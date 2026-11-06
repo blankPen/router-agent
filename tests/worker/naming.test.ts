@@ -23,10 +23,11 @@ describe('工单命名', () => {
     expect(ticketSlug('a'.repeat(120)).length).toBe(36)
   })
 
-  it('分支名是 ra/<工单号>-<语义>，worktree 名保持短且纯 ASCII', () => {
+  it('分支名是 ra/<工单号>-<语义>，worktree 目录名与分支名一致', () => {
     const ticket = { id: 'tk-12', title: 'Fix login timeout' }
     expect(workBranch(ticket)).toBe('ra/tk-12-fix-login-timeout')
     expect(workBranch({ id: 'tk-13', title: '调整登录超时' })).toBe('ra/tk-13-调整登录超时')
-    expect(worktreeName(ticket)).toBe('ra-tk-12')
+    expect(worktreeName(ticket)).toBe('ra-tk-12-fix-login-timeout')
+    expect(worktreeName({ id: 'tk-13', title: '调整登录超时' })).toBe('ra-tk-13-调整登录超时')
   })
 })

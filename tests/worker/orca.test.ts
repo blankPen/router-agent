@@ -158,6 +158,10 @@ describe('OrcaAdapter', () => {
     expect(handle).toBe('term-9')
     expect(workdir).toBe('/tmp/wt-9')
     expect(runner.calls[0]!.argv.slice(0, 4)).toEqual(['worktree', 'create', '--repo', 'name:dsh/router-agent'])
+    // worktree 名与工作分支一一对应：只是把 `/` 换成 `-`。
+    const argv = runner.calls[0]!.argv
+    expect(argv[argv.indexOf('--name') + 1]).toBe('ra-tk_1-调整登录超时')
+    expect(argv[argv.indexOf('--branch') + 1]).toBe('ra/tk_1-调整登录超时')
     const metaPath = join(dir, 'tk_1', 'meta.json')
     expect(existsSync(metaPath)).toBe(true)
     const meta = JSON.parse(readFileSync(metaPath, 'utf8'))

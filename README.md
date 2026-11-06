@@ -247,7 +247,7 @@ ra tickets                     # 6. 模拟产生的工单应出现在这里
 1. 在群里 @机器人 提一个小需求；
 2. `ra logs | grep trigger:ingested` 确认消息进来了；
 3. `ra tickets` 出现工单，`ra ticket <id>` 看授权范围与强度；
-4. `orca worktree list --json` 出现 `ra-tk-<编号>`，分支名为 `ra/tk-<编号>-<语义slug>`，Orca 里出现 Claude Code 终端；
+4. `orca worktree list --json` 出现 `ra-tk-<编号>-<语义slug>`，分支名为 `ra/tk-<编号>-<语义slug>`（目录名与分支名一一对应，只是把 `/` 换成 `-`），Orca 里出现 Claude Code 终端；
 5. worker 执行 `ra report` 后，`ra ticket <id>` 的阶段在 `running → review/person` 之间变化；
 6. 合并或关闭 PR 后，工单变 `closed`，飞书收到一次闭环通知。
 
@@ -344,7 +344,7 @@ worker 终端里的原始输出**不进日志**（避免解析 TUI 文本）；�
 ## 工单编号与分支命名
 
 - 工单号是全局自增的短编号：`tk-1`、`tk-2`……，重启后从上次的值继续，旧库里的 `tk_<uuid>` 仍可正常查询。
-- Orca worktree 名：`ra-tk-<编号>`，目录短且纯 ASCII。
+- Orca worktree 名：`ra-tk-<编号>-<语义 slug>`，与工作分支一一对应，只把 `/` 换成 `-`，目录和分支一眼能对上。
 - 工作分支：`ra/tk-<编号>-<语义 slug>`，由工单标题生成；标题里有足够英文时优先用英文，纯中文标题保留中文本身（git 支持 UTF-8 分支名）：
   - `ra/tk-12-fix-login-timeout`
   - `ra/tk-13-调整登录超时`
