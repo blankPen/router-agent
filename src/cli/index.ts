@@ -466,6 +466,11 @@ function cmdStatus(home: string, output: CliIo): number {
     }
     const config = loadConfig(home)
     output.stdout(`accept mode: ${config.policy.acceptMode}，并发上限: ${config.policy.maxWorkers}，后端: ${config.backend.default}`)
+    output.stdout(
+      config.retention.enabled
+        ? `闲置治理: 开启（${config.retention.idleHours}h 无进展提醒，${config.retention.closeGraceHours}h 未回复自动关闭）`
+        : '闲置治理: 关闭',
+    )
     return 0
   } finally {
     store.close()

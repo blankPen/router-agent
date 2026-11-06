@@ -61,8 +61,14 @@ export function worktreeShow(selector: string): string[] {
   return ['worktree', 'show', '--worktree', selector, '--json']
 }
 
-export function worktreeRemove(selector: string): string[] {
-  return ['worktree', 'rm', '--worktree', selector, '--force']
+export function worktreeRemove(selector: string, opts: { force?: boolean } = {}): string[] {
+  return [
+    'worktree', 'rm',
+    '--worktree', selector,
+    // 默认不强删：脏工作区由 Orca 拒绝，避免误删未提交改动。
+    ...(opts.force ? ['--force'] : []),
+    '--json',
+  ]
 }
 
 export function agentLaunch(opts: { worktree: string; prompt: string }): string[] {

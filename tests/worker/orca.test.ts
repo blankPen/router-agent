@@ -74,7 +74,9 @@ describe('Orca 命令构造', () => {
   it('terminal close / list / worktree rm / agent launch 参数正确', () => {
     expect(terminalClose('term-1')).toEqual(['terminal', 'close', '--terminal', 'term-1'])
     expect(terminalList()).toEqual(['terminal', 'list', '--json'])
-    expect(worktreeRemove('path:/tmp/wt')).toEqual(['worktree', 'rm', '--worktree', 'path:/tmp/wt', '--force'])
+    // 默认不 --force：脏工作区交给 Orca 拒绝，避免误删未提交改动。
+    expect(worktreeRemove('path:/tmp/wt')).toEqual(['worktree', 'rm', '--worktree', 'path:/tmp/wt', '--json'])
+    expect(worktreeRemove('path:/tmp/wt', { force: true })).toEqual(['worktree', 'rm', '--worktree', 'path:/tmp/wt', '--force', '--json'])
     expect(agentLaunch({ worktree: 'path:/tmp/wt', prompt: '继续' })).toEqual(['agent', 'launch', '--agent', 'claude', '--worktree', 'path:/tmp/wt', '--prompt', '继续'])
   })
 })

@@ -95,6 +95,14 @@ progress:
   # 工单进展定时轮询：把这段时间内的 progress 上报合并成一条消息同步到话题
   syncMs: 60000        # 毫秒；0 = 关闭（progress 上报不再同步到话题）
 
+# 闲置工单治理：先提醒，宽限期后自动关闭并回收 workspace
+retention:
+  enabled: true
+  idleHours: 24        # 多久没有新进展就发关单提醒
+  closeGraceHours: 6   # 提醒后多久没回复就自动关闭
+  zombieHours: 6       # 执行中但多久没上报/输出算僵尸
+  sweepMinutes: 5      # 扫描间隔（分钟）
+
 workerSpec:
   mode: prompt         # prompt | agent
 
@@ -354,6 +362,26 @@ worker 终端里的原始输出**不进日志**（避免解析 TUI 文本）；�
 
 `draft → accepted → assigned → running → review → closed`，可在 `person`（等人）与 `idle`（空闲）之间来回。
 PR 仍处于 open 时禁止结束工单。
+
+## 闲置工单治理
+
+长时间没有新进展的工单会被自动收口，避免工单和 Orca workspace 越积越多：
+
+- **24 小时没有任何新进展**（worker 上报 / 用户输入 / 派工启动）→ 在话题里发一次关单提醒；
+- **提醒后 6 小时仍无回复** → 自动关闭工单，并关闭终端、删除对应的 worktree；脏工作区不强删，会通知人工；
+- **PR 仍开着** → 只催办一次，不自动关闭；
+- **执行中但 6 小时无上报且终端无输出** → 转人工，不自动关闭；
+- **已关闭话题再次被回复** → 固定回复「工单已关闭」；回复「重新开工」会基于原工单的仓库 / 起点分支创建新工单，并带上之前描述的需求。
+
+```bash
+ra config set retention.enabled false        # 关闭
+ra config set retention.idleHours 48         # 多久无进展提醒
+ra config set retention.closeGraceHours 12   # 提醒后多久自动关闭
+ra config set retention.zombieHours 6        # 僵尸判定
+ra config set retention.sweepMinutes 5       # 扫描间隔
+```
+
+`ra status` 会显示当前治理阈值；阈值改动需要重启服务后生效。
 
 ## Worker 上报协议
 

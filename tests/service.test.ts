@@ -16,7 +16,12 @@ class FakeBackend implements WorkerBackend {
   starts: WorkerContext[] = []
   delivered: { handle: string; text: string }[] = []
   stopped: string[] = []
+  removed: string[] = []
   handles = new Map<string, boolean>()
+  /** 测试可指定终端最后一次输出时间；默认取当前时间。 */
+  outputAt = ''
+  /** 测试可模拟 Orca 拒绝删除（如工作区有未提交改动）。 */
+  removeError = ''
   async start(ctx: WorkerContext) {
     const handle = `term-${this.starts.length + 1}`
     this.starts.push(ctx)
@@ -32,9 +37,13 @@ class FakeBackend implements WorkerBackend {
     this.stopped.push(handle)
     this.handles.delete(handle)
   }
+  async removeWorktree(selector: string) {
+    if (this.removeError) throw new Error(this.removeError)
+    this.removed.push(selector)
+  }
   async inspect(handle: string) {
     return this.handles.has(handle)
-      ? { handle, connected: true, writable: true, orphaned: false, lastOutputAt: new Date().toISOString(), worktreePath: '', branch: '' }
+      ? { handle, connected: true, writable: true, orphaned: false, lastOutputAt: this.outputAt || new Date().toISOString(), worktreePath: '', branch: '' }
       : null
   }
   async inspectWorktree() {
@@ -673,5 +682,136 @@ describe('RouterService 编排', () => {
     const texts = store.claimOutbox('2026-11-06T10:10:00.000Z', 50).map(item => item.text)
     expect(texts.some(text => text.includes('最终交付内容'))).toBe(true)
     expect(texts.some(text => text.includes('工单「测试工单」进展'))).toBe(false)
+  })
+
+  describe('闲置工单治理', () => {
+    let seq = 0
+    const T0 = Date.parse('2026-11-06T10:00:00.000Z')
+    const HOUR = 3_600_000
+
+    function seed(opts: { state?: 'progress' | 'ready'; prState?: 'none' | 'open' } = {}): string {
+      seq += 1
+      const triggerId = `rt${seq}`
+      engine.ingest(makeTrigger({ id: triggerId, externalId: `om_rt_${seq}` }))
+      const outcome = engine.decide({
+        triggerId,
+        decision: 'accept',
+        strength: 'explicit',
+        reason: 'test',
+        title: `闲置工单${seq}`,
+        scope: '测试',
+        repo: 'acme/web',
+        branch: 'main',
+      })
+      const ticket = outcome.ticket!
+      const assignment = engine.startAssignment(ticket.id, { backendId: 'orca', handle: 'term-1', workdir: '/tmp/tk-1' })
+      if (opts.prState === 'open') {
+        engine.updatePr(ticket.id, { number: 1, url: 'https://github.com/o/r/pull/1', state: 'open' })
+      }
+      engine.report(assignment.id, {
+        ticketId: ticket.id,
+        turn: 1,
+        state: opts.state ?? 'ready',
+        summary: '完成',
+        ackedInputs: [],
+      })
+      return ticket.id
+    }
+
+    it('24 小时无进展先提醒，6 小时未回复后自动关闭并回收 workspace', async () => {
+      const ticketId = seed()
+
+      await service.sweepRetention(T0 + 24 * HOUR + 1000)
+      expect(store.getTicket(ticketId)?.stage).not.toBe('closed')
+
+      // 让提醒真正发出去（Effects 消费 outbox），之后才会进入关闭倒计时
+      await service.runOnce()
+
+      // 宽限期内不关闭
+      await service.sweepRetention(T0 + 29 * HOUR)
+      expect(store.getTicket(ticketId)?.stage).not.toBe('closed')
+
+      // 宽限期满自动关闭
+      await service.sweepRetention(T0 + 30 * HOUR + 1000)
+      expect(store.getTicket(ticketId)?.stage).toBe('closed')
+
+      const texts = store.listOutbox(50).map(item => item.text)
+      expect(texts.some(text => text.includes('24 小时没有新的进展'))).toBe(true)
+      expect(texts.some(text => text.includes('已自动关闭'))).toBe(true)
+
+      // 关闭后由 Effects 回收 workspace
+      await service.runOnce()
+      expect(backend.stopped).toContain('term-1')
+      expect(backend.removed).toContain('path:/tmp/tk-1')
+    })
+
+    it('提醒还没发出去时不会自动关闭，避免用户没看到通知就被关单', async () => {
+      const ticketId = seed()
+      await service.sweepRetention(T0 + 24 * HOUR + 1000)
+
+      // 不跑 Effects：提醒仍停留在 outbox pending，宽限期到了也不能关。
+      await service.sweepRetention(T0 + 31 * HOUR)
+      expect(store.getTicket(ticketId)?.stage).not.toBe('closed')
+    })
+
+    it('PR 仍开着：只催办一次，不自动关闭', async () => {
+      const ticketId = seed({ prState: 'open' })
+
+      await service.sweepRetention(T0 + 24 * HOUR + 1000)
+      await service.sweepRetention(T0 + 48 * HOUR)
+
+      expect(store.getTicket(ticketId)?.stage).not.toBe('closed')
+      const urges = store.claimOutbox('2026-11-07T20:00:00.000Z', 50).filter(item => item.text.includes('PR 已经'))
+      expect(urges).toHaveLength(1)
+    })
+
+    it('执行中 6 小时无上报且终端无输出：转人工，不自动关闭', async () => {
+      const ticketId = seed({ state: 'progress' })
+      backend.handles.set('term-1', true)
+      backend.outputAt = '2026-11-06T10:00:00.000Z'
+
+      await service.sweepRetention(T0 + 6 * HOUR + 1000)
+      expect(store.getTicket(ticketId)?.stage).toBe('person')
+      expect(store.getAttention(ticketId)?.question).toContain('6 小时没有上报')
+
+      // 转人工后不再自动关闭
+      await service.sweepRetention(T0 + 30 * HOUR)
+      expect(store.getTicket(ticketId)?.stage).not.toBe('closed')
+    })
+
+    it('提醒后出现新进展：取消自动关闭', async () => {
+      const ticketId = seed()
+      await service.sweepRetention(T0 + 24 * HOUR + 1000)
+
+      const assignment = store.latestAssignment(ticketId)!
+      store.insertReport({
+        id: 'rp_late_1',
+        ticketId,
+        assignmentId: assignment.id,
+        turn: 2,
+        state: 'progress',
+        summary: '又有进展',
+        ackedInputs: [],
+        at: new Date(T0 + 25 * HOUR).toISOString(),
+      })
+
+      await service.sweepRetention(T0 + 31 * HOUR)
+      expect(store.getTicket(ticketId)?.stage).not.toBe('closed')
+      expect(store.getCursor(`retention:reminder:${ticketId}`)).toBeNull()
+    })
+
+    it('workspace 有未提交改动时不强删，并通知人工处理', async () => {
+      const ticketId = seed()
+      backend.removeError = 'worktree has uncommitted changes'
+
+      await service.sweepRetention(T0 + 24 * HOUR + 1000)
+      await service.runOnce()
+      await service.sweepRetention(T0 + 30 * HOUR + 1000)
+      expect(store.getTicket(ticketId)?.stage).toBe('closed')
+
+      await service.runOnce()
+      expect(backend.removed).toHaveLength(0)
+      expect(store.listOutbox(50).some(item => item.text.includes('未能自动回收'))).toBe(true)
+    })
   })
 })
