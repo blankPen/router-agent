@@ -31,6 +31,93 @@ export interface OrcaTerminalInfo {
   branch: string
 }
 
+/**
+ * Orca CLI 失败时的结构化信息。
+ * `--json` 模式下 Orca 把错误体写在 stdout（`{"ok":false,"error":{...}}`），stderr 常常为空，
+ * 所以只读 stderr 会得到一句没有信息量的 `code=1`。这里把 stdout 的错误体和命令摘要一并保留。
+ */
+export interface OrcaCommandFailure {
+  /** 子命令，如 `worktree create`。 */
+  command: string
+  code: number
+  orcaCode?: string
+  orcaMessage?: string
+  /** 脱敏后的参数摘要：`--prompt` 只保留长度，避免整段 prompt 进日志。 */
+  args: string
+  stdoutTail: string
+  stderrTail: string
+}
+
+export class OrcaCommandError extends Error {
+  readonly detail: OrcaCommandFailure
+
+  constructor(detail: OrcaCommandFailure) {
+    super(formatCommandFailure(detail))
+    this.name = 'OrcaCommandError'
+    this.detail = detail
+  }
+}
+
+/** 把一次失败整理成便于日志与消息展示的一行。 */
+export function formatCommandFailure(detail: OrcaCommandFailure): string {
+  const parts = [`orca:command-failed(${detail.command}): exit=${detail.code}`]
+  if (detail.orcaCode) parts.push(`code=${detail.orcaCode}`)
+  if (detail.orcaMessage) parts.push(`message=${detail.orcaMessage}`)
+  if (!detail.orcaCode && !detail.orcaMessage && detail.stdoutTail) parts.push(`stdout=${detail.stdoutTail}`)
+  if (detail.stderrTail) parts.push(`stderr=${detail.stderrTail}`)
+  return parts.join(' | ')
+}
+
+/** 从 argv 生成脱敏摘要：跳过长文本参数，保留可复现的关键选项。 */
+export function summarizeArgs(args: string[]): string {
+  const out: string[] = []
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i]!
+    if (arg === '--prompt') {
+      const value = args[i + 1] ?? ''
+      out.push(`--prompt <${value.length} chars>`)
+      i += 1
+      continue
+    }
+    const next = args[i + 1]
+    if (arg.startsWith('--') && next !== undefined && !next.startsWith('--')) {
+      out.push(`${arg} ${next}`)
+      i += 1
+      continue
+    }
+    out.push(arg)
+  }
+  return out.join(' ')
+}
+
+export function describeCommandFailure(argv: string[], res: CommandResult): OrcaCommandFailure {
+  const command = argv.slice(0, 2).join(' ')
+  const args = summarizeArgs(argv.slice(2))
+  let orcaCode: string | undefined
+  let orcaMessage: string | undefined
+  let stdoutTail = ''
+  try {
+    const parsed = JSON.parse(res.stdout) as Record<string, any>
+    if (parsed?.error) {
+      if (parsed.error.code) orcaCode = String(parsed.error.code)
+      if (parsed.error.message) orcaMessage = String(parsed.error.message)
+    } else {
+      stdoutTail = res.stdout.slice(0, 300)
+    }
+  } catch {
+    stdoutTail = res.stdout.slice(0, 300)
+  }
+  return {
+    command,
+    code: res.code,
+    ...(orcaCode ? { orcaCode } : {}),
+    ...(orcaMessage ? { orcaMessage } : {}),
+    args,
+    stdoutTail,
+    stderrTail: res.stderr.slice(0, 300),
+  }
+}
+
 /** 解析 `orca worktree create --json` 的返回；不同 Orca 版本字段不同。 */
 export function parseCreateResult(stdout: string): { handle: string; workdir?: string } {
   let json: unknown
@@ -132,7 +219,7 @@ export class OrcaAdapter implements WorkerBackend {
   private async run(argv: string[]): Promise<CommandResult> {
     const res = await this.runner.run(argv)
     if (res.code !== 0) {
-      throw new Error(`orca:command-failed(${argv[0]} ${argv[1]}): code=${res.code} ${res.stderr.slice(0, 300)}`)
+      throw new OrcaCommandError(describeCommandFailure(argv, res))
     }
     return res
   }

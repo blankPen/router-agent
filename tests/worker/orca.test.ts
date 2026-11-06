@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { mkdtempSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { OrcaAdapter, parseCreateResult } from '../../src/worker/orca/index.js'
+import { OrcaAdapter, OrcaCommandError, parseCreateResult, summarizeArgs } from '../../src/worker/orca/index.js'
 import { worktreeCreate, terminalSend, terminalClose, terminalList, worktreeRemove, agentLaunch } from '../../src/worker/orca/commands.js'
 import type { CommandRunner, CommandResult } from '../../src/worker/orca/commands.js'
 import type { Assignment, Ticket } from '../../src/core/model.js'
@@ -92,6 +92,53 @@ describe('Orca 返回解析', () => {
 })
 
 describe('OrcaAdapter', () => {
+  it('命令失败时保留 stdout 里的 Orca 错误体，而不是只留下 code=1', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ra-workers-'))
+    const runner = new FakeRunner([{
+      code: 1,
+      stdout: JSON.stringify({
+        ok: false,
+        error: {
+          code: 'agent_session_operation_unknown',
+          message: 'base branch master not found',
+        },
+      }),
+      stderr: '',
+    }])
+    const adapter = new OrcaAdapter({ runner, workersDir: dir, spec: 'prompt' })
+
+    const error = await adapter.start({ ticket, assignment, workdir: '/tmp/wt' }).catch(item => item)
+    expect(error).toBeInstanceOf(OrcaCommandError)
+    expect(error.message).toContain('code=agent_session_operation_unknown')
+    expect(error.message).toContain('base branch master not found')
+    expect(error.detail).toMatchObject({
+      command: 'worktree create',
+      code: 1,
+      orcaCode: 'agent_session_operation_unknown',
+    })
+    // 参数摘要可复现，但不把整段 prompt 写进日志
+    expect(error.detail.args).toContain('--base-branch main')
+    expect(error.detail.args).toContain('--repo name:dsh/router-agent')
+    expect(error.detail.args).toContain('--prompt <')
+    expect(error.detail.args).not.toContain('ra report')
+  })
+
+  it('stdout 不是 JSON 时回退到 stdout 尾部，仍能定位命令参数', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ra-workers-'))
+    const runner = new FakeRunner([{ code: 2, stdout: 'fatal: not a git repository', stderr: '' }])
+    const adapter = new OrcaAdapter({ runner, workersDir: dir, spec: 'prompt' })
+    const error = await adapter.start({ ticket, assignment, workdir: '/tmp/wt' }).catch(item => item)
+    expect(error).toBeInstanceOf(OrcaCommandError)
+    expect(error.message).toContain('fatal: not a git repository')
+    expect(error.message).toContain('exit=2')
+  })
+
+  it('summarizeArgs 脱敏 --prompt 的值', () => {
+    expect(summarizeArgs(['--repo', 'name:x', '--prompt', '很长的提示词\n第二行', '--json'])).toBe(
+      '--repo name:x --prompt <10 chars> --json',
+    )
+  })
+
   it('start 创建 worktree、写入 meta.json 并返回 handle', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'ra-workers-'))
     const runner = new FakeRunner([

@@ -354,6 +354,13 @@ export class Engine {
     this.refreshStage(ticketId)
   }
 
+  /** 清除待答问题并重新推导阶段（派工失败后重试时使用）。 */
+  clearAttention(ticketId: string): void {
+    this.requireTicket(ticketId)
+    this.store.clearAttention(ticketId)
+    this.refreshStage(ticketId)
+  }
+
   /** 重新推导阶段并落库。 */
   refreshStage(ticketId: string): Stage {
     const ticket = this.requireTicket(ticketId)

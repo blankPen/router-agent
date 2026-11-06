@@ -9,7 +9,7 @@ import { AgentLoop } from './router/agent-loop.js'
 import { dispatchSettingsOf } from './router/dispatch.js'
 import type { LlmClient } from './router/llm.js'
 import { ReportPoller, appendEvent, judgeIdle, type WorkerMeta, type WorkerStateFile } from './worker/orca/report-poller.js'
-import type { OrcaTerminalInfo } from './worker/orca/index.js'
+import { OrcaCommandError, type OrcaTerminalInfo } from './worker/orca/index.js'
 import { EffectsProcessor } from './core/effects.js'
 import { preview } from './core/events.js'
 import { FeishuSender } from './sources/feishu.js'
@@ -85,6 +85,12 @@ export class RouterService {
   private idle = new Map<string, { turn: number; nudgedAt: number | null; stale: boolean }>()
   private ticking = false
   private backfill?: () => Promise<Trigger[]>
+  /** 派工失败记录：用于限制「旧输入」反复触发重试，并累计尝试次数。 */
+  private launchFailures = new Map<string, { attempts: number; lastSeq: number; lastReason: string }>()
+  /** 排队状态的去重签名，避免每秒刷同一条排队日志。 */
+  private queueSignature = ''
+  /** 已经发过排队通知的工单，避免刷屏。 */
+  private queueNotified = new Set<string>()
 
   constructor(opts: RouterServiceOptions) {
     this.store = opts.store
@@ -190,9 +196,13 @@ export class RouterService {
   /** 把所有 accepted 阶段、且还有并发额度的工单派出去。 */
   async launchPending(): Promise<Ticket[]> {
     const launched: Ticket[] = []
+    const open = this.store.listOpenTickets()
     let capacity = this.config.policy.maxWorkers - this.activeWorkers()
-    if (capacity <= 0) return launched
-    for (const ticket of this.store.listOpenTickets()) {
+    if (capacity <= 0) {
+      this.reportQueue(capacity)
+      return launched
+    }
+    for (const ticket of open) {
       if (capacity <= 0) break
       if (ticket.stage !== 'accepted') continue
       const latest = this.store.latestAssignment(ticket.id)
@@ -201,11 +211,44 @@ export class RouterService {
         await this.launch(ticket)
         launched.push(ticket)
         capacity -= 1
-      } catch (error) {
-        this.logger.error('launch:failed', { ticketId: ticket.id, message: error instanceof Error ? error.message : String(error) })
+      } catch {
+        // launch() 内部已记录详细原因、转人工并通知发起人，这里不再重复。
       }
     }
+    this.reportQueue(capacity)
     return launched
+  }
+
+  /**
+   * 并发已满时不能静默跳过：记录排队日志，并给首次排队的工单发一次提示。
+   * 用签名去重，避免每秒重复写日志与发消息。
+   */
+  private reportQueue(capacity: number): void {
+    // 重新查库：调用方手里的快照可能是派工前的，会把已派出的工单误报成排队。
+    const waiting = this.store.listOpenTickets().filter(ticket => ticket.stage === 'accepted')
+    if (waiting.length === 0) {
+      this.queueSignature = ''
+      return
+    }
+    const signature = `${Math.max(capacity, 0)}:${waiting.map(ticket => ticket.id).join(',')}`
+    if (signature === this.queueSignature) return
+    this.queueSignature = signature
+    this.logger.info('launch:queued', {
+      maxWorkers: this.config.policy.maxWorkers,
+      capacity: Math.max(capacity, 0),
+      waiting: waiting.length,
+      ticketIds: waiting.slice(0, 10).map(ticket => ticket.id),
+    })
+    if (capacity > 0) return
+    for (const ticket of waiting) {
+      if (this.queueNotified.has(ticket.id)) continue
+      this.queueNotified.add(ticket.id)
+      this.notify(
+        ticket,
+        `当前执行并发已满（${this.config.policy.maxWorkers} 个），工单「${ticket.title}」已排队，有空闲后会自动开始。`,
+        `queued:${ticket.id}`,
+      )
+    }
   }
 
   private async launch(ticket: Ticket): Promise<Assignment> {
@@ -220,12 +263,60 @@ export class RouterService {
       const updated: Assignment = { ...assignment, handle, workdir: workdir ?? '' }
       this.store.updateAssignment(updated)
       this.engine.refreshStage(ticket.id)
+      this.launchFailures.delete(ticket.id)
+      this.queueNotified.delete(ticket.id)
       this.log('launch', ticket.id, { handle, workdir })
       return updated
     } catch (error) {
       this.store.updateAssignment({ ...assignment, status: 'ended', endedAt: this.clock.now() })
+      this.reportLaunchFailure(ticket, error)
       throw error
     }
+  }
+
+  /**
+   * 派工失败统一收口：完整日志 + 转人工（释放并发额度）+ 飞书话题反馈。
+   * 此前只把 assignment 标记 ended，工单会永远停在 assigned：既不再重试，又一直占着 maxWorkers。
+   */
+  private reportLaunchFailure(ticket: Ticket, error: unknown): void {
+    const failure = describeLaunchError(error)
+    const attempts = (this.launchFailures.get(ticket.id)?.attempts ?? 0) + 1
+    const lastSeq = this.store.pendingInputs(ticket.id).reduce((max, input) => Math.max(max, input.seq), 0)
+    this.launchFailures.set(ticket.id, { attempts, lastSeq, lastReason: failure.reason })
+
+    const hint = `请确认项目「${ticket.repo}」与起始分支「${ticket.branch}」存在；修正后在本话题回复任意内容即可重试`
+    this.engine.setAttention(ticket.id, `执行环境创建失败：${failure.reason}`)
+    this.appendEventLog(ticket.id, { kind: 'launch-failure', attempt: attempts, reason: failure.reason, at: this.clock.now() })
+
+    this.logger.error('launch:failed', {
+      ticketId: ticket.id,
+      title: ticket.title,
+      repo: ticket.repo,
+      branch: ticket.branch,
+      attempt: attempts,
+      reason: failure.reason,
+      ...(failure.code !== undefined ? { exitCode: failure.code } : {}),
+      ...(failure.orcaCode ? { orcaCode: failure.orcaCode } : {}),
+      ...(failure.args ? { args: failure.args } : {}),
+      ...(failure.stdout ? { stdout: failure.stdout } : {}),
+      ...(failure.stderr ? { stderr: failure.stderr } : {}),
+      hint,
+    })
+
+    this.notify(
+      ticket,
+      [
+        `工单「${ticket.title}」的执行环境创建失败，已暂停执行并转人工。`,
+        '',
+        `失败原因：${failure.reason}`,
+        ...(failure.orcaCode ? [`错误码：${failure.orcaCode}`] : []),
+        `项目：${ticket.repo}　起始分支：${ticket.branch}`,
+        `已尝试次数：${attempts}`,
+        '',
+        `${hint}。`,
+      ].join('\n'),
+      `launch-failed:${ticket.id}:${reasonKey(failure.reason)}`,
+    )
   }
 
   private activeWorkers(): number {
@@ -234,10 +325,16 @@ export class RouterService {
 
   async deliverPendingInputs(): Promise<void> {
     for (const ticket of this.store.listOpenTickets()) {
+      if (ticket.stage === 'closed') continue
       const assignment = this.store.latestAssignment(ticket.id)
-      if (!assignment || assignment.status === 'ended' || !assignment.handle) continue
       const pending = this.store.pendingInputs(ticket.id)
       if (pending.length === 0) continue
+      // 没有活着的 worker：新输入视为「重试派工」信号。
+      // 派工失败后工单会转人工，用户在该话题里回复即可重新拉起 worker。
+      if (!assignment || assignment.status === 'ended' || !assignment.handle) {
+        await this.relaunchForInput(ticket, pending)
+        continue
+      }
       // 下次唤醒时把上次已投递但没 ack 的输入一并重发，靠 id 去重。
       const unacked = this.store.unackedInputs(ticket.id)
       const batch = [...unacked, ...pending]
@@ -258,6 +355,30 @@ export class RouterService {
         }
         this.logger.warn('input:deliver-failed', { ticketId: ticket.id, message: error instanceof Error ? error.message : String(error) })
       }
+    }
+  }
+
+  /**
+   * 旧 worker 已结束、但有新输入时重新派工。
+   * 只对「上次失败之后新到的输入」触发，避免同一批积压输入每秒重试打爆 Orca。
+   */
+  private async relaunchForInput(ticket: Ticket, pending: { seq: number }[]): Promise<void> {
+    const failure = this.launchFailures.get(ticket.id)
+    if (failure && !pending.some(input => input.seq > failure.lastSeq)) return
+    if (this.activeWorkers() >= this.config.policy.maxWorkers) {
+      this.logger.info('launch:queued-input', {
+        ticketId: ticket.id,
+        pending: pending.length,
+        maxWorkers: this.config.policy.maxWorkers,
+      })
+      return
+    }
+    this.engine.clearAttention(ticket.id)
+    try {
+      await this.launch(ticket)
+      this.log('input:relaunch', ticket.id, { pending: pending.length })
+    } catch {
+      // launch() 内部已记录原因、转人工并通知发起人。
     }
   }
 
@@ -457,8 +578,8 @@ export class RouterService {
           try {
             await this.launch(ticket)
             this.log('recover:relaunch', ticket.id, {})
-          } catch (error) {
-            this.logger.error('recover:relaunch-failed', { ticketId: ticket.id, message: error instanceof Error ? error.message : String(error) })
+          } catch {
+            // launch() 已记录详细失败原因、转人工并通知发起人。
           }
         }
       }
@@ -579,4 +700,42 @@ export function splitMessage(text: string, limit = 3500): string[] {
   }
   if (rest) chunks.push(rest)
   return chunks
+}
+
+export interface LaunchErrorDetail {
+  reason: string
+  code?: number
+  orcaCode?: string
+  args?: string
+  stdout?: string
+  stderr?: string
+}
+
+/**
+ * 把后端抛出的错误整理成可读、可审计的结构。
+ * Orca 在 `--json` 模式下把错误体写在 stdout，stderr 通常为空；
+ * 只取 stderr 会得到没有信息量的 `code=1`。
+ */
+export function describeLaunchError(error: unknown): LaunchErrorDetail {
+  if (error instanceof OrcaCommandError) {
+    const detail = error.detail
+    return {
+      reason: detail.orcaMessage ?? error.message,
+      code: detail.code,
+      ...(detail.orcaCode ? { orcaCode: detail.orcaCode } : {}),
+      ...(detail.args ? { args: detail.args } : {}),
+      ...(detail.stdoutTail ? { stdout: detail.stdoutTail } : {}),
+      ...(detail.stderrTail ? { stderr: detail.stderrTail } : {}),
+    }
+  }
+  return { reason: error instanceof Error ? error.message : String(error) }
+}
+
+/** 同一条失败原因只通知一次，避免用户每次重试都收到重复消息。 */
+function reasonKey(reason: string): string {
+  let hash = 0
+  for (let i = 0; i < reason.length; i += 1) {
+    hash = (hash * 31 + reason.charCodeAt(i)) >>> 0
+  }
+  return hash.toString(36)
 }
