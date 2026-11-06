@@ -1,0 +1,102 @@
+name: 发布 npm 包
+
+# 触发方式：
+#   1. 推送形如 v0.1.1 的 tag（tag 必须与 package.json 的 version 一致）
+#   2. 在 Actions 页面手动 Run workflow（发布当前 package.json 里的版本）
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # npm provenance（构建来源证明）需要通过 OIDC 换取签名令牌
+  id-token: write
+
+concurrency:
+  group: npm-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: 构建并发布
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 校验 NPM_TOKEN
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NPM_TOKEN" ]; then
+            echo "::error::仓库缺少 NPM_TOKEN secret，请先在 Settings → Secrets and variables → Actions 中配置（见 docs/PUBLISHING.md）。"
+            exit 1
+          fi
+
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 pnpm
+        # 版本取自 package.json 的 packageManager 字段
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.18.0'
+          cache: pnpm
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 类型检查与测试
+        run: pnpm check
+
+      - name: 构建
+        run: pnpm build
+
+      - name: 校验 tag 与 package.json 版本一致
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          tag_version="${TAG_NAME#v}"
+          pkg_version="$(node -p "require('./package.json').version")"
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "::error::tag ${TAG_NAME} 与 package.json 版本 ${pkg_version} 不一致，请先执行 pnpm version 再推 tag。"
+            exit 1
+          fi
+
+      - name: 检查该版本是否已发布
+        id: check
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "::notice::${name}@${version} 已存在于 npm，跳过本次发布。"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 发布到 npm
+        if: steps.check.outputs.skip != 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance
+
+      - name: 写入发布结果
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          {
+            echo "### npm 发布结果"
+            if [ "${{ steps.check.outputs.skip }}" = "true" ]; then
+              echo "- ${name}@${version} 已存在，已跳过发布"
+            else
+              echo "- 已发布 https://www.npmjs.com/package/${name}/v/${version}"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

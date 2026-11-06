@@ -3,6 +3,7 @@ import { createServer } from 'node:net'
 import { spawn } from 'node:child_process'
 import { join, resolve } from 'node:path'
 import { homedir } from 'node:os'
+import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { Command, CommanderError } from 'commander'
 import { ensureHome, loadConfig, policyOf, replyAlwaysChatsOf, setConfigValue, writeConfig } from '../config.js'
@@ -28,7 +29,11 @@ import { EffectsProcessor } from '../core/effects.js'
 import { createApiServer } from '../router/api.js'
 import { agentSpecDocument } from '../worker/spec/index.js'
 
-export const VERSION = '0.1.0'
+// 版本号以 package.json 为唯一来源，避免发版后 `ra -v` 与实际包版本漂移。
+// src/cli 与 dist/cli 到包根的相对路径一致，因此两种运行形态都能解析到同一个 package.json。
+const pkg = createRequire(import.meta.url)('../../package.json') as { version: string }
+
+export const VERSION: string = pkg.version
 
 export interface CliIo {
   stdout(line: string): void

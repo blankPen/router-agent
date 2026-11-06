@@ -1,15 +1,41 @@
 {
   "name": "router-agent",
   "version": "0.1.0",
-  "private": true,
   "description": "飞书消息 → 常驻 Router 研判 → 派发到 Orca worktree 内 Claude Code 执行 → PR 跟踪闭环的双层 Agent 系统",
+  "license": "MIT",
   "type": "module",
-  "main": "dist/index.js",
+  "main": "dist/cli/index.js",
   "bin": {
     "ra": "bin/ra.js"
   },
+  "files": [
+    "bin",
+    "dist"
+  ],
+  "keywords": [
+    "agent",
+    "feishu",
+    "lark",
+    "claude-code",
+    "orca",
+    "router",
+    "cli"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/blankPen/router-agent.git"
+  },
+  "homepage": "https://github.com/blankPen/router-agent#readme",
+  "bugs": {
+    "url": "https://github.com/blankPen/router-agent/issues"
+  },
   "engines": {
     "node": ">=22.18.0"
+  },
+  "packageManager": "pnpm@10.33.3",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "scripts": {
     "test": "vitest run",
@@ -18,7 +44,7 @@
     "build:web": "node scripts/build-web.mjs",
     "build": "tsc -p tsconfig.build.json && node scripts/build-web.mjs",
     "check": "pnpm typecheck && pnpm test",
-    "start": "node dist/cli/index.js start"
+    "start": "node dist/cli/main.js start"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
