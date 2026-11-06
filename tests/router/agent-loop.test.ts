@@ -168,18 +168,18 @@ describe('Router 常驻 Agent Loop', () => {
     expect(store.claimOutbox('2026-11-06T10:00:20.000Z', 10)).toHaveLength(0)
   })
 
-  it('接单后发普通消息 ack，并用话题开场接 worker', async () => {    const { engine, loop, store } = setup([ACCEPT('改登录超时')])
+  it('接单后只发一条话题消息，不再额外发普通 ack', async () => {
+    const { engine, loop, store } = setup([ACCEPT('改登录超时')])
     engine.ingest(trigger({ text: '把登录超时改成 30 秒' }))
 
     await loop.tick()
     const outbox = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)
-    const ack = outbox.find(item => item.key.startsWith('ack:'))!
-    const thread = outbox.find(item => item.key.startsWith('thread:'))!
-    expect(ack.text).toContain('我帮你创建了工单')
-    expect(ack.threadId).toBe('')
-    expect(ack.originMessageId).toBe('om_1')
+    expect(outbox).toHaveLength(1)
+    const thread = outbox[0]!
+    expect(thread.key).toMatch(/^thread:/)
     expect(thread.threadId).toBe('om_1')
     expect(thread.originMessageId).toBe('om_1')
+    expect(thread.text).toContain('已开始执行')
     expect(thread.text).toContain('后续进展会在这个话题里更新')
   })
 
@@ -225,15 +225,17 @@ describe('Router 常驻 Agent Loop', () => {
     expect(outbox[0]?.threadId).toBe('')
   })
 
-  it('mode=all 的群里未 @ 但判接单：照常开单并回 ack + 话题', async () => {
+  it('mode=all 的群里未 @ 但判接单：照常开单，只发一条话题消息', async () => {
     const { engine, loop, store } = setup([ACCEPT('加个重试')], undefined, ['oc_dev'])
     engine.ingest(trigger({ addressed: 'none', text: 'router-agent 加个重试' }))
 
     const result = await loop.tick()
     expect(result.accepted).toHaveLength(1)
     const outbox = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)
-    expect(outbox.find(item => item.key.startsWith('ack:'))?.text).toContain('我帮你创建了工单')
-    expect(outbox.find(item => item.key.startsWith('thread:'))?.threadId).toBe('om_1')
+    expect(outbox).toHaveLength(1)
+    expect(outbox[0]?.key).toMatch(/^thread:/)
+    expect(outbox[0]?.text).toContain('已开始执行')
+    expect(outbox[0]?.threadId).toBe('om_1')
   })
 
   it('私聊被判闲聊时礼貌回一句（普通消息）', async () => {
@@ -372,7 +374,8 @@ describe('Router 常驻 Agent Loop', () => {
     await loop.tick()
     const outbox = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)
     expect(outbox.some(item => item.text === '重复的回复')).toBe(false)
-    expect(outbox.filter(item => item.key.startsWith('ack:'))).toHaveLength(1)
+    expect(outbox).toHaveLength(1)
+    expect(outbox[0]?.key).toMatch(/^thread:/)
   })
 
   it('寒暄判定只拦纯寒暄，不误伤简短需求', () => {

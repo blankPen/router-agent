@@ -87,11 +87,12 @@ describe('ra simulate', () => {
     expect(result.replies).toEqual(['你好呀，需要我帮你改点什么？'])
   })
 
-  it('接单会返回 ack 与话题开场两条回复', async () => {
+  it('接单只返回一条话题开场回复', async () => {
     const engine = new CountingEngine('{"decision":"accept","reason":"ok","title":"改超时","scope":"x"}')
     const result = await simulate({ home: mkdtempSync(join(tmpdir(), 'ra-sim-')), config: config(), decisionEngine: engine }, { text: '把登录超时改成 30 秒', dryRun: true })
-    expect(result.replies[0]).toContain('我帮你创建了工单')
-    expect(result.replies[1]).toContain('后续进展会在这个话题里更新')
+    expect(result.replies).toHaveLength(1)
+    expect(result.replies[0]).toContain('已开始执行')
+    expect(result.replies[0]).toContain('后续进展会在这个话题里更新')
   })
 
   it('dryRun 不写 state.db', async () => {

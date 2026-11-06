@@ -24,7 +24,7 @@ Tests       291 passed | 4 skipped
 | `tests/sources/feishu-backfill.test.ts` | 历史补拉的命令与解析、`--start` 时间窗、首跑基线、游标增量与失败保号（8） |
 | `tests/sources/feishu-directory.test.ts` | 群名目录刷新与持久化（3） |
 | `tests/sources/github.test.ts` | PR 状态归一化、仓库选择器转 gh owner/name（6） |
-| `tests/router/agent-loop.test.ts` | 显式研判、礼貌回复、附件不开单、ack+话题、工具调用、批处理、扇出、多项目派工追问、会话绑定上下文、群白名单（27） |
+| `tests/router/agent-loop.test.ts` | 显式研判、礼貌回复、附件不开单、单条话题开场、工具调用、批处理、扇出、多项目派工追问、会话绑定上下文、群白名单（27） |
 | `tests/router/dispatch.test.ts` | 多项目/多分支解析：项目匹配、群绑定、草稿继承、白名单校验（11） |
 | `tests/router/api.test.ts` | HTTP API 全端点、`POST /api/reports` 上报入口与旧字段兼容（12） |
 | `tests/service.test.ts` | 派工、并发上限、PR 闭环、停止、重启对账、回复投递、长回复分块、旧上报去重、会话丢失转人工（16） |

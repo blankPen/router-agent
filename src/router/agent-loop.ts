@@ -60,7 +60,6 @@ const REPLY_ONLY_TEXT = '这条消息我收到了，但当前策略暂不自动�
 const SMALL_TALK_FALLBACK = '收到。我还没看出具体要做什么，能说一下要改哪个模块、期望的结果吗？'
 const MEDIA_ONLY_TEXT = '收到附件了，但我看不到图片/文件里的内容。请用文字说一下要改什么，或者把关键信息贴成文字。'
 const THREAD_INTRO = (title: string, id: string) => `工单「${title}」已开始执行（${id}）。后续进展会在这个话题里更新。`
-const ACK_TEXT = (title: string) => `好的，我帮你创建了工单「${title}」。执行进展我会在本话题里同步。`
 
 /** 显式 @ 也可能是寒暄/测试；只匹配纯寒暄，不误伤简短需求（如「修个 bug」）。 */
 export function isSmallTalk(text: string): boolean {
@@ -183,14 +182,13 @@ export class AgentLoop {
     }
   }
 
-  /** 落地研判结果：接单则发 ack + 开话题；没接单且消息是在找它说话时，礼貌回一句。 */
+  /** 落地研判结果：接单只用一条话题消息确认开单；没接单且消息是在找它说话时，礼貌回一句。 */
   private async applyAssess(trigger: Trigger, assessed: AssessResult, result: TickResult, strength: Strength): Promise<void> {
     if (assessed.outcome === 'accept' && assessed.ticket) {
       // 派工信息已经凑齐并开单，草稿使命结束。
       this.store.clearDispatchDraft(trigger.chatId)
       result.accepted.push(assessed.ticket)
-      this.reply(trigger, ACK_TEXT(assessed.ticket.title), `ack:${assessed.ticket.id}`)
-      // 用话题把后续 worker 进展挂在原消息下。
+      // 只发一条：话题开场同时承担开单确认，后续 worker 进展都挂在这条原消息下。
       this.reply(trigger, THREAD_INTRO(assessed.ticket.title, assessed.ticket.id), `thread:${assessed.ticket.id}`, { thread: true })
       return
     }
