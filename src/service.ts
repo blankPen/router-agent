@@ -4,6 +4,7 @@ import type { Clock, Engine } from './core/engine.js'
 import type { Assignment, Report, Ticket, Trigger } from './core/model.js'
 import type { Store } from './store/db.js'
 import type { AppConfig } from './config.js'
+import { replyAlwaysChatsOf } from './config.js'
 import type { WorkerBackend, WorkerContext } from './worker/port.js'
 import { AgentLoop } from './router/agent-loop.js'
 import type { DecisionAudit, DecisionEngine } from './router/decision-engine.js'
@@ -179,6 +180,7 @@ export class RouterService {
       clock: this.clock,
       batchWindowMs: opts.agentLoopOptions?.batchWindowMs ?? 8000,
       dispatch: dispatchSettingsOf(opts.config),
+      replyAlwaysChats: replyAlwaysChatsOf(opts.config),
       ...(opts.onDecisionAudit ? { onAudit: opts.onDecisionAudit } : {}),
     })
     this.poller = opts.poller ?? new ReportPoller({

@@ -93,6 +93,8 @@ function toEvent(message: RawMessage, cfg: FeishuConfig): Record<string, unknown
     sender_id: senderId,
     sender_type: senderIsBot ? 'bot' : 'user',
     root_id: message.reply_to,
+    // 补拉时同样保留「被引用消息」的 ID，入库前会回查正文。
+    ...(message.reply_to ? { reply_to: message.reply_to } : {}),
     // 补拉时没有 mentions 结构，用文本里的 @名字 兜底识别。
     mentions: cfg.botNames
       .filter(name => (message.content ?? '').includes(`@${name}`))

@@ -99,14 +99,22 @@ function trigger(over: Partial<Trigger> = {}): Trigger {
   }
 }
 
-function setup(responses: FakeResponse[] = [], dispatch?: DispatchSettings) {
+function setup(responses: FakeResponse[] = [], dispatch?: DispatchSettings, replyAlwaysChats?: string[]) {
   const store = new Store(':memory:')
   const clock = { now: () => '2026-11-06T10:00:10.000Z' }
   let n = 0
   const ids = { next: (p: string) => `${p}_${++n}` }
   const engine = new Engine({ store, policy, clock, ids })
   const fake = new FakeEngine(responses)
-  const loop = new AgentLoop({ engine, decisionEngine: fake, clock, batchWindowMs: 5000, source: 'feishu', ...(dispatch ? { dispatch } : {}) })
+  const loop = new AgentLoop({
+    engine,
+    decisionEngine: fake,
+    clock,
+    batchWindowMs: 5000,
+    source: 'feishu',
+    ...(dispatch ? { dispatch } : {}),
+    ...(replyAlwaysChats ? { replyAlwaysChats } : {}),
+  })
   return { store, engine, llm: fake, loop }
 }
 
@@ -201,6 +209,31 @@ describe('Router 常驻 Agent Loop', () => {
     const result = await loop.tick()
     expect(result.accepted).toHaveLength(0)
     expect(store.claimOutbox('2026-11-06T10:00:20.000Z', 10)).toHaveLength(0)
+  })
+
+  it('mode=all 的群里未 @ 也要回：判闲聊时正常回一句，不开单', async () => {
+    const { engine, loop, store } = setup([IGNORE('只是提问'), SAY('这个我看下，先不动代码。')], undefined, ['oc_dev'])
+    engine.ingest(trigger({ addressed: 'none', text: 'router agent 有内置什么工具么' }))
+
+    const result = await loop.tick()
+    expect(result.accepted).toHaveLength(0)
+    expect(result.replied).toBe(1)
+    expect(engine.store.listTickets()).toHaveLength(0)
+    const outbox = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)
+    expect(outbox).toHaveLength(1)
+    expect(outbox[0]?.text).toBe('这个我看下，先不动代码。')
+    expect(outbox[0]?.threadId).toBe('')
+  })
+
+  it('mode=all 的群里未 @ 但判接单：照常开单并回 ack + 话题', async () => {
+    const { engine, loop, store } = setup([ACCEPT('加个重试')], undefined, ['oc_dev'])
+    engine.ingest(trigger({ addressed: 'none', text: 'router-agent 加个重试' }))
+
+    const result = await loop.tick()
+    expect(result.accepted).toHaveLength(1)
+    const outbox = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)
+    expect(outbox.find(item => item.key.startsWith('ack:'))?.text).toContain('我帮你创建了工单')
+    expect(outbox.find(item => item.key.startsWith('thread:'))?.threadId).toBe('om_1')
   })
 
   it('私聊被判闲聊时礼貌回一句（普通消息）', async () => {

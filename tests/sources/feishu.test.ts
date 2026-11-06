@@ -1,6 +1,6 @@
 import { chatEntry } from '../../src/config.js'
 import { describe, expect, it } from 'vitest'
-import { FeishuSender, feishuCard, feishuCardSendCommand, feishuCreateDocCommand, feishuReactionCommand, fitIdempotencyKey, normalizeCardMarkdown, normalizeFeishuEvent, normalizeFeishuEventDetailed, parseDocumentUrl, shouldSendAsText, type FeishuConfig } from '../../src/sources/feishu.js'
+import { attachQuotedMessage, FeishuSender, feishuCard, feishuCardSendCommand, feishuCreateDocCommand, feishuReactionCommand, fitIdempotencyKey, normalizeCardMarkdown, normalizeFeishuEvent, normalizeFeishuEventDetailed, parseDocumentUrl, parseQuotedMessage, quotedMessageCommand, shouldSendAsText, type FeishuConfig } from '../../src/sources/feishu.js'
 
 const cfg: FeishuConfig = {
   chats: [chatEntry('oc_dev'), chatEntry('oc_other', { mode: 'mention' })],
@@ -284,5 +284,55 @@ describe('幂等 key', () => {
     })
     await sender.send('oc_dev', 'hi', 'ready:tk_0123456789abcdef0123456789abcdef:12:2026-11-06T06:34:14Z')
     expect(keys[0]!.length).toBeLessThanOrEqual(50)
+  })
+})
+
+describe('引用消息', () => {
+  it('归一化时保留被引用消息 ID（lark-cli 的 reply_to 与原始 parent_id 都认）', () => {
+    expect(normalizeFeishuEvent(evt({ reply_to: 'om_parent' }), cfg)!.raw).toEqual({ parentId: 'om_parent' })
+    expect(normalizeFeishuEvent(evt({ parent_id: 'om_parent' }), cfg)!.raw).toEqual({ parentId: 'om_parent' })
+  })
+
+  it('从 mget 结果里取正文，并还原 @ 占位符', () => {
+    const quoted = parseQuotedMessage(JSON.stringify({
+      ok: true,
+      data: {
+        messages: [{
+          message_id: 'om_parent',
+          msg_type: 'text',
+          content: '@_user_1 看下这个项目有什么可优化的么',
+          mentions: [{ key: '@_user_1', name: '皮皮虾' }],
+          sender: { name: '阿振(Pz)' },
+        }],
+      },
+    }))!
+    expect(quoted).toEqual({ id: 'om_parent', text: '@皮皮虾 看下这个项目有什么可优化的么', author: '阿振(Pz)' })
+  })
+
+  it('attach 把引用正文拼到消息前面，并写回 raw', async () => {
+    const runner = new RecordingRunner()
+    runner.response = JSON.stringify({
+      data: { messages: [{ message_id: 'om_parent', msg_type: 'text', content: '看下最近改了什么', sender: { name: '阿振' } }] },
+    })
+    const base = normalizeFeishuEvent(evt({ parent_id: 'om_parent', content: '@router-agent' }), cfg)!
+    const t = await attachQuotedMessage(base, runner as never)
+
+    expect(runner.calls[0]).toEqual(quotedMessageCommand('om_parent'))
+    expect(t.text).toBe('[引用 阿振的消息] 看下最近改了什么\n\n@router-agent')
+    expect((t.raw as Record<string, any>).quote.text).toBe('看下最近改了什么')
+  })
+
+  it('回查失败时保持原消息，不阻塞入库', async () => {
+    const runner = new RecordingRunner()
+    runner.fail = true
+    const base = normalizeFeishuEvent(evt({ parent_id: 'om_parent' }), cfg)!
+    expect(await attachQuotedMessage(base, runner as never)).toBe(base)
+  })
+
+  it('没有 parent_id 时不调用 lark-cli', async () => {
+    const runner = new RecordingRunner()
+    const base = normalizeFeishuEvent(evt(), cfg)!
+    expect(await attachQuotedMessage(base, runner as never)).toBe(base)
+    expect(runner.calls).toHaveLength(0)
   })
 })

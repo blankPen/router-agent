@@ -23,6 +23,11 @@ export interface AgentLoopOptions {
   systemPrompt?: string
   /** 多项目 / 多分支派工设置；不传则不校验 repo/branch（兼容旧测试与嵌入用法）。 */
   dispatch?: DispatchSettings
+  /**
+   * 「全量接收」的会话：配置了 `mode: all` 的群。
+   * 这些群里的消息无论有没有 @，都要正常回复；判不接单就回一句，不开单。
+   */
+  replyAlwaysChats?: string[]
   /** 审计出口：每次研判都会回调一次（CLI 落 decisions.jsonl）。 */
   onAudit?: (audit: DecisionAudit) => void
 }
@@ -78,6 +83,8 @@ export class AgentLoop {
   private systemPrompt: string
   private conversationPrompt: string
   private dispatch?: DispatchSettings
+  /** 全量接收的会话：这些群里不 @ 也要回复。 */
+  private replyAlwaysChats: Set<string>
   /** 可替换：测试与模拟可以直接注入假引擎。 */
   decisionEngine: DecisionEngine
   private onAudit?: (audit: DecisionAudit) => void
@@ -91,6 +98,7 @@ export class AgentLoop {
     this.systemPrompt = opts.systemPrompt ?? buildSystemPrompt(opts.engine.policy())
     this.conversationPrompt = readPrompt('conversation.md')
     this.dispatch = opts.dispatch
+    this.replyAlwaysChats = new Set(opts.replyAlwaysChats ?? [])
     this.decisionEngine = opts.decisionEngine
     this.onAudit = opts.onAudit
   }
@@ -146,7 +154,7 @@ export class AgentLoop {
           reason: 'media:needs-text',
         })
         result.ignored += 1
-        if (trigger.addressed !== 'none') {
+        if (this.shouldReply(trigger)) {
           this.reply(trigger, MEDIA_ONLY_TEXT, `media:${trigger.id}`)
           result.replied += 1
         }
@@ -188,8 +196,8 @@ export class AgentLoop {
     }
     if (assessed.outcome === 'clarify' && assessed.clarify) {
       const info = assessed.clarify
-      // 只对确实在跟它说话的消息追问，避免群里刷屏。
-      if (trigger.addressed === 'none') {
+      // 不在「全量接收」的会话里时，未 @ 的消息不追问，避免群里刷屏。
+      if (!this.shouldReply(trigger)) {
         this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength, reason: `clarify:unaddressed:missing-${info.missing.join('+')}` })
         result.ignored += 1
         return
@@ -225,15 +233,15 @@ export class AgentLoop {
     }
     if (assessed.outcome === 'unavailable') {
       result.unavailable += 1
-      if (trigger.addressed !== 'none') {
+      if (this.shouldReply(trigger)) {
         await this.converse(trigger, '暂时没判断出来这条消息要做什么')
         result.replied += 1
       }
       return
     }
     result.ignored += 1
-    // 只有当消息确实是在跟它说话（@ 或私聊）时才回复，避免群聊刷屏。
-    if (trigger.addressed !== 'none') {
+    // 全量接收的会话（mode: all）里，不接单也要正常回一句，只是不开单。
+    if (this.shouldReply(trigger)) {
       await this.converse(trigger, 'Router 判断这不是可执行的工作请求')
       result.replied += 1
     }
@@ -361,6 +369,18 @@ export class AgentLoop {
   private replyOnly(trigger: Trigger, reason: string): void {
     this.reply(trigger, REPLY_ONLY_TEXT, `replyonly:${trigger.id}`)
     this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'inferred', reason })
+  }
+
+  /**
+   * 这条消息要不要回。
+   *
+   * - 私聊、@机器人：一定回；
+   * - 群里没 @：只有配置为 `mode: all` 的会话才回。
+   *   全量接收意味着「所有消息都当对话听」，不能只听不回。
+   */
+  private shouldReply(trigger: Trigger): boolean {
+    if (trigger.addressed !== 'none') return true
+    return this.replyAlwaysChats.has(trigger.chatId)
   }
 
   /** 回一句到原会话；key 保证同一件事只发一次。 */
