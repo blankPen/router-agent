@@ -28,16 +28,18 @@ export function ticketSlug(title: string, maxLength = MAX_SLUG_LENGTH): string {
   return slug || 'task'
 }
 
-/** Orca worktree 名：短、纯 ASCII，目录里不会出现中文或 UUID。 */
-export function worktreeName(ticket: Pick<Ticket, 'id'>): string {
-  return sanitizeName(`ra-${ticket.id}`)
+/**
+ * Orca worktree 名：与工作分支一一对应，只把 `/` 换成 `-`。
+ *
+ * 例如分支 `ra/tk-12-fix-login-timeout` 对应目录 `ra-tk-12-fix-login-timeout`，
+ * 在 `orca worktree list` 和文件系统里都能一眼对上，不会再出现「目录 ra-tk-12、
+ * 分支 ra/tk-12-fix-login-timeout」这种对不上的情况。
+ */
+export function worktreeName(ticket: Pick<Ticket, 'id' | 'title'>): string {
+  return workBranch(ticket).replace(/\//g, '-')
 }
 
 /** 实际工作分支：`ra/tk-12-<语义 slug>`，由 Orca 的 `--branch` 直接落成 git 分支名。 */
 export function workBranch(ticket: Pick<Ticket, 'id' | 'title'>): string {
   return `${BRANCH_PREFIX}/${ticket.id}-${ticketSlug(ticket.title)}`
-}
-
-function sanitizeName(value: string): string {
-  return value.replace(/[^a-zA-Z0-9._-]/g, '-').replace(/-+/g, '-').slice(0, 60)
 }
