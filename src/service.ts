@@ -12,7 +12,7 @@ import { ReportPoller, appendEvent, judgeIdle, type WorkerMeta, type WorkerState
 import type { OrcaTerminalInfo } from './worker/orca/index.js'
 import { EffectsProcessor } from './core/effects.js'
 import { preview } from './core/events.js'
-import { FeishuSender } from './sources/feishu.js'
+import { shouldSendAsText } from './sources/feishu.js'
 import type { CommandRunner } from './infra/process.js'
 import type { GitHubTracker as GhTracker } from './sources/github.js'
 
@@ -675,19 +675,34 @@ export interface CreateServiceDeps {
   llm: LlmClient
   backend: WorkerBackend & { inspect?: (handle: string) => Promise<unknown | null> }
   prTracker: GhTracker
-  sender: FeishuSender
+  sender: FeishuOutbound
   logger: Logger
 }
 
+/** 回复投递需要的飞书能力；生产环境由 FeishuSender 实现。 */
+export interface FeishuOutbound {
+  reply(messageId: string, text: string, idempotencyKey: string): Promise<void>
+  send(chatId: string, text: string, idempotencyKey: string): Promise<void>
+  sendCard(chatId: string, markdown: string, idempotencyKey: string): Promise<void>
+  replyCard(messageId: string, markdown: string, idempotencyKey: string): Promise<void>
+}
+
 /** 生产装配：用一个 CommandRunner 驱动 Orca 与 gh。 */
-export function createEffectsSender(sender: FeishuSender): OutboundSender {
+export function createEffectsSender(sender: FeishuOutbound): OutboundSender {
   return {
     async send(item) {
-      if (item.channelKind === 'feishu') {
-        // 统一走互动卡片，Markdown 交给飞书渲染；卡片失败时 Sender 内部降级为 post。
-        if (item.threadId) await sender.replyCard(item.threadId, item.text, item.key)
-        else await sender.sendCard(item.channelId, item.text, item.key)
+      if (item.channelKind !== 'feishu') return
+      const text = item.text.trim()
+      if (!text) return
+      // 简单消息走纯文本：不开卡片，少一次渲染、少一类兼容问题。
+      if (shouldSendAsText(text)) {
+        if (item.threadId) await sender.reply(item.threadId, text, item.key)
+        else await sender.send(item.channelId, text, item.key)
+        return
       }
+      // 其余走互动卡片：Markdown 先在 feishuCard 内归一化，卡片失败时 Sender 内部降级为 post。
+      if (item.threadId) await sender.replyCard(item.threadId, text, item.key)
+      else await sender.sendCard(item.channelId, text, item.key)
     },
   }
 }
