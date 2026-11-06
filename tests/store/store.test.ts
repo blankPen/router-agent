@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { Store } from '../../src/store/db.js'
 import type { Assignment, Input, Report, Ticket, Trigger } from '../../src/core/model.js'
 import { DEFAULT_ADMISSION, type Policy } from '../../src/core/policy.js'
@@ -270,5 +273,21 @@ describe('派工草稿', () => {
     const db = store()
     db.insertTicket({ ...ticket, repo: 'name:dsh/router-agent', branch: 'release' })
     expect(db.getTicket('tk1')).toMatchObject({ repo: 'name:dsh/router-agent', branch: 'release' })
+  })
+
+  it('工单编号计数器原子自增，重启后从上次的值继续', () => {
+    const path = join(tmpdir(), `ra-store-${Date.now()}-${Math.random().toString(16).slice(2)}.db`)
+    const db = new Store(path)
+    expect(db.nextTicketSeq()).toBe(1)
+    expect(db.nextTicketSeq()).toBe(2)
+    db.close()
+
+    // 重新打开同一个库，编号不能回到 1，否则会和历史工单撞号。
+    const reopened = new Store(path)
+    expect(reopened.nextTicketSeq()).toBe(3)
+    reopened.close()
+    rmSync(path, { force: true })
+    rmSync(`${path}-wal`, { force: true })
+    rmSync(`${path}-shm`, { force: true })
   })
 })

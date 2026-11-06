@@ -45,6 +45,8 @@ ra report \
 ```
 
 - `--summary` 只放一句话（给日志和列表用）；**用户真正看到的内容全部放 `--reply`**。
+- `--state progress` 是「中途进展」：Router 不逐条转发，会按 `progress.syncMs` 合并后同步到话题；
+  带 `--ack` 的追问回答会立即发送。需要用户立刻看到的内容请用 `ready`。
 - `--reply` 支持字面量、`@文件`、`-`（stdin）。正文长时用文件，避免 shell 转义：
   ```bash
   ra report --ticket {{ticketId}} --state ready --summary "完成梳理" --reply @/tmp/answer.md
@@ -56,7 +58,8 @@ ra report \
 ## 回复怎么写
 
 - 直接给结论，不要只写「我做了什么」的过程。
-- Markdown 可以直接用：Router 会以飞书卡片渲染标题、列表、链接、代码块。
+- Markdown 可以直接用：单行纯文本会按纯文本发送，其余由 Router 以飞书卡片渲染标题、列表、链接、代码块。
+- 卡片渲染时会做 Markdown 归一化：`#` 标题变加粗行、表格降级为列表、`<br>` 变换行；富文本尽量用加粗、列表、代码块表达。
 - 有 PR 就附 PR 链接；有飞书文档就附文档链接。
 - `--reply` 超过单条消息长度会自动分块，不会截断。
 
@@ -77,7 +80,7 @@ ra report --ticket {{ticketId}} --state ready \
 
 ## 代码交付
 
-- 分支名：`ra/{{ticketId}}`。
+- 分支名：`{{workBranch}}`。
 - PR 标题用中文，正文写清「做了什么 / 怎么验证的 / 风险」。
 - 上报时带 `--pr-number`、`--pr-url`；不要自己合并 PR，合并由人决定。
 - CI 失败时修到绿；修不动用 `blocked` 说明失败原因。

@@ -2,6 +2,7 @@ import { mkdirSync, writeFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { WorkerBackend, WorkerContext, InboundMessage, ContextItem } from '../port.js'
 import { buildWorkerPrompt } from '../spec/index.js'
+import { workBranch, worktreeName } from '../naming.js'
 import {
   agentLaunch,
   terminalClose,
@@ -119,7 +120,7 @@ export function describeCommandFailure(argv: string[], res: CommandResult): Orca
 }
 
 /** 解析 `orca worktree create --json` 的返回；不同 Orca 版本字段不同。 */
-export function parseCreateResult(stdout: string): { handle: string; workdir?: string } {
+export function parseCreateResult(stdout: string): { handle: string; workdir?: string; branch?: string } {
   let json: unknown
   try {
     json = JSON.parse(stdout)
@@ -134,7 +135,13 @@ export function parseCreateResult(stdout: string): { handle: string; workdir?: s
   const handle = result.launch?.outcome?.handle ?? result.agentTerminalHandle ?? result.terminalHandle ?? result.terminal?.handle
   if (!handle) throw new Error(`orca:create-failed: 返回中没有 terminal handle: ${stdout.slice(0, 200)}`)
   const workdir = result.worktree?.path ?? result.worktreePath ?? result.path
-  return workdir ? { handle: String(handle), workdir: String(workdir) } : { handle: String(handle) }
+  const branch = result.worktree?.branch ?? result.branch
+  return {
+    handle: String(handle),
+    ...(workdir ? { workdir: String(workdir) } : {}),
+    // Orca 分支名可能是 `refs/heads/xxx`；若同名分支已存在还会自动加数字后缀，回读一次保证记录准确。
+    ...(branch ? { branch: String(branch).replace(/^refs\/heads\//, '') } : {}),
+  }
 }
 
 export class OrcaAdapter implements WorkerBackend {
@@ -152,12 +159,14 @@ export class OrcaAdapter implements WorkerBackend {
   async start(ctx: WorkerContext): Promise<{ handle: string; workdir?: string }> {
     const statePath = join(this.workersDir, ctx.ticket.id, 'state.json')
     const eventsPath = join(this.workersDir, ctx.ticket.id, 'events.log')
-    const name = sanitize(`ra-${ctx.ticket.id}`)
+    const name = worktreeName(ctx.ticket)
     // 每张工单自带 repo/branch（多项目派工）；缺了说明是脏数据，直接报错不猜。
     const repo = ctx.ticket.repo
-    const branch = ctx.ticket.branch
+    // 工单上的 branch 是「起始分支」；worktree 自己的工作分支由工单号 + 标题语义生成。
+    const baseBranch = ctx.ticket.branch
+    const branch = workBranch(ctx.ticket)
     if (!repo) throw new Error('orca:missing-repo: 工单没有指定仓库，拒绝创建 worktree')
-    if (!branch) throw new Error('orca:missing-branch: 工单没有指定起始分支，拒绝创建 worktree')
+    if (!baseBranch) throw new Error('orca:missing-branch: 工单没有指定起始分支，拒绝创建 worktree')
     const prompt = buildWorkerPrompt({
       mode: this.spec,
       ticket: ctx.ticket,
@@ -165,13 +174,14 @@ export class OrcaAdapter implements WorkerBackend {
       statePath,
       eventsPath,
       repo,
-      branch,
+      branch: baseBranch,
+      workBranch: branch,
       workdir: ctx.workdir,
     })
-    const res = await this.run(worktreeCreate({ repo, name, prompt, ...(branch ? { baseBranch: branch } : {}) }))
+    const res = await this.run(worktreeCreate({ repo, name, prompt, branch, ...(baseBranch ? { baseBranch } : {}) }))
     const parsed = parseCreateResult(res.stdout)
     const workdir = parsed.workdir ?? ctx.workdir
-    this.writeMeta(ctx, { handle: parsed.handle, workdir, statePath, eventsPath, repo, branch })
+    this.writeMeta(ctx, { handle: parsed.handle, workdir, statePath, eventsPath, repo, branch: baseBranch, workBranch: parsed.branch ?? branch })
     return { handle: parsed.handle, workdir }
   }
 
@@ -224,7 +234,7 @@ export class OrcaAdapter implements WorkerBackend {
     return res
   }
 
-  private writeMeta(ctx: WorkerContext, extra: { handle: string; workdir: string; statePath: string; eventsPath: string; repo: string; branch: string }): void {
+  private writeMeta(ctx: WorkerContext, extra: { handle: string; workdir: string; statePath: string; eventsPath: string; repo: string; branch: string; workBranch: string }): void {
     const dir = join(this.workersDir, ctx.ticket.id)
     mkdirSync(dir, { recursive: true })
     const metaPath = join(dir, 'meta.json')
@@ -236,7 +246,10 @@ export class OrcaAdapter implements WorkerBackend {
       statePath: extra.statePath,
       eventsPath: extra.eventsPath,
       repo: extra.repo,
+      /** 起始分支（base branch）。 */
       branch: extra.branch,
+      /** worktree 自己实际使用的工作分支。 */
+      workBranch: extra.workBranch,
       backend: this.id,
       startedAt: new Date().toISOString(),
     }
@@ -244,10 +257,6 @@ export class OrcaAdapter implements WorkerBackend {
     if (!existsSync(extra.eventsPath)) writeFileSync(extra.eventsPath, '', 'utf8')
     mkdirSync(dirname(metaPath), { recursive: true })
   }
-}
-
-function sanitize(value: string): string {
-  return value.replace(/[^a-zA-Z0-9._-]/g, '-').slice(0, 60)
 }
 
 /**
