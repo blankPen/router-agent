@@ -12,6 +12,7 @@
 3. **写入仓库 Secret**：GitHub 仓库 → Settings → Secrets and variables → Actions → New repository secret
    - Name: `NPM_TOKEN`
    - Value: 上一步生成的 token
+   - 配置后确认：`gh secret list --repo blankPen/router-agent` 应能看到 `NPM_TOKEN`（注意认准仓库 `blankPen/router-agent`，配到 fork 或其他仓库不会生效）
 
 ## 发版流程
 
@@ -60,8 +61,7 @@ ra -v
 
 ## 首次发布的待办与风险
 
-- **LICENSE**：仓库目前没有 LICENSE 文件，`package.json` 也没有 `license` 字段。npm 会给出警告但不阻断发布；
-  正式对外发布前建议补一个明确的开源协议（如 MIT），再在 `package.json` 里写上 `license`。
+- **LICENSE**：已采用 MIT，见根目录 `LICENSE` 与 `package.json` 的 `license` 字段；如需更换版权方，改 `LICENSE` 首行即可。
 - **平台限制**：README 已注明第一版只支持 macOS（Orca 依赖），npm 包本身可以安装在 Linux/Windows，但运行时功能受限。
 - **provenance**：要求仓库公开且工作流在 GitHub 托管 runner 上运行，当前仓库为 public，满足条件。
 
