@@ -66,6 +66,18 @@ function progressCursorKey(ticketId: string): string {
   return `progress:${ticketId}`
 }
 
+/** 派工失败水位：持久化到 cursors，重启后仍能区分「失败前积压的旧输入」与「用户新回复」。 */
+function launchFailureCursorKey(ticketId: string): string {
+  return `launch-failure:${ticketId}`
+}
+
+interface LaunchFailureRecord {
+  attempts: number
+  /** 上次失败时工单上已存在的最大输入序号；序号不大于它的输入不再触发重试。 */
+  lastSeq: number
+  lastReason: string
+}
+
 /** 同一条进展（summary + reply）只保留一次，避免 worker 重复上报刷屏。 */
 function dedupeProgress(reports: Report[]): Report[] {
   const seen = new Set<string>()
@@ -136,8 +148,8 @@ export class RouterService {
   private idle = new Map<string, { turn: number; nudgedAt: number | null; stale: boolean }>()
   private ticking = false
   private backfill?: () => Promise<Trigger[]>
-  /** 派工失败记录：用于限制「旧输入」反复触发重试，并累计尝试次数。 */
-  private launchFailures = new Map<string, { attempts: number; lastSeq: number; lastReason: string }>()
+  /** 派工失败记录：用于限制「旧输入」反复触发重试，并累计尝试次数。内存缓存 + cursors 持久化。 */
+  private launchFailures = new Map<string, LaunchFailureRecord>()
   /** 排队状态的去重签名，避免每秒刷同一条排队日志。 */
   private queueSignature = ''
   /** 已经发过排队通知的工单，避免刷屏。 */
@@ -325,7 +337,7 @@ export class RouterService {
       const updated: Assignment = { ...assignment, handle, workdir: workdir ?? '' }
       this.store.updateAssignment(updated)
       this.engine.refreshStage(ticket.id)
-      this.launchFailures.delete(ticket.id)
+      this.clearLaunchFailure(ticket.id)
       this.queueNotified.delete(ticket.id)
       this.log('launch', ticket.id, { handle, workdir })
       return updated
@@ -342,9 +354,10 @@ export class RouterService {
    */
   private reportLaunchFailure(ticket: Ticket, error: unknown): void {
     const failure = describeLaunchError(error)
-    const attempts = (this.launchFailures.get(ticket.id)?.attempts ?? 0) + 1
+    const previous = this.loadLaunchFailure(ticket.id)
+    const attempts = (previous?.attempts ?? 0) + 1
     const lastSeq = this.store.pendingInputs(ticket.id).reduce((max, input) => Math.max(max, input.seq), 0)
-    this.launchFailures.set(ticket.id, { attempts, lastSeq, lastReason: failure.reason })
+    this.saveLaunchFailure(ticket.id, { attempts, lastSeq, lastReason: failure.reason })
 
     const hint = `请确认项目「${ticket.repo}」与起始分支「${ticket.branch}」存在；修正后在本话题回复任意内容即可重试`
     this.engine.setAttention(ticket.id, `执行环境创建失败：${failure.reason}`)
@@ -357,6 +370,8 @@ export class RouterService {
       branch: ticket.branch,
       attempt: attempts,
       reason: failure.reason,
+      ...(failure.cause ? { cause: failure.cause } : {}),
+      ...(failure.operationId ? { operationId: failure.operationId } : {}),
       ...(failure.code !== undefined ? { exitCode: failure.code } : {}),
       ...(failure.orcaCode ? { orcaCode: failure.orcaCode } : {}),
       ...(failure.args ? { args: failure.args } : {}),
@@ -371,6 +386,7 @@ export class RouterService {
         `工单「${ticket.title}」的执行环境创建失败，已暂停执行并转人工。`,
         '',
         `失败原因：${failure.reason}`,
+        ...(failure.cause ? [`底层原因：${failure.cause}`] : []),
         ...(failure.orcaCode ? [`错误码：${failure.orcaCode}`] : []),
         `项目：${ticket.repo}　起始分支：${ticket.branch}`,
         `已尝试次数：${attempts}`,
@@ -379,6 +395,37 @@ export class RouterService {
       ].join('\n'),
       `launch-failed:${ticket.id}:${reasonKey(failure.reason)}`,
     )
+  }
+
+  /** 读取失败水位：内存缓存优先；进程重启后从 cursors 恢复，避免旧输入被当成新回复重试。 */
+  private loadLaunchFailure(ticketId: string): LaunchFailureRecord | undefined {
+    const cached = this.launchFailures.get(ticketId)
+    if (cached) return cached
+    const raw = this.store.getCursor(launchFailureCursorKey(ticketId))
+    if (!raw) return undefined
+    try {
+      const parsed = JSON.parse(raw) as Partial<LaunchFailureRecord>
+      if (typeof parsed.attempts !== 'number' || typeof parsed.lastSeq !== 'number') return undefined
+      const record: LaunchFailureRecord = {
+        attempts: parsed.attempts,
+        lastSeq: parsed.lastSeq,
+        lastReason: typeof parsed.lastReason === 'string' ? parsed.lastReason : '',
+      }
+      this.launchFailures.set(ticketId, record)
+      return record
+    } catch {
+      return undefined
+    }
+  }
+
+  private saveLaunchFailure(ticketId: string, record: LaunchFailureRecord): void {
+    this.launchFailures.set(ticketId, record)
+    this.store.setCursor(launchFailureCursorKey(ticketId), JSON.stringify(record), this.clock.now())
+  }
+
+  private clearLaunchFailure(ticketId: string): void {
+    this.launchFailures.delete(ticketId)
+    this.store.deleteCursor(launchFailureCursorKey(ticketId))
   }
 
   private activeWorkers(): number {
@@ -425,7 +472,7 @@ export class RouterService {
    * 只对「上次失败之后新到的输入」触发，避免同一批积压输入每秒重试打爆 Orca。
    */
   private async relaunchForInput(ticket: Ticket, pending: { seq: number }[]): Promise<void> {
-    const failure = this.launchFailures.get(ticket.id)
+    const failure = this.loadLaunchFailure(ticket.id)
     if (failure && !pending.some(input => input.seq > failure.lastSeq)) return
     if (this.activeWorkers() >= this.config.policy.maxWorkers) {
       this.logger.info('launch:queued-input', {
@@ -844,6 +891,10 @@ export function splitMessage(text: string, limit = 3500): string[] {
 
 export interface LaunchErrorDetail {
   reason: string
+  /** Orca 包装成通用文案时保留在 `error.data.cause` 里的底层原因。 */
+  cause?: string
+  /** 启动结果未知时的重试句柄。 */
+  operationId?: string
   code?: number
   orcaCode?: string
   args?: string
@@ -861,6 +912,8 @@ export function describeLaunchError(error: unknown): LaunchErrorDetail {
     const detail = error.detail
     return {
       reason: detail.orcaMessage ?? error.message,
+      ...(detail.orcaCause ? { cause: detail.orcaCause } : {}),
+      ...(detail.orcaOperationId ? { operationId: detail.orcaOperationId } : {}),
       code: detail.code,
       ...(detail.orcaCode ? { orcaCode: detail.orcaCode } : {}),
       ...(detail.args ? { args: detail.args } : {}),

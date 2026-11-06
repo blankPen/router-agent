@@ -43,6 +43,14 @@ export interface OrcaCommandFailure {
   code: number
   orcaCode?: string
   orcaMessage?: string
+  /**
+   * 错误体 `data.cause` 里的底层原因。
+   * Orca 会把 git 失败等真实错误包装成通用文案（如 agent_session_operation_unknown），
+   * 真正原因只保留在这里；不取出来日志就只剩一句「结果未知」。
+   */
+  orcaCause?: string
+  /** 启动结果未知时的重试句柄；Orca 要求用它 `--retry-launch`，而不是重新派工。 */
+  orcaOperationId?: string
   /** 脱敏后的参数摘要：`--prompt` 只保留长度，避免整段 prompt 进日志。 */
   args: string
   stdoutTail: string
@@ -64,6 +72,8 @@ export function formatCommandFailure(detail: OrcaCommandFailure): string {
   const parts = [`orca:command-failed(${detail.command}): exit=${detail.code}`]
   if (detail.orcaCode) parts.push(`code=${detail.orcaCode}`)
   if (detail.orcaMessage) parts.push(`message=${detail.orcaMessage}`)
+  if (detail.orcaCause) parts.push(`cause=${detail.orcaCause}`)
+  if (detail.orcaOperationId) parts.push(`operationId=${detail.orcaOperationId}`)
   if (!detail.orcaCode && !detail.orcaMessage && detail.stdoutTail) parts.push(`stdout=${detail.stdoutTail}`)
   if (detail.stderrTail) parts.push(`stderr=${detail.stderrTail}`)
   return parts.join(' | ')
@@ -96,12 +106,23 @@ export function describeCommandFailure(argv: string[], res: CommandResult): Orca
   const args = summarizeArgs(argv.slice(2))
   let orcaCode: string | undefined
   let orcaMessage: string | undefined
+  let orcaCause: string | undefined
+  let orcaOperationId: string | undefined
   let stdoutTail = ''
   try {
     const parsed = JSON.parse(res.stdout) as Record<string, any>
     if (parsed?.error) {
       if (parsed.error.code) orcaCode = String(parsed.error.code)
       if (parsed.error.message) orcaMessage = String(parsed.error.message)
+      const data = parsed.error.data as Record<string, any> | undefined
+      if (data) {
+        if (typeof data.cause === 'string') {
+          // cause 可能是带堆栈的多行文本，只留第一行有效信息。
+          const first = data.cause.split('\n').map((line: string) => line.trim()).find(Boolean)
+          if (first) orcaCause = first.slice(0, 300)
+        }
+        if (typeof data.operationId === 'string' && data.operationId) orcaOperationId = data.operationId
+      }
     } else {
       stdoutTail = res.stdout.slice(0, 300)
     }
@@ -113,6 +134,8 @@ export function describeCommandFailure(argv: string[], res: CommandResult): Orca
     code: res.code,
     ...(orcaCode ? { orcaCode } : {}),
     ...(orcaMessage ? { orcaMessage } : {}),
+    ...(orcaCause ? { orcaCause } : {}),
+    ...(orcaOperationId ? { orcaOperationId } : {}),
     args,
     stdoutTail,
     stderrTail: res.stderr.slice(0, 300),

@@ -101,6 +101,10 @@ describe('OrcaAdapter', () => {
         error: {
           code: 'agent_session_operation_unknown',
           message: 'base branch master not found',
+          data: {
+            cause: 'Error: Command failed: git worktree add ... master\nfatal: invalid reference: master\n    at ...',
+            operationId: 'op_123',
+          },
         },
       }),
       stderr: '',
@@ -111,11 +115,15 @@ describe('OrcaAdapter', () => {
     expect(error).toBeInstanceOf(OrcaCommandError)
     expect(error.message).toContain('code=agent_session_operation_unknown')
     expect(error.message).toContain('base branch master not found')
+    expect(error.message).toContain('cause=Error: Command failed: git worktree add ... master')
     expect(error.detail).toMatchObject({
       command: 'worktree create',
       code: 1,
       orcaCode: 'agent_session_operation_unknown',
+      orcaOperationId: 'op_123',
     })
+    // 多行 cause 只保留第一行有效信息，不把堆栈整段塞进日志
+    expect(error.detail.orcaCause).toBe('Error: Command failed: git worktree add ... master')
     // 参数摘要可复现，但不把整段 prompt 写进日志
     expect(error.detail.args).toContain('--base-branch main')
     expect(error.detail.args).toContain('--repo name:dsh/router-agent')

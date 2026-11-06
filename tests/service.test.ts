@@ -277,6 +277,47 @@ describe('RouterService 编排', () => {
     expect(store.getTicket(ticket.id)?.stage).toBe('assigned')
   })
 
+  it('服务重启后，失败前积压的旧输入不会再触发重试（水位持久化）', async () => {
+    config.policy.maxWorkers = 1
+    engine.updatePolicy(policyOf(config))
+    const flaky = new FlakyBackend(99)
+    const logger = {
+      info: (message: string, extra?: Record<string, unknown>) => logs.push({ level: 'info', message, ...(extra ? { extra } : {}) }),
+      warn: (message: string, extra?: Record<string, unknown>) => logs.push({ level: 'warn', message, ...(extra ? { extra } : {}) }),
+      error: (message: string, extra?: Record<string, unknown>) => logs.push({ level: 'error', message, ...(extra ? { extra } : {}) }),
+    }
+    const build = () => new RouterService({
+      config, store, engine, backend: flaky, llm: new NoopLlm(), prTracker,
+      clock: { now: () => '2026-11-06T10:00:10.000Z' },
+      logger,
+      agentLoopOptions: { batchWindowMs: 0 },
+    })
+
+    engine.ingest(makeTrigger())
+    service = build()
+    await service.runOnce()
+    const ticket = store.listTickets()[0]!
+
+    // 用户在两次尝试之间回复过：这条输入会随下一次失败一起被记为「已经试过」
+    engine.deliverInput(ticket.id, { kind: 'followup', text: '？' })
+    await service.runOnce()
+    expect(flaky.failures).toBe(2)
+    expect(store.getTicket(ticket.id)?.stage).toBe('person')
+
+    // 模拟重启：内存里的失败记录清空，水位必须从 cursors 恢复，旧输入不能再触发派工
+    service = build()
+    await service.runOnce()
+    await service.runOnce()
+    expect(flaky.failures).toBe(2)
+
+    // 只有真正新到的输入才能再触发一次派工；尝试次数也应跨重启累计
+    engine.deliverInput(ticket.id, { kind: 'followup', text: '分支修好了，再试一次' })
+    await service.runOnce()
+    expect(flaky.failures).toBe(3)
+    const lastFailure = logs.filter(entry => entry.message === 'launch:failed').at(-1)
+    expect(lastFailure?.extra?.attempt).toBe(3)
+  })
+
   it('worker 上报 ready 时进入 review 并安排 PR 跟踪', async () => {
     engine.ingest(makeTrigger())
     await service.runOnce()

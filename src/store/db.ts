@@ -657,6 +657,10 @@ export class Store {
       .run(key, value, at)
   }
 
+  deleteCursor(key: string): void {
+    this.db.prepare('DELETE FROM cursors WHERE key = ?').run(key)
+  }
+
   // ---------- 自增计数器 ----------
 
   /** 原子自增并返回新值；进程重启后从上次的值继续。 */
