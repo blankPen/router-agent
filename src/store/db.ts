@@ -63,36 +63,6 @@ export interface EnqueueEffect {
   now: string
 }
 
-/** 影子对照的一条记录；primary/shadow 是引擎侧的摘要对象。 */
-export interface ShadowComparisonRecord {
-  id: string
-  triggerId: string
-  agree: boolean
-  diff: string[]
-  primary: unknown
-  shadow: unknown
-  createdAt: string
-}
-
-export interface ShadowStats {
-  total: number
-  agree: number
-  agreeRate: number
-  primaryUnavailable: number
-  shadowUnavailable: number
-  shadowUnavailableRate: number
-  avgPrimaryLatencyMs: number
-  avgShadowLatencyMs: number
-  p95PrimaryLatencyMs: number
-  p95ShadowLatencyMs: number
-  avgPrimaryTokens: number
-  avgShadowTokens: number
-  avgPrimaryToolCalls: number
-  avgShadowToolCalls: number
-  /** 分歧字段分布：outcome / title / repo / branch / decision。 */
-  byDiff: Record<string, number>
-}
-
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS policy (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -141,20 +111,6 @@ CREATE TABLE IF NOT EXISTS decisions (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_thread ON decisions (thread_id, created_at);
-
--- 影子模式对照：只记录，不参与领域状态。
-CREATE TABLE IF NOT EXISTS decision_shadows (
-  id TEXT PRIMARY KEY,
-  trigger_id TEXT NOT NULL,
-  primary_engine TEXT NOT NULL,
-  shadow_engine TEXT NOT NULL,
-  agree INTEGER NOT NULL,
-  diff TEXT NOT NULL,
-  primary_json TEXT NOT NULL,
-  shadow_json TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_decision_shadows_created ON decision_shadows (created_at);
 
 CREATE TABLE IF NOT EXISTS mandates (
   id TEXT PRIMARY KEY,
@@ -434,69 +390,6 @@ export class Store {
       policyVersion: String(row.policy_version),
       wouldAccept: Number(row.would_accept) === 1,
       createdAt: String(row.created_at),
-    }
-  }
-
-  // ---------- 影子模式（只记录，不参与领域状态） ----------
-
-  insertShadowComparison(record: ShadowComparisonRecord): void {
-    const primaryEngine = String((record.primary as { engine?: unknown })?.engine ?? '')
-    const shadowEngine = String((record.shadow as { engine?: unknown })?.engine ?? '')
-    this.db.prepare(`INSERT INTO decision_shadows (id, trigger_id, primary_engine, shadow_engine, agree, diff, primary_json, shadow_json, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(
-        record.id,
-        record.triggerId,
-        primaryEngine,
-        shadowEngine,
-        record.agree ? 1 : 0,
-        JSON.stringify(record.diff),
-        JSON.stringify(record.primary),
-        JSON.stringify(record.shadow),
-        record.createdAt,
-      )
-  }
-
-  listShadowComparisons(limit = 100): ShadowComparisonRecord[] {
-    const rows = this.db.prepare('SELECT * FROM decision_shadows ORDER BY created_at DESC LIMIT ?').all(limit) as Row[]
-    return rows.map(row => ({
-      id: String(row.id),
-      triggerId: String(row.trigger_id),
-      agree: Number(row.agree) === 1,
-      diff: parseJsonArray(String(row.diff)),
-      primary: parseJsonValue(String(row.primary_json)),
-      shadow: parseJsonValue(String(row.shadow_json)),
-      createdAt: String(row.created_at),
-    }))
-  }
-
-  /** 运营指标：一致率、unavailable 率、延迟 / token / 工具调用次数。 */
-  shadowStats(): ShadowStats {
-    const rows = this.db.prepare('SELECT primary_json, shadow_json, agree, diff FROM decision_shadows').all() as Row[]
-    const primary = rows.map(row => parseSide(String(row.primary_json)))
-    const shadow = rows.map(row => parseSide(String(row.shadow_json)))
-    const byDiff: Record<string, number> = {}
-    for (const row of rows) {
-      for (const field of parseJsonArray(String(row.diff))) byDiff[field] = (byDiff[field] ?? 0) + 1
-    }
-    const total = rows.length
-    const agree = rows.filter(row => Number(row.agree) === 1).length
-    return {
-      total,
-      agree,
-      agreeRate: ratio(agree, total),
-      primaryUnavailable: primary.filter(side => side.outcome === 'unavailable').length,
-      shadowUnavailable: shadow.filter(side => side.outcome === 'unavailable').length,
-      shadowUnavailableRate: ratio(shadow.filter(side => side.outcome === 'unavailable').length, total),
-      avgPrimaryLatencyMs: avg(primary.map(side => side.latencyMs)),
-      avgShadowLatencyMs: avg(shadow.map(side => side.latencyMs)),
-      p95PrimaryLatencyMs: p95(primary.map(side => side.latencyMs)),
-      p95ShadowLatencyMs: p95(shadow.map(side => side.latencyMs)),
-      avgPrimaryTokens: avg(primary.map(side => side.tokens)),
-      avgShadowTokens: avg(shadow.map(side => side.tokens)),
-      avgPrimaryToolCalls: avg(primary.map(side => side.toolCalls)),
-      avgShadowToolCalls: avg(shadow.map(side => side.toolCalls)),
-      byDiff,
     }
   }
 
@@ -938,51 +831,4 @@ function effectFromRow(row: Row, bump: number): EffectItem {
     createdAt: String(row.created_at),
     ...(row.last_error ? { lastError: String(row.last_error) } : {}),
   }
-}
-
-function parseJsonValue(text: string): unknown {
-  try {
-    return JSON.parse(text) as unknown
-  } catch {
-    return null
-  }
-}
-
-function parseJsonArray(text: string): string[] {
-  const value = parseJsonValue(text)
-  return Array.isArray(value) ? value.map(String) : []
-}
-
-interface ShadowSideView {
-  outcome: string
-  latencyMs: number
-  tokens: number
-  toolCalls: number
-}
-
-function parseSide(text: string): ShadowSideView {
-  const value = parseJsonValue(text)
-  const side = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>
-  return {
-    outcome: String(side.outcome ?? ''),
-    latencyMs: Number(side.latencyMs ?? 0) || 0,
-    tokens: Number(side.tokens ?? 0) || 0,
-    toolCalls: Number(side.toolCalls ?? 0) || 0,
-  }
-}
-
-function ratio(part: number, total: number): number {
-  return total > 0 ? Math.round((part / total) * 10000) / 10000 : 0
-}
-
-function avg(values: number[]): number {
-  if (values.length === 0) return 0
-  return Math.round(values.reduce((sum, value) => sum + value, 0) / values.length)
-}
-
-function p95(values: number[]): number {
-  if (values.length === 0) return 0
-  const sorted = [...values].sort((a, b) => a - b)
-  const index = Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1)
-  return sorted[Math.max(0, index)] ?? 0
 }

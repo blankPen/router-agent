@@ -259,15 +259,12 @@ describe('多项目与群绑定配置', () => {
   })
 })
 
-describe('研判层配置', () => {
-  it('默认仍是 custom / shadow off，并带 60s 超时与 token 预算', () => {
+describe('Pi 研判层配置', () => {
+  it('默认带 60s 超时与 token 预算', () => {
     const cfg = loadConfig(home())
     expect(cfg.router).toMatchObject({
-      decisionEngine: 'custom',
-      shadow: 'off',
       timeoutMs: 60_000,
       tokenBudget: 32_000,
-      maxToolRounds: 3,
     })
   })
 
@@ -277,52 +274,39 @@ describe('研判层配置', () => {
     const { writeFileSync } = require('node:fs') as typeof import('node:fs')
     writeFileSync(join(dir, 'config.yaml'), [
       'router:',
-      '  decisionEngine: pi',
-      '  shadow: custom',
       '  timeoutMs: 15000',
       '  tokenBudget: 8000',
-      '  maxToolRounds: 5',
       '  agentDir: /tmp/ra-pi',
     ].join('\n'))
     const cfg = loadConfig(dir)
     expect(cfg.router).toMatchObject({
-      decisionEngine: 'pi',
-      shadow: 'custom',
       timeoutMs: 15000,
       tokenBudget: 8000,
-      maxToolRounds: 5,
       agentDir: '/tmp/ra-pi',
     })
   })
 
   it('config set 支持 router.*，非法值拒绝', () => {
     const cfg = defaultConfig()
-    expect(setConfigValue(cfg, 'router.decisionEngine', 'pi')).toBe(true)
-    expect(cfg.router.decisionEngine).toBe('pi')
-    expect(setConfigValue(cfg, 'router.shadow', 'custom')).toBe(true)
-    expect(cfg.router.shadow).toBe('custom')
     expect(setConfigValue(cfg, 'router.timeoutMs', '30000')).toBe(true)
     expect(cfg.router.timeoutMs).toBe(30000)
     expect(setConfigValue(cfg, 'router.tokenBudget', '0')).toBe(true)
     expect(cfg.router.tokenBudget).toBe(0)
-    expect(setConfigValue(cfg, 'router.maxToolRounds', '4')).toBe(true)
-    expect(cfg.router.maxToolRounds).toBe(4)
+    expect(setConfigValue(cfg, 'router.agentDir', '/tmp/pi')).toBe(true)
+    expect(cfg.router.agentDir).toBe('/tmp/pi')
 
-    expect(setConfigValue(cfg, 'router.decisionEngine', 'gpt')).toBe(false)
-    expect(setConfigValue(cfg, 'router.shadow', 'always')).toBe(false)
     expect(setConfigValue(cfg, 'router.timeoutMs', '10')).toBe(false)
-    expect(setConfigValue(cfg, 'router.maxToolRounds', '0')).toBe(false)
   })
 
   it('writeConfig 写回后 router 段仍能读回', () => {
     const dir = home()
     const cfg = loadConfig(dir)
-    cfg.router.decisionEngine = 'pi'
-    cfg.router.shadow = 'custom'
+    cfg.router.timeoutMs = 45000
+    cfg.router.tokenBudget = 16000
     writeConfig(dir, cfg)
 
     const loaded = loadConfig(dir)
-    expect(loaded.router.decisionEngine).toBe('pi')
-    expect(loaded.router.shadow).toBe('custom')
+    expect(loaded.router.timeoutMs).toBe(45000)
+    expect(loaded.router.tokenBudget).toBe(16000)
   })
 })

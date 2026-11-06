@@ -2,18 +2,67 @@ import { describe, expect, it } from 'vitest'
 import { Store } from '../../src/store/db.js'
 import { Engine } from '../../src/core/engine.js'
 import { AgentLoop, clarifyFallback, isSmallTalk } from '../../src/router/agent-loop.js'
-import type { LlmClient, LlmResponse } from '../../src/router/llm.js'
+import type {
+  DecisionEngine,
+  DecisionEngineResult,
+  DecisionProposal,
+  DecisionRequest,
+  ReplyRequest,
+} from '../../src/router/decision-engine.js'
+import { proposalFromJson } from '../../src/router/decision-engine.js'
+import { extractJsonObject } from '../../src/router/model-config.js'
 import type { Trigger } from '../../src/core/model.js'
 import { DEFAULT_ADMISSION, type Policy } from '../../src/core/policy.js'
-import { ROUTER_TOOLS, normalizeMessageId } from '../../src/router/tools.js'
 import type { DispatchSettings } from '../../src/router/dispatch.js'
 
-class FakeLlm implements LlmClient {
-  requests: { messages: { role: string; content: string | null }[]; tools?: unknown }[] = []
-  constructor(private responses: LlmResponse[]) {}
-  async complete(req: { messages: { role: string; content: string | null }[]; tools?: unknown }): Promise<LlmResponse> {
-    this.requests.push(req)
-    return this.responses.shift() ?? { content: '{"decision":"ignore","reason":"no more responses","title":"","scope":""}', toolCalls: [] }
+interface FakeResponse {
+  content: string | null
+  toolCalls: { id: string; name: string; arguments: string }[]
+  usage?: { input: number; output: number; total: number }
+}
+
+/** 用确定性响应模拟 Pi 研判与回复两条通道。 */
+class FakeEngine implements DecisionEngine {
+  requests: { kind: 'assess' | 'reply'; systemPrompt: string; userPrompt: string }[] = []
+  constructor(private responses: FakeResponse[]) {}
+
+  async assess(req: DecisionRequest): Promise<DecisionEngineResult> {
+    this.requests.push({ kind: 'assess', systemPrompt: req.systemPrompt, userPrompt: req.userPrompt })
+    const res = this.responses.shift() ?? { content: '{"decision":"ignore","reason":"no more responses"}', toolCalls: [] }
+    const audit = {
+      engine: 'pi' as const,
+      triggerId: req.trigger.id,
+      durationMs: 1,
+      toolCalls: [] as { name: string; args: string; ok: boolean }[],
+      tokens: res.usage ?? { input: 0, output: 0, total: 0 },
+      promptChars: { system: req.systemPrompt.length, user: req.userPrompt.length },
+    }
+    if (res.toolCalls.length > 0) {
+      const decide = res.toolCalls.find(call => call.name === 'router_decide')
+      if (!decide) return { unavailableReason: 'no decision', audit }
+      let args: Record<string, unknown>
+      try {
+        args = JSON.parse(decide.arguments) as Record<string, unknown>
+      } catch {
+        return { unavailableReason: 'invalid-json-arguments', audit }
+      }
+      const parsed = proposalFromJson(args, req.trigger.id, req.strength)
+      if (parsed.kind === 'proposal') {
+        audit.toolCalls.push({ name: 'router_decide', args: decide.arguments, ok: true })
+        return { proposal: parsed.proposal, audit }
+      }
+      return { unavailableReason: parsed.reason, audit }
+    }
+    const json = extractJsonObject(res.content)
+    if (!json) return { unavailableReason: '模型未给出可解析的决定', audit }
+    const parsed = proposalFromJson(json, req.trigger.id, req.strength)
+    if (parsed.kind === 'proposal') return { proposal: parsed.proposal, audit }
+    return { unavailableReason: parsed.reason, audit }
+  }
+
+  async reply(req: ReplyRequest): Promise<string> {
+    this.requests.push({ kind: 'reply', systemPrompt: req.systemPrompt, userPrompt: req.userPrompt })
+    return this.responses.shift()?.content ?? ''
   }
 }
 
@@ -27,9 +76,9 @@ const policy: Policy = {
   receiveAll: true,
 }
 
-const ACCEPT = (title = '延长登录超时到 30 秒') => ({ content: JSON.stringify({ decision: 'accept', reason: '明确的可执行请求', title, scope: '只调整登录超时配置' }), toolCalls: [] })
-const IGNORE = (reason = '闲聊') => ({ content: JSON.stringify({ decision: 'ignore', reason }), toolCalls: [] })
-const SAY = (text: string) => ({ content: text, toolCalls: [] })
+const ACCEPT = (title = '延长登录超时到 30 秒'): FakeResponse => ({ content: JSON.stringify({ decision: 'accept', reason: '明确的可执行请求', title, scope: '只调整登录超时配置' }), toolCalls: [] })
+const IGNORE = (reason = '闲聊'): FakeResponse => ({ content: JSON.stringify({ decision: 'ignore', reason }), toolCalls: [] })
+const SAY = (text: string): FakeResponse => ({ content: text, toolCalls: [] })
 
 function trigger(over: Partial<Trigger> = {}): Trigger {
   return {
@@ -50,15 +99,15 @@ function trigger(over: Partial<Trigger> = {}): Trigger {
   }
 }
 
-function setup(responses: LlmResponse[] = [], dispatch?: DispatchSettings) {
+function setup(responses: FakeResponse[] = [], dispatch?: DispatchSettings) {
   const store = new Store(':memory:')
   const clock = { now: () => '2026-11-06T10:00:10.000Z' }
   let n = 0
   const ids = { next: (p: string) => `${p}_${++n}` }
   const engine = new Engine({ store, policy, clock, ids })
-  const llm = new FakeLlm(responses)
-  const loop = new AgentLoop({ engine, llm, clock, batchWindowMs: 5000, source: 'feishu', maxToolRounds: 3, ...(dispatch ? { dispatch } : {}) })
-  return { store, engine, llm, loop }
+  const fake = new FakeEngine(responses)
+  const loop = new AgentLoop({ engine, decisionEngine: fake, clock, batchWindowMs: 5000, source: 'feishu', ...(dispatch ? { dispatch } : {}) })
+  return { store, engine, llm: fake, loop }
 }
 
 describe('Router 常驻 Agent Loop', () => {
@@ -178,7 +227,10 @@ describe('Router 常驻 Agent Loop', () => {
 
   it('模型调用失败同样记 unavailable，但不会反复重试同一条', async () => {
     const { engine, loop } = setup([])
-    loop.llm = { complete: async () => { throw new Error('llm down') } }
+    loop.decisionEngine = {
+      async assess() { throw new Error('llm down') },
+      async reply() { throw new Error('llm down') },
+    }
     engine.ingest(trigger({ addressed: 'none' }))
 
     expect((await loop.tick()).unavailable).toBe(1)
@@ -241,11 +293,32 @@ describe('Router 常驻 Agent Loop', () => {
 
   it('重叠的 tick 不会重复研判同一条消息', async () => {
     const { engine, loop, llm } = setup([])
-    loop.llm = {
-      async complete() {
+    loop.decisionEngine = {
+      async assess(req) {
         await new Promise(resolve => setTimeout(resolve, 30))
-        return ACCEPT('并发只开一张')
+        const proposal: DecisionProposal = {
+          triggerId: req.trigger.id,
+          decision: 'accept',
+          strength: req.strength,
+          reason: '明确的可执行请求',
+          title: '并发只开一张',
+          scope: '只调整登录超时配置',
+          rules: [],
+        }
+        return {
+          proposal,
+          audit: {
+            engine: 'pi',
+            triggerId: req.trigger.id,
+            durationMs: 30,
+            toolCalls: [],
+            tokens: { input: 0, output: 0, total: 0 },
+            promptChars: { system: 0, user: 0 },
+            proposal,
+          },
+        }
       },
+      async reply() { return '' },
     }
     engine.ingest(trigger({ text: '把登录超时改成 30 秒' }))
     const [a, b] = await Promise.all([loop.tick(), loop.tick()])
@@ -254,15 +327,7 @@ describe('Router 常驻 Agent Loop', () => {
     expect(llm.requests).toHaveLength(0)
   })
 
-  it('消息 id 归一化：内部 id 会被剥掉前缀，非法值变空（发普通消息）', () => {
-    expect(normalizeMessageId('om_x100b61e2c5cb6cb')).toBe('om_x100b61e2c5cb6cb')
-    expect(normalizeMessageId('feishu_om_x100b61e2c5cb6cb')).toBe('om_x100b61e2c5cb6cb')
-    expect(normalizeMessageId('feishu_om_x100b61e2c5cb6cb4b08efe52a9e518a')).toBe('om_x100b61e2c5cb6cb4b08efe52a9e518a')
-    expect(normalizeMessageId('')).toBe('')
-    expect(normalizeMessageId('oc_123')).toBe('')
-  })
-
-  it('模型调用 router_reply 不会产生重复消息', async () => {
+  it('模型调用未知工具不会产生重复消息', async () => {
     const { engine, loop, store } = setup([{
       content: null,
       toolCalls: [
@@ -280,12 +345,6 @@ describe('Router 常驻 Agent Loop', () => {
   it('寒暄判定只拦纯寒暄，不误伤简短需求', () => {
     for (const text of ['你好', '你好，在吗', 'Hi', '在不在？', '测试一下', '谢谢！', '好的']) expect(isSmallTalk(text)).toBe(true)
     for (const text of ['修个 bug', '改登录超时', '在吗，帮我把超时改成 30 秒', '你好，请把 README 端口改成 3083', '']) expect(isSmallTalk(text)).toBe(false)
-  })
-
-  it('暴露给模型的工具集合覆盖设计文档的五个 router_* 工具', () => {
-    expect(ROUTER_TOOLS.map(t => t.function.name).sort()).toEqual(
-      ['router_decide', 'router_read', 'router_reply', 'router_subscribe', 'router_ticket'],
-    )
   })
 })
 describe('多项目 / 多分支派工', () => {
@@ -366,15 +425,15 @@ describe('多项目 / 多分支派工', () => {
     await loop.tick()
 
     // 第一次是研判，第二次是回话；两者的 system 段都带「当前会话」
-    const judgeSystem = String(llm.requests[0]?.messages[0]?.content)
-    const chatSystem = String(llm.requests[1]?.messages[0]?.content)
+    const judgeSystem = String(llm.requests[0]?.systemPrompt)
+    const chatSystem = String(llm.requests[1]?.systemPrompt)
     for (const system of [judgeSystem, chatSystem]) {
       expect(system).toContain('# 当前会话')
       expect(system).toContain('已确定项目：router-agent')
       expect(system).toContain('起始分支：release（来源：群绑定）')
     }
     // 会话级信息不再塞进每条消息的 payload
-    const payload = JSON.parse(String(llm.requests[1]?.messages.at(-1)?.content))
+    const payload = JSON.parse(String(llm.requests[1]?.userPrompt))
     expect(payload.current).toBeUndefined()
     expect(payload.dispatch).toBeUndefined()
   })

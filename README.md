@@ -6,7 +6,7 @@
 ## 它做什么
 
 1. **听**：常驻消费飞书群 / 私聊消息，按名单与 `@` 规则做确定性准入。
-2. **判**：未被直接指派的候选交给 LLM 研判（可批量），输出 `accept / stop / ignore / unavailable` 四类决定。
+2. **判**：未被直接指派的候选交给 Pi 研判（可批量），输出 `accept / stop / ignore / unavailable` 四类决定。
 3. **派**：接单后创建工单与授权（Mandate），先确认「项目 + 起始分支」，再通过 `orca worktree create --repo ... --base-branch ...` 开一个独立 worktree + Claude Code 终端。缺项目或分支时不开单，先在会话里追问（群配置里可固定项目和分支，免问答）。
 4. **跟**：Worker 用 `ra report` 上报（失败自动落盘 `state.json`），Router 刷新工单阶段；PR 合并 / 关闭后闭环并通知发起人。
 
@@ -18,7 +18,7 @@
 Sources（飞书 / GitHub）
         │ Trigger
         ▼
-Router（AgentLoop + 工具 + HTTP API + Web）
+Router（AgentLoop + DecisionEngine(Pi) + HTTP API + Web）
         │ Engine（唯一状态写入口）
         ▼
 领域内核（TS 零依赖：Ticket / Mandate / Assignment / Stage / Policy）
@@ -33,7 +33,7 @@ WorkerBackend 端口 ── OrcaAdapter（默认）── 未来：Codex / Headl
 - **WorkerBackend 是唯一扩展点**：换后端只加一个 adapter，内核与 Router 一行不改。
 - **所有对外通知走 Outbox**：幂等 key + 2s 起步的指数退避（上限 60s）。
 - **不解析终端屏幕文本**：只读 Orca 的结构化字段（`connected` / `orphaned` / `lastOutputAt`）。
-- **研判层是 DecisionEngine 端口**：`custom`（自研 LLM 工具循环，默认）与 `pi`（Pi SDK）可切换；研判工具只产出提案，写库仍由 Engine 统一完成。
+- **研判层是 DecisionEngine 端口**：Pi 是唯一实现，研判与礼貌回复都走同一条 Pi 通道；研判工具只产出提案，写库仍由 Engine 统一完成。
 
 ## 快速开始
 
@@ -85,13 +85,10 @@ policy:
   acceptMode: auto     # off / observe / auto
   maxWorkers: 4
 
-# 研判层：主引擎 / 影子引擎 / 超时与预算
+# 研判层：Pi 单引擎；超时、token 预算与独立配置目录
 router:
-  decisionEngine: custom   # custom | pi
-  shadow: off              # off | custom | pi（与主引擎相同则自动忽略）
   timeoutMs: 60000         # 单次研判硬超时，超时按 unavailable 落库
   tokenBudget: 32000       # 单次研判 token 预算；0 表示不限制
-  maxToolRounds: 3         # 自研引擎的工具循环轮次
   agentDir: ""             # Pi 独立配置目录；空=~/.router-agent/pi
 
 workerSpec:
@@ -203,14 +200,14 @@ ra config set chatAllow.oc_xxx ""          # 清空，回到全局 allowed
 也可以在本文件写 `llm:` 段，或用 `RA_LLM_BASE_URL` / `RA_LLM_API_KEY` / `RA_LLM_MODEL` 覆盖。
 优先级：环境变量 > `config.yaml` > `.trove`。
 
-### 研判层：DecisionEngine 与 Pi 影子模式
+### 研判层：Pi 单引擎
 
-研判层被抽成 `DecisionEngine.assess(trigger, strength)` 端口。AgentLoop 只负责 Gate、应用提案、写库与回复，不再自己持有工具循环。
+研判层是 `DecisionEngine` 端口，**Pi 是唯一实现**。AgentLoop 只负责 Gate、应用提案、写库与回复，不再持有工具循环。
 
-| 实现 | 说明 |
+| 通道 | 说明 |
 |-|-|
-| `custom`（默认） | 自研 `LlmClient` + 工具循环，行为与旧版一致；单次调用 60s 超时 + token 预算 |
-| `pi` | Pi SDK `createAgentSession`，in-memory session，只注入 Router system prompt；工具白名单 `router_read / router_ticket / router_decide` |
+| 研判 | Pi `createAgentSession`，in-memory session，只注入 Router system prompt；工具白名单 `router_read / router_ticket / router_decide` |
+| 回复 | 同一个 Pi 引擎，零工具，生成寒暄 / 追问的一句礼貌回复；失败时退回固定话术 |
 
 五个约束：
 
@@ -220,20 +217,14 @@ ra config set chatAllow.oc_xxx ""          # 清空，回到全局 allowed
 4. **超时与预算**：单次 60s、32k token，超时/超预算落 `unavailable`，不会拖住 `runCycle`。
 5. **审计与回放**：`~/.router-agent/logs/decisions.jsonl` 记录 prompt、工具序列、proposal、耗时与 token。
 
-**影子模式**：主引擎照常应用；影子引擎并行跑，在后台记录差异，不开单、不发消息、也不阻塞主流程。
+Pi 侧完全隔离：AuthStorage / SettingsManager / SessionManager 全为 in-memory，关闭 extensions / skills / prompts / themes / AGENTS.md，不读写用户 `~/.pi`。
 
 ```bash
-ra config set router.shadow pi          # custom 为主，Pi 做影子（建议先跑 2 周）
-ra config set router.decisionEngine pi  # 确认影子指标后再正式切 Pi
-ra config set router.shadow off
-
-ra simulate --infer --text "把 README 的端口从 3000 改成 3083" --engine pi --dry-run
-ra simulate --infer --text "把 README 的端口从 3000 改成 3083" --engine custom --shadow pi --dry-run
+ra simulate --infer --text "把 README 的端口从 3000 改成 3083" --dry-run
+ra simulate --text "你好，在吗" --dry-run          # 验证回复通道也走 Pi
+ra config set router.timeoutMs 90000
+ra config set router.tokenBudget 64000
 ```
-
-影子指标：`GET /api/decisions/shadow` 返回一致率、unavailable 率、平均/p95 延迟、token 与工具调用次数，以及分歧字段分布；`ra logs` 里的 `decision:audit` / `decision:shadow` 可逐条追踪。
-
-Pi 侧完全隔离：AuthStorage / SettingsManager / SessionManager 全为 in-memory，关闭 extensions / skills / prompts / themes / AGENTS.md，不读写用户 `~/.pi`。默认仍是 `custom`，与方案「先 spike → 真实消息对比 → 影子 2 周 → 再切默认」的节奏一致。
 
 ## 启动与验证
 
@@ -263,14 +254,14 @@ Router 不做对话，只在必要时说话：
 | 场景 | 行为 |
 |-|-|
 | **任意被监听的消息** | 收到后**立即**加一个确认表情（默认 `Typing` ⌨️），回复发出后自动取消 |
-| 群里 @机器人，但只是寒暄/试探 | **LLM 生成**一句礼貌回复，作为**普通消息**发出；不建单 |
+| 群里 @机器人，但只是寒暄/试探 | **Pi 生成**一句礼貌回复，作为**普通消息**发出；不建单 |
 | 群里 @机器人，是真需求 | 普通消息回 ack「我帮你创建了工单「标题」」+ 用**话题**开场：「后续进展会在这个话题里更新」 |
-| 未 @ 的群消息 | 走 LLM 研判；判为闲聊则**完全静默**（不刷屏） |
-| 私聊 | 走 LLM 研判；判为闲聊时用 LLM 礼貌回复（普通消息） |
+| 未 @ 的群消息 | 走 Pi 研判；判为闲聊则**完全静默**（不刷屏） |
+| 私聊 | 走 Pi 研判；判为闲聊时用 Pi 礼貌回复（普通消息） |
 | 只发了图片 / 文件（没有文字） | **不开单**：@ 或私聊时回一句「看不到附件内容，请用文字说明」，不烧模型调用 |
 | 系统消息（建群 / 拉人 / 改群名） | 直接丢弃，不进领域 |
 | 互动卡片消息 | 直接丢弃（`content` 是原始卡片 JSON，不能当需求读） |
-| 研判没完成（unavailable） | 若在跟它说话，用 LLM 追问一句 |
+| 研判没完成（unavailable） | 若在跟它说话，用 Pi 追问一句 |
 | `acceptMode: off` 的推断候选 | 固定说明「暂不自动开工」 |
 | worker 卡住 / 有结果 / PR 合并关闭 | 一律作为**话题回复**同步到原消息下 |
 | worker 交付结论 | 以**飞书卡片**渲染 `--reply` 的 Markdown 回话题；有文档/PR 链接一并展示 |
@@ -316,7 +307,7 @@ worker 终端里的原始输出**不进日志**（避免解析 TUI 文本）；�
 |-|-|
 | `ra init` | 交互式初始化（`--yes` 跳过提问） |
 | `ra doctor` | 启动前自检：配置 / Orca / 飞书 / 模型 / 端口（`--json` 机器可读） |
-| `ra simulate` | 本地模拟一条消息，验证 Gate + 研判，不派工（`--infer` 走 LLM，`--dry-run` 不落库，`--engine custom\|pi` 选研判引擎，`--shadow pi` 跑影子） |
+| `ra simulate` | 本地模拟一条消息，验证 Gate + Pi 研判，不派工（`--infer` 走 Pi 研判，`--dry-run` 不落库） |
 | `ra start [--foreground]` | 启动常驻服务（默认后台） |
 | `ra stop` | 停止服务 |
 | `ra status` | 服务状态 + 工单概览 |
@@ -385,12 +376,11 @@ ra report \
 | POST | `/api/reports` | Worker 上报状态与回复（`ra report` 的入口） |
 | GET / PUT | `/api/policy` | 读写策略 |
 | GET | `/api/sources/feishu/chats` | 飞书来源配置 |
-| GET | `/api/decisions/shadow` | 影子模式对照记录与运营指标 |
 
 ## 开发
 
 ```bash
-pnpm test        # 317 个测试（含研判层 / 影子模式）
+pnpm test        # 307 个测试（含 Pi 研判 / 回复链路）
 pnpm typecheck
 pnpm build       # tsc + esbuild（Web 面板与 Markdown 资产）
 pnpm check       # typecheck + test
@@ -422,8 +412,7 @@ src/cli/      ra 命令
 - `workerSpec.mode: agent` 依赖 Orca 启动的 claude 是否加载全局 `~/.claude/agents/`；
   该前提尚未实测，默认使用已验证可行的 `prompt` 模式。
 - 派工草稿按「群 + 同一个人」保存，30 分钟有效；同一个群里的多个未补齐请求会互相覆盖（后一次追问覆盖前一次）。
-- Pi 研判引擎默认不启用；Pi SDK 仍在演进，本仓库锁定 `@mariozechner/pi-coding-agent@0.73.1`，升级前先跑 `RA_PI_VERIFY=1` 的真实环境验证。
-- 影子模式只自动统计机械指标（一致率、unavailable 率、延迟、token、工具次数）；accept 准确率 / 召回率仍需要人工标注小样本。
-- 默认引擎仍是 `custom`，这是方案要求：先影子对照，不直接替换生产。
+- Pi SDK 仍在演进，本仓库锁定 `@mariozechner/pi-coding-agent@0.73.1`，升级前先跑 `RA_PI_VERIFY=1` 的真实环境验证。
+- Pi 是唯一研判引擎，没有回退到旧实现的开关；Pi 不可用时候选会按 `unavailable` 落库，不会静默重试。
 
 验证细节与需要人工执行的剩余步骤见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。

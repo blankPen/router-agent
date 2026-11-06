@@ -1,5 +1,5 @@
 import { mkdirSync } from 'node:fs'
-import { extractJsonObject, type LlmConfig } from './llm.js'
+import { extractJsonObject, type PiModelConfig } from './model-config.js'
 import type {
   DecisionAudit,
   DecisionEngine,
@@ -7,6 +7,8 @@ import type {
   DecisionProposal,
   DecisionRequest,
   DecisionToolCall,
+  DecisionTokens,
+  ReplyRequest,
 } from './decision-engine.js'
 import { proposalFromJson } from './decision-engine.js'
 import { DECISION_TOOL_NAMES, toolSpec, type PiToolDefinition } from './tool-spec.js'
@@ -48,7 +50,7 @@ export interface PiSessionOptions {
 export type PiSessionFactory = (opts: PiSessionOptions) => Promise<PiSessionLike>
 
 export interface PiDecisionEngineOptions {
-  llm: LlmConfig
+  model: PiModelConfig
   toolbox: RouterToolbox
   /** Pi 的独立配置目录（与用户 ~/.pi 隔离），默认 ~/.router-agent/pi。 */
   agentDir: string
@@ -65,19 +67,31 @@ const DEFAULT_TIMEOUT_MS = 60_000
 const DEFAULT_TOKEN_BUDGET = 32_000
 const PROVIDER = 'router-agent'
 
+interface SessionOutcome {
+  messages: unknown
+  tokens: DecisionTokens
+  timedOut: boolean
+  overBudget: boolean
+  error: string
+}
+
+interface ToolState {
+  proposal: DecisionProposal | undefined
+  toolCalls: DecisionToolCall[]
+}
+
 /**
- * 用 Pi SDK 承担「研判 + 工具循环」。
+ * 用 Pi SDK 承担研判与工具循环，也承担寒暄 / 追问的礼貌回复。
  *
  * 守住方案的五个约束：
  * 1. Gate 在 Pi 之前（AgentLoop 已经过 Gate 才会调用这里）；
- * 2. 工具白名单（router_read / router_ticket / router_decide）；
+ * 2. 工具白名单（router_read / router_ticket / router_decide），回复通道零工具；
  * 3. 工具不写库（router_decide 只产出 proposal）；
  * 4. 60s 超时 + token 预算，超时按 unavailable 落库；
  * 5. 审计（prompt、工具序列、proposal、耗时、token）。
  */
 export class PiDecisionEngine implements DecisionEngine {
-  readonly kind = 'pi' as const
-  private llm: LlmConfig
+  private model: PiModelConfig
   private toolbox: RouterToolbox
   private agentDir: string
   private cwd: string
@@ -86,7 +100,7 @@ export class PiDecisionEngine implements DecisionEngine {
   private sessionFactory: PiSessionFactory
 
   constructor(opts: PiDecisionEngineOptions) {
-    this.llm = opts.llm
+    this.model = opts.model
     this.toolbox = opts.toolbox
     this.agentDir = opts.agentDir
     this.cwd = opts.cwd ?? process.cwd()
@@ -105,17 +119,68 @@ export class PiDecisionEngine implements DecisionEngine {
       tokens: { input: 0, output: 0, total: 0 },
       promptChars: { system: req.systemPrompt.length, user: req.userPrompt.length },
       provider: PROVIDER,
-      model: this.llm.model,
+      model: this.model.model,
       systemPrompt: req.systemPrompt,
       userPrompt: req.userPrompt,
     }
-    const state: AssessState = { proposal: undefined, toolCalls: [] }
+    const state: ToolState = { proposal: undefined, toolCalls: [] }
+    const tools = this.buildTools(req, state)
+    const outcome = await this.runSession({
+      systemPrompt: req.systemPrompt,
+      userPrompt: req.userPrompt,
+      toolNames: [...DECISION_TOOL_NAMES],
+      tools,
+      state,
+    })
+    audit.toolCalls = state.toolCalls
+    audit.tokens = outcome.tokens
+    audit.durationMs = Date.now() - started
 
+    if (outcome.timedOut) return this.finish(audit, { unavailableReason: `pi:timeout(${this.timeoutMs}ms)` })
+    if (outcome.overBudget) return this.finish(audit, { unavailableReason: `pi:token-budget(${this.tokenBudget})` })
+    if (state.proposal) return this.finish(audit, { proposal: state.proposal })
+
+    // Pi 没调用工具时的兜底：从最后一条 assistant 文本里提取 JSON 决定。
+    const json = extractJsonObject(lastAssistantText(outcome.messages))
+    if (json) {
+      const parsed = proposalFromJson(json, req.trigger.id, req.strength)
+      if (parsed.kind === 'proposal') return this.finish(audit, { proposal: parsed.proposal })
+      return this.finish(audit, { unavailableReason: parsed.reason })
+    }
+    return this.finish(audit, {
+      unavailableReason: outcome.error ? `pi:error:${outcome.error}` : 'pi:no-decision',
+    })
+  }
+
+  /** 寒暄 / 追问的礼貌回复：同一个 Pi 通道，但不开任何工具。 */
+  async reply(req: ReplyRequest): Promise<string> {
+    const outcome = await this.runSession({
+      systemPrompt: req.systemPrompt,
+      userPrompt: req.userPrompt,
+      toolNames: [],
+      tools: [],
+      state: { proposal: undefined, toolCalls: [] },
+    })
+    if (outcome.timedOut) throw new Error(`pi:timeout(${this.timeoutMs}ms)`)
+    if (outcome.overBudget) throw new Error(`pi:token-budget(${this.tokenBudget})`)
+    const text = lastAssistantText(outcome.messages).trim()
+    if (!text) throw new Error(outcome.error ? `pi:error:${outcome.error}` : 'pi:empty-reply')
+    return text
+  }
+
+  private async runSession(opts: {
+    systemPrompt: string
+    userPrompt: string
+    toolNames: string[]
+    tools: PiToolDefinition[]
+    state: ToolState
+  }): Promise<SessionOutcome> {
+    const tokens: DecisionTokens = { input: 0, output: 0, total: 0 }
     let session: PiSessionLike | null = null
     let unsubscribe: (() => void) | null = null
     let timedOut = false
     let overBudget = false
-    let sessionError = ''
+    let error = ''
     const timer = setTimeout(() => {
       timedOut = true
       void session?.abort().catch(() => {})
@@ -123,41 +188,39 @@ export class PiDecisionEngine implements DecisionEngine {
     timer.unref?.()
 
     try {
-      const tools = this.buildTools(req, state)
       session = await this.sessionFactory({
         cwd: this.cwd,
         agentDir: this.agentDir,
-        systemPrompt: req.systemPrompt,
-        toolNames: [...DECISION_TOOL_NAMES],
-        tools,
-        apiKey: this.llm.apiKey,
-        baseUrl: this.llm.baseUrl,
-        model: this.llm.model,
+        systemPrompt: opts.systemPrompt,
+        toolNames: opts.toolNames,
+        tools: opts.tools,
+        apiKey: this.model.apiKey,
+        baseUrl: this.model.baseUrl,
+        model: this.model.model,
       })
 
       unsubscribe = session.subscribe(event => {
-        if (event.type === 'message_end') {
-          const message = event.message
-          if (message?.role === 'assistant') {
-            const usage = message.usage ?? {}
-            const input = Number(usage.input ?? 0)
-            const output = Number(usage.output ?? 0)
-            const total = Number(usage.totalTokens ?? usage.total ?? input + output)
-            audit.tokens.input += Number.isFinite(input) ? input : 0
-            audit.tokens.output += Number.isFinite(output) ? output : 0
-            audit.tokens.total += Number.isFinite(total) ? total : 0
-            if (message.errorMessage) sessionError = message.errorMessage
-          }
-          if (this.tokenBudget > 0 && audit.tokens.total > this.tokenBudget && !overBudget) {
-            overBudget = true
-            void session?.abort().catch(() => {})
-          }
+        if (event.type !== 'message_end') return
+        const message = event.message
+        if (message?.role === 'assistant') {
+          const usage = message.usage ?? {}
+          const input = Number(usage.input ?? 0)
+          const output = Number(usage.output ?? 0)
+          const total = Number(usage.totalTokens ?? usage.total ?? input + output)
+          tokens.input += Number.isFinite(input) ? input : 0
+          tokens.output += Number.isFinite(output) ? output : 0
+          tokens.total += Number.isFinite(total) ? total : 0
+          if (message.errorMessage) error = message.errorMessage
+        }
+        if (this.tokenBudget > 0 && tokens.total > this.tokenBudget && !overBudget) {
+          overBudget = true
+          void session?.abort().catch(() => {})
         }
       })
 
-      await session.prompt(req.userPrompt)
-    } catch (error) {
-      sessionError = sessionError || (error instanceof Error ? error.message : String(error))
+      await session.prompt(opts.userPrompt)
+    } catch (caught) {
+      error = error || (caught instanceof Error ? caught.message : String(caught))
     } finally {
       clearTimeout(timer)
       unsubscribe?.()
@@ -166,28 +229,12 @@ export class PiDecisionEngine implements DecisionEngine {
       } catch {
         // dispose 失败不影响已拿到的结果。
       }
-      audit.toolCalls = state.toolCalls
     }
 
-    if (timedOut) return this.finish(audit, started, { unavailableReason: `pi:timeout(${this.timeoutMs}ms)` })
-    if (overBudget) return this.finish(audit, started, { unavailableReason: `pi:token-budget(${this.tokenBudget})` })
-    if (state.proposal) return this.finish(audit, started, { proposal: state.proposal })
-
-    // Pi 没调用工具时的兜底：从最后一条 assistant 文本里提取 JSON 决定。
-    const text = lastAssistantText(session?.messages)
-    const json = extractJsonObject(text)
-    if (json) {
-      const parsed = proposalFromJson(json, req.trigger.id, req.strength)
-      if (parsed.kind === 'proposal') return this.finish(audit, started, { proposal: parsed.proposal })
-      if (parsed.kind === 'unavailable') return this.finish(audit, started, { unavailableReason: parsed.reason })
-      return this.finish(audit, started, { unavailableReason: parsed.reason })
-    }
-    return this.finish(audit, started, {
-      unavailableReason: sessionError ? `pi:error:${sessionError}` : 'pi:no-decision',
-    })
+    return { messages: session?.messages, tokens, timedOut, overBudget, error }
   }
 
-  private buildTools(req: DecisionRequest, state: AssessState): PiToolDefinition[] {
+  private buildTools(req: DecisionRequest, state: ToolState): PiToolDefinition[] {
     return DECISION_TOOL_NAMES.map(name => {
       const spec = toolSpec(name)
       return {
@@ -213,8 +260,9 @@ export class PiDecisionEngine implements DecisionEngine {
                 proposal: outcome.proposal,
               })
             }
-            const outcome = await this.toolbox.call(name, safeJson(args), { triggerId: req.trigger.id })
-            const result = outcome.result
+            const result = name === 'router_read'
+              ? this.toolbox.read(args)
+              : this.toolbox.ticket(args)
             const failed = Boolean(result && typeof result === 'object' && 'error' in (result as Record<string, unknown>))
             state.toolCalls.push({
               name,
@@ -223,8 +271,8 @@ export class PiDecisionEngine implements DecisionEngine {
               ...(failed ? { error: String((result as Record<string, unknown>).error) } : {}),
             })
             return textResult(result)
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error)
+          } catch (caught) {
+            const message = caught instanceof Error ? caught.message : String(caught)
             state.toolCalls.push({ name, args: argsText, ok: false, error: message })
             return textResult({ error: message })
           }
@@ -235,10 +283,8 @@ export class PiDecisionEngine implements DecisionEngine {
 
   private finish(
     audit: DecisionAudit,
-    started: number,
     result: { proposal: DecisionProposal } | { unavailableReason: string },
   ): DecisionEngineResult {
-    audit.durationMs = Date.now() - started
     if ('proposal' in result) {
       audit.proposal = result.proposal
       return { proposal: result.proposal, audit }
@@ -246,11 +292,6 @@ export class PiDecisionEngine implements DecisionEngine {
     audit.unavailableReason = result.unavailableReason
     return { unavailableReason: result.unavailableReason, audit }
   }
-}
-
-interface AssessState {
-  proposal: DecisionProposal | undefined
-  toolCalls: DecisionToolCall[]
 }
 
 function textResult(value: unknown): { content: { type: 'text'; text: string }[]; details: Record<string, unknown> } {
@@ -282,13 +323,13 @@ function lastAssistantText(messages: unknown): string {
 }
 
 /**
- * 真实 Pi session 装配。动态 import 是为了让单元测试注入假 factory 时不加载 SDK。
+ * 真实 Pi session 装配。动态 import 让单元测试注入假 factory 时不加载 SDK。
  *
  * 隔离策略：
  * - AuthStorage / ModelRegistry / SettingsManager 全部 in-memory，不读写用户 ~/.pi；
  * - DefaultResourceLoader 关闭 extensions / skills / prompts / themes / AGENTS.md，
  *   只注入 Router 自己的 system prompt；
- * - 只放行三个 router_* 工具，禁用 Pi 内置 read/bash/edit/write。
+ * - 研判只放行三个 router_* 工具；回复通道工具为空。
  */
 export async function createDefaultPiSession(opts: PiSessionOptions): Promise<PiSessionLike> {
   mkdirSync(opts.agentDir, { recursive: true })

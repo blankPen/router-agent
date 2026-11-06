@@ -3,7 +3,7 @@ import { Store } from '../../src/store/db.js'
 import { Engine } from '../../src/core/engine.js'
 import { DEFAULT_ADMISSION, type Policy } from '../../src/core/policy.js'
 import type { Trigger } from '../../src/core/model.js'
-import type { LlmConfig } from '../../src/router/llm.js'
+import type { PiModelConfig } from '../../src/router/model-config.js'
 import { RouterToolbox } from '../../src/router/tools.js'
 import {
   PiDecisionEngine,
@@ -22,7 +22,7 @@ const policy: Policy = {
   receiveAll: true,
 }
 
-const llmConfig: LlmConfig = { baseUrl: 'https://example.invalid/v1', apiKey: 'sk-test', model: 'test-model' }
+const model: PiModelConfig = { baseUrl: 'https://example.invalid/v1', apiKey: 'sk-test', model: 'test-model' }
 
 function trigger(over: Partial<Trigger> = {}): Trigger {
   return {
@@ -105,11 +105,11 @@ function setup(
 ) {
   const store = new Store(':memory:')
   const engine = new Engine({ store, policy })
-  const toolbox = new RouterToolbox({ engine, store })
+  const toolbox = new RouterToolbox({ store })
   engine.ingest(trigger())
   const state: { captured: PiSessionOptions | null; session: FakeSession | null } = { captured: null, session: null }
   const enginePi = new PiDecisionEngine({
-    llm: llmConfig,
+    model,
     toolbox,
     agentDir: '/tmp/ra-pi-test',
     timeoutMs: over.timeoutMs ?? 2_000,
@@ -203,5 +203,26 @@ describe('PiDecisionEngine', () => {
     expect(result.proposal).toBeUndefined()
     expect(result.unavailableReason).toBe('pi:no-decision')
     expect(state.session?.disposed).toBe(true)
+  })
+
+  it('reply 走同一个 Pi 通道但不开放任何工具', async () => {
+    const { enginePi, state } = setup(s => {
+      s.messages = [{ role: 'assistant', content: '收到～需要我改哪块？' }]
+      s.finish()
+    })
+    const text = await enginePi.reply({ systemPrompt: 'CONV SYSTEM', userPrompt: '{"message":"在吗"}' })
+    expect(text).toBe('收到～需要我改哪块？')
+    expect(state.captured?.toolNames).toEqual([])
+    expect(state.captured?.tools).toEqual([])
+    expect(state.captured?.systemPrompt).toBe('CONV SYSTEM')
+    expect(state.session?.promptText).toBe('{"message":"在吗"}')
+  })
+
+  it('reply 超时 / 空回复会抛错，由 AgentLoop 退回固定话术', async () => {
+    const timed = setup(() => {}, { timeoutMs: 30 })
+    await expect(timed.enginePi.reply({ systemPrompt: 'S', userPrompt: 'U' })).rejects.toThrow('pi:timeout')
+
+    const empty = setup(s => s.finish())
+    await expect(empty.enginePi.reply({ systemPrompt: 'S', userPrompt: 'U' })).rejects.toThrow('pi:empty-reply')
   })
 })

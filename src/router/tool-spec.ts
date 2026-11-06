@@ -1,11 +1,10 @@
 import { Type, type TSchema } from 'typebox'
-import type { LlmToolSchema } from './llm.js'
 
 /**
  * 研判工具的单一事实来源。
  *
- * TypeBox schema 本身是标准 JSON Schema，可直接给 OpenAI 兼容接口，
- * 也可以交给 Pi 的 customTools；避免维护两份工具定义。
+ * 只有三个工具：读上下文、查工单、给决定。
+ * 不给 shell / 文件 / MCP / 通用 coding skills —— 研判层的价值是判断，不是执行。
  */
 export interface RouterToolSpec {
   name: string
@@ -26,6 +25,15 @@ export const ROUTER_TOOL_SPECS: RouterToolSpec[] = [
     }),
   },
   {
+    name: 'router_ticket',
+    description: '查询工单：给 ticket_id 取详情，或按 stage 列表。',
+    parameters: Type.Object({
+      ticket_id: Type.Optional(Type.String()),
+      stage: Type.Optional(Type.String()),
+      limit: Type.Optional(Type.Number()),
+    }),
+  },
+  {
     name: 'router_decide',
     description: '对一条 Trigger 给出决定。accept 会创建工单并派工；ignore 表示不需要开工；unavailable 表示研判没完成。',
     parameters: Type.Object({
@@ -40,54 +48,14 @@ export const ROUTER_TOOL_SPECS: RouterToolSpec[] = [
       rules: Type.Optional(Type.Array(Type.String(), { description: '命中的策略规则名' })),
     }),
   },
-  {
-    name: 'router_reply',
-    description: '回到飞书会话里说一句话。只用于 ack 与最终通知，不要闲聊。',
-    parameters: Type.Object({
-      chat_id: Type.String(),
-      thread_id: Type.Optional(Type.String({ description: '根消息 ID，用于话题回复' })),
-      text: Type.String(),
-    }),
-  },
-  {
-    name: 'router_ticket',
-    description: '查询工单：给 ticket_id 取详情，或按 stage 列表。',
-    parameters: Type.Object({
-      ticket_id: Type.Optional(Type.String()),
-      stage: Type.Optional(Type.String()),
-      limit: Type.Optional(Type.Number()),
-    }),
-  },
-  {
-    name: 'router_subscribe',
-    description: '订阅或退订一个 Thread。订阅后该线程的新消息直接作为上下文投给工单，不再经过研判。',
-    parameters: Type.Object({
-      thread_id: Type.String(),
-      ticket_id: Type.String(),
-      action: stringEnum(['subscribe', 'unsubscribe']),
-      context_only: Type.Optional(Type.Boolean()),
-    }),
-  },
 ]
 
-/** 研判层的工具白名单：只读上下文 + 给出决定，不给 shell / 文件 / MCP。 */
 export const DECISION_TOOL_NAMES = ['router_read', 'router_ticket', 'router_decide'] as const
 
 export function toolSpec(name: string): RouterToolSpec {
   const spec = ROUTER_TOOL_SPECS.find(item => item.name === name)
   if (!spec) throw new Error(`tool:not-found:${name}`)
   return spec
-}
-
-export function toOpenAiTool(spec: RouterToolSpec): LlmToolSchema {
-  return {
-    type: 'function',
-    function: {
-      name: spec.name,
-      description: spec.description,
-      parameters: spec.parameters as unknown as Record<string, unknown>,
-    },
-  }
 }
 
 /** 交给 Pi 的 customTools（ToolDefinition 的最小结构，不依赖 Pi 运行时类型）。 */

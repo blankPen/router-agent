@@ -51,20 +51,12 @@ export interface PolicySettings {
   admission: AdmissionTable
 }
 
-export type DecisionEngineSetting = 'custom' | 'pi'
-
-/** 研判层配置：主引擎、影子引擎、超时与预算。 */
+/** 研判层配置：Pi 的超时、预算与独立配置目录。 */
 export interface RouterSettings {
-  /** 主研判引擎；默认 custom（方案要求先影子验证，不直接切生产）。 */
-  decisionEngine: DecisionEngineSetting
-  /** 影子引擎：同时跑、只记录差异；off 表示关闭。 */
-  shadow: 'off' | DecisionEngineSetting
   /** 每次研判的硬超时。 */
   timeoutMs: number
   /** 单次研判 token 预算；0 表示不限制。 */
   tokenBudget: number
-  /** 自研引擎的工具循环轮次上限。 */
-  maxToolRounds: number
   /** Pi 的独立配置目录；空表示 ~/.router-agent/pi。 */
   agentDir: string
 }
@@ -119,11 +111,8 @@ export function defaultConfig(): AppConfig {
       admission: { ...DEFAULT_ADMISSION },
     },
     router: {
-      decisionEngine: 'custom',
-      shadow: 'off',
       timeoutMs: 60_000,
       tokenBudget: 32_000,
-      maxToolRounds: 3,
       agentDir: '',
     },
     workerSpec: { mode: 'prompt' },
@@ -152,14 +141,10 @@ policy:
   acceptMode: auto     # off / observe / auto
   maxWorkers: 4
 
-# 研判层：主引擎 / 影子引擎 / 超时与预算
-# 方案要求先影子验证再切默认，因此默认仍是 custom。
+# 研判层：Pi 单引擎；超时、token 预算与独立配置目录
 router:
-  decisionEngine: custom   # custom | pi
-  shadow: off              # off | custom | pi（与主引擎相同时自动忽略）
   timeoutMs: 60000
   tokenBudget: 32000
-  maxToolRounds: 3
   agentDir: ""             # Pi 独立配置目录；空=~/.router-agent/pi
 
 workerSpec:
@@ -276,21 +261,13 @@ function pickMode(value: unknown, fallback: WorkerSpecMode): WorkerSpecMode {
   return value === 'prompt' || value === 'agent' ? value : fallback
 }
 
-function pickEngine(value: unknown, fallback: DecisionEngineSetting): DecisionEngineSetting {
-  return value === 'custom' || value === 'pi' ? value : fallback
-}
-
 function parseRouter(value: unknown, base: RouterSettings): RouterSettings {
   const doc = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>
   const timeoutMs = Number(doc.timeoutMs)
   const tokenBudget = Number(doc.tokenBudget)
-  const maxToolRounds = Number(doc.maxToolRounds)
   return {
-    decisionEngine: pickEngine(doc.decisionEngine, base.decisionEngine),
-    shadow: doc.shadow === 'off' || doc.shadow === 'custom' || doc.shadow === 'pi' ? doc.shadow : base.shadow,
     timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : base.timeoutMs,
     tokenBudget: Number.isFinite(tokenBudget) && tokenBudget >= 0 ? tokenBudget : base.tokenBudget,
-    maxToolRounds: Number.isInteger(maxToolRounds) && maxToolRounds >= 1 && maxToolRounds <= 10 ? maxToolRounds : base.maxToolRounds,
     agentDir: stringOr(doc.agentDir, base.agentDir),
   }
 }
@@ -444,11 +421,8 @@ export function writeConfig(home: string, config: AppConfig): void {
       admission: config.policy.admission,
     },
     router: {
-      decisionEngine: config.router.decisionEngine,
-      shadow: config.router.shadow,
       timeoutMs: config.router.timeoutMs,
       tokenBudget: config.router.tokenBudget,
-      maxToolRounds: config.router.maxToolRounds,
       ...(config.router.agentDir ? { agentDir: config.router.agentDir } : {}),
     },
     workerSpec: { mode: config.workerSpec.mode },
@@ -604,14 +578,6 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
       if (!WORKER_MODES.includes(value)) return false
       config.workerSpec.mode = value as WorkerSpecMode
       return true
-    case 'router.decisionEngine':
-      if (value !== 'custom' && value !== 'pi') return false
-      config.router.decisionEngine = value
-      return true
-    case 'router.shadow':
-      if (value !== 'off' && value !== 'custom' && value !== 'pi') return false
-      config.router.shadow = value
-      return true
     case 'router.timeoutMs': {
       const v = int(1000, 600_000)
       if (v === null) return false
@@ -622,12 +588,6 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
       const v = int(0, 10_000_000)
       if (v === null) return false
       config.router.tokenBudget = v
-      return true
-    }
-    case 'router.maxToolRounds': {
-      const v = int(1, 10)
-      if (v === null) return false
-      config.router.maxToolRounds = v
       return true
     }
     case 'router.agentDir':

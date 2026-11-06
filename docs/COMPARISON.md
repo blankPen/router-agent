@@ -67,7 +67,7 @@ ra 的**主干是通的**：Source → Gate → LLM 研判 → 工单/Mandate �
 - 对照：prototype 的 Eval 有 30–600s deadline，超时重排，连续两次后记 `unavailable`。
 - 建议：`AbortSignal.timeout(60_000)`；超时按 `unavailable` 落库并记录 attempt，避免无限重试。
 
-**已修复（2026-11-06）**：研判层抽成 `DecisionEngine` 后，custom 与 pi 两个实现都按 `router.timeoutMs`（默认 60s）做硬超时，并用 `router.tokenBudget`（默认 32000）限制单次研判；超时/超预算统一落 `unavailable`，不再阻塞 `runCycle`。测试：`tests/router/decision-engine.test.ts`、`tests/router/pi-decision-engine.test.ts`。
+**已修复（2026-11-06）**：研判层切换为 Pi 单引擎后，按 `router.timeoutMs`（默认 60s）做硬超时，并用 `router.tokenBudget`（默认 32000）限制单次研判；超时/超预算统一落 `unavailable`，不再阻塞 `runCycle`。测试：`tests/router/pi-decision-engine.test.ts`。
 
 ### A5 `stop` 决策是空转
 

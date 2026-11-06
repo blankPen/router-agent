@@ -4,7 +4,9 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { simulate } from '../src/cli/simulate.js'
 import { defaultConfig } from '../src/config.js'
-import { OpenAiCompatClient, resolveLlmConfig } from '../src/router/llm.js'
+import { resolvePiModelConfig } from '../src/router/model-config.js'
+import { PiDecisionEngine } from '../src/router/pi-decision-engine.js'
+import { RouterToolbox } from '../src/router/tools.js'
 
 /**
  * 真实环境验证（方案第 7 节 Spike 验收）：
@@ -16,20 +18,28 @@ const live = process.env.RA_PI_VERIFY === '1'
 
 describe.skipIf(!live)('Pi 真实环境验证', () => {
   it('Pi 能产出合法 proposal，工具调用与 token 可审计，且超时/异常可降级', async () => {
-    const llmConfig = resolveLlmConfig({ home: process.env.HOME })
-    const llm = new OpenAiCompatClient(llmConfig)
+    const model = resolvePiModelConfig({ home: process.env.HOME })
     const home = mkdtempSync(join(tmpdir(), 'ra-pi-live-'))
     const config = defaultConfig()
     config.home = home
-    config.router.decisionEngine = 'pi'
     config.router.timeoutMs = 90_000
     config.router.tokenBudget = 64_000
     config.projects = [{ name: 'router-agent', repo: 'name:dsh/router-agent', branches: ['main'], defaultBranch: 'main' }]
     config.feishu.allowed = ['ou_live']
 
     const result = await simulate(
-      { home, config, llm, llmConfig },
-      { text: '把 README 里的端口从 3000 改成 3083', dryRun: true, engine: 'pi' },
+      {
+        home,
+        config,
+        decisionEngine: store => new PiDecisionEngine({
+          model,
+          toolbox: new RouterToolbox({ store }),
+          agentDir: join(home, 'pi'),
+          timeoutMs: 90_000,
+          tokenBudget: 64_000,
+        }),
+      },
+      { text: '把 README 里的端口从 3000 改成 3083', dryRun: true },
     )
 
     expect(result.audits).toHaveLength(1)
