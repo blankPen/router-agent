@@ -88,6 +88,23 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --provenance
 
+      # 只有 stage 权限的 token 不会报错，而是把版本写进暂存区（npm 上仅显示 0.0.0-stage）。
+      # 这里在发布后回查一次，确保版本真的公开可查，避免「流水线绿了但包没上线」。
+      - name: 校验发布结果
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          for i in $(seq 1 10); do
+            if npm view "${name}@${version}" version >/dev/null 2>&1; then
+              echo "${name}@${version} 已可从 npm 查询到"
+              exit 0
+            fi
+            sleep 6
+          done
+          echo "::error::${name}@${version} 发布后仍不可查询。最常见原因是 NPM_TOKEN 只有 stage 权限：版本被写进了暂存区（npm 上只显示 0.0.0-stage）。请改用 Read and write (publish and stage) 的 token，或在 npm 页面 Staged Packages 中批准该暂存版本。"
+          exit 1
+
       - name: 写入发布结果
         run: |
           name="$(node -p "require('./package.json').name")"
@@ -97,6 +114,6 @@ jobs:
             if [ "${{ steps.check.outputs.skip }}" = "true" ]; then
               echo "- ${name}@${version} 已存在，已跳过发布"
             else
-              echo "- 已发布 https://www.npmjs.com/package/${name}/v/${version}"
+              echo "- 已发布并校验：https://www.npmjs.com/package/${name}/v/${version}"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
