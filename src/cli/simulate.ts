@@ -22,7 +22,7 @@ export interface SimulateResult {
   trigger: Trigger
   decision: DecisionRecord | null
   ticket?: Ticket
-  /** 这一轮排进 Outbox 的回复（ack / 话题开场 / 礼貌回复），便于本地验证话术。 */
+  /** 这一轮排进 Outbox 的回复（话题开场 / 礼貌回复），便于本地验证话术。 */
   replies: string[]
   /** 本轮研判审计（含耗时 / token / 工具调用）。 */
   audits: DecisionAudit[]
