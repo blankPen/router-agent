@@ -25,6 +25,10 @@ export interface FeishuEvent {
   sender_id?: string
   sender_type?: string
   root_id?: string
+  /** 被引用/回复的那条消息 ID。lark-cli 的事件 schema 里叫 reply_to。 */
+  reply_to?: string
+  /** 飞书原始事件里叫 parent_id；两个名字都兼容。 */
+  parent_id?: string
   thread_id?: string
   mentions?: { id?: string; name?: string; key?: string }[]
 }
@@ -87,6 +91,8 @@ export function normalizeFeishuEventDetailed(raw: Record<string, unknown>, cfg: 
   if (!text && !mediaOnly) return { dropped: 'empty-content', chatId, actorId: senderId }
 
   const rootId = event.root_id || messageId
+  // 被引用消息：lark-cli 用 reply_to，飞书原始事件用 parent_id。正文不在 content 里，必须回查。
+  const replyTo = event.reply_to || event.parent_id || ''
   const trigger: Trigger = {
     id: `feishu_${messageId}`,
     source: 'feishu',
@@ -102,7 +108,8 @@ export function normalizeFeishuEventDetailed(raw: Record<string, unknown>, cfg: 
     mediaOnly,
     receivedAt: toIso(event.create_time),
     disposition: 'pending',
-    raw: {},
+    // 记住被引用消息的 ID：正文要靠 lark-cli 回查，见 attachQuotedMessage。
+    raw: replyTo ? { parentId: replyTo } : {},
   }
   return { trigger, chatId, actorId: trigger.actorId, addressed: trigger.addressed }
 }
@@ -116,6 +123,118 @@ function toIso(ms?: string): string {
   const value = Number(ms)
   if (!Number.isFinite(value) || value <= 0) return new Date().toISOString()
   return new Date(value).toISOString()
+}
+
+/** 被引用消息的正文。飞书事件只带 parent_id，正文必须回查。 */
+export interface QuotedMessage {
+  id: string
+  text: string
+  author: string
+}
+
+/** 单条消息回查命令（`+messages-mget` 支持批量，这里只查一条）。 */
+export function quotedMessageCommand(messageId: string, as = 'bot'): string[] {
+  return ['im', '+messages-mget', '--message-ids', messageId, '--as', as, '--format', 'json']
+}
+
+/** 从 `+messages-mget` 的输出里取第一条消息的正文与发送者。 */
+export function parseQuotedMessage(stdout: string, fallbackId = ''): QuotedMessage | null {
+  let json: unknown
+  try {
+    json = JSON.parse(stdout)
+  } catch {
+    return null
+  }
+  const root = json as Record<string, any>
+  const list = root?.data?.messages ?? root?.messages
+  const message = Array.isArray(list) ? (list[0] as Record<string, any> | undefined) : undefined
+  if (!message) return null
+  const text = extractMessageText(message)
+  if (!text) return null
+  return {
+    id: String(message.message_id ?? fallbackId),
+    text,
+    author: String(message.sender?.name ?? ''),
+  }
+}
+
+/** text / post 两种消息取正文；其余类型（图片、文件等）没有可读文本。 */
+function extractMessageText(message: Record<string, any>): string {
+  const type = String(message.msg_type ?? 'text')
+  const content = String(message.content ?? '')
+  let text = ''
+  if (type === 'text') text = content
+  else if (type === 'post') text = postText(content)
+  if (!text) return ''
+  // 富文本里的 @ 是占位 key（如 @_user_1），按 mentions 还原成名字。
+  for (const mention of message.mentions ?? []) {
+    const key = String(mention.key ?? '')
+    if (key) text = text.split(key).join(`@${mention.name ?? ''}`)
+  }
+  return text.trim()
+}
+
+function postText(content: string): string {
+  try {
+    const parts: string[] = []
+    const walk = (node: unknown): void => {
+      if (Array.isArray(node)) {
+        node.forEach(walk)
+        return
+      }
+      if (node && typeof node === 'object') {
+        const obj = node as Record<string, unknown>
+        if (typeof obj.text === 'string') parts.push(obj.text)
+        for (const [key, value] of Object.entries(obj)) if (key !== 'text') walk(value)
+      }
+    }
+    walk(JSON.parse(content))
+    return parts.join('')
+  } catch {
+    return ''
+  }
+}
+
+const QUOTED_MAX_CHARS = 800
+
+/**
+ * 把被引用消息的正文拼到 trigger 文本前面。
+ *
+ * 飞书的 `im.message.receive_v1` 只在 content 里放用户新输入的文字，引用内容只给 parent_id。
+ * 不回查的话，「引用某条消息 + @机器人」在模型眼里就是一条空的 @。
+ * 回查失败不阻塞主流程，按原消息继续。
+ */
+export async function attachQuotedMessage(
+  trigger: Trigger,
+  runner: CommandRunner,
+  opts: { as?: string; maxChars?: number } = {},
+): Promise<Trigger> {
+  const parentId = readParentId(trigger.raw)
+  if (!parentId) return trigger
+  try {
+    const res = await runner.run(quotedMessageCommand(parentId, opts.as ?? 'bot'))
+    if (res.code !== 0) return trigger
+    const quoted = parseQuotedMessage(res.stdout, parentId)
+    if (!quoted) return trigger
+    const max = opts.maxChars ?? QUOTED_MAX_CHARS
+    const body = quoted.text.length > max ? `${quoted.text.slice(0, max)}…` : quoted.text
+    const who = quoted.author ? ` ${quoted.author}` : ''
+    const header = `[引用${who}的消息] ${body}`
+    const text = trigger.text.trim()
+    return {
+      ...trigger,
+      text: text ? `${header}\n\n${text}` : header,
+      raw: { ...(trigger.raw as Record<string, unknown>), quote: quoted },
+    }
+  } catch {
+    return trigger
+  }
+}
+
+function readParentId(raw: unknown): string {
+  if (!raw || typeof raw !== 'object') return ''
+  const value = (raw as Record<string, unknown>).parentId
+  return typeof value === 'string' ? value : ''
 }
 
 export interface FeishuConsumerOptions {

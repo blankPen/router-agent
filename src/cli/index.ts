@@ -5,12 +5,12 @@ import { join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { Command, CommanderError } from 'commander'
-import { ensureHome, loadConfig, policyOf, setConfigValue, writeConfig } from '../config.js'
+import { ensureHome, loadConfig, policyOf, replyAlwaysChatsOf, setConfigValue, writeConfig } from '../config.js'
 import { Store } from '../store/db.js'
 import { Engine } from '../core/engine.js'
 import { OrcaAdapter } from '../worker/orca/index.js'
 import { GitHubTracker } from '../sources/github.js'
-import { FeishuConsumer, FeishuSender, normalizeFeishuEventDetailed } from '../sources/feishu.js'
+import { FeishuConsumer, FeishuSender, attachQuotedMessage, normalizeFeishuEventDetailed } from '../sources/feishu.js'
 import { backfillChats } from '../sources/feishu-backfill.js'
 import { ChatDirectory } from '../sources/feishu-directory.js'
 import { createLarkRunner, larkEnv, parseAppId } from '../sources/lark.js'
@@ -625,6 +625,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   })
 
   const store = new Store(join(home, 'state.db'))
+  const replyAlwaysChats = new Set(replyAlwaysChatsOf(config))
   const repaired = store.repairOutbox()
   if (repaired > 0) logger.warn('outbox:repaired', { count: repaired })
   const engine = new Engine({ store, policy: policyOf(config), onEvent: sink })
@@ -714,7 +715,10 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
         },
       })
       if (result.baselined.length > 0) logger.info('backfill:baseline', { chats: result.baselined })
-      return result.triggers.map(t => ({ ...t, chatName: directory.nameOf(t.chatId) }))
+      // 补拉同样要带上被引用消息的正文，否则引用消息进研判时只剩一句空 @。
+      return Promise.all(
+        result.triggers.map(async t => attachQuotedMessage({ ...t, chatName: directory.nameOf(t.chatId) }, larkRunner)),
+      )
     },
   })
 
@@ -756,14 +760,20 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
           })
           return
         }
-        const stored = engine.ingest(result.trigger)
-        if (!stored) return
-        logger.info('trigger:ingested', { id: result.trigger.id, chat: result.trigger.chatId, addressed: result.addressed })
-        // 只对「在跟它说话」的消息加回执表情；未 @ 的群消息不回也不会回复。
-        if (config.feishu.reaction && result.trigger.addressed !== 'none') {
-          void reactTo(result.trigger.externalId)
-            .catch(error => logger.warn('feishu:reaction-failed', { message: error instanceof Error ? error.message : String(error) }))
-        }
+        // 引用消息要先回查被引用正文，异步补齐后再入库。
+        void (async () => {
+          const trigger = await attachQuotedMessage(result.trigger!, larkRunner)
+          const stored = engine.ingest(trigger)
+          if (!stored) return
+          const quoted = Boolean((trigger.raw as Record<string, unknown> | undefined)?.quote)
+          logger.info('trigger:ingested', { id: trigger.id, chat: trigger.chatId, addressed: trigger.addressed, quoted })
+          // 只对「会被回复」的消息加回执表情：@、私聊，或 mode=all 的全量接收群。
+          const willReply = trigger.addressed !== 'none' || replyAlwaysChats.has(trigger.chatId)
+          if (config.feishu.reaction && willReply) {
+            void reactTo(trigger.externalId)
+              .catch(error => logger.warn('feishu:reaction-failed', { message: error instanceof Error ? error.message : String(error) }))
+          }
+        })().catch(error => logger.warn('trigger:ingest-failed', { message: error instanceof Error ? error.message : String(error) }))
       },
       onReady: () => logger.info('feishu:ready', {}),
       onError: error => {

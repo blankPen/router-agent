@@ -70,7 +70,7 @@ feishu:
   # 监控的群：一条配置同时决定「收什么消息 + 派工绑定 + 是否补拉历史」
   chats:
     - chat: oc_xxx     # 群 chat_id
-      mode: all        # all=全部消息；mention=只收 @机器人
+      mode: all        # all=全部消息且不 @ 也回复；mention=只收 @机器人
       repo: router-agent   # 可选：群绑定项目（项目名或仓库选择器）
       branch: main         # 可选：群绑定起始分支
       sync: false          # 可选：启动时补拉该群历史

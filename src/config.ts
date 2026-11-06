@@ -14,7 +14,7 @@ export type ChatMode = 'all' | 'mention'
  */
 export interface ChatSettings {
   chat: string
-  /** all：全部消息；mention：只收 @机器人。 */
+  /** all：全部消息，且不 @ 也会回复；mention：只收 @机器人。 */
   mode: ChatMode
   /** 群级派工绑定：项目名或仓库选择器；空表示开工前追问。 */
   repo: string
@@ -97,6 +97,16 @@ export interface AppConfig {
   llm?: { baseUrl?: string; apiKey?: string; model?: string; temperature?: number }
 }
 
+/**
+ * 「全量接收」的会话：配置了 `mode: all` 的群。
+ *
+ * 语义对齐：收了就要回。这些群里即使没 @ 机器人，研判后也要正常回一句，
+ * 只是判不接单时不开工单。`mode: mention` 的群本来就只收 @，无需处理。
+ */
+export function replyAlwaysChatsOf(config: AppConfig): string[] {
+  return config.feishu.chats.filter(chat => chat.mode === 'all').map(chat => chat.chat)
+}
+
 export function defaultConfig(): AppConfig {
   return {
     home: '',
@@ -134,7 +144,7 @@ feishu:
   # 监控的群：一条配置同时决定「收什么消息 + 派工绑定 + 是否补拉历史」
   chats: []
   #  - chat: oc_xxx
-  #    mode: all          # all=全部消息；mention=只收 @机器人
+  #    mode: all          # all=全部消息且不 @ 也回复；mention=只收 @机器人
   #    repo: router-agent # 可选：群绑定项目（项目名或仓库选择器），开工不再追问
   #    branch: main       # 可选：群绑定起始分支
   #    sync: false        # 可选：启动时补拉该群历史
