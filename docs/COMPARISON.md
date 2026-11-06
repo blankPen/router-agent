@@ -145,6 +145,9 @@ ra 的**主干是通的**：Source → Gate → LLM 研判 → 工单/Mandate �
 - 证据：`src/service.ts:357-366`——只要 report 带 `reply` 就发，**不区分 state**；summary/reply 相同也照发（幂等 key 含 `updatedAt`，每次上报都不同）。
 - 后果：worker 每轮 progress 都带 `--reply` 时，话题里会刷屏；prototype 明确「progress 不唤醒、不发 IM」。
 - 建议：progress 默认不发（或合并成每 N 分钟最多一条）；同 ticket 相同 reply 做内容去重。
+- **已修复（2026-11-06）**：progress 上报不再逐条发送；`RouterService.syncProgress()` 按 `progress.syncMs`（默认 60 秒）
+  定时轮询未同步的进展，合并成一条消息发到工单话题，内容相同的进展只发一次。ready / blocked 等终态与带 `--ack` 的追问回答
+  仍即时发送，并在发送前补发未同步的进展，保证话题内「进展 → 完成」的顺序。
 
 ### B9 outbox 失败不会升级
 

@@ -520,6 +520,18 @@ export class Store {
     return (this.db.prepare('SELECT * FROM reports WHERE ticket_id = ? ORDER BY at DESC, turn DESC LIMIT ?').all(ticketId, limit) as Row[]).map(reportFromRow)
   }
 
+  /**
+   * 按入库顺序取某条报告之后的报告，供进展轮询做增量同步。
+   * afterId 为空或已不存在时返回该工单的全部报告（配合 '@start' 基线使用）。
+   */
+  listReportsAfter(ticketId: string, afterId: string): Report[] {
+    const marker = afterId
+      ? (this.db.prepare('SELECT rowid FROM reports WHERE id = ?').get(afterId) as Row | undefined)
+      : undefined
+    const after = marker ? Number(marker.rowid) : 0
+    return (this.db.prepare('SELECT * FROM reports WHERE ticket_id = ? AND rowid > ? ORDER BY rowid').all(ticketId, after) as Row[]).map(reportFromRow)
+  }
+
   insertInput(i: Input): void {
     this.db.prepare(`INSERT INTO inputs (id, ticket_id, assignment_id, seq, kind, text, status, created_at, delivered_at, acked_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)

@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Clock, Engine } from './core/engine.js'
-import type { Assignment, Ticket, Trigger } from './core/model.js'
+import type { Assignment, Report, Ticket, Trigger } from './core/model.js'
 import type { Store } from './store/db.js'
 import type { AppConfig } from './config.js'
 import type { WorkerBackend, WorkerContext } from './worker/port.js'
@@ -59,6 +59,57 @@ export interface RouterServiceOptions {
 
 const noopLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} }
 
+/** 进展游标的起点标记：表示「从派工这一刻开始」，之前没有需要同步的报告。 */
+const PROGRESS_FROM_START = '@start'
+
+function progressCursorKey(ticketId: string): string {
+  return `progress:${ticketId}`
+}
+
+/** 同一条进展（summary + reply）只保留一次，避免 worker 重复上报刷屏。 */
+function dedupeProgress(reports: Report[]): Report[] {
+  const seen = new Set<string>()
+  return reports.filter(report => {
+    const key = progressSignature([report])
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function progressSignature(reports: Report[]): string {
+  return reports.map(report => `${report.summary.trim()}\u0000${report.reply?.trim() ?? ''}`).join('\u0001')
+}
+
+/** 每张工单最多记住最近 50 条进展签名，避免进程内去重表无限增长。 */
+function rememberProgress(seen: Set<string>, signature: string): void {
+  seen.add(signature)
+  if (seen.size <= 50) return
+  const oldest = seen.values().next().value
+  if (oldest !== undefined) seen.delete(oldest)
+}
+
+/** 把多条 progress 上报合并成一条话题消息。 */
+export function formatProgressDigest(title: string, reports: Report[]): string {
+  const lines: string[] = [`**工单「${title}」进展**`]
+  for (const report of reports) {
+    const summary = report.summary.trim()
+    if (!summary) continue
+    const clock = clockOf(report.at)
+    lines.push('', clock ? `**${clock}** ${summary}` : `**${summary}**`)
+    const reply = report.reply?.trim() ?? ''
+    if (reply && reply !== summary) lines.push(reply)
+  }
+  return lines.length > 1 ? lines.join('\n') : ''
+}
+
+function clockOf(at: string): string {
+  const ts = Date.parse(at)
+  if (!Number.isFinite(ts)) return ''
+  const date = new Date(ts)
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+}
+
 /**
  * 服务编排：把 AgentLoop、上报轮询、Effects、PR 跟踪与 WorkerBackend 接在一起。
  * 本身不持有终端状态；重启后靠 recover() 与 Orca 对账。
@@ -85,6 +136,10 @@ export class RouterService {
   private idle = new Map<string, { turn: number; nudgedAt: number | null; stale: boolean }>()
   private ticking = false
   private backfill?: () => Promise<Trigger[]>
+  /** 工单进展合并同步的轮询间隔；0 表示关闭。 */
+  private progressSyncMs: number
+  /** 每张工单已经同步过的进展签名（有界），用于内容去重。 */
+  private progressSeen = new Map<string, Set<string>>()
 
   constructor(opts: RouterServiceOptions) {
     this.store = opts.store
@@ -96,6 +151,7 @@ export class RouterService {
     this.prTracker = opts.prTracker
     this.idleAfterMs = opts.idleAfterMs ?? 120_000
     this.staleAfterMs = opts.staleAfterMs ?? 300_000
+    this.progressSyncMs = opts.config.progress?.syncMs ?? 60_000
     this.backfill = opts.backfill
     this.loop = new AgentLoop({
       engine: opts.engine,
@@ -177,6 +233,7 @@ export class RouterService {
     every(1000, () => this.runOnce())
     every(5000, () => this.trackPullRequests())
     every(15_000, () => this.checkIdle())
+    if (this.progressSyncMs > 0) every(this.progressSyncMs, () => this.syncProgress())
   }
 
   stop(): void {
@@ -214,6 +271,11 @@ export class RouterService {
       handle: '',
       workdir: '',
     })
+    // 进展同步从派工这一刻起算：首次派工用起点标记，重启重派则沿用/回落到最新报告。
+    if (this.store.getCursor(progressCursorKey(ticket.id)) === null) {
+      const latest = this.store.latestReport(ticket.id)
+      this.store.setCursor(progressCursorKey(ticket.id), latest?.id ?? PROGRESS_FROM_START, this.clock.now())
+    }
     const ctx: WorkerContext = { ticket, assignment, workdir: '' }
     try {
       const { handle, workdir } = await this.backend.start(ctx)
@@ -335,7 +397,7 @@ export class RouterService {
       return
     }
     const reply = state.reply?.trim() ?? ''
-    this.engine.report(assignment.id, {
+    const report = this.engine.report(assignment.id, {
       ticketId: ticket.id,
       turn: state.turn,
       state: state.state,
@@ -356,8 +418,20 @@ export class RouterService {
       ...(reply ? { replyChars: reply.length } : {}),
     })
 
+    // 追问的回答（ackedInputs 非空）用户正在等，立即发送；其余 progress 交给定时轮询合并。
+    const answersInput = state.state === 'progress' && report.ackedInputs.length > 0 && Boolean(reply)
+    if (answersInput) rememberProgress(this.seenProgress(ticket.id), progressSignature([report]))
+    // 发送终态或追问回答前，先把更早的进展补同步掉，保证话题里的先后顺序。
+    if (state.state !== 'progress' || answersInput) {
+      try {
+        this.syncProgress()
+      } catch (error) {
+        this.logger.warn('progress:sync-failed', { ticketId: ticket.id, message: error instanceof Error ? error.message : String(error) })
+      }
+    }
+
     const reportKey = `${state.turn}:${state.updatedAt}`
-    if (reply) {
+    if (reply && (state.state !== 'progress' || answersInput)) {
       // Worker 给了完整回复就原样发；正文里带文档链接 / PR 链接都照发，Router 不改写。
       const text = state.prUrl && !reply.includes(state.prUrl) ? `${reply}\n\nPR：${state.prUrl}` : reply
       this.queueLong(ticket, '', text, `reply:${ticket.id}:${reportKey}`)
@@ -370,6 +444,57 @@ export class RouterService {
     if (state.state === 'blocked' && !reply) {
       this.notify(ticket, `工单「${ticket.title}」卡住了：${state.humanAction ?? state.summary}`, `blocked:${ticket.id}:${reportKey}`)
     }
+  }
+
+  // ---------- 工单进展定时同步 ----------
+
+  /**
+   * 定时轮询工单进展：把自上次同步以来的 progress 上报合并成一条消息发到话题。
+   * 由 `progress.syncMs` 定时触发；也可直接调用（测试或手动补同步）。
+   */
+  syncProgress(): void {
+    const now = this.clock.now()
+    for (const ticket of this.store.listOpenTickets()) {
+      const cursorKey = progressCursorKey(ticket.id)
+      let marker = this.store.getCursor(cursorKey)
+      if (marker === null) {
+        // 兼容升级前已存在的工单：以最新一条报告为基线，不把历史进展回灌进话题。
+        const latest = this.store.latestReport(ticket.id)
+        this.store.setCursor(cursorKey, latest?.id ?? PROGRESS_FROM_START, now)
+        if (!latest) continue
+        marker = latest.id
+      }
+
+      const fresh = this.store.listReportsAfter(ticket.id, marker)
+      if (fresh.length === 0) continue
+      const newest = fresh[fresh.length - 1]!
+      // 先推进游标再发送：本轮跳过的内容（重复进展）不会在下一轮反复扫描。
+      this.store.setCursor(cursorKey, newest.id, now)
+
+      const pending = dedupeProgress(fresh.filter(report => report.state === 'progress'))
+      const seen = this.seenProgress(ticket.id)
+      const toSend = pending.filter(report => !seen.has(progressSignature([report])))
+      if (toSend.length === 0) {
+        if (pending.length > 0) this.log('progress:dedup', ticket.id, { skipped: pending.length })
+        continue
+      }
+
+      const text = formatProgressDigest(ticket.title, toSend)
+      if (!text) continue
+
+      for (const report of toSend) rememberProgress(seen, progressSignature([report]))
+      this.queueLong(ticket, '', text, `progress:${ticket.id}:${newest.id}`)
+      this.log('progress:synced', ticket.id, { count: toSend.length })
+    }
+  }
+
+  private seenProgress(ticketId: string): Set<string> {
+    let seen = this.progressSeen.get(ticketId)
+    if (!seen) {
+      seen = new Set()
+      this.progressSeen.set(ticketId, seen)
+    }
+    return seen
   }
 
   // ---------- 停止 ----------
