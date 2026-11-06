@@ -37,7 +37,7 @@ ra 的**主干是通的**：Source → Gate → LLM 研判 → 工单/Mandate �
 
 ## 2. P0：先修的 6 个正确性问题（外加 1 个恢复期漏洞）
 
-> 修复进度：A1、B1（见第 3 节）已于 2026-11-06 修复并验证；A2–A7 仍待做。
+> 修复进度：A1、B1（见第 3 节）、A4 已于 2026-11-06 修复并验证；A2、A3、A5–A7 仍待做。
 
 ### A1 启动补拉取到的是「最老的 50 条消息」
 
@@ -66,6 +66,8 @@ ra 的**主干是通的**：Source → Gate → LLM 研判 → 工单/Mandate �
 - 后果：模型端慢请求（无上限）会让后续所有 `runOnce` 直接 return，研判、`state.json` 兜底轮询、Outbox 投递、派工全部停摆（PR 跟踪与 idle 检查因独立 timer 仍会跑，掩盖了故障）。
 - 对照：prototype 的 Eval 有 30–600s deadline，超时重排，连续两次后记 `unavailable`。
 - 建议：`AbortSignal.timeout(60_000)`；超时按 `unavailable` 落库并记录 attempt，避免无限重试。
+
+**已修复（2026-11-06）**：研判层抽成 `DecisionEngine` 后，custom 与 pi 两个实现都按 `router.timeoutMs`（默认 60s）做硬超时，并用 `router.tokenBudget`（默认 32000）限制单次研判；超时/超预算统一落 `unavailable`，不再阻塞 `runCycle`。测试：`tests/router/decision-engine.test.ts`、`tests/router/pi-decision-engine.test.ts`。
 
 ### A5 `stop` 决策是空转
 

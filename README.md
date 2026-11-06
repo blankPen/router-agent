@@ -33,6 +33,7 @@ WorkerBackend 端口 ── OrcaAdapter（默认）── 未来：Codex / Headl
 - **WorkerBackend 是唯一扩展点**：换后端只加一个 adapter，内核与 Router 一行不改。
 - **所有对外通知走 Outbox**：幂等 key + 2s 起步的指数退避（上限 60s）。
 - **不解析终端屏幕文本**：只读 Orca 的结构化字段（`connected` / `orphaned` / `lastOutputAt`）。
+- **研判层是 DecisionEngine 端口**：`custom`（自研 LLM 工具循环，默认）与 `pi`（Pi SDK）可切换；研判工具只产出提案，写库仍由 Engine 统一完成。
 
 ## 快速开始
 
@@ -83,6 +84,15 @@ feishu:
 policy:
   acceptMode: auto     # off / observe / auto
   maxWorkers: 4
+
+# 研判层：主引擎 / 影子引擎 / 超时与预算
+router:
+  decisionEngine: custom   # custom | pi
+  shadow: off              # off | custom | pi（与主引擎相同则自动忽略）
+  timeoutMs: 60000         # 单次研判硬超时，超时按 unavailable 落库
+  tokenBudget: 32000       # 单次研判 token 预算；0 表示不限制
+  maxToolRounds: 3         # 自研引擎的工具循环轮次
+  agentDir: ""             # Pi 独立配置目录；空=~/.router-agent/pi
 
 workerSpec:
   mode: prompt         # prompt | agent
@@ -193,6 +203,38 @@ ra config set chatAllow.oc_xxx ""          # 清空，回到全局 allowed
 也可以在本文件写 `llm:` 段，或用 `RA_LLM_BASE_URL` / `RA_LLM_API_KEY` / `RA_LLM_MODEL` 覆盖。
 优先级：环境变量 > `config.yaml` > `.trove`。
 
+### 研判层：DecisionEngine 与 Pi 影子模式
+
+研判层被抽成 `DecisionEngine.assess(trigger, strength)` 端口。AgentLoop 只负责 Gate、应用提案、写库与回复，不再自己持有工具循环。
+
+| 实现 | 说明 |
+|-|-|
+| `custom`（默认） | 自研 `LlmClient` + 工具循环，行为与旧版一致；单次调用 60s 超时 + token 预算 |
+| `pi` | Pi SDK `createAgentSession`，in-memory session，只注入 Router system prompt；工具白名单 `router_read / router_ticket / router_decide` |
+
+五个约束：
+
+1. **Gate 在 Pi 之前**：Pi 只处理已过确定性准入的候选，准入永远不交给模型。
+2. **工具白名单**：不给 shell / 文件 / MCP / 通用 skill。
+3. **工具不写库**：`router_decide` 只产出 `DecisionProposal`，`Engine.decide()` 由 AgentLoop 统一调用。
+4. **超时与预算**：单次 60s、32k token，超时/超预算落 `unavailable`，不会拖住 `runCycle`。
+5. **审计与回放**：`~/.router-agent/logs/decisions.jsonl` 记录 prompt、工具序列、proposal、耗时与 token。
+
+**影子模式**：主引擎照常应用；影子引擎并行跑，在后台记录差异，不开单、不发消息、也不阻塞主流程。
+
+```bash
+ra config set router.shadow pi          # custom 为主，Pi 做影子（建议先跑 2 周）
+ra config set router.decisionEngine pi  # 确认影子指标后再正式切 Pi
+ra config set router.shadow off
+
+ra simulate --infer --text "把 README 的端口从 3000 改成 3083" --engine pi --dry-run
+ra simulate --infer --text "把 README 的端口从 3000 改成 3083" --engine custom --shadow pi --dry-run
+```
+
+影子指标：`GET /api/decisions/shadow` 返回一致率、unavailable 率、平均/p95 延迟、token 与工具调用次数，以及分歧字段分布；`ra logs` 里的 `decision:audit` / `decision:shadow` 可逐条追踪。
+
+Pi 侧完全隔离：AuthStorage / SettingsManager / SessionManager 全为 in-memory，关闭 extensions / skills / prompts / themes / AGENTS.md，不读写用户 `~/.pi`。默认仍是 `custom`，与方案「先 spike → 真实消息对比 → 影子 2 周 → 再切默认」的节奏一致。
+
 ## 启动与验证
 
 ```bash
@@ -274,7 +316,7 @@ worker 终端里的原始输出**不进日志**（避免解析 TUI 文本）；�
 |-|-|
 | `ra init` | 交互式初始化（`--yes` 跳过提问） |
 | `ra doctor` | 启动前自检：配置 / Orca / 飞书 / 模型 / 端口（`--json` 机器可读） |
-| `ra simulate` | 本地模拟一条消息，验证 Gate + 研判，不派工（`--infer` 走 LLM，`--dry-run` 不落库） |
+| `ra simulate` | 本地模拟一条消息，验证 Gate + 研判，不派工（`--infer` 走 LLM，`--dry-run` 不落库，`--engine custom\|pi` 选研判引擎，`--shadow pi` 跑影子） |
 | `ra start [--foreground]` | 启动常驻服务（默认后台） |
 | `ra stop` | 停止服务 |
 | `ra status` | 服务状态 + 工单概览 |
@@ -343,14 +385,16 @@ ra report \
 | POST | `/api/reports` | Worker 上报状态与回复（`ra report` 的入口） |
 | GET / PUT | `/api/policy` | 读写策略 |
 | GET | `/api/sources/feishu/chats` | 飞书来源配置 |
+| GET | `/api/decisions/shadow` | 影子模式对照记录与运营指标 |
 
 ## 开发
 
 ```bash
-pnpm test        # 258 个测试（TDD 写成）
+pnpm test        # 317 个测试（含研判层 / 影子模式）
 pnpm typecheck
 pnpm build       # tsc + esbuild（Web 面板与 Markdown 资产）
 pnpm check       # typecheck + test
+RA_PI_VERIFY=1 npx vitest run tests/verify-pi-live.test.ts   # 真实 Pi + 真实模型（默认跳过）
 ```
 
 代码结构：
@@ -378,5 +422,8 @@ src/cli/      ra 命令
 - `workerSpec.mode: agent` 依赖 Orca 启动的 claude 是否加载全局 `~/.claude/agents/`；
   该前提尚未实测，默认使用已验证可行的 `prompt` 模式。
 - 派工草稿按「群 + 同一个人」保存，30 分钟有效；同一个群里的多个未补齐请求会互相覆盖（后一次追问覆盖前一次）。
+- Pi 研判引擎默认不启用；Pi SDK 仍在演进，本仓库锁定 `@mariozechner/pi-coding-agent@0.73.1`，升级前先跑 `RA_PI_VERIFY=1` 的真实环境验证。
+- 影子模式只自动统计机械指标（一致率、unavailable 率、延迟、token、工具次数）；accept 准确率 / 召回率仍需要人工标注小样本。
+- 默认引擎仍是 `custom`，这是方案要求：先影子对照，不直接替换生产。
 
 验证细节与需要人工执行的剩余步骤见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。

@@ -179,6 +179,26 @@ describe('HTTP 管理 API', () => {
     expect((await call(server, 'POST', '/api/reports', { ticketId: 'tk_nope', state: 'ready', summary: 'x' })).status).toBe(404)
   })
 
+  it('GET /api/decisions/shadow 返回对照记录与运营指标', async () => {
+    store.insertShadowComparison({
+      id: 'sc_1',
+      triggerId: 't1',
+      agree: false,
+      diff: ['branch'],
+      primary: { engine: 'custom', outcome: 'accept', decision: 'accept', latencyMs: 100, tokens: 120, toolCalls: 1, repo: 'r', branch: 'main' },
+      shadow: { engine: 'pi', outcome: 'accept', decision: 'accept', latencyMs: 250, tokens: 240, toolCalls: 2, repo: 'r', branch: 'release' },
+      createdAt: '2026-11-06T10:00:04.000Z',
+    })
+
+    const res = await call(server, 'GET', '/api/decisions/shadow')
+
+    expect(res.status).toBe(200)
+    expect(res.json.stats).toMatchObject({ total: 1, agree: 0, agreeRate: 0, avgPrimaryLatencyMs: 100, avgShadowLatencyMs: 250 })
+    expect(res.json.stats.byDiff).toEqual({ branch: 1 })
+    expect(res.json.comparisons).toHaveLength(1)
+    expect(res.json.config).toMatchObject({ decisionEngine: 'custom', shadow: 'off', timeoutMs: 60_000 })
+  })
+
   it('未知路由返回 404 JSON', async () => {
     const res = await call(server, 'GET', '/api/nope')
     expect(res.status).toBe(404)

@@ -25,9 +25,16 @@ export interface LlmToolCall {
   arguments: string
 }
 
+export interface LlmUsage {
+  input: number
+  output: number
+  total: number
+}
+
 export interface LlmResponse {
   content: string | null
   toolCalls: LlmToolCall[]
+  usage?: LlmUsage
 }
 
 export interface LlmCompleteRequest {
@@ -35,6 +42,8 @@ export interface LlmCompleteRequest {
   tools?: LlmToolSchema[]
   temperature?: number
   maxTokens?: number
+  /** 调用方注入的超时/取消信号。 */
+  signal?: AbortSignal
 }
 
 export interface LlmClient {
@@ -145,6 +154,7 @@ export class OpenAiCompatClient implements LlmClient {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.config.apiKey}` },
       body: JSON.stringify(body),
+      ...(req.signal ? { signal: req.signal } : {}),
     })
     if (!res.ok) {
       const text = await res.text().catch(() => '')
@@ -153,6 +163,10 @@ export class OpenAiCompatClient implements LlmClient {
     const json = (await res.json()) as Record<string, any>
     const message = json.choices?.[0]?.message ?? {}
     const rawCalls = Array.isArray(message.tool_calls) ? message.tool_calls : []
+    const rawUsage = json.usage ?? {}
+    const input = Number(rawUsage.prompt_tokens ?? 0)
+    const output = Number(rawUsage.completion_tokens ?? 0)
+    const total = Number(rawUsage.total_tokens ?? input + output)
     return {
       content: typeof message.content === 'string' ? message.content : null,
       toolCalls: rawCalls.map((call: Record<string, any>, index: number) => ({
@@ -160,6 +174,9 @@ export class OpenAiCompatClient implements LlmClient {
         name: String(call.function?.name ?? ''),
         arguments: typeof call.function?.arguments === 'string' ? call.function.arguments : JSON.stringify(call.function?.arguments ?? {}),
       })),
+      ...(Number.isFinite(input) && Number.isFinite(output) && (input > 0 || output > 0)
+        ? { usage: { input, output, total: Number.isFinite(total) ? total : input + output } }
+        : {}),
     }
   }
 }

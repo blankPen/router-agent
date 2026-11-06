@@ -4,10 +4,19 @@ import type { Store } from '../store/db.js'
 import type { Clock, Engine } from '../core/engine.js'
 import { gate, type Policy } from '../core/policy.js'
 import type { SourceKind, Strength, Ticket, Trigger } from '../core/model.js'
-import { deriveTitle } from '../core/engine.js'
-import { extractJsonObject, type LlmClient, type LlmMessage, type LlmToolSchema } from './llm.js'
-import { ROUTER_TOOLS, RouterToolbox } from './tools.js'
+import type { LlmClient, LlmToolSchema } from './llm.js'
+import { RouterToolbox } from './tools.js'
 import { activeDraft, resolveDispatch, type DispatchMissing, type DispatchSettings } from './dispatch.js'
+import { CustomDecisionEngine } from './custom-decision-engine.js'
+import { compareShadow } from './decision-engine.js'
+import type {
+  DecisionAudit,
+  DecisionEngine,
+  DecisionEngineResult,
+  DecisionProposal,
+  DecisionRequest,
+  ShadowComparison,
+} from './decision-engine.js'
 
 export interface AgentLoopOptions {
   engine: Engine
@@ -21,6 +30,14 @@ export interface AgentLoopOptions {
   systemPrompt?: string
   /** 多项目 / 多分支派工设置；不传则不校验 repo/branch（兼容旧测试与嵌入用法）。 */
   dispatch?: DispatchSettings
+  /** 主研判引擎；不传则用自研 CustomDecisionEngine。 */
+  decisionEngine?: DecisionEngine
+  /** 影子研判引擎：只记录差异，不应用它的决定。 */
+  shadowEngine?: DecisionEngine
+  /** 审计出口：每次研判都会回调一次（CLI 落 decisions.jsonl）。 */
+  onAudit?: (audit: DecisionAudit) => void
+  /** 影子对照出口：便于日志与指标。 */
+  onShadow?: (comparison: ShadowComparison) => void
 }
 
 export interface ClarifyInfo {
@@ -77,6 +94,11 @@ export class AgentLoop {
   private systemPrompt: string
   private conversationPrompt: string
   private dispatch?: DispatchSettings
+  private decisionEngine: DecisionEngine
+  private shadowEngine?: DecisionEngine
+  private onAudit?: (audit: DecisionAudit) => void
+  private onShadow?: (comparison: ShadowComparison) => void
+  private shadowTasks = new Set<Promise<void>>()
 
   constructor(opts: AgentLoopOptions) {
     this.engine = opts.engine
@@ -89,7 +111,15 @@ export class AgentLoop {
     this.systemPrompt = opts.systemPrompt ?? buildSystemPrompt(opts.engine.policy())
     this.conversationPrompt = readPrompt('conversation.md')
     this.dispatch = opts.dispatch
-    this.toolbox = opts.toolbox ?? new RouterToolbox({ engine: opts.engine, store: this.store, clock: this.clock, dispatch: opts.dispatch })
+    this.toolbox = opts.toolbox ?? new RouterToolbox({ engine: opts.engine, store: this.store })
+    this.decisionEngine = opts.decisionEngine ?? new CustomDecisionEngine({
+      llm: () => this.llm,
+      toolbox: this.toolbox,
+      maxToolRounds: this.maxToolRounds,
+    })
+    this.shadowEngine = opts.shadowEngine
+    this.onAudit = opts.onAudit
+    this.onShadow = opts.onShadow
   }
 
   setPolicy(policy: Policy): void {
@@ -287,62 +317,56 @@ export class AgentLoop {
     return lines.join('\n')
   }
 
-  /** 单条候选的研判。返回实际落地的决定与工单。 */
+  /** 单条候选的研判。两个引擎看到同一份 prompt；只有主引擎的决定会被应用。 */
   async assess(trigger: Trigger, strength: Strength = 'inferred'): Promise<AssessResult> {
-    const messages: LlmMessage[] = [
-      { role: 'system', content: this.systemPromptFor(trigger) },
-      { role: 'user', content: this.contextPrompt(trigger) },
-    ]
+    const request = {
+      trigger,
+      strength,
+      systemPrompt: this.systemPromptFor(trigger),
+      userPrompt: this.contextPrompt(trigger),
+    }
 
-    try {
-      for (let round = 0; round < this.maxToolRounds; round += 1) {
-        const res = await this.llm.complete({ messages, tools: ROUTER_TOOLS })
-        if (res.toolCalls.length > 0) {
-          messages.push({
-            role: 'assistant',
-            content: res.content,
-            tool_calls: res.toolCalls.map(call => ({ id: call.id, type: 'function', function: { name: call.name, arguments: call.arguments } })),
-          })
-          let applied: AssessResult | null = null
-          for (const call of res.toolCalls) {
-            const outcome = await this.toolbox.call(call.name, call.arguments, { strength })
-            messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(outcome.result) })
-            if (call.name === 'router_decide') {
-              const raw = outcome.result as Record<string, unknown>
-              if (raw.error === 'dispatch:needs-info') return this.clarifyFrom(trigger, raw)
-              if (raw.error) return this.markUnavailable(trigger, String(raw.error))
-              const decision = String(raw.decision ?? '')
-              const ticketId = raw.ticket_id ? String(raw.ticket_id) : ''
-              applied = {
-                outcome: decision === 'accept' ? 'accept' : decision === 'unavailable' ? 'unavailable' : 'ignore',
-                ...(ticketId ? { ticket: this.store.getTicket(ticketId) ?? undefined } : {}),
-              }
-            }
-          }
-          if (applied) return applied
-          continue
-        }
+    // 主引擎与影子引擎并行；影子在后台记录，绝不阻塞主流程。
+    const primaryTask = this.decisionEngine.assess(request).catch(error => failedResult(this.decisionEngine, trigger.id, error))
+    if (this.shadowEngine) this.startShadow(trigger.id, request, primaryTask)
+    const primary = await primaryTask
+    this.onAudit?.(primary.audit)
 
-        const json = extractJsonObject(res.content)
-        if (!json) return this.markUnavailable(trigger, '模型未给出可解析的决定')
-        return this.applyDecision(trigger, json, strength)
-      }
-      return this.markUnavailable(trigger, '工具调用轮次耗尽')
-    } catch (error) {
-      return this.markUnavailable(trigger, error instanceof Error ? error.message : String(error))
+    if (primary.unavailableReason) return this.markUnavailable(trigger, primary.unavailableReason)
+    if (!primary.proposal) return this.markUnavailable(trigger, '研判未产出决定')
+    return this.applyProposal(trigger, primary.proposal, strength)
+  }
+
+  /** 等待所有后台影子研判结束（测试、优雅关闭用）。 */
+  async shadowIdle(): Promise<void> {
+    while (this.shadowTasks.size > 0) {
+      await Promise.all([...this.shadowTasks])
     }
   }
 
-  private applyDecision(trigger: Trigger, json: Record<string, unknown>, strength: Strength): AssessResult {
-    const decision = String(json.decision ?? '')
-    if (!['accept', 'stop', 'ignore', 'unavailable'].includes(decision)) {
-      return this.markUnavailable(trigger, `非法决定：${decision || '(空)'}`)
-    }
-    if (decision === 'unavailable') return this.markUnavailable(trigger, String(json.reason ?? '模型判定未完成'))
+  private startShadow(triggerId: string, request: DecisionRequest, primaryTask: Promise<DecisionEngineResult>): void {
+    const engine = this.shadowEngine
+    if (!engine) return
+    const shadowTask = engine.assess(request).catch(error => failedResult(engine, triggerId, error))
+    const task = Promise.all([primaryTask, shadowTask])
+      .then(([primary, shadow]) => {
+        this.onAudit?.(shadow.audit)
+        this.recordShadow(triggerId, primary, shadow)
+      })
+      .catch(() => {})
+      .finally(() => { this.shadowTasks.delete(task) })
+    this.shadowTasks.add(task)
+  }
 
-    let repo = json.repo === undefined ? '' : String(json.repo).trim()
-    let branch = json.branch === undefined ? '' : String(json.branch).trim()
-    if (decision === 'accept' && this.dispatch) {
+  /** 只有这里会写库：派工解析 + Engine.decide。 */
+  private applyProposal(trigger: Trigger, proposal: DecisionProposal, strength: Strength): AssessResult {
+    if (proposal.decision === 'unavailable') {
+      return this.markUnavailable(trigger, proposal.reason || '模型判定未完成')
+    }
+
+    let repo = proposal.repo ?? ''
+    let branch = proposal.branch ?? ''
+    if (proposal.decision === 'accept' && this.dispatch) {
       const draft = activeDraft(this.store, trigger.chatId, trigger.actorId, this.clock.now())
       const resolution = resolveDispatch({ settings: this.dispatch, chatId: trigger.chatId, draft, repo, branch })
       if (resolution.missing.length > 0 || resolution.rejectedRepo || resolution.rejectedBranch) {
@@ -364,36 +388,30 @@ export class AgentLoop {
 
     const outcome = this.engine.decide({
       triggerId: trigger.id,
-      decision: decision as never,
+      decision: proposal.decision,
       strength,
-      reason: String(json.reason ?? ''),
-      ...(json.title === undefined ? {} : { title: String(json.title) }),
-      ...(json.scope === undefined ? {} : { scope: String(json.scope) }),
+      reason: proposal.reason,
+      ...(proposal.title === undefined ? {} : { title: proposal.title }),
+      ...(proposal.scope === undefined ? {} : { scope: proposal.scope }),
       ...(repo ? { repo } : {}),
       ...(branch ? { branch } : {}),
-      rules: Array.isArray(json.rules) ? json.rules.map(String) : [],
+      rules: proposal.rules,
     })
     return outcome.decision.decision === 'accept' && outcome.ticket
       ? { outcome: 'accept', ticket: outcome.ticket }
       : { outcome: 'ignore' }
   }
 
-  /** 工具层判定缺派工信息：把已解析到的部分转成追问结果。 */
-  private clarifyFrom(trigger: Trigger, raw: Record<string, unknown>): AssessResult {
-    const missing = Array.isArray(raw.missing)
-      ? (raw.missing.map(String).filter(value => value === 'repo' || value === 'branch') as DispatchMissing[])
-      : []
-    return {
-      outcome: 'clarify',
-      clarify: {
-        missing,
-        repo: String(raw.repo ?? ''),
-        branch: String(raw.branch ?? ''),
-        ...(raw.rejected_repo ? { rejectedRepo: String(raw.rejected_repo) } : {}),
-        ...(raw.rejected_branch ? { rejectedBranch: String(raw.rejected_branch) } : {}),
-        task: String(raw.draft_task ?? trigger.text),
-      },
+  /** 影子模式只记录对照，不改变任何领域状态。 */
+  private recordShadow(triggerId: string, primary: DecisionEngineResult, shadow: DecisionEngineResult): void {
+    const createdAt = this.clock.now()
+    const comparison = compareShadow(triggerId, primary, shadow, createdAt, `sc_${crypto.randomUUID()}`)
+    try {
+      this.store.insertShadowComparison(comparison)
+    } catch {
+      // 影子记录失败不影响主流程。
     }
+    this.onShadow?.(comparison)
   }
 
   private markUnavailable(trigger: Trigger, reason: string): AssessResult {
@@ -463,6 +481,23 @@ export class AgentLoop {
 
 export function buildSystemPrompt(policy: Policy): string {
   return [readPrompt('orchestrator.md'), readPrompt('admission.md'), policySection(policy)].join('\n\n---\n\n')
+}
+
+/** 引擎抛异常时的兜底结果：按 unavailable 处理，并留下可审计的记录。 */
+function failedResult(engine: DecisionEngine, triggerId: string, error: unknown): DecisionEngineResult {
+  const message = error instanceof Error ? error.message : String(error)
+  return {
+    unavailableReason: message,
+    audit: {
+      engine: engine.kind,
+      triggerId,
+      durationMs: 0,
+      toolCalls: [],
+      tokens: { input: 0, output: 0, total: 0 },
+      promptChars: { system: 0, user: 0 },
+      unavailableReason: message,
+    },
+  }
 }
 
 function policySection(policy: Policy): string {

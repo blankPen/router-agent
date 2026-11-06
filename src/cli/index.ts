@@ -1,4 +1,4 @@
-import { closeSync, mkdirSync, existsSync, openSync, readFileSync, readSync, statSync, writeFileSync, unlinkSync } from 'node:fs'
+import { appendFileSync, closeSync, mkdirSync, existsSync, openSync, readFileSync, readSync, statSync, writeFileSync, unlinkSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { spawn } from 'node:child_process'
 import { join, resolve } from 'node:path'
@@ -21,6 +21,8 @@ import { runReport, readContentArg, type ReportOptions } from './report.js'
 import type { Prompter } from './prompts.js'
 import { realRunner, type CommandRunner } from '../infra/process.js'
 import { OpenAiCompatClient, resolveLlmConfig } from '../router/llm.js'
+import { createDecisionEngineBundle } from '../router/engine-factory.js'
+import type { DecisionAudit, ShadowComparison } from '../router/decision-engine.js'
 import { RouterService, createEffectsSender, type Logger } from '../service.js'
 import { EffectsProcessor } from '../core/effects.js'
 import { createApiServer } from '../router/api.js'
@@ -100,7 +102,9 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
     .option('--actor <openId>', '指定发送人（默认取 allowed 里的第一个人）')
     .option('--infer', '按未 @ 的推断候选处理（会走 LLM 研判）')
     .option('--dry-run', '不写数据库')
-    .action(async (opts: { home?: string; text: string; chat?: string; actor?: string; infer?: boolean; dryRun?: boolean }) => {
+    .option('--engine <engine>', '主研判引擎：custom | pi（默认取配置）')
+    .option('--shadow <engine>', '影子引擎：off | custom | pi（默认取配置）')
+    .action(async (opts: { home?: string; text: string; chat?: string; actor?: string; infer?: boolean; dryRun?: boolean; engine?: string; shadow?: string }) => {
       setCode(await cmdSimulate(homeOf(opts, output), opts, output))
     })
 
@@ -265,31 +269,50 @@ function collect(value: string, previous: string[]): string[] {
 
 async function cmdSimulate(
   home: string,
-  opts: { text: string; chat?: string; actor?: string; infer?: boolean; dryRun?: boolean },
+  opts: { text: string; chat?: string; actor?: string; infer?: boolean; dryRun?: boolean; engine?: string; shadow?: string },
   output: CliIo,
 ): Promise<number> {
   ensureHome(home)
   const config = loadConfig(home, output.env as NodeJS.ProcessEnv)
+  if (opts.engine && opts.engine !== 'custom' && opts.engine !== 'pi') {
+    output.stderr('--engine 只能是 custom 或 pi')
+    return 2
+  }
+  if (opts.shadow && opts.shadow !== 'off' && opts.shadow !== 'custom' && opts.shadow !== 'pi') {
+    output.stderr('--shadow 只能是 off / custom / pi')
+    return 2
+  }
+  let llmConfig
   let llm
   try {
-    llm = new OpenAiCompatClient(resolveLlmConfig({ configPath: join(home, 'config.yaml') }))
+    llmConfig = resolveLlmConfig({ configPath: join(home, 'config.yaml') })
+    llm = new OpenAiCompatClient(llmConfig)
   } catch (error) {
     output.stderr(error instanceof Error ? error.message : String(error))
     return 1
   }
 
   const result = await simulate(
-    { home, config, llm },
+    { home, config, llm, llmConfig },
     {
       text: opts.text,
       ...(opts.chat ? { chatId: opts.chat } : {}),
       ...(opts.actor ? { actorId: opts.actor } : {}),
       ...(opts.infer ? { addressed: 'none' as const } : {}),
       ...(opts.dryRun ? { dryRun: true } : {}),
+      ...(opts.engine ? { engine: opts.engine as 'custom' | 'pi' } : {}),
+      ...(opts.shadow ? { shadow: opts.shadow as 'off' | 'custom' | 'pi' } : {}),
     },
   )
 
   output.stdout(`模拟消息: ${result.trigger.id}  (addressed=${result.trigger.addressed}, actor=${result.trigger.actorId})`)
+  for (const audit of result.audits) {
+    output.stdout(`研判: ${audit.engine}  ${audit.durationMs}ms  tokens=${audit.tokens.total}  tools=${audit.toolCalls.length}${audit.unavailableReason ? `  unavailable=${audit.unavailableReason}` : ''}`)
+  }
+  for (const shadow of result.shadows) {
+    const diff = shadow.diff.length > 0 ? `（差异：${shadow.diff.join(',')}）` : ''
+    output.stdout(`影子: ${shadow.shadow.engine}  结论${shadow.agree ? '一致' : '不一致'}${diff}`)
+  }
   if (!result.decision) {
     output.stdout('没有产生决定（消息被 Source 过滤或仍在等待）')
     return 0
@@ -613,6 +636,8 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     home,
     projects: config.projects.map(project => `${project.name}@${project.defaultBranch || '(未设默认分支)'}`),
     chats: config.feishu.chats.map(chat => `${chat.chat}:${chat.mode}${chat.repo ? `→${chat.repo}@${chat.branch || '?'}` : ''}`),
+    decisionEngine: config.router.decisionEngine,
+    shadow: config.router.shadow,
   })
 
   const store = new Store(join(home, 'state.db'))
@@ -629,7 +654,35 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   })
   const sender = new FeishuSender(larkRunner)
   const prTracker = new GitHubTracker(ghRunner)
-  const llm = new OpenAiCompatClient(resolveLlmConfig({ configPath: join(home, 'config.yaml') }))
+  const llmConfig = resolveLlmConfig({ configPath: join(home, 'config.yaml') })
+  const llm = new OpenAiCompatClient(llmConfig)
+  const decisionEngines = createDecisionEngineBundle({ config, engine, store, llm, llmConfig })
+  const auditPath = join(home, 'logs', 'decisions.jsonl')
+  const onDecisionAudit = (audit: DecisionAudit): void => {
+    try {
+      appendFileSync(auditPath, `${JSON.stringify({ at: new Date().toISOString(), ...audit })}\n`, 'utf8')
+    } catch (error) {
+      logger.warn('decision:audit-write-failed', { message: error instanceof Error ? error.message : String(error) })
+    }
+    logger.info('decision:audit', {
+      engine: audit.engine,
+      triggerId: audit.triggerId,
+      durationMs: audit.durationMs,
+      tokens: audit.tokens.total,
+      toolCalls: audit.toolCalls.length,
+      ...(audit.proposal ? { decision: audit.proposal.decision, title: audit.proposal.title } : {}),
+      ...(audit.unavailableReason ? { unavailable: audit.unavailableReason } : {}),
+    })
+  }
+  const onShadowComparison = (comparison: ShadowComparison): void => {
+    logger.info('decision:shadow', {
+      triggerId: comparison.triggerId,
+      agree: comparison.agree,
+      diff: comparison.diff,
+      primary: comparison.primary.outcome,
+      shadow: comparison.shadow.outcome,
+    })
+  }
   const directory = new ChatDirectory(join(home, 'chats.json'))
 
   const reactTo = async (messageId: string): Promise<void> => {
@@ -675,6 +728,10 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     logger,
     effects,
     sender: feishuOutbox,
+    decisionEngine: decisionEngines.primary,
+    ...(decisionEngines.shadow ? { shadowEngine: decisionEngines.shadow } : {}),
+    onDecisionAudit,
+    onShadowComparison,
     backfill: async () => {
       const result = await backfillChats({
         runner: larkRunner,

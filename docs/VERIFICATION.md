@@ -159,9 +159,86 @@ ra stop && ra start
 3. **绑定的群**（`oc_xxx`）：直接 @bot 派活 → 不追问，直接开单并派工到 `router-agent @ main`。
 4. 反例：@bot 说「用 feature/x 分支改一下」且项目配了 `branches: [main, release]` → 应回复「该分支不在允许范围」，不开单。
 
-## 5. 结论
+## 5. 研判层 DecisionEngine / Pi（本轮新增，2026-11-06）
+
+### 5.1 自动化验证
+
+```
+pnpm check
+Test Files  31 passed | 1 skipped (32)
+Tests       317 passed | 5 skipped (322)
+```
+
+新增测试：
+
+| 测试文件 | 覆盖 |
+|-|-|
+| `tests/router/decision-engine.test.ts` | proposal 解析、影子比较、custom 引擎「工具不写库」、JSON 兜底、超时、token 预算（8） |
+| `tests/router/pi-decision-engine.test.ts` | 工具白名单、proposal-only、prompt 注入、超时 abort、token 预算、文本兜底、dispose（6） |
+| `tests/router/shadow.test.ts` | 只应用主引擎、影子记录与统计、分歧/异常不影响主流程、影子工具无副作用（4） |
+| `tests/router/tool-spec.test.ts` | TypeBox 与 OpenAI schema 同源、必填/枚举校验、白名单（3） |
+| `tests/config.test.ts` | `router.*` 默认值、读取、`config set`、写回（+4） |
+| `tests/router/api.test.ts` | `GET /api/decisions/shadow` 记录与指标（+1） |
+
+### 5.2 方案第 7 节 Spike 验收对照
+
+| 验收项 | 结果 | 证据 |
+|-|-|-|
+| Pi 在不写库的前提下产出合法 `DecisionProposal` | ✅ | PI 单元测试断言 `store.listTickets()` 为空；真实运行由 AgentLoop 统一开单 |
+| 工具调用序列可审计 | ✅ | `audit.toolCalls` + `~/.router-agent/logs/decisions.jsonl`（prompt / 工具 / proposal / 耗时 / token） |
+| 超时与异常降级为 `unavailable`，不拖垮服务 | ✅ | Pi `pi:timeout` / `pi:token-budget`；custom 同步补了 `custom:timeout` / `custom:token-budget` |
+| 主/影子决定差异可解释 | ✅ | 影子记录 `diff` 字段与 `decision:shadow` 日志；真实对照两者都 accept，仅标题措辞不同 |
+| 不直接替换生产默认 | ✅ | 默认 `router.decisionEngine: custom`，Pi 需显式配置 |
+
+### 5.3 真实环境验证
+
+```
+RA_PI_VERIFY=1 npx vitest run tests/verify-pi-live.test.ts  → 1 passed (4.3s)
+```
+
+用 worktree 内构建产物 + 独立临时 home 跑 `ra simulate`（真实 `deepseek-v4-flash`）：
+
+| 场景 | 耗时 | tokens | 工具调用 | 决定 |
+|-|-|-|-|-|
+| `--engine custom` | 2426ms | 2845 | 1 | accept |
+| `--engine pi` | 3225ms | 5396 | 1 | accept |
+| `--engine custom --shadow pi` | 2393 / 3243ms | 2835 / 5405 | 1 / 1 | 一致 |
+
+- 三次都开出同一张工单（主引擎决定），影子模式没有重复开单；
+- Pi 的 token 约为 custom 的 1.9 倍，延迟约 +0.8s，与方案风险清单「Pi 的 system prompt / 工具 schema 更大」一致；
+- 未改动用户本地 `ra` 命令、生产配置或权限，验证均在临时目录完成。
+
+### 5.4 真实消息 A/B（方案 D3）
+
+从本机 `~/.router-agent/state.db` **只读**（`SELECT`，未写生产库）取最近 20 条非机器人消息，用临时 home 分别跑 custom 与 Pi：
+
+| 指标 | custom | pi |
+|-|-|-|
+| 成功研判 | 20/20 | 20/20 |
+| unavailable | 0 | 0 |
+| accept | 8 | 9 |
+| 平均耗时 | 3456ms | 3768ms（+9%） |
+| 总 tokens | 68,414 | 121,590（1.78x） |
+| 工具调用总数 | 24 | 22 |
+
+- **决定一致 19/20（95%）**；唯一分歧是一条「整理可新增工具清单并出文档」的长请求：custom 判 `ignore`、Pi 判 `accept`。复跑该条时 custom 也判 `accept`，属于边界样本上的模型抖动，不是系统性偏差。
+- 20 条消息里两个引擎都产出了可审计的 proposal，没有出现超时或解析失败。
+- 结论：Pi 可作为影子引擎进入观察期；token 成本约为 custom 的 1.8 倍，切换默认前应结合预算评估。
+
+### 5.5 五个约束的落地位置
+
+| 约束 | 实现 |
+|-|-|
+| Gate 在 Pi 之前 | `AgentLoop.handle()` 先 `gate()`，只有通过准入才调用 `DecisionEngine.assess()` |
+| 工具白名单 | `PiDecisionEngine` 只注册 `router_read / router_ticket / router_decide`，关闭 Pi 内置工具 |
+| 工具不写库 | `RouterToolbox.propose()` 只返回 proposal；`Engine.decide()` 只在 `AgentLoop.applyProposal()` 调用 |
+| 超时 + 预算 | 两个引擎都按 `router.timeoutMs` / `router.tokenBudget` 降级为 `unavailable` |
+| 审计与回放 | `DecisionAudit` 统一结构；CLI 写 JSONL，API 暴露影子指标 |
+
+## 6. 结论
 
 - 领域内核、Router、WorkerBackend、上报协议、飞书 / GitHub Source、HTTP API、Web 面板、CLI 均已实现并有测试覆盖。
+- 研判层已抽成 `DecisionEngine` 端口：`custom`（默认）与 `pi` 两个实现、影子对照、审计与超时预算均已落地并有测试。
 - 多项目 / 多分支：开单前强制明确「任务 + 项目 + 起始分支」，缺信息先在会话里追问并落草稿；群级 `chatBindings` 可免问答。
 - 真实 LLM、Orca、lark-cli、HTTP 服务与 CLI 常驻链路均已跑通。
 - 剩余风险集中在「真实飞书群 + 真实 worktree 开工」的外部集成，已在上节给出可直接执行的步骤。

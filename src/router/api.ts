@@ -56,6 +56,20 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       })
     }
 
+    if (path === '/api/decisions/shadow' && req.method === 'GET') {
+      const limit = Number(url.searchParams.get('limit') ?? 100)
+      return respond(res, 200, {
+        stats: opts.store.shadowStats(),
+        comparisons: opts.store.listShadowComparisons(Number.isFinite(limit) ? limit : 100),
+        config: {
+          decisionEngine: config.router.decisionEngine,
+          shadow: config.router.shadow,
+          timeoutMs: config.router.timeoutMs,
+          tokenBudget: config.router.tokenBudget,
+        },
+      })
+    }
+
     if (path === '/api/tickets' && req.method === 'GET') {
       const stage = url.searchParams.get('stage') ?? undefined
       const limit = Number(url.searchParams.get('limit') ?? 200)
