@@ -45,6 +45,8 @@ ra report \
 ```
 
 - `--summary` 只放一句话（给日志和列表用）；**用户真正看到的内容全部放 `--reply`**。
+- `--state progress` 是「中途进展」：Router 不逐条转发，会按 `progress.syncMs` 合并后同步到话题；
+  带 `--ack` 的追问回答会立即发送。需要用户立刻看到的内容请用 `ready`。
 - `--reply` 支持字面量、`@文件`、`-`（stdin）。正文长时用文件，避免 shell 转义：
   ```bash
   ra report --ticket {{ticketId}} --state ready --summary "完成梳理" --reply @/tmp/answer.md

@@ -425,8 +425,66 @@ describe('RouterService 编排', () => {
       reply: '先改 A，因为 A 影响面最大。',
       updatedAt: '2026-11-06T10:03:00.000Z',
     })
+    // 追问的回答用户正在等：progress 也立即发送，且后续轮询不会再重复发送。
+    svc.syncProgress()
 
     const text = store.claimOutbox('2026-11-06T10:10:00.000Z', 20).map(item => item.text).join('\n')
-    expect(text).toContain('先改 A')
+    expect(text.match(/先改 A/g)).toHaveLength(1)
+  })
+
+  it('progress 上报不逐条发送，轮询时合并成一条进展消息', async () => {
+    engine.ingest(makeTrigger())
+    await service.runOnce()
+    const ticket = store.listTickets()[0]!
+    const assignment = store.latestAssignment(ticket.id)!
+    const base = { ticketId: ticket.id, assignmentId: assignment.id, state: 'progress' as const, prNumber: 0, prUrl: '', ackedInputs: [] }
+
+    service.onWorkerState({ ...base, turn: 1, summary: '已定位配置入口', updatedAt: '2026-11-06T10:01:00.000Z' })
+    service.onWorkerState({ ...base, turn: 2, summary: '正在改超时逻辑', updatedAt: '2026-11-06T10:02:00.000Z' })
+
+    // 上报本身不发消息
+    expect(store.listOutbox(20).some(item => item.text.includes('已定位配置入口'))).toBe(false)
+
+    service.syncProgress()
+
+    const digests = store.claimOutbox('2026-11-06T10:10:00.000Z', 50).filter(item => item.text.includes('工单「测试工单」进展'))
+    expect(digests).toHaveLength(1)
+    expect(digests[0]?.text).toContain('已定位配置入口')
+    expect(digests[0]?.text).toContain('正在改超时逻辑')
+    expect(digests[0]?.threadId).toBe('om_root')
+  })
+
+  it('内容相同的进展不会重复同步', async () => {
+    engine.ingest(makeTrigger())
+    await service.runOnce()
+    const ticket = store.listTickets()[0]!
+    const assignment = store.latestAssignment(ticket.id)!
+    const base = { ticketId: ticket.id, assignmentId: assignment.id, state: 'progress' as const, prNumber: 0, prUrl: '', ackedInputs: [] }
+
+    service.onWorkerState({ ...base, turn: 1, summary: '仍在改', updatedAt: '2026-11-06T10:01:00.000Z' })
+    service.syncProgress()
+    expect(store.claimOutbox('2026-11-06T10:10:00.000Z', 50).filter(item => item.text.includes('仍在改'))).toHaveLength(1)
+
+    service.onWorkerState({ ...base, turn: 2, summary: '仍在改', updatedAt: '2026-11-06T10:02:00.000Z' })
+    service.syncProgress()
+    expect(store.claimOutbox('2026-11-06T10:10:00.000Z', 50).filter(item => item.text.includes('仍在改'))).toHaveLength(0)
+  })
+
+  it('ready 回复不进进展摘要，仍立即发送', async () => {
+    engine.ingest(makeTrigger())
+    await service.runOnce()
+    const ticket = store.listTickets()[0]!
+    const assignment = store.latestAssignment(ticket.id)!
+
+    service.onWorkerState({
+      ticketId: ticket.id, assignmentId: assignment.id, turn: 1, state: 'ready',
+      summary: '完成', prNumber: 0, prUrl: '', ackedInputs: [], reply: '最终交付内容',
+      updatedAt: '2026-11-06T10:05:00.000Z',
+    })
+    service.syncProgress()
+
+    const texts = store.claimOutbox('2026-11-06T10:10:00.000Z', 50).map(item => item.text)
+    expect(texts.some(text => text.includes('最终交付内容'))).toBe(true)
+    expect(texts.some(text => text.includes('工单「测试工单」进展'))).toBe(false)
   })
 })

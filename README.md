@@ -84,6 +84,10 @@ policy:
   acceptMode: auto     # off / observe / auto
   maxWorkers: 4
 
+progress:
+  # 工单进展定时轮询：把这段时间内的 progress 上报合并成一条消息同步到话题
+  syncMs: 60000        # 毫秒；0 = 关闭（progress 上报不再同步到话题）
+
 workerSpec:
   mode: prompt         # prompt | agent
 
@@ -232,6 +236,7 @@ Router 不做对话，只在必要时说话：
 | `acceptMode: off` 的推断候选 | 固定说明「暂不自动开工」 |
 | worker 卡住 / 有结果 / PR 合并关闭 | 一律作为**话题回复**同步到原消息下 |
 | worker 交付结论 | 以**飞书卡片**渲染 `--reply` 的 Markdown 回话题；有文档/PR 链接一并展示 |
+| worker 进展（`--state progress`） | **不逐条发送**：Router 按 `progress.syncMs` 定时轮询，把多条进展合并成一条话题消息（追问的回答除外） |
 
 - 显式请求也会过一次研判（`conversation.md` / `admission.md` 提示词），不是命中名单就无脑开工；
 - 明显寒暄走规则短路，不再额外调用模型；
@@ -240,6 +245,10 @@ Router 不做对话，只在必要时说话：
 - 回复发出后自动撤销该表情（`feishu:unreact-failed` 是撤销失败的日志）；`ra config set feishu.reaction ""` 可关闭。
 - 全部 emoji_type 见飞书文档「表情文案」，注意**大小写敏感**（`Typing` 不是 `TYPING`）。
 - 出站统一用飞书**互动卡片**渲染 Markdown；卡片失败自动降级为 post 富文本。分流规则：`threadId` 为空 = 普通消息，有值 = 话题回复。
+- 工单进展（`--state progress`）走**定时轮询 + 合并同步**：Router 每 `progress.syncMs`（默认 60 秒）扫描一次未同步的进展，
+  合并成一条消息发到工单话题；内容完全相同的进展只发一次。ready / blocked 等终态仍即时发送，
+  带 `--ack` 的追问回答也即时发送；这两种情况都会先把尚未同步的进展补发掉，保证话题里「进展 → 完成」的顺序。
+  `ra config set progress.syncMs 0` 可关闭。
 
 ### 日志能追到哪一步
 
@@ -255,6 +264,7 @@ Router 不做对话，只在必要时说话：
 | `input:queued` | Engine | `ticketId` `seq` `text` | Router 准备发给 worker 的内容 |
 | `input:delivered` | Service | `ticketId` `count` `text` | 实际投递进 worker 终端 |
 | `report` | Service | `ticketId` `state` `turn` `summary` `reply` `humanAction` `pr` | worker 的 `ra report` 上报 |
+| `progress:synced` / `progress:dedup` | Service | `ticketId` `count` / `skipped` | 进展定时合并同步，或内容重复被跳过 |
 | `outbox:sent` / `outbox:failed` | Outbox | `key` `text` / `error` | 对外通知结果 |
 | `api:input` / `api:stop` / `api:policy` | HTTP API | — | 面板/CLI 的操作 |
 | `idle:nudge` / `idle:stale` | Service | — | 空闲唤醒与失联标记 |
@@ -282,7 +292,7 @@ worker 终端里的原始输出**不进日志**（避免解析 TUI 文本）；�
 | `ra tickets [--stage]` | 列出工单 |
 | `ra ticket <id>` | 工单详情（状态 / 派工 / 上报 / 输入） |
 | `ra logs` | 最近 50 行日志 |
-| `ra config` | 查看配置；`config set <key> <value>` 改单项（含 `project.<名>` / `chatBinding.<群>`）；`config --edit` 编辑全文 |
+| `ra config` | 查看配置；`config set <key> <value>` 改单项（含 `project.<名>` / `chatBinding.<群>` / `progress.syncMs`）；`config --edit` 编辑全文 |
 
 全局选项 `--home <dir>` 可切换状态目录（测试与多实例用）。
 
@@ -323,6 +333,8 @@ ra report \
 - Router **只发送 `--reply` 原文**，不判断形态、不改写：里面有 PR 链接就是 PR，有文档链接就是文档。
 - 需要长文档时，worker 自己执行 `ra doc --title "…" --content @answer.md`，拿到链接后写进 `--reply`。
 - 追问以 `【Router 输入 in_xxx】` 前缀投递；worker 用 `--ack in_xxx` 确认，否则会被反复重投。
+- `--state progress` 的 `--reply` / `--summary` 默认不即时发送：Router 按 `progress.syncMs` 定时合并后同步到话题，
+  同一内容只发一次；带 `--ack` 的追问回答，以及 ready / blocked / failed 等终态仍即时发送。
 - Router 每轮按文件变化增量读取（`state.json` 兜底通道），成功后调 `Engine.report()`。
 - 终端长时间无输出 → 主动发 `status?`；仍无响应 → 标记 stale 并通知人。
 - 审计事件追加到同目录 `events.log`。
