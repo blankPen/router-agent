@@ -350,7 +350,7 @@
       <div class="dot">9</div>
       <div class="card c-feishu">
         <div class="step-head"><span class="step-title">开话题并确认开单</span><span class="tag t-feishu">飞书</span></div>
-        <p>只发一条<b>话题回复</b>：「好的，我帮你创建了工单「标题」（id）。执行进展会在这个话题里更新。」。
+        <p>只发一条<b>话题回复</b>：「工单「标题」（id）已开始执行。后续进展会在这个话题里更新。」，不再回「我帮你创建了工单」之类的普通消息 ack。
            outbox 用幂等 key，同一个 key 不会发两次。</p>
         <p>发出侧按 <code>threadId</code> 是否为空分流：空 → <code>im +messages-send</code>；有值 → <code>im +messages-reply --reply-in-thread</code>。</p>
         <span class="ref"><b>src/router/agent-loop.ts</b> · reply() · <b>src/service.ts</b> · createEffectsSender()</span>

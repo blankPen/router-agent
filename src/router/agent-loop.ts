@@ -59,7 +59,7 @@ export interface TickResult {
 const REPLY_ONLY_TEXT = '这条消息我收到了，但当前策略暂不自动开工（acceptMode=off），所以我没有派工。如果需要我做，请直接 @我并说明要改什么。'
 const SMALL_TALK_FALLBACK = '收到。我还没看出具体要做什么，能说一下要改哪个模块、期望的结果吗？'
 const MEDIA_ONLY_TEXT = '收到附件了，但我看不到图片/文件里的内容。请用文字说一下要改什么，或者把关键信息贴成文字。'
-const THREAD_INTRO = (title: string, id: string) => `好的，我帮你创建了工单「${title}」（${id}）。执行进展会在这个话题里更新。`
+const THREAD_INTRO = (title: string, id: string) => `工单「${title}」已开始执行（${id}）。后续进展会在这个话题里更新。`
 
 /** 显式 @ 也可能是寒暄/测试；只匹配纯寒暄，不误伤简短需求（如「修个 bug」）。 */
 export function isSmallTalk(text: string): boolean {

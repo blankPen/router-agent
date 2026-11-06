@@ -179,8 +179,8 @@ describe('Router 常驻 Agent Loop', () => {
     expect(thread.key).toMatch(/^thread:/)
     expect(thread.threadId).toBe('om_1')
     expect(thread.originMessageId).toBe('om_1')
-    expect(thread.text).toContain('我帮你创建了工单')
-    expect(thread.text).toContain('执行进展会在这个话题里更新')
+    expect(thread.text).toContain('已开始执行')
+    expect(thread.text).toContain('后续进展会在这个话题里更新')
   })
 
   it('推断候选通过工具调用接单，强度仍是 inferred', async () => {
@@ -234,7 +234,7 @@ describe('Router 常驻 Agent Loop', () => {
     const outbox = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)
     expect(outbox).toHaveLength(1)
     expect(outbox[0]?.key).toMatch(/^thread:/)
-    expect(outbox[0]?.text).toContain('我帮你创建了工单')
+    expect(outbox[0]?.text).toContain('已开始执行')
     expect(outbox[0]?.threadId).toBe('om_1')
   })
 
