@@ -148,7 +148,7 @@ export class Engine {
     }
 
     const ticket: Ticket = {
-      id: this.ids.next('tk'),
+      id: formatTicketId(this.store.nextTicketSeq()),
       title: input.title?.trim() || deriveTitle(trigger.text),
       threadId: trigger.threadId,
       source: trigger.source,
@@ -384,4 +384,12 @@ export function deriveTitle(text: string): string {
   const line = text.trim().split('\n')[0]?.trim() ?? ''
   if (!line) return '未命名工单'
   return line.length > 40 ? `${line.slice(0, 40)}…` : line
+}
+
+/**
+ * 工单编号：`tk-1`、`tk-2`……全局自增，方便在飞书与终端里直接引用。
+ * 旧工单是 `tk_<uuid>`，与短编号不会冲突。
+ */
+export function formatTicketId(seq: number): string {
+  return `tk-${seq}`
 }

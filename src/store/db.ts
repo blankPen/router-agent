@@ -242,6 +242,11 @@ CREATE TABLE IF NOT EXISTS cursors (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS counters (
+  key TEXT PRIMARY KEY,
+  value INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS effects (
   id TEXT PRIMARY KEY,
   key TEXT NOT NULL UNIQUE,
@@ -638,6 +643,20 @@ export class Store {
   setCursor(key: string, value: string, at: string): void {
     this.db.prepare('INSERT INTO cursors (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at')
       .run(key, value, at)
+  }
+
+  // ---------- 自增计数器 ----------
+
+  /** 原子自增并返回新值；进程重启后从上次的值继续。 */
+  nextCounter(key: string): number {
+    const row = this.db.prepare('INSERT INTO counters (key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = counters.value + 1 RETURNING value')
+      .get(key) as Row
+    return Number(row.value)
+  }
+
+  /** 工单编号：全局自增，重启后不回退。 */
+  nextTicketSeq(): number {
+    return this.nextCounter('ticket')
   }
 
   /**

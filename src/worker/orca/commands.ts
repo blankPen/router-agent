@@ -14,6 +14,8 @@ export interface CreateOptions {
   prompt: string
   /** worktree 的起始分支；不传则用仓库默认分支。 */
   baseBranch?: string
+  /** 新 worktree 的 git 分支名（绕过 Orca 配置的用户前缀），用于语义化命名。 */
+  branch?: string
 }
 
 export function worktreeCreate(opts: CreateOptions): string[] {
@@ -22,6 +24,7 @@ export function worktreeCreate(opts: CreateOptions): string[] {
     '--repo', repoSelector(opts.repo),
     '--name', opts.name,
     ...(opts.baseBranch ? ['--base-branch', opts.baseBranch] : []),
+    ...(opts.branch ? ['--branch', opts.branch] : []),
     '--agent', 'claude',
     // 必须是终端 surface：chat 会话不在 terminal list 里，send/close/inspect 都用不了。
     '--surface', 'terminal',
