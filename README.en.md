@@ -140,14 +140,14 @@ Triage is a `DecisionEngine` port, and **Pi is the only implementation**. AgentL
 
 | Channel | Description |
 |-|-|
-| Triage | Pi `createAgentSession`, in-memory session, Router system prompt only; tool allowlist `router_read / router_ticket / router_decide` |
+| Triage | Pi `createAgentSession`, in-memory session, Router system prompt only; tool allowlist `router_read / router_ticket / router_ticket_list / router_ticket_progress / router_ticket_close / router_workspace_remove / router_decide` |
 | Reply | The same Pi engine with zero tools, generating one polite sentence for greetings / follow-up questions; falls back to fixed copy on failure |
 
 Five constraints:
 
 1. **Gate before Pi**: Pi only sees candidates that already passed the deterministic gate; admission is never delegated to a model.
 2. **Tool allowlist**: no shell / files / MCP / general skills.
-3. **Tools never write state**: `router_decide` only produces a `DecisionProposal`; AgentLoop calls `Engine.decide()` uniformly.
+3. **Bounded writes**: query tools are read-only; cleanup tools close tickets through `Engine` and enqueue workspace reclamation in `Effects` (the service still stops terminals and removes worktrees), and only for allowlisted users who explicitly mention or DM the bot. `router_decide` only produces a `DecisionProposal`; AgentLoop calls `Engine.decide()` uniformly.
 4. **Timeout and budget**: 60s and 32k tokens per call; timeout or budget overrun lands as `unavailable` and never blocks `runCycle`.
 5. **Audit and replay**: `~/.router-agent/logs/decisions.jsonl` records prompts, tool sequences, proposals, latency and tokens.
 

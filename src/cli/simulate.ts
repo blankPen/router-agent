@@ -36,15 +36,15 @@ export async function simulate(
   deps: {
     home: string
     config: AppConfig
-    /** 引擎可以直接给，也可以按本次的内存库现建（Pi 的 toolbox 需要绑定同一个 Store）。 */
-    decisionEngine: DecisionEngine | ((store: Store) => DecisionEngine)
+    /** 引擎可以直接给，也可以按本次的内存库现建（Pi 的 toolbox 需要绑定同一个 Store / Engine）。 */
+    decisionEngine: DecisionEngine | ((store: Store, engine: Engine) => DecisionEngine)
   },
   opts: SimulateOptions,
 ): Promise<SimulateResult> {
   const store = new Store(opts.dryRun ? ':memory:' : join(deps.home, 'state.db'))
   try {
     const engine = new Engine({ store, policy: policyOf(deps.config) })
-    const decisionEngine = typeof deps.decisionEngine === 'function' ? deps.decisionEngine(store) : deps.decisionEngine
+    const decisionEngine = typeof deps.decisionEngine === 'function' ? deps.decisionEngine(store, engine) : deps.decisionEngine
     const audits: DecisionAudit[] = []
     const loop = new AgentLoop({
       engine,

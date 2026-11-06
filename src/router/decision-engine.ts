@@ -27,6 +27,12 @@ export interface DecisionRequest {
   strength: Strength
   systemPrompt: string
   userPrompt: string
+  /**
+   * 是否允许调用写工具（关单 / 回收 workspace）。
+   * 由 AgentLoop 按 Gate 的准入结果给出：发送人在名单内，且是 @ 或私聊。
+   * 缺省为 false，保证嵌入用法不会意外获得写权限。
+   */
+  canMutate?: boolean
 }
 
 /** 一次礼貌回复的输入。 */
@@ -68,6 +74,12 @@ export interface DecisionAudit {
 export interface DecisionEngineResult {
   proposal?: DecisionProposal
   unavailableReason?: string
+  /**
+   * 研判过程中直接面向用户的一句话。
+   * 查询/清理类工具执行完后，Pi 的最终 assistant 文本放在这里，AgentLoop 原样发出去，
+   * 不再额外消耗一次回复模型调用。
+   */
+  reply?: string
   audit: DecisionAudit
 }
 

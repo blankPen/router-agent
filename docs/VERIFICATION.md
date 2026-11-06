@@ -166,10 +166,11 @@ ra stop && ra start
 
 研判层保留 `DecisionEngine` 端口，**Pi 是唯一实现**：
 
-- `assess()`：Pi session + 三个只读/提案工具（`router_read / router_ticket / router_decide`）；
+- `assess()`：Pi session + 读 / 查 / 清理 / 提案工具（`router_read / router_ticket / router_ticket_list / router_ticket_progress / router_ticket_close / router_workspace_remove / router_decide`）；
 - `reply()`：同一个 Pi 引擎、零工具，生成寒暄 / 追问的礼貌回复；
 - 删除自研 `CustomDecisionEngine`、`OpenAiCompatClient`、影子模式、`decision_shadows` 表与 `/api/decisions/shadow`；
 - `router_decide` 只产出 proposal，`Engine.decide()` 仍由 AgentLoop 统一调用；
+- 关单走 `Engine.closeTicket/stopTicket`，workspace 回收只排 `Effects`；写工具只对准入名单内、明确 @ 或私聊的用户开放；
 - 两个通道共用 60s 硬超时 + 32k token 预算，超时/超预算落 `unavailable` 或退回固定话术。
 
 ### 5.2 自动化验证
@@ -184,7 +185,8 @@ Tests       334 passed | 5 skipped (339)
 |-|-|
 | `tests/router/pi-decision-engine.test.ts` | 工具白名单、proposal-only、prompt 注入、超时 abort、token 预算、JSON 兜底、reply 零工具、dispose（8） |
 | `tests/router/decision-engine.test.ts` | proposal 解析与非法决定（3） |
-| `tests/router/tool-spec.test.ts` | 只有三个 Pi 工具、TypeBox schema 校验（3） |
+| `tests/router/tool-spec.test.ts` | 读 / 查 / 清理 / 决定工具集、TypeBox schema 校验（4） |
+| `tests/router/tools.test.ts` | 列表 / 进展查询、权限与 PR 保护、关单幂等、workspace 回收排队（9） |
 | `tests/router/agent-loop.test.ts` | Gate / 派工 / 追问 / 扇出 / 回复 / 并发去重（25） |
 | `tests/config.test.ts` | `router.*` 默认值、读取、`config set`、写回（18） |
 | `tests/cli-simulate.test.ts` | 模拟研判 / observe / 寒暄回复 / dry-run（7） |
@@ -221,8 +223,8 @@ RA_PI_VERIFY=1 npx vitest run tests/verify-pi-live.test.ts  → 1 passed
 | 约束 | 实现 |
 |-|-|
 | Gate 在 Pi 之前 | `AgentLoop.handle()` 先 `gate()`，只有通过准入才调用 `assess()` |
-| 工具白名单 | `PiDecisionEngine` 只注册三个 router_* 工具，关闭 Pi 内置工具；回复通道零工具 |
-| 工具不写库 | `RouterToolbox` 只有 read / ticket / propose |
+| 工具白名单 | `PiDecisionEngine` 只注册 Router 自己的 router_* 工具，关闭 Pi 内置工具；回复通道零工具 |
+| 写操作有界 | `RouterToolbox` 的写工具只做两件事：`Engine.closeTicket/stopTicket` 关单、把 workspace 回收排进 `Effects`；权限由 AgentLoop 按名单 + @/私聊判定 |
 | 超时 + 预算 | `router.timeoutMs` / `router.tokenBudget` |
 | 审计与回放 | `DecisionAudit` 统一结构；CLI 写 JSONL |
 

@@ -140,14 +140,14 @@ WorkerBackend 端口 ── OrcaAdapter（默认）── 未来：Codex / Headl
 
 | 通道 | 说明 |
 |-|-|
-| 研判 | Pi `createAgentSession`，in-memory session，只注入 Router system prompt；工具白名单 `router_read / router_ticket / router_decide` |
+| 研判 | Pi `createAgentSession`，in-memory session，只注入 Router system prompt；工具白名单 `router_read / router_ticket / router_ticket_list / router_ticket_progress / router_ticket_close / router_workspace_remove / router_decide` |
 | 回复 | 同一个 Pi 引擎，零工具，生成寒暄 / 追问的一句礼貌回复；失败时退回固定话术 |
 
 五条约束：
 
 1. **Gate 在 Pi 之前**：Pi 只处理已过确定性准入的候选，准入永远不交给模型。
 2. **工具白名单**：不给 shell / 文件 / MCP / 通用 skill。
-3. **工具不写库**：`router_decide` 只产出 `DecisionProposal`，`Engine.decide()` 由 AgentLoop 统一调用。
+3. **写操作有界**：查询工具只读；清理工具只经 `Engine` 关单、把 workspace 回收排进 `Effects`（仍由服务层统一停终端 / 删 worktree），且只对准入名单内、明确 @ 或私聊的用户开放。`router_decide` 只产出 `DecisionProposal`，`Engine.decide()` 由 AgentLoop 统一调用。
 4. **超时与预算**：单次 60s、32k token，超时 / 超预算落 `unavailable`，不会拖住 `runCycle`。
 5. **审计与回放**：`~/.router-agent/logs/decisions.jsonl` 记录 prompt、工具序列、proposal、耗时与 token。
 

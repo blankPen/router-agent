@@ -83,10 +83,10 @@ interface ToolState {
 /**
  * 用 Pi SDK 承担研判与工具循环，也承担寒暄 / 追问的礼貌回复。
  *
- * 守住方案的五个约束：
+ * 守住方案的约束：
  * 1. Gate 在 Pi 之前（AgentLoop 已经过 Gate 才会调用这里）；
- * 2. 工具白名单（router_read / router_ticket / router_decide），回复通道零工具；
- * 3. 工具不写库（router_decide 只产出 proposal）；
+ * 2. 工具白名单（读上下文 / 查工单 / 关单 / 回收 workspace / router_decide），回复通道零工具；
+ * 3. 写操作只走两个口子：Engine 关单、Effects 回收 workspace；router_decide 仍只产出 proposal；
  * 4. 60s 超时 + token 预算，超时按 unavailable 落库；
  * 5. 审计（prompt、工具序列、proposal、耗时、token）。
  */
@@ -138,15 +138,35 @@ export class PiDecisionEngine implements DecisionEngine {
 
     if (outcome.timedOut) return this.finish(audit, { unavailableReason: `pi:timeout(${this.timeoutMs}ms)` })
     if (outcome.overBudget) return this.finish(audit, { unavailableReason: `pi:token-budget(${this.tokenBudget})` })
-    if (state.proposal) return this.finish(audit, { proposal: state.proposal })
+
+    // 查询 / 清理工具执行完后，Pi 的最终文本就是给用户看的答复；
+    // 有决定时一并带回，AgentLoop 不必再调用一次回复模型。
+    const finalText = lastAssistantText(outcome.messages).trim()
+    if (state.proposal) return this.finish(audit, { proposal: state.proposal, ...(finalText ? { reply: finalText } : {}) })
 
     // Pi 没调用工具时的兜底：从最后一条 assistant 文本里提取 JSON 决定。
-    const json = extractJsonObject(lastAssistantText(outcome.messages))
+    const json = extractJsonObject(finalText)
     if (json) {
       const parsed = proposalFromJson(json, req.trigger.id, req.strength)
       if (parsed.kind === 'proposal') return this.finish(audit, { proposal: parsed.proposal })
       return this.finish(audit, { unavailableReason: parsed.reason })
     }
+
+    // 调用过工具并给出了答复：按 ignore 收口，文本原样回给用户。
+    // 工具被拒绝（例如未 @ 的写操作）时同样使用这段文本，避免再说一遍或吞掉解释。
+    if (finalText && state.toolCalls.length > 0) {
+      return this.finish(audit, {
+        proposal: {
+          triggerId: req.trigger.id,
+          decision: 'ignore',
+          strength: req.strength,
+          reason: 'ops:tool-reply',
+          rules: [],
+        },
+        reply: finalText,
+      })
+    }
+
     return this.finish(audit, {
       unavailableReason: outcome.error ? `pi:error:${outcome.error}` : 'pi:no-decision',
     })
@@ -260,9 +280,27 @@ export class PiDecisionEngine implements DecisionEngine {
                 proposal: outcome.proposal,
               })
             }
-            const result = name === 'router_read'
-              ? this.toolbox.read(args)
-              : this.toolbox.ticket(args)
+            const ctx = { canMutate: req.canMutate === true }
+            let result: unknown
+            switch (name) {
+              case 'router_read':
+                result = this.toolbox.read(args)
+                break
+              case 'router_ticket_list':
+                result = this.toolbox.list(args)
+                break
+              case 'router_ticket_progress':
+                result = this.toolbox.progress(args)
+                break
+              case 'router_ticket_close':
+                result = this.toolbox.close(args, ctx)
+                break
+              case 'router_workspace_remove':
+                result = this.toolbox.removeWorkspace(args, ctx)
+                break
+              default:
+                result = this.toolbox.ticket(args)
+            }
             const failed = Boolean(result && typeof result === 'object' && 'error' in (result as Record<string, unknown>))
             state.toolCalls.push({
               name,
@@ -283,11 +321,11 @@ export class PiDecisionEngine implements DecisionEngine {
 
   private finish(
     audit: DecisionAudit,
-    result: { proposal: DecisionProposal } | { unavailableReason: string },
+    result: { proposal: DecisionProposal; reply?: string } | { unavailableReason: string },
   ): DecisionEngineResult {
     if ('proposal' in result) {
       audit.proposal = result.proposal
-      return { proposal: result.proposal, audit }
+      return { proposal: result.proposal, ...(result.reply ? { reply: result.reply } : {}), audit }
     }
     audit.unavailableReason = result.unavailableReason
     return { unavailableReason: result.unavailableReason, audit }
@@ -329,7 +367,7 @@ function lastAssistantText(messages: unknown): string {
  * - AuthStorage / ModelRegistry / SettingsManager 全部 in-memory，不读写用户 ~/.pi；
  * - DefaultResourceLoader 关闭 extensions / skills / prompts / themes / AGENTS.md，
  *   只注入 Router 自己的 system prompt；
- * - 研判只放行三个 router_* 工具；回复通道工具为空。
+ * - 研判只放行 Router 自己的 router_* 工具；回复通道工具为空。
  */
 export async function createDefaultPiSession(opts: PiSessionOptions): Promise<PiSessionLike> {
   mkdirSync(opts.agentDir, { recursive: true })
