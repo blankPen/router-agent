@@ -235,7 +235,7 @@ Router 不做对话，只在必要时说话：
 | 研判没完成（unavailable） | 若在跟它说话，用 LLM 追问一句 |
 | `acceptMode: off` 的推断候选 | 固定说明「暂不自动开工」 |
 | worker 卡住 / 有结果 / PR 合并关闭 | 一律作为**话题回复**同步到原消息下 |
-| worker 交付结论 | 以**飞书卡片**渲染 `--reply` 的 Markdown 回话题；有文档/PR 链接一并展示 |
+| worker 交付结论 | 简单单行回复走**纯文本**；带 Markdown 的以**飞书卡片**渲染（卡片内 Markdown 先归一化）回话题；有文档/PR 链接一并展示 |
 | worker 进展（`--state progress`） | **不逐条发送**：Router 按 `progress.syncMs` 定时轮询，把多条进展合并成一条话题消息（追问的回答除外） |
 
 - 显式请求也会过一次研判（`conversation.md` / `admission.md` 提示词），不是命中名单就无脑开工；
@@ -244,7 +244,8 @@ Router 不做对话，只在必要时说话：
   只对首次入库、且是在跟它说话（@ / 私聊）的消息加；补拉与重放不会重复加；
 - 回复发出后自动撤销该表情（`feishu:unreact-failed` 是撤销失败的日志）；`ra config set feishu.reaction ""` 可关闭。
 - 全部 emoji_type 见飞书文档「表情文案」，注意**大小写敏感**（`Typing` 不是 `TYPING`）。
-- 出站统一用飞书**互动卡片**渲染 Markdown；卡片失败自动降级为 post 富文本。分流规则：`threadId` 为空 = 普通消息，有值 = 话题回复。
+- 出站按内容分流：**单行、≤200 字、不含 Markdown 语法**的回复直接用 `text` 消息；其余用飞书**互动卡片**渲染 Markdown，卡片失败自动降级为 post 富文本。分流规则：`threadId` 为空 = 普通消息，有值 = 话题回复。
+- 卡片内的 Markdown 会先归一化（`normalizeCardMarkdown`），把 Card 1.0 不支持的语法降级掉：`#` 标题 → 加粗行、`>` 引用 → `▍`、表格 → 加粗表头 + 列表行、`- [x]` → ☑/☐、`<br>` → 换行、`![图片](http...)` → 可点击链接；代码块内原样保留。
 - 工单进展（`--state progress`）走**定时轮询 + 合并同步**：Router 每 `progress.syncMs`（默认 60 秒）扫描一次未同步的进展，
   合并成一条消息发到工单话题；内容完全相同的进展只发一次。ready / blocked 等终态仍即时发送，
   带 `--ack` 的追问回答也即时发送；这两种情况都会先把尚未同步的进展补发掉，保证话题里「进展 → 完成」的顺序。

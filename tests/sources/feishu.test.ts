@@ -1,6 +1,6 @@
 import { chatEntry } from '../../src/config.js'
 import { describe, expect, it } from 'vitest'
-import { FeishuSender, feishuCard, feishuCardSendCommand, feishuCreateDocCommand, feishuReactionCommand, fitIdempotencyKey, normalizeFeishuEvent, normalizeFeishuEventDetailed, parseDocumentUrl, type FeishuConfig } from '../../src/sources/feishu.js'
+import { FeishuSender, feishuCard, feishuCardSendCommand, feishuCreateDocCommand, feishuReactionCommand, fitIdempotencyKey, normalizeCardMarkdown, normalizeFeishuEvent, normalizeFeishuEventDetailed, parseDocumentUrl, shouldSendAsText, type FeishuConfig } from '../../src/sources/feishu.js'
 
 const cfg: FeishuConfig = {
   chats: [chatEntry('oc_dev'), chatEntry('oc_other', { mode: 'mention' })],
@@ -178,8 +178,40 @@ describe('飞书文档交付', () => {
 describe('卡片消息', () => {
   it('把 Markdown 包成 interactive 卡片，不再发源码文本', () => {
     const card = JSON.parse(feishuCard('## 标题\n- A\n- B'))
-    expect(card.elements[0]).toEqual({ tag: 'markdown', content: '## 标题\n- A\n- B' })
+    expect(card.elements[0]).toEqual({ tag: 'markdown', content: '**标题**\n- A\n- B' })
     expect(card.config.wide_screen_mode).toBe(true)
+  })
+
+  it('卡片内 Markdown 归一化：标题、引用、表格、任务列表、图片、换行标签', () => {
+    const markdown = [
+      '# 总览',
+      '> 引用一段说明',
+      '| 名称 | 状态 |',
+      '| --- | --- |',
+      '| router | 完成 |',
+      '| worker | 进行中 |',
+      '- [x] 已修完',
+      '- [ ] 待验证',
+      '![架构图](https://example.com/a.png)',
+      '第一行<br>第二行',
+    ].join('\n')
+    const content = normalizeCardMarkdown(markdown)
+    expect(content).toContain('**总览**')
+    expect(content).not.toContain('# 总览')
+    expect(content).toContain('▍引用一段说明')
+    expect(content).toContain('**名称** · **状态**')
+    expect(content).toContain('- router · 完成')
+    expect(content).toContain('- ☑ 已修完')
+    expect(content).toContain('- ☐ 待验证')
+    expect(content).toContain('[架构图](https://example.com/a.png)')
+    expect(content).toContain('第一行\n第二行')
+  })
+
+  it('归一化不碰代码块里的内容，并压缩多余空行', () => {
+    const content = normalizeCardMarkdown('# 标题\n\n\n```bash\n# 这是注释\n| a | b |\n```')
+    expect(content.startsWith('**标题**')).toBe(true)
+    expect(content).toContain('```bash\n# 这是注释\n| a | b |\n```')
+    expect(content).not.toContain('\n\n\n')
   })
 
   it('发送走 --msg-type interactive，正文由 stdin 传入', async () => {
@@ -208,6 +240,24 @@ describe('卡片消息', () => {
     })
     await sender.sendCard('oc_dev', '内容', 'k')
     expect(argvList[1]!.join(' ')).toContain('--markdown')
+  })
+})
+
+describe('消息形态分流', () => {
+  it('单行、无 Markdown、长度可控的回复走纯文本', () => {
+    expect(shouldSendAsText('已帮你创建工单「登录超时」，后续进展会在这个话题里更新。')).toBe(true)
+    expect(shouldSendAsText('PR：https://github.com/o/r/pull/42')).toBe(true)
+    expect(shouldSendAsText('  已改完  ')).toBe(true)
+  })
+
+  it('带 Markdown、多行或超长的回复走卡片', () => {
+    expect(shouldSendAsText('**已改完**，请验证')).toBe(false)
+    expect(shouldSendAsText('- 先改 A\n- 再改 B')).toBe(false)
+    expect(shouldSendAsText('`npm test` 已通过')).toBe(false)
+    expect(shouldSendAsText('[PR](https://github.com/o/r/pull/42) 已开')).toBe(false)
+    expect(shouldSendAsText('## 标题')).toBe(false)
+    expect(shouldSendAsText('一'.repeat(201))).toBe(false)
+    expect(shouldSendAsText('   ')).toBe(false)
   })
 })
 
