@@ -241,8 +241,8 @@ export class OrcaAdapter implements WorkerBackend {
     return (result.worktree ?? result) as Record<string, unknown>
   }
 
-  async removeWorktree(selector: string): Promise<void> {
-    await this.run(worktreeRemove(selector))
+  async removeWorktree(selector: string, opts: { force?: boolean } = {}): Promise<void> {
+    await this.run(worktreeRemove(selector, opts))
   }
 
   async relaunchAgent(worktree: string, prompt: string): Promise<void> {

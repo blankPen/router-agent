@@ -61,6 +61,33 @@ const SMALL_TALK_FALLBACK = '收到。我还没看出具体要做什么，能说
 const MEDIA_ONLY_TEXT = '收到附件了，但我看不到图片/文件里的内容。请用文字说一下要改什么，或者把关键信息贴成文字。'
 const THREAD_INTRO = (title: string, id: string) => `工单「${title}」已开始执行（${id}）。后续进展会在这个话题里更新。`
 
+/** 已关闭话题里，用户明确要求继续的关键词。 */
+const REOPEN_PATTERN = /重新开工|重新开单|重开|继续做|继续干|接着做|接着干|继续|reopen|retry|continue/i
+
+export function isReopenRequest(text: string): boolean {
+  const normalized = text.trim()
+  // 先排除「不用继续 / 别重开」这类否定表达，避免把收尾消息当成重开。
+  if (/不(用|需要|想|必)(继续|重开|重新)|别(继续|重开|重新)|不要(继续|重开|重新)/.test(normalized)) return false
+  return REOPEN_PATTERN.test(normalized)
+}
+
+/** 关闭话题的固定回复；不调用模型，保证每次都是同一套口径。 */
+export function closedThreadText(ticket: Ticket): string {
+  const closedAt = ticket.closedAt ? ticket.closedAt.slice(0, 10) : ''
+  const pr = ticket.prUrl ? `，PR：${ticket.prUrl}` : ''
+  return [
+    `这张工单「${ticket.title}」（${ticket.id}）已于 ${closedAt} 关闭${pr}，后续消息不会自动继续处理。`,
+    '',
+    '如果还需要继续，请回复「重新开工」并说明要补充的内容，我会基于原工单创建一张新工单跟进。',
+    '如果是新需求，请描述完整需求并回复「重新开工」，我会创建一张新工单。',
+  ].join('\n')
+}
+
+/** 已关闭话题里用户先描述的需求：暂存到游标，等「重新开工」时一起带进新工单。 */
+function reopenDraftKey(threadId: string): string {
+  return `reopen:draft:${threadId}`
+}
+
 /** 显式 @ 也可能是寒暄/测试；只匹配纯寒暄，不误伤简短需求（如「修个 bug」）。 */
 export function isSmallTalk(text: string): boolean {
   // 去掉标点与空白后，只由寒暄词组成才算闲聊（容许「你好在吗」这类拼接）。
@@ -136,6 +163,13 @@ export class AgentLoop {
           result.fannedOut += delivered.length
           return
         }
+      }
+
+      // 已关闭工单的话题：确定性回复，不再交给模型，也不自动开单。
+      const closed = this.closedTicketForThread(trigger.threadId)
+      if (closed) {
+        this.handleClosedThread(trigger, closed, result)
+        return
       }
 
       const verdict = gate(trigger, this.engine.policy())
@@ -402,6 +436,92 @@ export class AgentLoop {
       const ticket = this.store.getTicket(sub.ticketId)
       return Boolean(ticket && ticket.stage !== 'closed')
     })
+  }
+
+  /** 该线程是否只对应已关闭工单（没有在办工单）；返回最近关闭的那张。 */
+  private closedTicketForThread(threadId: string): Ticket | null {
+    const subscriptions = this.store.listSubscriptions(threadId)
+    for (let i = subscriptions.length - 1; i >= 0; i -= 1) {
+      const ticket = this.store.getTicket(subscriptions[i]!.ticketId)
+      if (ticket?.stage === 'closed') return ticket
+    }
+    return null
+  }
+
+  /**
+   * 已关闭话题的确定性处理：不研判、不自动开工。
+   * - 普通消息：回复「工单已关闭」并记住内容，供随后的「重新开工」一并作为新工单上下文；
+   * - 明确要求重开：基于原工单的 repo / 起始分支创建一张新工单。
+   */
+  private handleClosedThread(trigger: Trigger, closed: Ticket, result: TickResult): void {
+    if (trigger.isBot) {
+      this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'inferred', reason: 'thread:closed:bot' })
+      result.ignored += 1
+      return
+    }
+
+    const verdict = gate(trigger, this.engine.policy())
+    if (verdict.action === 'ignore') {
+      // 群级白名单外 / 机器人等：关闭话题也不回复，避免绕开准入。
+      this.engine.decide({
+        triggerId: trigger.id,
+        decision: 'ignore',
+        strength: 'inferred',
+        reason: `thread:closed:${verdict.reason}`,
+      })
+      result.ignored += 1
+      return
+    }
+
+    const strength: Strength = verdict.action === 'explicit' ? 'explicit' : 'inferred'
+    const canReopen = verdict.action === 'explicit' || verdict.action === 'infer'
+
+    if (canReopen && isReopenRequest(trigger.text)) {
+      const reopened = this.reopenTicket(trigger, closed, strength)
+      if (reopened) result.accepted.push(reopened)
+      return
+    }
+
+    if (!trigger.mediaOnly && !isSmallTalk(trigger.text)) {
+      // 用户可能是先描述需求、再补一句「重新开工」；把这条原文记下来。
+      this.store.setCursor(reopenDraftKey(trigger.threadId), trigger.text.trim().slice(0, 4000), this.clock.now())
+    }
+    this.reply(trigger, closedThreadText(closed), `closed-thread:${trigger.id}`, { thread: true })
+    this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength, reason: 'thread:closed' })
+    result.replied += 1
+  }
+
+  private reopenTicket(trigger: Trigger, closed: Ticket, strength: Strength): Ticket | null {
+    const draft = this.store.getCursor(reopenDraftKey(trigger.threadId))
+    const task = [draft, trigger.text].map(text => text?.trim() ?? '').filter(Boolean).join('\n\n')
+    const outcome = this.engine.decide({
+      triggerId: trigger.id,
+      decision: 'accept',
+      strength,
+      reason: `thread:reopen:${closed.id}`,
+      title: `续作：${closed.title}`,
+      scope: task || trigger.text,
+      ...(closed.repo ? { repo: closed.repo } : {}),
+      ...(closed.branch ? { branch: closed.branch } : {}),
+    })
+    this.store.deleteCursor(reopenDraftKey(trigger.threadId))
+
+    if (!outcome.ticket) {
+      this.reply(
+        trigger,
+        '收到重新开工的请求，但当前策略没有自动开单。请直接 @我 说明要做什么，我会按新工单处理。',
+        `reopen-blocked:${trigger.id}`,
+        { thread: true },
+      )
+      return null
+    }
+    this.reply(
+      trigger,
+      `已基于原工单 ${closed.id} 创建新工单「${outcome.ticket.title}」（${outcome.ticket.id}），从 ${closed.branch || '默认分支'} 重新开始。`,
+      `reopen:${outcome.ticket.id}`,
+      { thread: true },
+    )
+    return outcome.ticket
   }
 
   private contextPrompt(trigger: Trigger): string {

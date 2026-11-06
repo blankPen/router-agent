@@ -84,6 +84,23 @@ export interface ProgressSettings {
   syncMs: number
 }
 
+/**
+ * 闲置工单治理：长时间没有新进展的工单先提醒，再自动关闭并回收 workspace。
+ * 阈值按小时配置，更贴近日常表述；服务内部换算成毫秒。
+ */
+export interface RetentionSettings {
+  /** 总开关；关闭后不再扫描、不提醒、不自动关单。 */
+  enabled: boolean
+  /** 工单多久没有任何新进展就发一次关单提醒。 */
+  idleHours: number
+  /** 提醒后多久没有回复就自动关闭。 */
+  closeGraceHours: number
+  /** 显示在执行、但多久没有上报/终端输出算僵尸进程。 */
+  zombieHours: number
+  /** 扫描间隔（分钟）。 */
+  sweepMinutes: number
+}
+
 export interface AppConfig {
   home: string
   projects: ProjectConfig[]
@@ -91,6 +108,7 @@ export interface AppConfig {
   policy: PolicySettings
   router: RouterSettings
   progress: ProgressSettings
+  retention: RetentionSettings
   workerSpec: { mode: WorkerSpecMode }
   backend: { default: 'orca' }
   server: { port: number }
@@ -133,6 +151,14 @@ export function defaultConfig(): AppConfig {
       agentDir: '',
     },
     progress: { syncMs: 60_000 },
+    retention: {
+      enabled: true,
+      // 用户口径：1 天没有任何新进展先提醒，提醒后 6 小时没回复自动关闭。
+      idleHours: 24,
+      closeGraceHours: 6,
+      zombieHours: 6,
+      sweepMinutes: 5,
+    },
     workerSpec: { mode: 'prompt' },
     backend: { default: 'orca' },
     server: { port: 3083 },
@@ -167,6 +193,14 @@ router:
 
 progress:
   syncMs: 60000        # 工单进展合并同步间隔（毫秒）；0 = 关闭定时同步
+
+# 闲置工单治理：先提醒，宽限期后自动关闭并回收 workspace
+retention:
+  enabled: true
+  idleHours: 24        # 多久没有新进展就发关单提醒
+  closeGraceHours: 6   # 提醒后多久没回复就自动关闭
+  zombieHours: 6       # 执行中但多久没上报/输出算僵尸
+  sweepMinutes: 5      # 扫描间隔（分钟）
 
 workerSpec:
   mode: prompt         # prompt | agent
@@ -219,6 +253,7 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
   const mode = pickMode(doc.workerSpec?.mode, base.workerSpec.mode)
   const port = Number(doc.server?.port)
   const progressSyncMs = Number(doc.progress?.syncMs)
+  const retentionDoc = doc.retention ?? {}
 
   const admissionDoc = doc.policy?.admission ?? {}
   const admission: AdmissionTable = {
@@ -249,6 +284,13 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
     router: parseRouter(doc.router, base.router),
     progress: {
       syncMs: Number.isInteger(progressSyncMs) && progressSyncMs >= 0 && progressSyncMs <= 3_600_000 ? progressSyncMs : base.progress.syncMs,
+    },
+    retention: {
+      enabled: booleanOr(retentionDoc.enabled, base.retention.enabled),
+      idleHours: positiveNumberOr(retentionDoc.idleHours, base.retention.idleHours, 1, 24 * 365),
+      closeGraceHours: positiveNumberOr(retentionDoc.closeGraceHours, base.retention.closeGraceHours, 1, 24 * 365),
+      zombieHours: positiveNumberOr(retentionDoc.zombieHours, base.retention.zombieHours, 1, 24 * 365),
+      sweepMinutes: positiveNumberOr(retentionDoc.sweepMinutes, base.retention.sweepMinutes, 1, 24 * 60),
     },
     workerSpec: { mode },
     backend: { default: 'orca' },
@@ -311,6 +353,12 @@ function stringOr(value: unknown, fallback: string): string {
 
 function booleanOr(value: unknown, fallback: boolean): boolean {
   return typeof value === 'boolean' ? value : fallback
+}
+
+/** 解析正数阈值：非法值、越界值都退回默认值，避免写错配置把清理时钟调成 0。 */
+function positiveNumberOr(value: unknown, fallback: number, min: number, max: number): number {
+  const n = Number(value)
+  return Number.isFinite(n) && n >= min && n <= max ? n : fallback
 }
 
 function parseProjects(value: unknown): ProjectConfig[] {
@@ -451,6 +499,13 @@ export function writeConfig(home: string, config: AppConfig): void {
       ...(config.router.agentDir ? { agentDir: config.router.agentDir } : {}),
     },
     progress: { syncMs: config.progress.syncMs },
+    retention: {
+      enabled: config.retention.enabled,
+      idleHours: config.retention.idleHours,
+      closeGraceHours: config.retention.closeGraceHours,
+      zombieHours: config.retention.zombieHours,
+      sweepMinutes: config.retention.sweepMinutes,
+    },
     workerSpec: { mode: config.workerSpec.mode },
     backend: { default: config.backend.default },
     projects: config.projects,
@@ -593,6 +648,36 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
       const n = Number(value)
       if (!Number.isInteger(n) || n < 0 || n > 3_600_000) return false
       config.progress.syncMs = n
+      return true
+    }
+    case 'retention.enabled': {
+      const v = bool()
+      if (v === null) return false
+      config.retention.enabled = v
+      return true
+    }
+    case 'retention.idleHours': {
+      const v = int(1, 24 * 365)
+      if (v === null) return false
+      config.retention.idleHours = v
+      return true
+    }
+    case 'retention.closeGraceHours': {
+      const v = int(1, 24 * 365)
+      if (v === null) return false
+      config.retention.closeGraceHours = v
+      return true
+    }
+    case 'retention.zombieHours': {
+      const v = int(1, 24 * 365)
+      if (v === null) return false
+      config.retention.zombieHours = v
+      return true
+    }
+    case 'retention.sweepMinutes': {
+      const v = int(1, 24 * 60)
+      if (v === null) return false
+      config.retention.sweepMinutes = v
       return true
     }
     case 'policy.admission.listedNotAddressed':

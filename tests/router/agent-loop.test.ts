@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Store } from '../../src/store/db.js'
 import { Engine } from '../../src/core/engine.js'
-import { AgentLoop, clarifyFallback, isSmallTalk } from '../../src/router/agent-loop.js'
+import { AgentLoop, clarifyFallback, isReopenRequest, isSmallTalk } from '../../src/router/agent-loop.js'
 import type {
   DecisionEngine,
   DecisionEngineResult,
@@ -526,5 +526,76 @@ describe('群级白名单', () => {
     expect(store.claimOutbox('2026-11-06T10:00:20.000Z', 10)).toHaveLength(0)
     const decision = store.getDecision(store.listTriggers()[0]!.decisionId!)
     expect(decision?.reason).toBe('admission:not-in-chat-allowlist')
+  })
+})
+
+describe('已关闭工单话题', () => {
+  it('重开关键词识别：否定表达不触发', () => {
+    expect(isReopenRequest('重新开工')).toBe(true)
+    expect(isReopenRequest('继续做，把超时改成 60 秒')).toBe(true)
+    expect(isReopenRequest('不用继续了')).toBe(false)
+    expect(isReopenRequest('别重开了')).toBe(false)
+  })
+
+  function seedClosed(engine: Engine): string {
+    engine.ingest(trigger())
+    const outcome = engine.decide({
+      triggerId: 't1',
+      decision: 'accept',
+      strength: 'explicit',
+      reason: 'test',
+      title: '旧工单',
+      scope: '旧范围',
+      repo: 'acme/web',
+      branch: 'main',
+    })
+    const ticket = outcome.ticket!
+    engine.closeTicket(ticket.id, 'idle:test')
+    return ticket.id
+  }
+
+  it('回复固定「工单已关闭」，不调模型、不自动开单', async () => {
+    const { engine, loop, llm, store } = setup([])
+    const closedId = seedClosed(engine)
+
+    engine.ingest(trigger({ id: 't2', externalId: 'om_2', text: '在吗' }))
+    const result = await loop.tick()
+
+    expect(llm.requests).toHaveLength(0)
+    expect(result.accepted).toHaveLength(0)
+    expect(result.replied).toBe(1)
+    expect(store.listTickets()).toHaveLength(1)
+    const outbox = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)
+    const reply = outbox.find(item => item.key.startsWith('closed-thread:'))
+    expect(reply?.text).toContain('已于')
+    expect(reply?.text).toContain('重新开工')
+    expect(reply?.threadId).toBe('om_1')
+    expect(store.getDecision(store.listTriggers().find(t => t.id === 't2')!.decisionId!)?.reason).toBe('thread:closed')
+    expect(closedId).toBe('tk-1')
+  })
+
+  it('回复「重新开工」时基于原工单 repo / 起始分支创建新工单，并带上之前描述的需求', async () => {
+    const { engine, loop, llm, store } = setup([])
+    const closedId = seedClosed(engine)
+
+    engine.ingest(trigger({ id: 't2', externalId: 'om_2', text: '帮我把 README 的端口改成 3081' }))
+    await loop.tick()
+    expect(llm.requests).toHaveLength(0)
+    expect(store.listTickets()).toHaveLength(1)
+
+    engine.ingest(trigger({ id: 't3', externalId: 'om_3', text: '重新开工' }))
+    const result = await loop.tick()
+
+    expect(llm.requests).toHaveLength(0)
+    expect(result.accepted).toHaveLength(1)
+    const tickets = store.listTickets()
+    expect(tickets).toHaveLength(2)
+    const reopened = tickets.find(ticket => ticket.id !== closedId)!
+    expect(reopened.title).toBe('续作：旧工单')
+    expect(reopened.repo).toBe('acme/web')
+    expect(reopened.branch).toBe('main')
+    expect(store.getMandate(reopened.mandateId)?.scope).toContain('3081')
+    const outbox = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)
+    expect(outbox.some(item => item.text.includes(`基于原工单 ${closedId}`))).toBe(true)
   })
 })

@@ -689,6 +689,12 @@ export class Store {
       .map(row => outboxFromRow(row, 0))
   }
 
+  /** 按幂等 key 查外发状态：用于「提醒真的发出去了才自动关单」这类前置判断。 */
+  getOutboxStatus(key: string): string | null {
+    const row = this.db.prepare('SELECT status FROM outbox WHERE key = ?').get(key) as Row | undefined
+    return row ? String(row.status) : null
+  }
+
   claimOutbox(now: string, limit: number): OutboxItem[] {
     const rows = this.db.prepare("SELECT * FROM outbox WHERE status = 'pending' AND next_at <= ? ORDER BY next_at LIMIT ?").all(now, limit) as Row[]
     const stmt = this.db.prepare("UPDATE outbox SET status = 'inflight', attempts = attempts + 1 WHERE id = ?")
