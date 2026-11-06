@@ -1,4 +1,4 @@
-import { closeSync, mkdirSync, existsSync, openSync, readFileSync, readSync, statSync, writeFileSync, unlinkSync } from 'node:fs'
+import { appendFileSync, closeSync, mkdirSync, existsSync, openSync, readFileSync, readSync, statSync, writeFileSync, unlinkSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { spawn } from 'node:child_process'
 import { join, resolve } from 'node:path'
@@ -20,7 +20,9 @@ import { simulate } from './simulate.js'
 import { runReport, readContentArg, type ReportOptions } from './report.js'
 import type { Prompter } from './prompts.js'
 import { realRunner, type CommandRunner } from '../infra/process.js'
-import { OpenAiCompatClient, resolveLlmConfig } from '../router/llm.js'
+import { resolvePiModelConfig } from '../router/model-config.js'
+import { createDecisionEngine } from '../router/engine-factory.js'
+import type { DecisionAudit } from '../router/decision-engine.js'
 import { RouterService, createEffectsSender, type Logger } from '../service.js'
 import { EffectsProcessor } from '../core/effects.js'
 import { createApiServer } from '../router/api.js'
@@ -213,7 +215,7 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
     lark: lark(config.feishu.larkHome),
     llm: () => {
       try {
-        const resolved = resolveLlmConfig({ configPath: join(home, 'config.yaml') })
+        const resolved = resolvePiModelConfig({ configPath: join(home, 'config.yaml') })
         return { ok: true, detail: `${resolved.model} @ ${resolved.baseUrl}` }
       } catch (error) {
         return { ok: false, detail: error instanceof Error ? error.message : String(error) }
@@ -270,16 +272,17 @@ async function cmdSimulate(
 ): Promise<number> {
   ensureHome(home)
   const config = loadConfig(home, output.env as NodeJS.ProcessEnv)
-  let llm
+  let model
   try {
-    llm = new OpenAiCompatClient(resolveLlmConfig({ configPath: join(home, 'config.yaml') }))
+    model = resolvePiModelConfig({ configPath: join(home, 'config.yaml') })
   } catch (error) {
     output.stderr(error instanceof Error ? error.message : String(error))
     return 1
   }
+  const decisionEngine = (store: Store) => createDecisionEngine({ config, store, model })
 
   const result = await simulate(
-    { home, config, llm },
+    { home, config, decisionEngine },
     {
       text: opts.text,
       ...(opts.chat ? { chatId: opts.chat } : {}),
@@ -290,6 +293,9 @@ async function cmdSimulate(
   )
 
   output.stdout(`模拟消息: ${result.trigger.id}  (addressed=${result.trigger.addressed}, actor=${result.trigger.actorId})`)
+  for (const audit of result.audits) {
+    output.stdout(`研判: ${audit.engine}  ${audit.durationMs}ms  tokens=${audit.tokens.total}  tools=${audit.toolCalls.length}${audit.unavailableReason ? `  unavailable=${audit.unavailableReason}` : ''}`)
+  }
   if (!result.decision) {
     output.stdout('没有产生决定（消息被 Source 过滤或仍在等待）')
     return 0
@@ -613,6 +619,9 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     home,
     projects: config.projects.map(project => `${project.name}@${project.defaultBranch || '(未设默认分支)'}`),
     chats: config.feishu.chats.map(chat => `${chat.chat}:${chat.mode}${chat.repo ? `→${chat.repo}@${chat.branch || '?'}` : ''}`),
+    decisionEngine: 'pi',
+    timeoutMs: config.router.timeoutMs,
+    tokenBudget: config.router.tokenBudget,
   })
 
   const store = new Store(join(home, 'state.db'))
@@ -629,7 +638,25 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   })
   const sender = new FeishuSender(larkRunner)
   const prTracker = new GitHubTracker(ghRunner)
-  const llm = new OpenAiCompatClient(resolveLlmConfig({ configPath: join(home, 'config.yaml') }))
+  const model = resolvePiModelConfig({ configPath: join(home, 'config.yaml') })
+  const decisionEngine = createDecisionEngine({ config, store, model })
+  const auditPath = join(home, 'logs', 'decisions.jsonl')
+  const onDecisionAudit = (audit: DecisionAudit): void => {
+    try {
+      appendFileSync(auditPath, `${JSON.stringify({ at: new Date().toISOString(), ...audit })}\n`, 'utf8')
+    } catch (error) {
+      logger.warn('decision:audit-write-failed', { message: error instanceof Error ? error.message : String(error) })
+    }
+    logger.info('decision:audit', {
+      engine: audit.engine,
+      triggerId: audit.triggerId,
+      durationMs: audit.durationMs,
+      tokens: audit.tokens.total,
+      toolCalls: audit.toolCalls.length,
+      ...(audit.proposal ? { decision: audit.proposal.decision, title: audit.proposal.title } : {}),
+      ...(audit.unavailableReason ? { unavailable: audit.unavailableReason } : {}),
+    })
+  }
   const directory = new ChatDirectory(join(home, 'chats.json'))
 
   const reactTo = async (messageId: string): Promise<void> => {
@@ -670,11 +697,12 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     store,
     engine,
     backend,
-    llm,
     prTracker,
     logger,
     effects,
     sender: feishuOutbox,
+    decisionEngine,
+    onDecisionAudit,
     backfill: async () => {
       const result = await backfillChats({
         runner: larkRunner,

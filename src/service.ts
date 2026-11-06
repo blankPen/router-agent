@@ -6,8 +6,8 @@ import type { Store } from './store/db.js'
 import type { AppConfig } from './config.js'
 import type { WorkerBackend, WorkerContext } from './worker/port.js'
 import { AgentLoop } from './router/agent-loop.js'
+import type { DecisionAudit, DecisionEngine } from './router/decision-engine.js'
 import { dispatchSettingsOf } from './router/dispatch.js'
-import type { LlmClient } from './router/llm.js'
 import { ReportPoller, appendEvent, judgeIdle, type WorkerMeta, type WorkerStateFile } from './worker/orca/report-poller.js'
 import { OrcaCommandError, type OrcaTerminalInfo } from './worker/orca/index.js'
 import { EffectsProcessor } from './core/effects.js'
@@ -39,14 +39,16 @@ export interface RouterServiceOptions {
     inspect?: (handle: string) => Promise<unknown | null>
     inspectWorktree?: (selector: string) => Promise<Record<string, unknown> | null>
   }
-  llm: LlmClient
+  /** 唯一研判引擎（Pi）。 */
+  decisionEngine: DecisionEngine
   prTracker: PrTracker
   clock?: Clock
   logger?: Logger
   poller?: { scan(): number; reset?: () => void }
   effects?: EffectsProcessor
   sender?: OutboundSender
-  agentLoopOptions?: { batchWindowMs?: number; maxToolRounds?: number }
+  agentLoopOptions?: { batchWindowMs?: number }
+  onDecisionAudit?: (audit: DecisionAudit) => void
   /** 终端多久没输出算空闲，默认 2 分钟。 */
   idleAfterMs?: number
   /** 唤醒后多久仍无响应算 stale，默认 5 分钟。 */
@@ -173,11 +175,11 @@ export class RouterService {
     this.backfill = opts.backfill
     this.loop = new AgentLoop({
       engine: opts.engine,
-      llm: opts.llm,
+      decisionEngine: opts.decisionEngine,
       clock: this.clock,
       batchWindowMs: opts.agentLoopOptions?.batchWindowMs ?? 8000,
-      maxToolRounds: opts.agentLoopOptions?.maxToolRounds ?? 3,
       dispatch: dispatchSettingsOf(opts.config),
+      ...(opts.onDecisionAudit ? { onAudit: opts.onDecisionAudit } : {}),
     })
     this.poller = opts.poller ?? new ReportPoller({
       workersDir: join(opts.config.home, 'workers'),
@@ -840,7 +842,6 @@ export class RouterService {
 export interface CreateServiceDeps {
   config: AppConfig
   runner: CommandRunner
-  llm: LlmClient
   backend: WorkerBackend & { inspect?: (handle: string) => Promise<unknown | null> }
   prTracker: GhTracker
   sender: FeishuOutbound

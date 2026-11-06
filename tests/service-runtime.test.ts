@@ -9,6 +9,39 @@ import { defaultConfig, policyOf, type AppConfig, chatEntry } from '../src/confi
 import { DEFAULT_ADMISSION } from '../src/core/policy.js'
 import type { WorkerBackend, WorkerContext } from '../src/worker/port.js'
 import type { Trigger } from '../src/core/model.js'
+import type { DecisionEngine } from '../src/router/decision-engine.js'
+
+/** 测试用：所有候选都 accept，回复为空。 */
+function acceptEngine(): DecisionEngine {
+  return {
+    async assess(req) {
+      const proposal = {
+        triggerId: req.trigger.id,
+        decision: 'accept' as const,
+        strength: req.strength,
+        reason: 'test',
+        title: '测试工单',
+        scope: '测试',
+        rules: [],
+      }
+      return {
+        proposal,
+        audit: {
+          engine: 'pi' as const,
+          triggerId: req.trigger.id,
+          durationMs: 1,
+          toolCalls: [],
+          tokens: { input: 0, output: 0, total: 0 },
+          promptChars: { system: 0, user: 0 },
+          proposal,
+        },
+      }
+    },
+    async reply() {
+      return ''
+    },
+  }
+}
 
 class FakeBackend implements WorkerBackend {
   readonly id = 'orca'
@@ -70,7 +103,7 @@ describe('运行时机制', () => {
     backend = new FakeBackend()
     service = new RouterService({
       config, store, engine, backend,
-      llm: { complete: async () => ({ content: '{"decision":"accept","reason":"test","title":"测试工单","scope":"测试"}', toolCalls: [] }) },
+      decisionEngine: acceptEngine(),
       prTracker: new NullPrTracker(),
       clock: { now: () => new Date(now).toISOString() },
       logger: { info: () => {}, warn: () => {}, error: () => {} },
@@ -182,7 +215,7 @@ describe('运行时机制', () => {
   it('启动时执行历史补拉，补回来的消息进入领域', async () => {
     service = new RouterService({
       config, store, engine, backend,
-      llm: { complete: async () => ({ content: '{"decision":"accept","reason":"test","title":"测试工单","scope":"测试"}', toolCalls: [] }) },
+      decisionEngine: acceptEngine(),
       prTracker: new NullPrTracker(),
       clock: { now: () => new Date(now).toISOString() },
       logger: { info: () => {}, warn: () => {}, error: () => {} },

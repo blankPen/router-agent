@@ -8,7 +8,7 @@ import { RouterService } from '../src/service.js'
 import { defaultConfig, policyOf, type AppConfig, chatEntry } from '../src/config.js'
 import { DEFAULT_ADMISSION } from '../src/core/policy.js'
 import type { WorkerBackend, WorkerContext } from '../src/worker/port.js'
-import type { LlmClient } from '../src/router/llm.js'
+import type { DecisionEngine, DecisionEngineResult, DecisionRequest } from '../src/router/decision-engine.js'
 import type { Trigger } from '../src/core/model.js'
 
 class FakeBackend implements WorkerBackend {
@@ -42,6 +42,35 @@ class FakeBackend implements WorkerBackend {
   }
 }
 
+class AcceptEngine implements DecisionEngine {
+  async assess(req: DecisionRequest): Promise<DecisionEngineResult> {
+    const proposal = {
+      triggerId: req.trigger.id,
+      decision: 'accept' as const,
+      strength: req.strength,
+      reason: '测试接单',
+      title: '测试工单',
+      scope: '测试',
+      rules: [],
+    }
+    return {
+      proposal,
+      audit: {
+        engine: 'pi',
+        triggerId: req.trigger.id,
+        durationMs: 1,
+        toolCalls: [],
+        tokens: { input: 0, output: 0, total: 0 },
+        promptChars: { system: 0, user: 0 },
+        proposal,
+      },
+    }
+  }
+  async reply(): Promise<string> {
+    return ''
+  }
+}
+
 /** 第一次派工失败、之后成功的后端，用来验证「失败 → 用户回复 → 重派」闭环。 */
 class FlakyBackend extends FakeBackend {
   failures = 0
@@ -51,15 +80,9 @@ class FlakyBackend extends FakeBackend {
   override async start(ctx: WorkerContext) {
     if (this.failures < this.failTimes) {
       this.failures += 1
-      throw new Error('orca:command-failed(worktree create): exit=1 | code=agent_session_operation_unknown | message=base branch master not found')
+      throw new Error('orca:command-failed(worktree create): exit=1 | code=agent_session_operation_unknown | message:base branch master not found')
     }
     return super.start(ctx)
-  }
-}
-
-class NoopLlm implements LlmClient {
-  async complete() {
-    return { content: '{"decision":"accept","reason":"测试接单","title":"测试工单","scope":"测试"}', toolCalls: [] }
   }
 }
 
@@ -122,7 +145,7 @@ describe('RouterService 编排', () => {
     backend = new FakeBackend()
     prTracker = new FakePrTracker()
     service = new RouterService({
-      config, store, engine, backend, llm: new NoopLlm(), prTracker,
+      config, store, engine, backend, decisionEngine: new AcceptEngine(), prTracker,
       clock: { now: () => '2026-11-06T10:00:10.000Z' },
       logger: {
         info: (message, extra) => logs.push({ level: 'info', message, ...(extra ? { extra } : {}) }),
@@ -178,7 +201,7 @@ describe('RouterService 编排', () => {
   it('派工失败：转人工释放并发、记录完整失败日志并回贴话题', async () => {
     const flaky = new FlakyBackend(99)
     service = new RouterService({
-      config, store, engine, backend: flaky, llm: new NoopLlm(), prTracker,
+      config, store, engine, backend: flaky, decisionEngine: new AcceptEngine(), prTracker,
       clock: { now: () => '2026-11-06T10:00:10.000Z' },
       logger: {
         info: (message, extra) => logs.push({ level: 'info', message, ...(extra ? { extra } : {}) }),
@@ -212,7 +235,7 @@ describe('RouterService 编排', () => {
     engine.updatePolicy(policyOf(config))
     const flaky = new FlakyBackend(1)
     service = new RouterService({
-      config, store, engine, backend: flaky, llm: new NoopLlm(), prTracker,
+      config, store, engine, backend: flaky, decisionEngine: new AcceptEngine(), prTracker,
       clock: { now: () => '2026-11-06T10:00:10.000Z' },
       logger: {
         info: (message, extra) => logs.push({ level: 'info', message, ...(extra ? { extra } : {}) }),
@@ -251,7 +274,7 @@ describe('RouterService 编排', () => {
     engine.updatePolicy(policyOf(config))
     const flaky = new FlakyBackend(1)
     service = new RouterService({
-      config, store, engine, backend: flaky, llm: new NoopLlm(), prTracker,
+      config, store, engine, backend: flaky, decisionEngine: new AcceptEngine(), prTracker,
       clock: { now: () => '2026-11-06T10:00:10.000Z' },
       logger: {
         info: (message, extra) => logs.push({ level: 'info', message, ...(extra ? { extra } : {}) }),
@@ -287,7 +310,7 @@ describe('RouterService 编排', () => {
       error: (message: string, extra?: Record<string, unknown>) => logs.push({ level: 'error', message, ...(extra ? { extra } : {}) }),
     }
     const build = () => new RouterService({
-      config, store, engine, backend: flaky, llm: new NoopLlm(), prTracker,
+      config, store, engine, backend: flaky, decisionEngine: new AcceptEngine(), prTracker,
       clock: { now: () => '2026-11-06T10:00:10.000Z' },
       logger,
       agentLoopOptions: { batchWindowMs: 0 },
@@ -464,7 +487,7 @@ describe('RouterService 编排', () => {
     const assignment = store.latestAssignment(ticket.id)!
     const sender = new FakeSender()
     const svc = new RouterService({
-      config, store, engine, backend, llm: new NoopLlm(), prTracker,
+      config, store, engine, backend, decisionEngine: new AcceptEngine(), prTracker,
       clock: { now: () => '2026-11-06T10:00:10.000Z' },
       logger: { info: () => {}, warn: () => {}, error: () => {} },
       sender,
@@ -491,7 +514,7 @@ describe('RouterService 编排', () => {
     const assignment = store.latestAssignment(ticket.id)!
     const sender = new FakeSender()
     const svc = new RouterService({
-      config, store, engine, backend, llm: new NoopLlm(), prTracker,
+      config, store, engine, backend, decisionEngine: new AcceptEngine(), prTracker,
       clock: { now: () => '2026-11-06T10:00:10.000Z' },
       logger: { info: () => {}, warn: () => {}, error: () => {} },
       sender,
@@ -535,7 +558,7 @@ describe('RouterService 编排', () => {
     const assignment = store.latestAssignment(ticket.id)!
     const sender = new FakeSender()
     const svc = new RouterService({
-      config, store, engine, backend, llm: new NoopLlm(), prTracker,
+      config, store, engine, backend, decisionEngine: new AcceptEngine(), prTracker,
       clock: { now: () => '2026-11-06T10:00:10.000Z' },
       logger: { info: () => {}, warn: () => {}, error: () => {} },
       sender,
@@ -578,7 +601,7 @@ describe('RouterService 编排', () => {
     const assignment = store.latestAssignment(ticket.id)!
     const sender = new FakeSender()
     const svc = new RouterService({
-      config, store, engine, backend, llm: new NoopLlm(), prTracker,
+      config, store, engine, backend, decisionEngine: new AcceptEngine(), prTracker,
       clock: { now: () => '2026-11-06T10:00:10.000Z' },
       logger: { info: () => {}, warn: () => {}, error: () => {} },
       sender,

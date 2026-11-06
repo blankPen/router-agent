@@ -266,3 +266,55 @@ describe('多项目与群绑定配置', () => {
     expect(loaded.feishu.chats).toEqual(cfg.feishu.chats)
   })
 })
+
+describe('Pi 研判层配置', () => {
+  it('默认带 60s 超时与 token 预算', () => {
+    const cfg = loadConfig(home())
+    expect(cfg.router).toMatchObject({
+      timeoutMs: 60_000,
+      tokenBudget: 32_000,
+    })
+  })
+
+  it('读取 router 段，非法值回退默认', () => {
+    const dir = home()
+    ensureHome(dir)
+    const { writeFileSync } = require('node:fs') as typeof import('node:fs')
+    writeFileSync(join(dir, 'config.yaml'), [
+      'router:',
+      '  timeoutMs: 15000',
+      '  tokenBudget: 8000',
+      '  agentDir: /tmp/ra-pi',
+    ].join('\n'))
+    const cfg = loadConfig(dir)
+    expect(cfg.router).toMatchObject({
+      timeoutMs: 15000,
+      tokenBudget: 8000,
+      agentDir: '/tmp/ra-pi',
+    })
+  })
+
+  it('config set 支持 router.*，非法值拒绝', () => {
+    const cfg = defaultConfig()
+    expect(setConfigValue(cfg, 'router.timeoutMs', '30000')).toBe(true)
+    expect(cfg.router.timeoutMs).toBe(30000)
+    expect(setConfigValue(cfg, 'router.tokenBudget', '0')).toBe(true)
+    expect(cfg.router.tokenBudget).toBe(0)
+    expect(setConfigValue(cfg, 'router.agentDir', '/tmp/pi')).toBe(true)
+    expect(cfg.router.agentDir).toBe('/tmp/pi')
+
+    expect(setConfigValue(cfg, 'router.timeoutMs', '10')).toBe(false)
+  })
+
+  it('writeConfig 写回后 router 段仍能读回', () => {
+    const dir = home()
+    const cfg = loadConfig(dir)
+    cfg.router.timeoutMs = 45000
+    cfg.router.tokenBudget = 16000
+    writeConfig(dir, cfg)
+
+    const loaded = loadConfig(dir)
+    expect(loaded.router.timeoutMs).toBe(45000)
+    expect(loaded.router.tokenBudget).toBe(16000)
+  })
+})

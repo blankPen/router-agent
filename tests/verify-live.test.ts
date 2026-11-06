@@ -7,7 +7,9 @@ import type { AddressInfo } from 'node:net'
 import { Store } from '../src/store/db.js'
 import { Engine } from '../src/core/engine.js'
 import { AgentLoop } from '../src/router/agent-loop.js'
-import { OpenAiCompatClient, resolveLlmConfig } from '../src/router/llm.js'
+import { PiDecisionEngine } from '../src/router/pi-decision-engine.js'
+import { resolvePiModelConfig } from '../src/router/model-config.js'
+import { RouterToolbox } from '../src/router/tools.js'
 import { defaultConfig, loadConfig, policyOf, chatEntry } from '../src/config.js'
 import { createApiServer } from '../src/router/api.js'
 import { OrcaAdapter } from '../src/worker/orca/index.js'
@@ -26,8 +28,9 @@ describe.runIf(LIVE)('真实环境验证', () => {
     config.policy = { acceptMode: 'auto', maxWorkers: 2, admission: { listedNotAddressed: 'inferred', unlistedAddressed: 'inferred', unlistedNotAddressed: 'ignore' } }
     config.feishu = { ...config.feishu, chats: [chatEntry('oc_dev')], allowed: ['ou_alice'] }
     const engine = new Engine({ store, policy: policyOf(config) })
-    const llm = new OpenAiCompatClient(resolveLlmConfig({ configPath: join(home, 'config.yaml') }))
-    const loop = new AgentLoop({ engine, llm, batchWindowMs: 0 })
+    const model = resolvePiModelConfig({ configPath: join(home, 'config.yaml') })
+    const decisionEngine = new PiDecisionEngine({ model, toolbox: new RouterToolbox({ store }), agentDir: join(home, 'pi') })
+    const loop = new AgentLoop({ engine, decisionEngine, batchWindowMs: 0 })
 
     const trigger: Trigger = {
       id: 'live_1', source: 'feishu', externalId: 'om_live_1', threadId: 'feishu:oc_dev:om_root',

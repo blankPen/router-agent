@@ -3,9 +3,9 @@ import { Engine } from '../core/engine.js'
 import type { AddressMode, DecisionRecord, SourceKind, Ticket, Trigger } from '../core/model.js'
 import { policyOf, type AppConfig } from '../config.js'
 import { Store } from '../store/db.js'
-import type { LlmClient } from '../router/llm.js'
 import { AgentLoop } from '../router/agent-loop.js'
 import { dispatchSettingsOf } from '../router/dispatch.js'
+import type { DecisionAudit, DecisionEngine } from '../router/decision-engine.js'
 
 export interface SimulateOptions {
   text: string
@@ -24,17 +24,35 @@ export interface SimulateResult {
   ticket?: Ticket
   /** 这一轮排进 Outbox 的回复（ack / 话题开场 / 礼貌回复），便于本地验证话术。 */
   replies: string[]
+  /** 本轮研判审计（含耗时 / token / 工具调用）。 */
+  audits: DecisionAudit[]
 }
 
 /**
  * 不经过飞书消息、也不派工，直接跑一轮 Gate + 研判，
- * 用来验证策略、提示词与模型配置是否正确。
+ * 用来验证策略、提示词、Pi 引擎与模型配置是否正确。
  */
-export async function simulate(deps: { home: string; config: AppConfig; llm: LlmClient }, opts: SimulateOptions): Promise<SimulateResult> {
+export async function simulate(
+  deps: {
+    home: string
+    config: AppConfig
+    /** 引擎可以直接给，也可以按本次的内存库现建（Pi 的 toolbox 需要绑定同一个 Store）。 */
+    decisionEngine: DecisionEngine | ((store: Store) => DecisionEngine)
+  },
+  opts: SimulateOptions,
+): Promise<SimulateResult> {
   const store = new Store(opts.dryRun ? ':memory:' : join(deps.home, 'state.db'))
   try {
     const engine = new Engine({ store, policy: policyOf(deps.config) })
-    const loop = new AgentLoop({ engine, llm: deps.llm, batchWindowMs: 0, dispatch: dispatchSettingsOf(deps.config) })
+    const decisionEngine = typeof deps.decisionEngine === 'function' ? deps.decisionEngine(store) : deps.decisionEngine
+    const audits: DecisionAudit[] = []
+    const loop = new AgentLoop({
+      engine,
+      decisionEngine,
+      batchWindowMs: 0,
+      dispatch: dispatchSettingsOf(deps.config),
+      onAudit: audit => audits.push(audit),
+    })
     const now = new Date()
     const trigger: Trigger = {
       id: `sim_${now.getTime()}`,
@@ -63,7 +81,7 @@ export async function simulate(deps: { home: string; config: AppConfig; llm: Llm
       .filter(item => !beforeOutbox.has(item.id))
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
       .map(item => item.text)
-    return { trigger: stored, decision, replies, ...(ticket ? { ticket } : {}) }
+    return { trigger: stored, decision, replies, audits, ...(ticket ? { ticket } : {}) }
   } finally {
     store.close()
   }

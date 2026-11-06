@@ -51,6 +51,16 @@ export interface PolicySettings {
   admission: AdmissionTable
 }
 
+/** 研判层配置：Pi 的超时、预算与独立配置目录。 */
+export interface RouterSettings {
+  /** 每次研判的硬超时。 */
+  timeoutMs: number
+  /** 单次研判 token 预算；0 表示不限制。 */
+  tokenBudget: number
+  /** Pi 的独立配置目录；空表示 ~/.router-agent/pi。 */
+  agentDir: string
+}
+
 /** 一个可派工的项目。name 是用户/模型口中引用的名字，repo 是交给 Orca 的选择器。 */
 export interface ProjectConfig {
   name: string
@@ -79,6 +89,7 @@ export interface AppConfig {
   projects: ProjectConfig[]
   feishu: FeishuSettings
   policy: PolicySettings
+  router: RouterSettings
   progress: ProgressSettings
   workerSpec: { mode: WorkerSpecMode }
   backend: { default: 'orca' }
@@ -106,6 +117,11 @@ export function defaultConfig(): AppConfig {
       maxWorkers: 4,
       admission: { ...DEFAULT_ADMISSION },
     },
+    router: {
+      timeoutMs: 60_000,
+      tokenBudget: 32_000,
+      agentDir: '',
+    },
     progress: { syncMs: 60_000 },
     workerSpec: { mode: 'prompt' },
     backend: { default: 'orca' },
@@ -132,6 +148,12 @@ feishu:
 policy:
   acceptMode: auto     # off / observe / auto
   maxWorkers: 4
+
+# 研判层：Pi 单引擎；超时、token 预算与独立配置目录
+router:
+  timeoutMs: 60000
+  tokenBudget: 32000
+  agentDir: ""             # Pi 独立配置目录；空=~/.router-agent/pi
 
 progress:
   syncMs: 60000        # 工单进展合并同步间隔（毫秒）；0 = 关闭定时同步
@@ -214,6 +236,7 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
       maxWorkers: Number.isFinite(Number(doc.policy?.maxWorkers)) && Number(doc.policy?.maxWorkers) > 0 ? Number(doc.policy.maxWorkers) : base.policy.maxWorkers,
       admission,
     },
+    router: parseRouter(doc.router, base.router),
     progress: {
       syncMs: Number.isInteger(progressSyncMs) && progressSyncMs >= 0 && progressSyncMs <= 3_600_000 ? progressSyncMs : base.progress.syncMs,
     },
@@ -251,6 +274,17 @@ function pickAcceptMode(value: unknown, fallback: AcceptMode): AcceptMode {
 
 function pickMode(value: unknown, fallback: WorkerSpecMode): WorkerSpecMode {
   return value === 'prompt' || value === 'agent' ? value : fallback
+}
+
+function parseRouter(value: unknown, base: RouterSettings): RouterSettings {
+  const doc = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>
+  const timeoutMs = Number(doc.timeoutMs)
+  const tokenBudget = Number(doc.tokenBudget)
+  return {
+    timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : base.timeoutMs,
+    tokenBudget: Number.isFinite(tokenBudget) && tokenBudget >= 0 ? tokenBudget : base.tokenBudget,
+    agentDir: stringOr(doc.agentDir, base.agentDir),
+  }
 }
 
 function pickAdmission(value: unknown, fallback: string, allowed: string[]): string {
@@ -400,6 +434,11 @@ export function writeConfig(home: string, config: AppConfig): void {
       acceptMode: config.policy.acceptMode,
       maxWorkers: config.policy.maxWorkers,
       admission: config.policy.admission,
+    },
+    router: {
+      timeoutMs: config.router.timeoutMs,
+      tokenBudget: config.router.tokenBudget,
+      ...(config.router.agentDir ? { agentDir: config.router.agentDir } : {}),
     },
     progress: { syncMs: config.progress.syncMs },
     workerSpec: { mode: config.workerSpec.mode },
@@ -561,6 +600,21 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
     case 'workerSpec.mode':
       if (!WORKER_MODES.includes(value)) return false
       config.workerSpec.mode = value as WorkerSpecMode
+      return true
+    case 'router.timeoutMs': {
+      const v = int(1000, 600_000)
+      if (v === null) return false
+      config.router.timeoutMs = v
+      return true
+    }
+    case 'router.tokenBudget': {
+      const v = int(0, 10_000_000)
+      if (v === null) return false
+      config.router.tokenBudget = v
+      return true
+    }
+    case 'router.agentDir':
+      config.router.agentDir = value
       return true
     case 'server.port': {
       const v = int(0, 65535)

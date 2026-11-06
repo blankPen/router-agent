@@ -160,9 +160,76 @@ ra stop && ra start
 3. **绑定的群**（`oc_xxx`）：直接 @bot 派活 → 不追问，直接开单并派工到 `router-agent @ main`。
 4. 反例：@bot 说「用 feature/x 分支改一下」且项目配了 `branches: [main, release]` → 应回复「该分支不在允许范围」，不开单。
 
-## 5. 结论
+## 5. Pi 研判层（2026-11-06 切换为单引擎）
+
+### 5.1 实现
+
+研判层保留 `DecisionEngine` 端口，**Pi 是唯一实现**：
+
+- `assess()`：Pi session + 三个只读/提案工具（`router_read / router_ticket / router_decide`）；
+- `reply()`：同一个 Pi 引擎、零工具，生成寒暄 / 追问的礼貌回复；
+- 删除自研 `CustomDecisionEngine`、`OpenAiCompatClient`、影子模式、`decision_shadows` 表与 `/api/decisions/shadow`；
+- `router_decide` 只产出 proposal，`Engine.decide()` 仍由 AgentLoop 统一调用；
+- 两个通道共用 60s 硬超时 + 32k token 预算，超时/超预算落 `unavailable` 或退回固定话术。
+
+### 5.2 自动化验证
+
+```
+pnpm check
+Test Files  32 passed | 1 skipped (33)
+Tests       334 passed | 5 skipped (339)
+```
+
+| 测试文件 | 覆盖 |
+|-|-|
+| `tests/router/pi-decision-engine.test.ts` | 工具白名单、proposal-only、prompt 注入、超时 abort、token 预算、JSON 兜底、reply 零工具、dispose（8） |
+| `tests/router/decision-engine.test.ts` | proposal 解析与非法决定（3） |
+| `tests/router/tool-spec.test.ts` | 只有三个 Pi 工具、TypeBox schema 校验（3） |
+| `tests/router/agent-loop.test.ts` | Gate / 派工 / 追问 / 扇出 / 回复 / 并发去重（25） |
+| `tests/config.test.ts` | `router.*` 默认值、读取、`config set`、写回（18） |
+| `tests/cli-simulate.test.ts` | 模拟研判 / observe / 寒暄回复 / dry-run（7） |
+| `tests/service*.test.ts` | 派工、上报、PR 闭环、重启对账（24） |
+
+### 5.3 方案第 7 节 Spike 验收对照
+
+| 验收项 | 结果 | 证据 |
+|-|-|-|
+| Pi 在不写库的前提下产出合法 `DecisionProposal` | ✅ | 单元测试断言 `store.listTickets()` 为空；真实运行由 AgentLoop 统一开单 |
+| 工具调用序列可审计 | ✅ | `audit.toolCalls` + `~/.router-agent/logs/decisions.jsonl` |
+| 超时与异常降级为 `unavailable`，不拖垮服务 | ✅ | `pi:timeout` / `pi:token-budget` / `pi:error` / `pi:no-decision` |
+| 研判与回复都只有一条模型通道 | ✅ | `reply()` 复用同一个 Pi 引擎，零工具 |
+| 不直接替换生产 | — | 按用户要求，本轮直接切为 Pi 单引擎 |
+
+### 5.4 真实环境验证
+
+```
+RA_PI_VERIFY=1 npx vitest run tests/verify-pi-live.test.ts  → 1 passed
+```
+
+用 worktree 内构建产物 + 独立临时 home 跑 `ra simulate`（真实 `deepseek-v4-flash`）：
+
+| 场景 | 结果 |
+|-|-|
+| 真实需求（`--infer`） | accept；4085ms；5445 tokens；1 次工具调用；开出工单 |
+| 寒暄（`你好，在吗`） | Pi 生成回复：「在的。想把明确的需求告诉我，比如要改哪个项目、改哪里、期望的结果…」 |
+| 隔离服务 | `ra start` → `/api/status` 正常；`/api/decisions/shadow` 已随影子模式删除，返回 404；`ra stop` 后端口关闭 |
+
+切换前曾用本机最近 20 条真实消息对比旧实现与 Pi：0 次 unavailable，决定一致 19/20（95%），唯一分歧为边界样本；该对比仅作切换依据，旧实现代码已删除。
+
+### 5.5 五个约束的落地位置
+
+| 约束 | 实现 |
+|-|-|
+| Gate 在 Pi 之前 | `AgentLoop.handle()` 先 `gate()`，只有通过准入才调用 `assess()` |
+| 工具白名单 | `PiDecisionEngine` 只注册三个 router_* 工具，关闭 Pi 内置工具；回复通道零工具 |
+| 工具不写库 | `RouterToolbox` 只有 read / ticket / propose |
+| 超时 + 预算 | `router.timeoutMs` / `router.tokenBudget` |
+| 审计与回放 | `DecisionAudit` 统一结构；CLI 写 JSONL |
+
+## 6. 结论
 
 - 领域内核、Router、WorkerBackend、上报协议、飞书 / GitHub Source、HTTP API、Web 面板、CLI 均已实现并有测试覆盖。
+- 研判层已切换为 Pi 单引擎：`assess` 与 `reply` 都走 Pi，工具白名单、proposal-only、超时预算与审计均已落地并有测试。
 - 多项目 / 多分支：开单前强制明确「任务 + 项目 + 起始分支」，缺信息先在会话里追问并落草稿；群级 `chatBindings` 可免问答。
 - 真实 LLM、Orca、lark-cli、HTTP 服务与 CLI 常驻链路均已跑通。
 - 剩余风险集中在「真实飞书群 + 真实 worktree 开工」的外部集成，已在上节给出可直接执行的步骤。
