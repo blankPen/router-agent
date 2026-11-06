@@ -78,12 +78,19 @@ export interface ChatBinding {
   branch: string
 }
 
+/** 工单进展的定时同步策略。 */
+export interface ProgressSettings {
+  /** 轮询间隔（毫秒）：把这段时间内的 progress 上报合并成一条消息同步到话题；0 表示关闭。 */
+  syncMs: number
+}
+
 export interface AppConfig {
   home: string
   projects: ProjectConfig[]
   feishu: FeishuSettings
   policy: PolicySettings
   router: RouterSettings
+  progress: ProgressSettings
   workerSpec: { mode: WorkerSpecMode }
   backend: { default: 'orca' }
   server: { port: number }
@@ -115,6 +122,7 @@ export function defaultConfig(): AppConfig {
       tokenBudget: 32_000,
       agentDir: '',
     },
+    progress: { syncMs: 60_000 },
     workerSpec: { mode: 'prompt' },
     backend: { default: 'orca' },
     server: { port: 3083 },
@@ -146,6 +154,9 @@ router:
   timeoutMs: 60000
   tokenBudget: 32000
   agentDir: ""             # Pi 独立配置目录；空=~/.router-agent/pi
+
+progress:
+  syncMs: 60000        # 工单进展合并同步间隔（毫秒）；0 = 关闭定时同步
 
 workerSpec:
   mode: prompt         # prompt | agent
@@ -197,6 +208,7 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
   const acceptMode = pickAcceptMode(doc.policy?.acceptMode, base.policy.acceptMode)
   const mode = pickMode(doc.workerSpec?.mode, base.workerSpec.mode)
   const port = Number(doc.server?.port)
+  const progressSyncMs = Number(doc.progress?.syncMs)
 
   const admissionDoc = doc.policy?.admission ?? {}
   const admission: AdmissionTable = {
@@ -225,6 +237,9 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
       admission,
     },
     router: parseRouter(doc.router, base.router),
+    progress: {
+      syncMs: Number.isInteger(progressSyncMs) && progressSyncMs >= 0 && progressSyncMs <= 3_600_000 ? progressSyncMs : base.progress.syncMs,
+    },
     workerSpec: { mode },
     backend: { default: 'orca' },
     server: { port: Number.isFinite(port) && port >= 0 && port < 65536 ? port : base.server.port },
@@ -425,6 +440,7 @@ export function writeConfig(home: string, config: AppConfig): void {
       tokenBudget: config.router.tokenBudget,
       ...(config.router.agentDir ? { agentDir: config.router.agentDir } : {}),
     },
+    progress: { syncMs: config.progress.syncMs },
     workerSpec: { mode: config.workerSpec.mode },
     backend: { default: config.backend.default },
     projects: config.projects,
@@ -560,6 +576,13 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
       const v = int(1, 64)
       if (v === null) return false
       config.policy.maxWorkers = v
+      return true
+    }
+    case 'progress.syncMs': {
+      // 0 表示关闭工单进展定时同步
+      const n = Number(value)
+      if (!Number.isInteger(n) || n < 0 || n > 3_600_000) return false
+      config.progress.syncMs = n
       return true
     }
     case 'policy.admission.listedNotAddressed':

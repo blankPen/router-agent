@@ -258,11 +258,128 @@ export function feishuSendCommand(chatId: string, text: string, idempotencyKey: 
   return ['im', '+messages-send', '--chat-id', chatId, '--text', text, '--idempotency-key', idempotencyKey, '--as', 'bot', '--json']
 }
 
+/** 单行且没有 Markdown 语法的短回复，直接用纯文本发送，不必为了几个字开卡片。 */
+const SIMPLE_MESSAGE_MAX = 200
+
+/** 需要 Markdown 渲染的行内语法。 */
+const INLINE_MARKDOWN = [
+  /`[^`\n]+`/, // 行内代码
+  /\*\*[^*\n]+\*\*/, // 加粗
+  /~~[^~\n]+~~/, // 删除线
+  /!\[[^\]\n]*\]\([^)\n]+\)/, // 图片
+  /\[[^\]\n]+\]\([^)\n]+\)/, // 文字链接
+  /<\/?[a-zA-Z][^>\n]*>/, // HTML / 飞书卡片标签
+]
+
+/** 需要 Markdown 渲染的块级语法（按行判断）。 */
+const BLOCK_MARKDOWN = [
+  /^\s{0,3}#{1,6}\s+/, // 标题
+  /^\s{0,3}[-*+]\s+/, // 无序列表 / 任务列表
+  /^\s{0,3}\d+[.)]\s+/, // 有序列表
+  /^\s{0,3}>\s?/, // 引用
+  /^\s*```/, // 代码块
+  /^\s*\|.*\|\s*$/, // 表格行
+]
+
+/**
+ * 简单消息 = 单行、长度可控、完全不含 Markdown。
+ * 这类内容走 text 消息渲染最稳，也避免卡片加载与宽度差异。
+ */
+export function shouldSendAsText(text: string, maxLength = SIMPLE_MESSAGE_MAX): boolean {
+  const trimmed = text.trim()
+  if (!trimmed || trimmed.length > maxLength) return false
+  if (trimmed.includes('\n')) return false
+  return !INLINE_MARKDOWN.some(pattern => pattern.test(trimmed)) && !BLOCK_MARKDOWN.some(pattern => pattern.test(trimmed))
+}
+
+/**
+ * 卡片 markdown 元素（Card 1.0）只支持基础语法：不带标题、引用、表格的渲染，
+ * 这里把不支持的写法降级为卡片能正常显示的形式，避免用户看到 Markdown 源码。
+ */
+export function normalizeCardMarkdown(markdown: string): string {
+  const lines = markdown.replace(/\r\n?/g, '\n').replace(/<!--[\s\S]*?-->/g, '').split('\n')
+  const out: string[] = []
+  let fence: string | null = null
+
+  for (let index = 0; index < lines.length; index += 1) {
+    let line = lines[index]!
+    const fenceMatch = /^\s{0,3}(`{3,}|~{3,})/.exec(line)
+    if (fenceMatch) {
+      if (fence === null) fence = fenceMatch[1]![0]!
+      else if (fenceMatch[1]![0] === fence) fence = null
+      out.push(line)
+      continue
+    }
+    if (fence !== null) {
+      out.push(line)
+      continue
+    }
+
+    // 换行标签与图片语法在卡片里都不成立：<br> 转真换行，图片转可点击链接。
+    line = line.replace(/<br\s*\/?>/gi, '\n')
+    line = line.replace(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g, (_match, alt: string, url: string) =>
+      alt.trim() ? `[${alt.trim()}](${url})` : `[图片](${url})`)
+
+    // 表格：1.0 卡片不渲染表格，降级为「加粗表头 + 列表行」。
+    if (isTableRow(line) && index + 1 < lines.length && isTableDivider(lines[index + 1]!)) {
+      const header = parseTableCells(line)
+      index += 1
+      const rows: string[][] = []
+      while (index + 1 < lines.length && isTableRow(lines[index + 1]!)) {
+        index += 1
+        rows.push(parseTableCells(lines[index]!))
+      }
+      out.push(header.map(cell => `**${cell}**`).join(' · '))
+      for (const row of rows) out.push(`- ${row.join(' · ')}`)
+      continue
+    }
+
+    // 标题：卡片不渲染 #，统一降级成加粗行。
+    const heading = /^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/.exec(line)
+    if (heading) {
+      out.push(`**${heading[1]}**`)
+      continue
+    }
+
+    // 引用：卡片不渲染 >，用竖线前缀保留引用观感。
+    const quote = /^\s{0,3}(?:>\s?)+(.*)$/.exec(line)
+    if (quote) {
+      out.push(`▍${quote[1]}`)
+      continue
+    }
+
+    // 任务列表：卡片不支持 [ ] / [x]，换成勾选框字符。
+    const task = /^(\s*)[-*+]\s+\[([ xX])\]\s+(.*)$/.exec(line)
+    if (task) {
+      out.push(`${task[1]}- ${task[2] === ' ' ? '☐' : '☑'} ${task[3]}`)
+      continue
+    }
+
+    out.push(line)
+  }
+
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+}
+
+function isTableRow(line: string): boolean {
+  return /^\s*\|.*\|\s*$/.test(line)
+}
+
+function isTableDivider(line: string): boolean {
+  return /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)+\|?\s*$/.test(line)
+}
+
+function parseTableCells(line: string): string[] {
+  const inner = line.trim().replace(/^\|/, '').replace(/\|$/, '')
+  return inner.split('|').map(cell => cell.trim())
+}
+
 /** 把 Markdown 包成互动卡片：正文用 card markdown 元素渲染，不再是源码。 */
 export function feishuCard(markdown: string): string {
+  const content = normalizeCardMarkdown(markdown) || markdown.trim()
   return JSON.stringify({
     config: { wide_screen_mode: true },
-    elements: [{ tag: 'markdown', content: markdown }],
+    elements: [{ tag: 'markdown', content }],
   })
 }
 

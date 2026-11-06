@@ -20,7 +20,7 @@ Tests       291 passed | 4 skipped
 | `tests/store/store.test.ts` | SQLite 读写、去重、订阅、队列、游标、mediaOnly、派工草稿、工单 repo/branch（15） |
 | `tests/worker/orca.test.ts` | 命令构造、返回解析、start/deliver/stop/inspect、工单级 repo/branch 与 `--base-branch`（16） |
 | `tests/worker/report-poller.test.ts` | state.json 增量读取、交付物解析、坏文件容错、idle 判定（17） |
-| `tests/sources/feishu.test.ts` | 事件归一化、@ / 私聊、系统消息与卡片丢弃、附件标记、飞书文档创建、互动卡片与降级、幂等 key 长度（24） |
+| `tests/sources/feishu.test.ts` | 事件归一化、@ / 私聊、系统消息与卡片丢弃、附件标记、飞书文档创建、互动卡片与降级、卡片 Markdown 归一化、纯文本/卡片分流、幂等 key 长度（28） |
 | `tests/sources/feishu-backfill.test.ts` | 历史补拉的命令与解析、`--start` 时间窗、首跑基线、游标增量与失败保号（8） |
 | `tests/sources/feishu-directory.test.ts` | 群名目录刷新与持久化（3） |
 | `tests/sources/github.test.ts` | PR 状态归一化、仓库选择器转 gh owner/name（6） |
@@ -28,6 +28,7 @@ Tests       291 passed | 4 skipped
 | `tests/router/dispatch.test.ts` | 多项目/多分支解析：项目匹配、群绑定、草稿继承、白名单校验（11） |
 | `tests/router/api.test.ts` | HTTP API 全端点、`POST /api/reports` 上报入口与旧字段兼容（12） |
 | `tests/service.test.ts` | 派工、并发上限、PR 闭环、停止、重启对账、回复投递、长回复分块、旧上报去重、会话丢失转人工（16） |
+| `tests/service-sender.test.ts` | 出站形态分流：简单消息走纯文本、Markdown 走卡片、非飞书/空正文跳过（5） |
 | `tests/service-runtime.test.ts` | 未 ack 重投、idle 唤醒、stale、Orca linkedPR、补拉（8） |
 | `tests/cli.test.ts` | commander 命令解析：init / tickets / ticket / status / config / help（11） |
 | `tests/cli-init.test.ts` | inquirer 交互初始化：select/checkbox/password、App Secret 走 stdin、新建应用、授权引导（6） |
@@ -175,8 +176,8 @@ ra stop && ra start
 
 ```
 pnpm check
-Test Files  30 passed | 1 skipped (31)
-Tests       307 passed | 5 skipped (312)
+Test Files  32 passed | 1 skipped (33)
+Tests       334 passed | 5 skipped (339)
 ```
 
 | 测试文件 | 覆盖 |

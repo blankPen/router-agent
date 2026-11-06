@@ -71,6 +71,21 @@ class AcceptEngine implements DecisionEngine {
   }
 }
 
+/** 第一次派工失败、之后成功的后端，用来验证「失败 → 用户回复 → 重派」闭环。 */
+class FlakyBackend extends FakeBackend {
+  failures = 0
+  constructor(private readonly failTimes = 1) {
+    super()
+  }
+  override async start(ctx: WorkerContext) {
+    if (this.failures < this.failTimes) {
+      this.failures += 1
+      throw new Error('orca:command-failed(worktree create): exit=1 | code=agent_session_operation_unknown | message:base branch master not found')
+    }
+    return super.start(ctx)
+  }
+}
+
 class FakePrTracker {
   states = new Map<number, 'open' | 'merged' | 'closed'>()
   async view(_repo: string, number: number) {
@@ -115,9 +130,11 @@ describe('RouterService 编排', () => {
   let prTracker: FakePrTracker
   let config: AppConfig
   let service: RouterService
+  let logs: { level: string; message: string; extra?: Record<string, unknown> }[]
 
   beforeEach(() => {
     const home = mkdtempSync(join(tmpdir(), 'ra-svc-'))
+    logs = []
     store = new Store(':memory:')
     config = { ...defaultConfig(), home }
     config.projects = [{ name: 'acme/web', repo: 'acme/web', branches: [], defaultBranch: 'main' }]
@@ -130,7 +147,11 @@ describe('RouterService 编排', () => {
     service = new RouterService({
       config, store, engine, backend, decisionEngine: new AcceptEngine(), prTracker,
       clock: { now: () => '2026-11-06T10:00:10.000Z' },
-      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      logger: {
+        info: (message, extra) => logs.push({ level: 'info', message, ...(extra ? { extra } : {}) }),
+        warn: (message, extra) => logs.push({ level: 'warn', message, ...(extra ? { extra } : {}) }),
+        error: (message, extra) => logs.push({ level: 'error', message, ...(extra ? { extra } : {}) }),
+      },
       agentLoopOptions: { batchWindowMs: 0 },
     })
   })
@@ -175,6 +196,149 @@ describe('RouterService 编排', () => {
     })
     await service.runOnce()
     expect(backend.starts.length).toBe(2)
+  })
+
+  it('派工失败：转人工释放并发、记录完整失败日志并回贴话题', async () => {
+    const flaky = new FlakyBackend(99)
+    service = new RouterService({
+      config, store, engine, backend: flaky, decisionEngine: new AcceptEngine(), prTracker,
+      clock: { now: () => '2026-11-06T10:00:10.000Z' },
+      logger: {
+        info: (message, extra) => logs.push({ level: 'info', message, ...(extra ? { extra } : {}) }),
+        warn: (message, extra) => logs.push({ level: 'warn', message, ...(extra ? { extra } : {}) }),
+        error: (message, extra) => logs.push({ level: 'error', message, ...(extra ? { extra } : {}) }),
+      },
+      agentLoopOptions: { batchWindowMs: 0 },
+    })
+    engine.ingest(makeTrigger())
+    await service.runOnce()
+
+    const ticket = store.listTickets()[0]!
+    expect(store.latestAssignment(ticket.id)?.status).toBe('ended')
+    expect(store.getTicket(ticket.id)?.stage).toBe('person')
+    expect(store.getAttention(ticket.id)?.question).toContain('执行环境创建失败')
+
+    // 失败必须留下可诊断的日志，而不是只有 code=1
+    const entry = logs.find(item => item.message === 'launch:failed')
+    expect(entry).toBeDefined()
+    expect(entry?.extra).toMatchObject({ repo: 'acme/web', branch: 'main', attempt: 1 })
+    expect(String(entry?.extra?.reason)).toContain('base branch master not found')
+
+    const outbox = store.claimOutbox('2026-11-06T10:10:00.000Z', 20)
+    const notice = outbox.find(item => item.text.includes('执行环境创建失败'))
+    expect(notice?.text).toContain('起始分支：main')
+    expect(notice?.text).toContain('回复任意内容')
+  })
+
+  it('派工失败不会永久占用并发，后续工单能正常派出去', async () => {
+    config.policy.maxWorkers = 1
+    engine.updatePolicy(policyOf(config))
+    const flaky = new FlakyBackend(1)
+    service = new RouterService({
+      config, store, engine, backend: flaky, decisionEngine: new AcceptEngine(), prTracker,
+      clock: { now: () => '2026-11-06T10:00:10.000Z' },
+      logger: {
+        info: (message, extra) => logs.push({ level: 'info', message, ...(extra ? { extra } : {}) }),
+        warn: (message, extra) => logs.push({ level: 'warn', message, ...(extra ? { extra } : {}) }),
+        error: (message, extra) => logs.push({ level: 'error', message, ...(extra ? { extra } : {}) }),
+      },
+      agentLoopOptions: { batchWindowMs: 0 },
+    })
+    engine.ingest(makeTrigger({ id: 't1', externalId: 'e1' }))
+    engine.ingest(makeTrigger({ id: 't2', externalId: 'e2', threadId: 'feishu:oc_dev:om_root2', text: '再修一个分页 bug' }))
+
+    await service.runOnce()
+
+    // 第一张失败后阶段回落，额度立刻释放给第二张
+    expect(flaky.starts).toHaveLength(1)
+    expect(store.listTickets().filter(ticket => ticket.stage === 'assigned')).toHaveLength(1)
+    expect(store.listTickets().filter(ticket => ticket.stage === 'person')).toHaveLength(1)
+  })
+
+  it('并发已满时记录排队日志并回贴排队提示，而不是静默跳过', async () => {
+    config.policy.maxWorkers = 1
+    engine.updatePolicy(policyOf(config))
+    engine.ingest(makeTrigger({ id: 't1', externalId: 'e1' }))
+    engine.ingest(makeTrigger({ id: 't2', externalId: 'e2', threadId: 'feishu:oc_dev:om_root2', text: '再修一个分页 bug' }))
+
+    await service.runOnce()
+
+    expect(backend.starts).toHaveLength(1)
+    expect(logs.some(entry => entry.message === 'launch:queued')).toBe(true)
+    const outbox = store.claimOutbox('2026-11-06T10:10:00.000Z', 20)
+    expect(outbox.some(item => item.text.includes('已排队'))).toBe(true)
+  })
+
+  it('派工失败后，用户回复会重新派工；没有新输入时不会反复重试', async () => {
+    config.policy.maxWorkers = 1
+    engine.updatePolicy(policyOf(config))
+    const flaky = new FlakyBackend(1)
+    service = new RouterService({
+      config, store, engine, backend: flaky, decisionEngine: new AcceptEngine(), prTracker,
+      clock: { now: () => '2026-11-06T10:00:10.000Z' },
+      logger: {
+        info: (message, extra) => logs.push({ level: 'info', message, ...(extra ? { extra } : {}) }),
+        warn: (message, extra) => logs.push({ level: 'warn', message, ...(extra ? { extra } : {}) }),
+        error: (message, extra) => logs.push({ level: 'error', message, ...(extra ? { extra } : {}) }),
+      },
+      agentLoopOptions: { batchWindowMs: 0 },
+    })
+    engine.ingest(makeTrigger())
+    await service.runOnce()
+    const ticket = store.listTickets()[0]!
+    expect(store.getTicket(ticket.id)?.stage).toBe('person')
+
+    // 没有新输入：连续多轮也不能重试（否则每秒打一次 Orca）
+    await service.runOnce()
+    await service.runOnce()
+    expect(flaky.failures).toBe(1)
+
+    // 用户回复 = 重试信号，修好配置后能重新拉起 worker
+    engine.deliverInput(ticket.id, { kind: 'followup', text: '分支改成 main 了，再试一次' })
+    await service.runOnce()
+    expect(flaky.starts).toHaveLength(1)
+    expect(store.getTicket(ticket.id)?.stage).toBe('assigned')
+  })
+
+  it('服务重启后，失败前积压的旧输入不会再触发重试（水位持久化）', async () => {
+    config.policy.maxWorkers = 1
+    engine.updatePolicy(policyOf(config))
+    const flaky = new FlakyBackend(99)
+    const logger = {
+      info: (message: string, extra?: Record<string, unknown>) => logs.push({ level: 'info', message, ...(extra ? { extra } : {}) }),
+      warn: (message: string, extra?: Record<string, unknown>) => logs.push({ level: 'warn', message, ...(extra ? { extra } : {}) }),
+      error: (message: string, extra?: Record<string, unknown>) => logs.push({ level: 'error', message, ...(extra ? { extra } : {}) }),
+    }
+    const build = () => new RouterService({
+      config, store, engine, backend: flaky, decisionEngine: new AcceptEngine(), prTracker,
+      clock: { now: () => '2026-11-06T10:00:10.000Z' },
+      logger,
+      agentLoopOptions: { batchWindowMs: 0 },
+    })
+
+    engine.ingest(makeTrigger())
+    service = build()
+    await service.runOnce()
+    const ticket = store.listTickets()[0]!
+
+    // 用户在两次尝试之间回复过：这条输入会随下一次失败一起被记为「已经试过」
+    engine.deliverInput(ticket.id, { kind: 'followup', text: '？' })
+    await service.runOnce()
+    expect(flaky.failures).toBe(2)
+    expect(store.getTicket(ticket.id)?.stage).toBe('person')
+
+    // 模拟重启：内存里的失败记录清空，水位必须从 cursors 恢复，旧输入不能再触发派工
+    service = build()
+    await service.runOnce()
+    await service.runOnce()
+    expect(flaky.failures).toBe(2)
+
+    // 只有真正新到的输入才能再触发一次派工；尝试次数也应跨重启累计
+    engine.deliverInput(ticket.id, { kind: 'followup', text: '分支修好了，再试一次' })
+    await service.runOnce()
+    expect(flaky.failures).toBe(3)
+    const lastFailure = logs.filter(entry => entry.message === 'launch:failed').at(-1)
+    expect(lastFailure?.extra?.attempt).toBe(3)
   })
 
   it('worker 上报 ready 时进入 review 并安排 PR 跟踪', async () => {
@@ -448,8 +612,66 @@ describe('RouterService 编排', () => {
       reply: '先改 A，因为 A 影响面最大。',
       updatedAt: '2026-11-06T10:03:00.000Z',
     })
+    // 追问的回答用户正在等：progress 也立即发送，且后续轮询不会再重复发送。
+    svc.syncProgress()
 
     const text = store.claimOutbox('2026-11-06T10:10:00.000Z', 20).map(item => item.text).join('\n')
-    expect(text).toContain('先改 A')
+    expect(text.match(/先改 A/g)).toHaveLength(1)
+  })
+
+  it('progress 上报不逐条发送，轮询时合并成一条进展消息', async () => {
+    engine.ingest(makeTrigger())
+    await service.runOnce()
+    const ticket = store.listTickets()[0]!
+    const assignment = store.latestAssignment(ticket.id)!
+    const base = { ticketId: ticket.id, assignmentId: assignment.id, state: 'progress' as const, prNumber: 0, prUrl: '', ackedInputs: [] }
+
+    service.onWorkerState({ ...base, turn: 1, summary: '已定位配置入口', updatedAt: '2026-11-06T10:01:00.000Z' })
+    service.onWorkerState({ ...base, turn: 2, summary: '正在改超时逻辑', updatedAt: '2026-11-06T10:02:00.000Z' })
+
+    // 上报本身不发消息
+    expect(store.listOutbox(20).some(item => item.text.includes('已定位配置入口'))).toBe(false)
+
+    service.syncProgress()
+
+    const digests = store.claimOutbox('2026-11-06T10:10:00.000Z', 50).filter(item => item.text.includes('工单「测试工单」进展'))
+    expect(digests).toHaveLength(1)
+    expect(digests[0]?.text).toContain('已定位配置入口')
+    expect(digests[0]?.text).toContain('正在改超时逻辑')
+    expect(digests[0]?.threadId).toBe('om_root')
+  })
+
+  it('内容相同的进展不会重复同步', async () => {
+    engine.ingest(makeTrigger())
+    await service.runOnce()
+    const ticket = store.listTickets()[0]!
+    const assignment = store.latestAssignment(ticket.id)!
+    const base = { ticketId: ticket.id, assignmentId: assignment.id, state: 'progress' as const, prNumber: 0, prUrl: '', ackedInputs: [] }
+
+    service.onWorkerState({ ...base, turn: 1, summary: '仍在改', updatedAt: '2026-11-06T10:01:00.000Z' })
+    service.syncProgress()
+    expect(store.claimOutbox('2026-11-06T10:10:00.000Z', 50).filter(item => item.text.includes('仍在改'))).toHaveLength(1)
+
+    service.onWorkerState({ ...base, turn: 2, summary: '仍在改', updatedAt: '2026-11-06T10:02:00.000Z' })
+    service.syncProgress()
+    expect(store.claimOutbox('2026-11-06T10:10:00.000Z', 50).filter(item => item.text.includes('仍在改'))).toHaveLength(0)
+  })
+
+  it('ready 回复不进进展摘要，仍立即发送', async () => {
+    engine.ingest(makeTrigger())
+    await service.runOnce()
+    const ticket = store.listTickets()[0]!
+    const assignment = store.latestAssignment(ticket.id)!
+
+    service.onWorkerState({
+      ticketId: ticket.id, assignmentId: assignment.id, turn: 1, state: 'ready',
+      summary: '完成', prNumber: 0, prUrl: '', ackedInputs: [], reply: '最终交付内容',
+      updatedAt: '2026-11-06T10:05:00.000Z',
+    })
+    service.syncProgress()
+
+    const texts = store.claimOutbox('2026-11-06T10:10:00.000Z', 50).map(item => item.text)
+    expect(texts.some(text => text.includes('最终交付内容'))).toBe(true)
+    expect(texts.some(text => text.includes('工单「测试工单」进展'))).toBe(false)
   })
 })

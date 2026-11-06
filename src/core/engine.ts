@@ -148,7 +148,7 @@ export class Engine {
     }
 
     const ticket: Ticket = {
-      id: this.ids.next('tk'),
+      id: formatTicketId(this.store.nextTicketSeq()),
       title: input.title?.trim() || deriveTitle(trigger.text),
       threadId: trigger.threadId,
       source: trigger.source,
@@ -354,6 +354,13 @@ export class Engine {
     this.refreshStage(ticketId)
   }
 
+  /** 清除待答问题并重新推导阶段（派工失败后重试时使用）。 */
+  clearAttention(ticketId: string): void {
+    this.requireTicket(ticketId)
+    this.store.clearAttention(ticketId)
+    this.refreshStage(ticketId)
+  }
+
   /** 重新推导阶段并落库。 */
   refreshStage(ticketId: string): Stage {
     const ticket = this.requireTicket(ticketId)
@@ -384,4 +391,12 @@ export function deriveTitle(text: string): string {
   const line = text.trim().split('\n')[0]?.trim() ?? ''
   if (!line) return '未命名工单'
   return line.length > 40 ? `${line.slice(0, 40)}…` : line
+}
+
+/**
+ * 工单编号：`tk-1`、`tk-2`……全局自增，方便在飞书与终端里直接引用。
+ * 旧工单是 `tk_<uuid>`，与短编号不会冲突。
+ */
+export function formatTicketId(seq: number): string {
+  return `tk-${seq}`
 }

@@ -147,6 +147,9 @@ ra 的**主干是通的**：Source → Gate → LLM 研判 → 工单/Mandate �
 - 证据：`src/service.ts:357-366`——只要 report 带 `reply` 就发，**不区分 state**；summary/reply 相同也照发（幂等 key 含 `updatedAt`，每次上报都不同）。
 - 后果：worker 每轮 progress 都带 `--reply` 时，话题里会刷屏；prototype 明确「progress 不唤醒、不发 IM」。
 - 建议：progress 默认不发（或合并成每 N 分钟最多一条）；同 ticket 相同 reply 做内容去重。
+- **已修复（2026-11-06）**：progress 上报不再逐条发送；`RouterService.syncProgress()` 按 `progress.syncMs`（默认 60 秒）
+  定时轮询未同步的进展，合并成一条消息发到工单话题，内容相同的进展只发一次。ready / blocked 等终态与带 `--ack` 的追问回答
+  仍即时发送，并在发送前补发未同步的进展，保证话题内「进展 → 完成」的顺序。
 
 ### B9 outbox 失败不会升级
 
@@ -165,7 +168,7 @@ ra 的**主干是通的**：Source → Gate → LLM 研判 → 工单/Mandate �
 | C3 | 无暂停 | 只有 `stop`（不可逆） | Ticket 加 `paused` 阶段，`pause` 不停 worker、只停止派新活 |
 | C4 | 无「人工插队槽」 | `launchPending` 纯 FIFO | 人的追问投递优先于新派工（当前同队列，worker 满了追问也排队） |
 | C5 | 无 turn 墙钟上限 | 只有 idle nudge + stale（软提醒） | 加 `maxTurnMs`，超时记 `blocked` 转人工 |
-| C6 | 卡片只是 Markdown 壳 | `src/sources/feishu.ts:249-254` 只有一个 markdown 元素 | 加状态字段 + 「打开面板 / 停止」按钮（需要 card callback 通道，成本较高，可延后） |
+| C6 | 卡片只是 Markdown 壳 | `src/sources/feishu.ts:378-384` 只有一个 markdown 元素（含 Markdown 归一化） | 加状态字段 + 「打开面板 / 停止」按钮（需要 card callback 通道，成本较高，可延后） |
 | C7 | 配置无版本无审计 | `config.yaml` 直改 | 保存时留 revision + diff，面板能回看；不必做自动回滚 |
 | C8 | prompt 打包进 dist | `src/worker/spec/index.ts:1-50` 读文件 | 允许 `~/.router-agent/prompts/` 覆盖，免 rebuild |
 | C9 | 面板只读为主 | `src/web/client/app.tsx` 3 Tab | 至少补：决策/日志/健康三个只读视图（和 A6/B3 一起做） |

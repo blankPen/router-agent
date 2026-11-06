@@ -13,6 +13,8 @@ export interface WorkerPromptInput {
   repo: string
   /** worktree 的起始分支（base branch）。 */
   branch?: string
+  /** worktree 自己的工作分支（语义化命名）。 */
+  workBranch?: string
   workdir?: string
 }
 
@@ -28,6 +30,7 @@ export function buildWorkerPrompt(input: WorkerPromptInput): string {
     eventsPath: input.eventsPath,
     repo: input.repo,
     branch: input.branch ?? input.ticket.branch ?? '(仓库默认分支)',
+    workBranch: input.workBranch ?? `ra/${input.ticket.id}`,
     workdir: input.workdir ?? '(由 Orca 决定)',
   })
 }

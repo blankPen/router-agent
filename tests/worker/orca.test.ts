@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { mkdtempSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { OrcaAdapter, parseCreateResult } from '../../src/worker/orca/index.js'
+import { OrcaAdapter, OrcaCommandError, parseCreateResult, summarizeArgs } from '../../src/worker/orca/index.js'
 import { worktreeCreate, terminalSend, terminalClose, terminalList, worktreeRemove, agentLaunch } from '../../src/worker/orca/commands.js'
 import type { CommandRunner, CommandResult } from '../../src/worker/orca/commands.js'
 import type { Assignment, Ticket } from '../../src/core/model.js'
@@ -92,6 +92,61 @@ describe('Orca 返回解析', () => {
 })
 
 describe('OrcaAdapter', () => {
+  it('命令失败时保留 stdout 里的 Orca 错误体，而不是只留下 code=1', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ra-workers-'))
+    const runner = new FakeRunner([{
+      code: 1,
+      stdout: JSON.stringify({
+        ok: false,
+        error: {
+          code: 'agent_session_operation_unknown',
+          message: 'base branch master not found',
+          data: {
+            cause: 'Error: Command failed: git worktree add ... master\nfatal: invalid reference: master\n    at ...',
+            operationId: 'op_123',
+          },
+        },
+      }),
+      stderr: '',
+    }])
+    const adapter = new OrcaAdapter({ runner, workersDir: dir, spec: 'prompt' })
+
+    const error = await adapter.start({ ticket, assignment, workdir: '/tmp/wt' }).catch(item => item)
+    expect(error).toBeInstanceOf(OrcaCommandError)
+    expect(error.message).toContain('code=agent_session_operation_unknown')
+    expect(error.message).toContain('base branch master not found')
+    expect(error.message).toContain('cause=Error: Command failed: git worktree add ... master')
+    expect(error.detail).toMatchObject({
+      command: 'worktree create',
+      code: 1,
+      orcaCode: 'agent_session_operation_unknown',
+      orcaOperationId: 'op_123',
+    })
+    // 多行 cause 只保留第一行有效信息，不把堆栈整段塞进日志
+    expect(error.detail.orcaCause).toBe('Error: Command failed: git worktree add ... master')
+    // 参数摘要可复现，但不把整段 prompt 写进日志
+    expect(error.detail.args).toContain('--base-branch main')
+    expect(error.detail.args).toContain('--repo name:dsh/router-agent')
+    expect(error.detail.args).toContain('--prompt <')
+    expect(error.detail.args).not.toContain('ra report')
+  })
+
+  it('stdout 不是 JSON 时回退到 stdout 尾部，仍能定位命令参数', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ra-workers-'))
+    const runner = new FakeRunner([{ code: 2, stdout: 'fatal: not a git repository', stderr: '' }])
+    const adapter = new OrcaAdapter({ runner, workersDir: dir, spec: 'prompt' })
+    const error = await adapter.start({ ticket, assignment, workdir: '/tmp/wt' }).catch(item => item)
+    expect(error).toBeInstanceOf(OrcaCommandError)
+    expect(error.message).toContain('fatal: not a git repository')
+    expect(error.message).toContain('exit=2')
+  })
+
+  it('summarizeArgs 脱敏 --prompt 的值', () => {
+    expect(summarizeArgs(['--repo', 'name:x', '--prompt', '很长的提示词\n第二行', '--json'])).toBe(
+      '--repo name:x --prompt <10 chars> --json',
+    )
+  })
+
   it('start 创建 worktree、写入 meta.json 并返回 handle', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'ra-workers-'))
     const runner = new FakeRunner([
@@ -189,12 +244,14 @@ describe('Worker 提示词', () => {
 })
 
 describe('多项目 / 多分支派工', () => {
-  it('worktree create 带上起始分支（--base-branch）', () => {
-    const argv = worktreeCreate({ repo: 'dsh/router-agent', name: 'ra-tk_1', prompt: '做这个', baseBranch: 'release' })
+  it('worktree create 带上起始分支（--base-branch）与语义分支（--branch）', () => {
+    const argv = worktreeCreate({ repo: 'dsh/router-agent', name: 'ra-tk_1', prompt: '做这个', baseBranch: 'release', branch: 'ra/tk-1-fix-login' })
     expect(argv.slice(0, 6)).toEqual(['worktree', 'create', '--repo', 'name:dsh/router-agent', '--name', 'ra-tk_1'])
     expect(argv[argv.indexOf('--base-branch') + 1]).toBe('release')
+    expect(argv[argv.indexOf('--branch') + 1]).toBe('ra/tk-1-fix-login')
     // 没给分支时不传，交给 Orca 用仓库默认分支
     expect(worktreeCreate({ repo: 'r', name: 'n', prompt: 'p' })).not.toContain('--base-branch')
+    expect(worktreeCreate({ repo: 'r', name: 'n', prompt: 'p' })).not.toContain('--branch')
   })
 
   it('start 优先用工单自带的 repo/branch，而不是适配器上的全局 repo', async () => {
@@ -207,10 +264,14 @@ describe('多项目 / 多分支派工', () => {
     const argv = runner.calls[0]!.argv
     expect(argv[argv.indexOf('--repo') + 1]).toBe('name:other/repo')
     expect(argv[argv.indexOf('--base-branch') + 1]).toBe('release')
+    // 工作分支由工单号 + 标题生成，而不是被 Orca 的用户前缀包一层 UUID。
+    expect(argv[argv.indexOf('--branch') + 1]).toBe('ra/tk_1-调整登录超时')
     const meta = JSON.parse(readFileSync(join(dir, 'tk_1', 'meta.json'), 'utf8'))
     expect(meta.repo).toBe('name:other/repo')
     expect(meta.branch).toBe('release')
+    expect(meta.workBranch).toBe('ra/tk_1-调整登录超时')
     const prompt = argv[argv.indexOf('--prompt') + 1]!
     expect(prompt).toContain('起始分支：release')
+    expect(prompt).toContain('分支名：`ra/tk_1-调整登录超时`')
   })
 })
