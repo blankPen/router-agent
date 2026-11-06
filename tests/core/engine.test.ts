@@ -76,6 +76,17 @@ describe('Engine', () => {
     expect(store.listOpenTickets()).toHaveLength(1)
   })
 
+  it('工单号是全局短编号，按开单顺序自增', () => {
+    engine.ingest(makeTrigger({ id: 't1', externalId: 'e1' }))
+    engine.ingest(makeTrigger({ id: 't2', externalId: 'e2' }))
+    const first = engine.decide({ triggerId: 't1', decision: 'accept', strength: 'explicit', reason: 'ok' })
+    const second = engine.decide({ triggerId: 't2', decision: 'accept', strength: 'explicit', reason: 'ok' })
+
+    expect(first.ticket?.id).toBe('tk-1')
+    expect(second.ticket?.id).toBe('tk-2')
+    expect(second.ticket?.mandateId).not.toBe(first.ticket?.mandateId)
+  })
+
   it('接单自动把工单订阅回原 Thread，后续消息可扇出', () => {
     engine.ingest(makeTrigger())
     const { ticket } = engine.decide({ triggerId: 'trg_1', decision: 'accept', strength: 'explicit', reason: 'ok' })

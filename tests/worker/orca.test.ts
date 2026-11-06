@@ -189,12 +189,14 @@ describe('Worker 提示词', () => {
 })
 
 describe('多项目 / 多分支派工', () => {
-  it('worktree create 带上起始分支（--base-branch）', () => {
-    const argv = worktreeCreate({ repo: 'dsh/router-agent', name: 'ra-tk_1', prompt: '做这个', baseBranch: 'release' })
+  it('worktree create 带上起始分支（--base-branch）与语义分支（--branch）', () => {
+    const argv = worktreeCreate({ repo: 'dsh/router-agent', name: 'ra-tk_1', prompt: '做这个', baseBranch: 'release', branch: 'ra/tk-1-fix-login' })
     expect(argv.slice(0, 6)).toEqual(['worktree', 'create', '--repo', 'name:dsh/router-agent', '--name', 'ra-tk_1'])
     expect(argv[argv.indexOf('--base-branch') + 1]).toBe('release')
+    expect(argv[argv.indexOf('--branch') + 1]).toBe('ra/tk-1-fix-login')
     // 没给分支时不传，交给 Orca 用仓库默认分支
     expect(worktreeCreate({ repo: 'r', name: 'n', prompt: 'p' })).not.toContain('--base-branch')
+    expect(worktreeCreate({ repo: 'r', name: 'n', prompt: 'p' })).not.toContain('--branch')
   })
 
   it('start 优先用工单自带的 repo/branch，而不是适配器上的全局 repo', async () => {
@@ -207,10 +209,14 @@ describe('多项目 / 多分支派工', () => {
     const argv = runner.calls[0]!.argv
     expect(argv[argv.indexOf('--repo') + 1]).toBe('name:other/repo')
     expect(argv[argv.indexOf('--base-branch') + 1]).toBe('release')
+    // 工作分支由工单号 + 标题生成，而不是被 Orca 的用户前缀包一层 UUID。
+    expect(argv[argv.indexOf('--branch') + 1]).toBe('ra/tk_1-调整登录超时')
     const meta = JSON.parse(readFileSync(join(dir, 'tk_1', 'meta.json'), 'utf8'))
     expect(meta.repo).toBe('name:other/repo')
     expect(meta.branch).toBe('release')
+    expect(meta.workBranch).toBe('ra/tk_1-调整登录超时')
     const prompt = argv[argv.indexOf('--prompt') + 1]!
     expect(prompt).toContain('起始分支：release')
+    expect(prompt).toContain('分支名：`ra/tk_1-调整登录超时`')
   })
 })

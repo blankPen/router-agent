@@ -210,7 +210,7 @@ ra tickets                     # 6. 模拟产生的工单应出现在这里
 1. 在群里 @机器人 提一个小需求；
 2. `ra logs | grep trigger:ingested` 确认消息进来了；
 3. `ra tickets` 出现工单，`ra ticket <id>` 看授权范围与强度；
-4. `orca worktree list --json` 出现 `ra-tk_xxx`，Orca 里出现 Claude Code 终端；
+4. `orca worktree list --json` 出现 `ra-tk-<编号>`，分支名为 `ra/tk-<编号>-<语义slug>`，Orca 里出现 Claude Code 终端；
 5. worker 执行 `ra report` 后，`ra ticket <id>` 的阶段在 `running → review/person` 之间变化；
 6. 合并或关闭 PR 后，工单变 `closed`，飞书收到一次闭环通知。
 
@@ -297,6 +297,15 @@ worker 终端里的原始输出**不进日志**（避免解析 TUI 文本）；�
 
 准入表可在 `config.yaml` 的 `policy.admission` 里逐格调整。
 
+## 工单编号与分支命名
+
+- 工单号是全局自增的短编号：`tk-1`、`tk-2`……，重启后从上次的值继续，旧库里的 `tk_<uuid>` 仍可正常查询。
+- Orca worktree 名：`ra-tk-<编号>`，目录短且纯 ASCII。
+- 工作分支：`ra/tk-<编号>-<语义 slug>`，由工单标题生成；标题里有足够英文时优先用英文，纯中文标题保留中文本身（git 支持 UTF-8 分支名）：
+  - `ra/tk-12-fix-login-timeout`
+  - `ra/tk-13-调整登录超时`
+- 工单上的 `branch` 表示**起始分支**；工作分支通过 `orca worktree create --branch` 单独指定，不再叠加 Orca 的用户前缀与 UUID。
+
 ## 工单阶段
 
 `draft → accepted → assigned → running → review → closed`，可在 `person`（等人）与 `idle`（空闲）之间来回。
@@ -309,7 +318,7 @@ Worker **不手写状态文件**，统一用 `ra report` 上报。CLI 会 POST �
 
 ```bash
 ra report \
-  --ticket tk_xxx \
+  --ticket tk-12 \
   --state progress|waiting|ready|blocked|failed|dropped \
   --summary "一句话摘要" \
   --reply @answer.md \

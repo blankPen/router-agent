@@ -77,7 +77,7 @@ ra report --ticket {{ticketId}} --state ready \
 
 ## 代码交付
 
-- 分支名：`ra/{{ticketId}}`。
+- 分支名：`{{workBranch}}`。
 - PR 标题用中文，正文写清「做了什么 / 怎么验证的 / 风险」。
 - 上报时带 `--pr-number`、`--pr-url`；不要自己合并 PR，合并由人决定。
 - CI 失败时修到绿；修不动用 `blocked` 说明失败原因。
