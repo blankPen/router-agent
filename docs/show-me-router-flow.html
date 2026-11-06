@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>router-agent · 一条飞书消息的完整旅程</title>
+<style>
+  :root{
+    --bg:#f7f6f3;
+    --panel:#ffffff;
+    --ink:#17181c;
+    --ink-2:#4a4c55;
+    --ink-3:#7c7f8a;
+    --line:#e3e1da;
+    --line-strong:#cfccc3;
+    --feishu:#2f6bff;
+    --router:#7c3aed;
+    --store:#b45309;
+    --orca:#0e7490;
+    --worker:#15803d;
+    --github:#475569;
+    --danger:#b91c1c;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-font-smoothing:antialiased}
+  body{
+    margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+    font-size:15px;line-height:1.65;
+  }
+  .wrap{max-width:1120px;margin:0 auto;padding:0 28px 96px}
+
+  /* ---------- header ---------- */
+  header{
+    padding:64px 0 40px;border-bottom:1px solid var(--line);margin-bottom:56px;
+    background:
+      radial-gradient(circle at 12% 20%, rgba(124,58,237,.06), transparent 42%),
+      radial-gradient(circle at 88% 10%, rgba(47,107,255,.07), transparent 40%);
+  }
+  .eyebrow{
+    display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);
+    font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3);
+  }
+  .eyebrow::before{content:"";width:22px;height:1px;background:var(--ink-3)}
+  h1{
+    font-size:clamp(32px,4.6vw,48px);line-height:1.15;letter-spacing:-.02em;
+    margin:18px 0 14px;font-weight:750;
+  }
+  h1 em{font-style:normal;color:var(--router)}
+  .lede{max-width:680px;color:var(--ink-2);font-size:17px;margin:0}
+  .lede code{font-family:var(--mono);font-size:.9em;background:#ecebe6;padding:1px 5px;border-radius:4px}
+  .metrics{display:flex;flex-wrap:wrap;gap:8px;margin-top:26px}
+  .metric{
+    font-family:var(--mono);font-size:12px;color:var(--ink-2);
+    border:1px solid var(--line-strong);background:rgba(255,255,255,.6);
+    border-radius:999px;padding:5px 12px;
+  }
+  .metric b{color:var(--ink);font-weight:600}
+
+  /* ---------- sections ---------- */
+  section{margin-bottom:64px}
+  .sec-head{display:flex;align-items:baseline;gap:14px;margin-bottom:8px}
+  .sec-num{font-family:var(--mono);font-size:12px;color:var(--ink-3);letter-spacing:.1em}
+  h2{font-size:23px;letter-spacing:-.01em;margin:0;font-weight:700}
+  .sec-sub{color:var(--ink-2);margin:0 0 26px;max-width:760px}
+
+  /* ---------- pipeline ---------- */
+  .pipeline{
+    display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:0;
+    border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--panel);
+  }
+  .node{
+    padding:16px 14px 15px;border-right:1px solid var(--line);position:relative;
+    display:flex;flex-direction:column;gap:6px;min-width:0;
+  }
+  .node:last-child{border-right:none}
+  .node .idx{font-family:var(--mono);font-size:10px;color:var(--ink-3)}
+  .node .name{font-size:13px;font-weight:650;line-height:1.35}
+  .node .who{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .node::after{
+    content:"›";position:absolute;right:-7px;top:50%;transform:translateY(-50%);
+    color:var(--line-strong);font-size:16px;background:var(--panel);z-index:2;line-height:1;
+  }
+  .node:last-child::after{display:none}
+  .node .bar{height:3px;border-radius:2px;margin-bottom:2px}
+  .n-feishu .bar{background:var(--feishu)} .n-router .bar{background:var(--router)}
+  .n-store .bar{background:var(--store)} .n-orca .bar{background:var(--orca)}
+  .n-worker .bar{background:var(--worker)} .n-github .bar{background:var(--github)}
+
+  /* ---------- timeline ---------- */
+  .timeline{position:relative;margin-top:8px}
+  .timeline::before{
+    content:"";position:absolute;left:27px;top:14px;bottom:14px;width:1px;
+    background:linear-gradient(var(--line-strong),var(--line-strong)) ;
+  }
+  .step{position:relative;padding:0 0 30px 66px}
+  .step:last-child{padding-bottom:0}
+  .step .dot{
+    position:absolute;left:16px;top:2px;width:23px;height:23px;border-radius:50%;
+    background:var(--panel);border:1px solid var(--line-strong);
+    display:flex;align-items:center;justify-content:center;
+    font-family:var(--mono);font-size:10.5px;color:var(--ink-2);z-index:2;
+  }
+  .step.live .dot{border-color:var(--router);color:var(--router)}
+  .card{
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:17px 20px 18px;border-left:3px solid var(--line-strong);
+  }
+  .c-feishu{border-left-color:var(--feishu)} .c-router{border-left-color:var(--router)}
+  .c-store{border-left-color:var(--store)} .c-orca{border-left-color:var(--orca)}
+  .c-worker{border-left-color:var(--worker)} .c-github{border-left-color:var(--github)}
+  .step-head{display:flex;flex-wrap:wrap;align-items:center;gap:9px;margin-bottom:5px}
+  .step-title{font-weight:680;font-size:15.5px}
+  .tag{
+    font-family:var(--mono);font-size:10.5px;padding:2px 7px;border-radius:5px;
+    border:1px solid currentColor;opacity:.85;white-space:nowrap;
+  }
+  .t-feishu{color:var(--feishu)} .t-router{color:var(--router)} .t-store{color:var(--store)}
+  .t-orca{color:var(--orca)} .t-worker{color:var(--worker)} .t-github{color:var(--github)}
+  .step p{margin:0;color:var(--ink-2);font-size:14.2px}
+  .step p + p{margin-top:7px}
+  .ref{
+    display:block;margin-top:9px;font-family:var(--mono);font-size:11.5px;
+    color:var(--ink-3);word-break:break-all;
+  }
+  .ref b{color:var(--ink-2);font-weight:500}
+  code{font-family:var(--mono);font-size:.88em;background:#efeee9;padding:1px 4px;border-radius:4px;color:#2a2b31}
+  .card code{background:#f2f1ec}
+
+  /* ---------- note ---------- */
+  .note{
+    display:flex;gap:12px;background:#fffdf6;border:1px solid #e8dfc2;
+    border-radius:10px;padding:13px 16px;margin-top:14px;color:#5c4a1c;font-size:13.6px;
+  }
+  .note .k{font-family:var(--mono);font-size:11px;letter-spacing:.06em;white-space:nowrap;padding-top:2px}
+
+  /* ---------- interaction ---------- */
+  .contract{
+    display:grid;grid-template-columns:1fr 152px 1fr;gap:0;align-items:stretch;
+    border:1px solid var(--line);border-radius:14px;background:var(--panel);overflow:hidden;
+  }
+  .box{padding:22px}
+  .box h3{margin:0 0 4px;font-size:15px;font-weight:700}
+  .box .sub{font-family:var(--mono);font-size:11px;color:var(--ink-3);margin-bottom:16px}
+  .box ul{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:11px}
+  .box li{font-size:13.2px;color:var(--ink-2);padding-left:14px;position:relative}
+  .box li::before{content:"";position:absolute;left:0;top:9px;width:5px;height:5px;border-radius:50%;background:var(--line-strong)}
+  .box li b{color:var(--ink);font-weight:620}
+  .box li .m{font-family:var(--mono);font-size:11px;color:var(--ink-3);display:block;margin-top:2px}
+  .mid{
+    border-left:1px dashed var(--line-strong);border-right:1px dashed var(--line-strong);
+    display:flex;flex-direction:column;justify-content:center;gap:26px;
+    padding:18px 8px;background:#fbfaf7;
+  }
+  .arrow{display:flex;flex-direction:column;align-items:center;gap:4px;text-align:center}
+  .arrow .ln{font-family:var(--mono);font-size:10px;letter-spacing:.04em;color:var(--ink-3)}
+  .arrow .glyph{font-size:20px;line-height:1}
+  .arrow.down .glyph{color:var(--orca)}
+  .arrow.up .glyph{color:var(--worker)}
+
+  /* ---------- table ---------- */
+  table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;font-size:13.4px}
+  th,td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--line)}
+  th{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:500;background:#fbfaf7}
+  tr:last-child td{border-bottom:none}
+  td code{background:#f2f1ec}
+  .pill{display:inline-block;font-family:var(--mono);font-size:11px;padding:1px 7px;border-radius:999px;border:1px solid currentColor}
+
+  /* ---------- branch cards ---------- */
+  .branches{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  .branch{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 18px 16px}
+  .branch .q{font-family:var(--mono);font-size:11px;color:var(--ink-3);margin-bottom:6px}
+  .branch h4{margin:0 0 8px;font-size:14.5px;font-weight:680;line-height:1.4}
+  .branch p{margin:0;color:var(--ink-2);font-size:13.2px}
+  .branch .flow{margin-top:12px;font-family:var(--mono);font-size:11.5px;color:var(--ink-2);line-height:1.9}
+  .branch .flow span{color:var(--router)}
+  .branch.hot{border-color:#d9c9f8;box-shadow:0 1px 0 #efe9fb inset}
+  .branch.hot h4{color:var(--router)}
+
+  /* ---------- state machine ---------- */
+  .fsm{display:flex;flex-wrap:wrap;align-items:center;gap:8px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px}
+  .st{font-family:var(--mono);font-size:12px;padding:6px 12px;border-radius:7px;background:#f4f3ef;border:1px solid var(--line);color:var(--ink-2)}
+  .st.start{background:#f3edff;border-color:#d9c9f8;color:var(--router)}
+  .st.end{background:#f1f5f3;border-color:#cfe0d7;color:var(--worker)}
+  .st.warn{background:#fff6f6;border-color:#f0cfcf;color:var(--danger)}
+  .sep{color:var(--line-strong);font-family:var(--mono);font-size:13px}
+  .fsm-note{margin-top:12px;font-size:13px;color:var(--ink-2)}
+
+  footer{margin-top:72px;padding-top:22px;border-top:1px solid var(--line);color:var(--ink-3);font-size:12.5px;font-family:var(--mono)}
+
+  @media (max-width:900px){
+    .pipeline{grid-template-columns:repeat(3,1fr)}
+    .node:nth-child(3n)::after{display:none}
+    .node{border-bottom:1px solid var(--line)}
+    .contract{grid-template-columns:1fr}
+    .mid{border:none;border-top:1px dashed var(--line-strong);border-bottom:1px dashed var(--line-strong);flex-direction:row;justify-content:center;gap:48px}
+    .arrow.down .glyph,.arrow.up .glyph{transform:rotate(90deg)}
+    .branches{grid-template-columns:1fr}
+  }
+  @media (max-width:560px){
+    .wrap{padding:0 18px 64px}
+    header{padding-top:44px}
+    .pipeline{grid-template-columns:repeat(2,1fr)}
+    .node:nth-child(2n)::after{display:none}
+    .timeline::before{left:18px}
+    .step{padding-left:52px}
+    .step .dot{left:7px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">router-agent · 流程解剖</div>
+  <h1>一条飞书消息，<br>如何走到 <em>PR 闭环</em></h1>
+  <p class="lede">
+    这份图基于仓库真实代码绘制：飞书消息经 <code>lark-cli</code> 事件流进入 Router，
+    由确定性 Gate + LLM 研判决定接不接单，接了就派一个 Orca worktree 里的 Worker，
+    Worker 只写 <code>state.json</code> 上报，Router 轮询后把进展回复到原话题。
+  </p>
+  <div class="metrics">
+    <span class="metric"><b>1s</b> 主循环</span>
+    <span class="metric"><b>8s</b> 消息聚合窗口</span>
+    <span class="metric"><b>4</b> 并发 worker 上限</span>
+    <span class="metric"><b>5s</b> PR 跟踪</span>
+    <span class="metric"><b>15s</b> 空闲巡检</span>
+  </div>
+</header>
+
+<!-- ================= 1. 全景 ================= -->
+<section>
+  <div class="sec-head"><span class="sec-num">01</span><h2>全景：九个环节</h2></div>
+  <p class="sec-sub">一次完整的消息生命周期。颜色代表消息/状态所在的组件。</p>
+
+  <div class="pipeline">
+    <div class="node n-feishu"><div class="bar"></div><span class="idx">01</span><span class="name">飞书消息</span><span class="who">用户 @bot / 私聊</span></div>
+    <div class="node n-feishu"><div class="bar"></div><span class="idx">02</span><span class="name">事件流</span><span class="who">lark-cli consume</span></div>
+    <div class="node n-router"><div class="bar"></div><span class="idx">03</span><span class="name">归一化</span><span class="who">Trigger</span></div>
+    <div class="node n-store"><div class="bar"></div><span class="idx">04</span><span class="name">入库</span><span class="who">SQLite state.db</span></div>
+    <div class="node n-router"><div class="bar"></div><span class="idx">05</span><span class="name">Gate + 研判</span><span class="who">规则 → LLM</span></div>
+    <div class="node n-store"><div class="bar"></div><span class="idx">06</span><span class="name">开单</span><span class="who">Ticket / Mandate</span></div>
+    <div class="node n-orca"><div class="bar"></div><span class="idx">07</span><span class="name">派工</span><span class="who">orca worktree</span></div>
+    <div class="node n-worker"><div class="bar"></div><span class="idx">08</span><span class="name">执行 + 上报</span><span class="who">state.json</span></div>
+    <div class="node n-github"><div class="bar"></div><span class="idx">09</span><span class="name">通知 / 闭环</span><span class="who">飞书话题 + PR</span></div>
+  </div>
+
+  <div class="note">
+    <span class="k">核心约束</span>
+    <span>所有状态写入只经过 <code>Engine</code>（<code>src/core/engine.ts</code>）；所有出站消息先进 <code>outbox</code> 再由 Effects 幂等发送。
+    Router 不直接操作 SQLite，也不解析终端屏幕文本。</span>
+  </div>
+</section>
+
+<!-- ================= 2. 时序 ================= -->
+<section>
+  <div class="sec-head"><span class="sec-num">02</span><h2>端到端时序</h2></div>
+  <p class="sec-sub">从「用户按下回车」到「工单闭环」。左侧数字是执行顺序，不是严格耗时。</p>
+
+  <div class="timeline">
+
+    <div class="step live">
+      <div class="dot">1</div>
+      <div class="card c-feishu">
+        <div class="step-head"><span class="step-title">飞书事件到达</span><span class="tag t-feishu">飞书</span></div>
+        <p>常驻子进程执行 <code>lark-cli event consume im.message.receive_v1 --as bot</code>，stdout 按 NDJSON 一行一个事件。
+           stdin 必须保持打开的管道——lark-cli 把 stdin EOF 当作退出信号。</p>
+        <span class="ref"><b>src/sources/feishu.ts</b> · FeishuConsumer.start()</span>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="dot">2</div>
+      <div class="card c-router">
+        <div class="step-head"><span class="step-title">归一化 + 过滤</span><span class="tag t-router">Router</span></div>
+        <p>依次判定：群是否在监听范围 → 是否机器人自己发的（防自激）→ 只接 @ 的群里有没有 @ 到 bot → 内容是否为空。
+           通过则生成 <code>Trigger</code>：<code>threadId = feishu:{chatId}:{rootId}</code>，
+           <code>addressed = mention | direct | none</code>。</p>
+        <p>被丢弃的消息写一条 <code>trigger:dropped</code> 日志并附原因——否则用户只会看到「没反应」。</p>
+        <span class="ref"><b>src/sources/feishu.ts</b> · normalizeFeishuEventDetailed()</span>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="dot">3</div>
+      <div class="card c-store">
+        <div class="step-head"><span class="step-title">入库 + 回执表情</span><span class="tag t-store">SQLite</span><span class="tag t-feishu">飞书</span></div>
+        <p><code>engine.ingest()</code> 幂等写 Trigger（同一 message_id 只进一次），同时 upsert 线程记录。
+           对「在跟它说话」的消息立刻加一个 <code>Typing</code> 表情，先把「收到了」的反馈给到人。</p>
+        <p>回复真正发出时，再按 <code>originMessageId</code> 撤销这个表情。</p>
+        <span class="ref"><b>src/cli/index.ts</b> · onEvent / reactTo / clearReaction</span>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="dot">4</div>
+      <div class="card c-router">
+        <div class="step-head"><span class="step-title">主循环领取</span><span class="tag t-router">Router</span></div>
+        <p>服务每 <b>1 秒</b>跑一次 <code>runOnce()</code>，用 <code>ticking</code> 标志保证周期串行不重叠。
+           领取条件是消息已存在超过 <b>8 秒</b>（聚合窗口，让人可以连发几条），
+           并把 disposition 从 <code>pending</code> 原子改成 <code>evaluating</code>，防止重复处理。</p>
+        <span class="ref"><b>src/router/agent-loop.ts</b> · tick() / <b>src/store/db.ts</b> · claimPendingTriggers()</span>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="dot">5</div>
+      <div class="card c-router">
+        <div class="step-head"><span class="step-title">Gate：不花模型的第一层路由</span><span class="tag t-router">确定性</span></div>
+        <p>只看三件事：<b>发送人在不在名单</b> × <b>有没有 @ / 私聊</b> × <b>acceptMode</b>，得出四种结果：
+           <code>explicit</code>（显式授权）、<code>infer</code>（推断候选）、<code>reply-only</code>（策略关闭，只回一句）、<code>ignore</code>。</p>
+        <p>机器人消息永远不会构成显式请求；私聊也只算推断候选，只有 @ 才是显式授权。</p>
+        <span class="ref"><b>src/core/policy.ts</b> · gate()</span>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="dot">6</div>
+      <div class="card c-router">
+        <div class="step-head"><span class="step-title">这个线程已有工单？先扇出，不研判</span><span class="tag t-router">分支</span></div>
+        <p>若该 <code>threadId</code> 已订阅到未关闭的工单，消息直接作为 <code>followup</code> 投给 Worker，
+           <b>跳过 Gate 与 LLM</b>。这是「追问已有工单」的快速通道，详见第 3 节。</p>
+        <span class="ref"><b>src/router/agent-loop.ts</b> · hasLiveSubscription() / <b>src/core/engine.ts</b> · fanOut()</span>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="dot">7</div>
+      <div class="card c-router">
+        <div class="step-head"><span class="step-title">LLM 研判</span><span class="tag t-router">LLM</span></div>
+        <p>上下文包含：当前策略、最近 10 条线程消息、该线程已有工单。模型最多 <b>3 轮</b>工具调用，
+           最终调用 <code>router_decide</code> 给出 <code>accept / ignore / stop / unavailable</code>。</p>
+        <p>纯寒暄（你好 / 在吗 / 谢谢 / test 等整句）走规则短路，不再研判，直接用 <code>conversation.md</code> 生成一句礼貌回复。</p>
+        <span class="ref"><b>src/router/agent-loop.ts</b> · assess() / isSmallTalk() / converse()</span>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="dot">8</div>
+      <div class="card c-store">
+        <div class="step-head"><span class="step-title">落库：Decision + Mandate + Ticket</span><span class="tag t-store">SQLite</span></div>
+        <p><code>engine.decide()</code> 写一条 Decision，接单时同时创建授权书 Mandate 与工单 Ticket，并订阅该线程。
+           <code>observe</code> 模式下，推断候选的 accept 会被降级成 <code>ignore</code>，但记 <code>wouldAccept=true</code> 供人查看。</p>
+        <span class="ref"><b>src/core/engine.ts</b> · decide() · <b>src/core/policy.ts</b> · negotiateAcceptance()</span>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="dot">9</div>
+      <div class="card c-feishu">
+        <div class="step-head"><span class="step-title">回 ack，并开一个话题</span><span class="tag t-feishu">飞书</span></div>
+        <p>两条出站消息进入 outbox：一条<b>普通消息</b>「已创建工单」，一条<b>话题回复</b>「后续进展会在这个话题里更新」。
+           outbox 用幂等 key，同一个 key 不会发两次。</p>
+        <p>发出侧按 <code>threadId</code> 是否为空分流：空 → <code>im +messages-send</code>；有值 → <code>im +messages-reply --reply-in-thread</code>。</p>
+        <span class="ref"><b>src/router/agent-loop.ts</b> · reply() · <b>src/service.ts</b> · createEffectsSender()</span>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="dot">10</div>
+      <div class="card c-orca">
+        <div class="step-head"><span class="step-title">派工：起一个 Orca worktree</span><span class="tag t-orca">Orca</span></div>
+        <p>同一轮循环里的 <code>launchPending()</code> 扫描 <code>accepted</code> 阶段的工单，受 <code>maxWorkers = 4</code> 约束。
+           每次派工：<code>engine.startAssignment()</code> → <code>orca worktree create</code>（新分支 + 终端 + 注入 worker 手册）→ 写 <code>meta.json</code>。</p>
+        <span class="ref"><b>src/service.ts</b> · launchPending() / launch() · <b>src/worker/orca/index.ts</b> · start()</span>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="dot">11</div>
+      <div class="card c-worker">
+        <div class="step-head"><span class="step-title">Worker 干活</span><span class="tag t-worker">Worker</span></div>
+        <p>在独立 worktree 里读代码、改代码、跑测试、开 PR（分支 <code>ra/{ticketId}</code>）。
+           <b>它不发飞书、不联系发起人</b>，每轮结束前把结果写进 <code>~/.router-agent/workers/{ticketId}/state.json</code>。</p>
+        <span class="ref"><b>src/worker/spec/prompt-mode.md</b> · 状态上报协议</span>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="dot">12</div>
+      <div class="card c-router">
+        <div class="step-head"><span class="step-title">轮询上报 → 回话题</span><span class="tag t-router">Router</span><span class="tag t-feishu">飞书</span></div>
+        <p>每秒扫描 <code>workers/*/state.json</code>，按 <code>mtime + 内容</code> 指纹去重。
+           <code>engine.report()</code> 落报告、ack 输入、重算阶段；
+           <code>blocked</code> 与 <code>ready</code> 会通过 outbox 回复到原话题（同一条消息只通知一次）。</p>
+        <span class="ref"><b>src/worker/orca/report-poller.ts</b> · scan() · <b>src/service.ts</b> · onWorkerState()</span>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="dot">13</div>
+      <div class="card c-github">
+        <div class="step-head"><span class="step-title">PR 跟踪与闭环</span><span class="tag t-github">GitHub</span></div>
+        <p>每 <b>5 秒</b>从两个来源找 PR：Orca worktree 自带的 <code>linkedPR / linkedGitLabMR</code>，或 <code>gh pr view</code> 兜底。
+           PR 变成 merged / closed 时，<code>closeTicket()</code> 关单并在话题里通知「工单闭环」。</p>
+        <span class="ref"><b>src/service.ts</b> · trackPullRequests()</span>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ================= 3. Router ↔ Worker ================= -->
+<section>
+  <div class="sec-head"><span class="sec-num">03</span><h2>Router ⟷ Worker 怎么交互</h2></div>
+  <p class="sec-sub">不是 RPC，是<b>两条单向管道</b>：Router 往下发命令，Worker 往上写文件。中间没有回调，也没有共享内存。</p>
+
+  <div class="contract">
+    <div class="box">
+      <h3>Router（编排层）</h3>
+      <div class="sub">src/service.ts · src/worker/orca</div>
+      <ul>
+        <li><b>派工</b> — 起 worktree，注入整套 worker 手册
+          <span class="m">orca worktree create --repo … --name ra-tk_xxx</span></li>
+        <li><b>追加输入</b> — 把新消息作为文本敲进终端
+          <span class="m">orca terminal send &lt;handle&gt; "…"</span></li>
+        <li><b>探活</b> — 长时间无输出时发一句 <code>status?</code>
+          <span class="m">orca terminal list → lastOutputAt 结构化字段</span></li>
+        <li><b>停止</b> — 人点停单时关终端
+          <span class="m">orca terminal close &lt;handle&gt;</span></li>
+      </ul>
+    </div>
+
+    <div class="mid">
+      <div class="arrow down">
+        <span class="ln">命令</span>
+        <span class="glyph">▼</span>
+        <span class="ln">terminal / worktree</span>
+      </div>
+      <div class="arrow up">
+        <span class="ln">上报</span>
+        <span class="glyph">▲</span>
+        <span class="ln">state.json 文件</span>
+      </div>
+    </div>
+
+    <div class="box">
+      <h3>Worker（执行层）</h3>
+      <div class="sub">Orca worktree · Claude Code</div>
+      <ul>
+        <li><b>state.json</b> — 唯一对外通道，每轮必须更新
+          <span class="m">state / summary / human_action / pr_* / acked_inputs</span></li>
+        <li><b>meta.json</b> — Router 派工时写的身份映射
+          <span class="m">ticketId ↔ assignmentId ↔ handle ↔ workdir</span></li>
+        <li><b>events.log</b> — 可选审计流水，一行一个 JSON，不参与状态机</li>
+        <li><b>PR</b> — 自建分支 <code>ra/tk_xxx</code>，开 PR 后把编号写回 state.json；<b>不自己合并</b></li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="note">
+    <span class="k">为什么这么设计</span>
+    <span>Router 只消费结构化字段（Orca 的 <code>connected / writable / orphaned / lastOutputAt</code> 与 state.json），
+    从不解析终端 TUI 文本。重启后靠 <code>recover()</code> 与 Orca 对账：<code>connected=false</code> 才判定终端死亡并重新派工；
+    <code>orphaned=true</code> 但可写时仍然复用。</span>
+  </div>
+</section>
+
+<!-- ================= 4. 状态映射 ================= -->
+<section>
+  <div class="sec-head"><span class="sec-num">04</span><h2>Worker 的六种状态，落成什么阶段</h2></div>
+  <p class="sec-sub">阶段由「工单 + 派工 + 最新报告 + 是否在等人」推导，不是 Worker 直接写的。</p>
+
+  <table>
+    <thead><tr><th>state.json</th><th>推导出的 Ticket stage</th><th>会通知人吗</th><th>含义</th></tr></thead>
+    <tbody>
+      <tr><td><code>progress</code></td><td><span class="pill" style="color:var(--orca)">running</span></td><td>否</td><td>这轮在做，summary 说明做了什么</td></tr>
+      <tr><td><code>waiting</code></td><td><span class="pill" style="color:var(--ink-3)">idle</span></td><td>否</td><td>没有可做的活，不空转</td></tr>
+      <tr><td><code>blocked</code></td><td><span class="pill" style="color:var(--danger)">person</span></td><td><b>是</b>（话题回复）</td><td>要人回答，<code>human_action</code> 写清要做什么</td></tr>
+      <tr><td><code>failed</code></td><td><span class="pill" style="color:var(--danger)">person</span></td><td>否</td><td>本轮失败，需人工介入</td></tr>
+      <tr><td><code>dropped</code></td><td><span class="pill" style="color:var(--ink-3)">idle</span></td><td>否</td><td>主动放弃，等新输入</td></tr>
+      <tr><td><code>ready</code></td><td><span class="pill" style="color:var(--worker)">review</span></td><td><b>是</b>（话题回复 + PR 链接）</td><td>PR 已开，等人 review</td></tr>
+    </tbody>
+  </table>
+
+  <div class="fsm" style="margin-top:18px">
+    <span class="st start">accepted</span><span class="sep">→</span>
+    <span class="st">assigned</span><span class="sep">→</span>
+    <span class="st">running</span><span class="sep">→</span>
+    <span class="st">review</span><span class="sep">→</span>
+    <span class="st end">closed</span>
+    <span style="width:100%"></span>
+    <span class="st warn">person</span>
+    <span class="st">idle</span>
+    <span style="font-size:12.5px;color:var(--ink-3);font-family:var(--mono)">← 可从任意活跃阶段进入，也可回到 running</span>
+  </div>
+  <p class="fsm-note">PR 仍处于 open 时拒绝关单，避免「代码没合就闭环」。人工停单是唯一能绕过这条限制的路径。</p>
+</section>
+
+<!-- ================= 5. 并发消息 ================= -->
+<section>
+  <div class="sec-head"><span class="sec-num">05</span><h2>Worker 正在干活，用户又发了一条</h2></div>
+  <p class="sec-sub">关键区别只有一个：这条消息是不是落在<b>已经订阅的线程</b>里。是 → 直接塞给 Worker；不是 → 重新走研判。</p>
+
+  <div class="branches">
+    <div class="branch hot">
+      <div class="q">情况 A · 最常见</div>
+      <h4>在话题里追问<br>「顺便把日志也改一下」</h4>
+      <p>同一 <code>threadId</code>，已有未关闭工单 → 跳过 Gate 和 LLM，直接作为 <code>followup</code> 输入投给正在跑的 Worker。</p>
+      <div class="flow">
+        消息 <span>→</span> tick（8s 窗口）<br>
+        <span>→</span> hasLiveSubscription<br>
+        <span>→</span> fanOut → inputs 表<br>
+        <span>→</span> terminal send<br>
+        <span>→</span> Worker 读到并干活
+      </div>
+    </div>
+
+    <div class="branch">
+      <div class="q">情况 B · 群里另起一条</div>
+      <h4>新消息、新线程<br>「再帮我查个接口」</h4>
+      <p>没有订阅记录 → 走完整 Gate + 研判。接单则开<b>新工单</b>、派<b>新 Worker</b>，并受 4 个并发上限约束。</p>
+      <div class="flow">
+        新消息 <span>→</span> 新 threadId<br>
+        <span>→</span> Gate → LLM 研判<br>
+        <span>→</span> 新 Ticket<br>
+        <span>→</span> 有余量就派工<br>
+        <span>→</span> 否则停在 accepted 排队
+      </div>
+    </div>
+
+    <div class="branch">
+      <div class="q">情况 C · 兜底</div>
+      <h4>消息发了但 Worker 没反应</h4>
+      <p>已投递、未 ack 的输入会在下一轮重新投递；连续无输出还会被主动唤醒，仍无响应则标记 stale 并通知人。</p>
+      <div class="flow">
+        <span>→</span> unacked 重投<br>
+        <span>→</span> 2 分钟无输出发 status?<br>
+        <span>→</span> 再 5 分钟 → stale<br>
+        <span>→</span> 话题里提醒人工确认
+      </div>
+    </div>
+  </div>
+
+  <div class="note" style="margin-top:18px">
+    <span class="k">幂等细节</span>
+    <span>每条输入在库里有唯一 <code>seq</code>，投递 id 为 <code>{assignmentId}:{seq}</code>。
+    Worker 在 state.json 的 <code>acked_inputs</code> 里回写读过的 id，Router 才把状态从 delivered 改成 acked；
+    没 ack 的会在下一次唤醒时连同新输入一起重发——所以既不会丢，也不会因为重发而重复执行。</span>
+  </div>
+</section>
+
+<!-- ================= 6. 出站 ================= -->
+<section>
+  <div class="sec-head"><span class="sec-num">06</span><h2>回复是怎么发出去的</h2></div>
+  <p class="sec-sub">Router 从不直接调飞书 API，所有出站消息统一走 outbox。</p>
+
+  <div class="timeline">
+    <div class="step">
+      <div class="dot">A</div>
+      <div class="card c-feishu">
+        <div class="step-head"><span class="step-title">入 outbox</span><span class="tag t-store">SQLite</span></div>
+        <p><code>enqueueOutbox()</code> 写入：<code>channelKind</code>、<code>channelId</code>（群）、<code>threadId</code>（空 = 普通消息，有值 = 话题回复）、
+           文本、幂等 key、以及 <code>originMessageId</code>（用于回执表情撤销）。</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="dot">B</div>
+      <div class="card c-feishu">
+        <div class="step-head"><span class="step-title">Effects 每秒发送</span><span class="tag t-feishu">飞书</span></div>
+        <p>单条失败只影响自己：错误写入 <code>last_error</code>，按退避重试，不影响同批其它消息。
+           成功的消息写 <code>outbox:sent</code> 事件，可在 <code>ra logs --follow</code> 里追踪。</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="dot">C</div>
+      <div class="card c-router">
+        <div class="step-head"><span class="step-title">通道分流</span><span class="tag t-router">路由</span></div>
+        <p>ack / 寒暄回复走<b>普通消息</b>；工单进展、blocked、ready、PR 闭环走<b>原消息话题回复</b>。
+           这样群里只有一条「已开单」，其余进展都收在话题里，不刷屏。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  依据仓库当前代码整理 · src/sources/feishu.ts · src/router/agent-loop.ts · src/core/{engine,policy,stage}.ts · src/service.ts · src/worker/orca/*
+</footer>
+
+</div>
+</body>
+</html>

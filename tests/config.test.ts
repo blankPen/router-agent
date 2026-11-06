@@ -1,0 +1,260 @@
+import { mkdtempSync, existsSync, readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { describe, expect, it } from 'vitest'
+import { chatEntry, defaultConfig, ensureHome, loadConfig, policyOf, setConfigValue, writeConfig } from '../src/config.js'
+
+function home(): string {
+  return mkdtempSync(join(tmpdir(), 'ra-home-'))
+}
+
+describe('全局状态目录与配置', () => {
+  it('ensureHome 创建目录结构并写入默认 config.yaml', () => {
+    const dir = home()
+    ensureHome(dir)
+    for (const sub of ['logs', 'workers']) expect(existsSync(join(dir, sub))).toBe(true)
+    const text = readFileSync(join(dir, 'config.yaml'), 'utf8')
+    expect(text).toContain('acceptMode')
+    expect(text).toContain('workerSpec')
+  })
+
+  it('没有配置时使用默认值：auto + 并发 4 + prompt 模式 + orca 后端', () => {
+    const cfg = loadConfig(home())
+    expect(cfg.policy.acceptMode).toBe('auto')
+    expect(cfg.policy.maxWorkers).toBe(4)
+    expect(cfg.feishu.reaction).toBe('Typing')
+    expect(cfg.workerSpec.mode).toBe('prompt')
+    expect(cfg.backend.default).toBe('orca')
+  })
+
+  it('读取用户配置并覆盖默认值', () => {
+    const dir = home()
+    ensureHome(dir)
+    const { writeFileSync } = require('node:fs') as typeof import('node:fs')
+    writeFileSync(join(dir, 'config.yaml'), [
+      'policy:',
+      '  acceptMode: observe',
+      '  maxWorkers: 2',
+      'workerSpec:',
+      '  mode: agent',
+      'feishu:',
+      '  chats: [oc_a]',
+      '  otherChats: [oc_b]',
+      '  directMessages: false',
+      '  allowed: [ou_alice]',
+      '  botOpenIds: [ou_bot]',
+      'server:',
+      '  port: 3999',
+    ].join('\n'))
+    const cfg = loadConfig(dir)
+    expect(cfg.policy.acceptMode).toBe('observe')
+    expect(cfg.workerSpec.mode).toBe('agent')
+    expect(cfg.server.port).toBe(3999)
+    expect(cfg.feishu.chats).toEqual([chatEntry('oc_a'), chatEntry('oc_b', { mode: 'mention' })])
+  })
+
+  it('非法 acceptMode / mode / port 回退到默认值而不是崩溃', () => {
+    const dir = home()
+    ensureHome(dir)
+    const { writeFileSync } = require('node:fs') as typeof import('node:fs')
+    writeFileSync(join(dir, 'config.yaml'), ['policy:', '  acceptMode: yolo', 'workerSpec:', '  mode: magic', 'server:', '  port: abc'].join('\n'))
+    const cfg = loadConfig(dir)
+    expect(cfg.policy.acceptMode).toBe('auto')
+    expect(cfg.workerSpec.mode).toBe('prompt')
+    expect(cfg.server.port).toBe(defaultConfig().server.port)
+  })
+
+  it('配置映射成 Policy：版本号随关键字段变化', () => {
+    const base = { ...loadConfig(home()), feishu: { ...loadConfig(home()).feishu, chats: [chatEntry('oc_a')], allowed: ['ou_alice'] } }
+    const p1 = policyOf(base)
+    const p2 = policyOf({ ...base, policy: { ...base.policy, acceptMode: 'observe' } })
+    expect(p1.version).not.toBe(p2.version)
+    expect(p1.allowed).toEqual(['ou_alice'])
+    expect(p1.receiveAll).toBe(true)
+  })
+
+  it('群级白名单：解析、写回、折算进 Policy', () => {
+    const dir = home()
+    ensureHome(dir)
+    const { writeFileSync } = require('node:fs') as typeof import('node:fs')
+    writeFileSync(join(dir, 'config.yaml'), [
+      'feishu:',
+      '  allowed: [ou_global]',
+      '  chats:',
+      '    - chat: oc_a',
+      '      allowed: [ou_alice]',
+      '    - chat: oc_b',
+    ].join('\n'))
+    const cfg = loadConfig(dir)
+    expect(cfg.feishu.chats[0]?.allowed).toEqual(['ou_alice'])
+    expect(cfg.feishu.chats[1]?.allowed).toEqual([])
+    expect(policyOf(cfg).allowedByChat).toEqual({ oc_a: ['ou_alice'] })
+
+    expect(setConfigValue(cfg, 'chatAllow.oc_b', 'ou_bob,ou_carol')).toBe(true)
+    expect(cfg.feishu.chats[1]?.allowed).toEqual(['ou_bob', 'ou_carol'])
+    expect(setConfigValue(cfg, 'chatAllow.oc_b', '')).toBe(true)
+    expect(policyOf(cfg).allowedByChat).toEqual({ oc_a: ['ou_alice'] })
+
+    writeConfig(dir, cfg)
+    expect(loadConfig(dir).feishu.chats[0]?.allowed).toEqual(['ou_alice'])
+  })
+
+  it('只有 mode=all 的群才算 receiveAll（影响机器人推断候选）', () => {
+    const base = loadConfig(home())
+    expect(policyOf({ ...base, feishu: { ...base.feishu, chats: [chatEntry('oc_a', { mode: 'mention' })] } }).receiveAll).toBe(false)
+    expect(policyOf({ ...base, feishu: { ...base.feishu, chats: [chatEntry('oc_a', { mode: 'mention' }), chatEntry('oc_b')] } }).receiveAll).toBe(true)
+  })
+
+  it('feishu.larkHome 支持配置文件与环境变量 RA_LARK_HOME（环境变量优先）', () => {
+    const dir = home()
+    ensureHome(dir)
+    const { writeFileSync } = require('node:fs') as typeof import('node:fs')
+    writeFileSync(join(dir, 'config.yaml'), ['feishu:', '  larkHome: /from/file'].join('\n'))
+    expect(loadConfig(dir).feishu.larkHome).toBe('/from/file')
+    expect(loadConfig(dir, { RA_LARK_HOME: '/from/env' }).feishu.larkHome).toBe('/from/env')
+  })
+
+  it('writeConfig 写回后能被 loadConfig 读回，且保留可选字段', () => {
+    const dir = home()
+    const cfg = loadConfig(dir)
+    cfg.feishu.chats = [chatEntry('oc_a', { mode: 'mention', repo: 'router-agent', branch: 'main', sync: true })]
+    cfg.feishu.allowed = ['ou_me']
+    cfg.feishu.botOpenIds = ['ou_bot', 'cli_bot']
+    cfg.feishu.larkHome = '/tmp/lark-home'
+    cfg.feishu.appId = 'cli_dedicated'
+    cfg.feishu.reaction = 'THUMBSUP'
+    cfg.policy.acceptMode = 'observe'
+    cfg.server.port = 3999
+    writeConfig(dir, cfg)
+
+    const loaded = loadConfig(dir)
+    expect(loaded.feishu.chats).toEqual([chatEntry('oc_a', { mode: 'mention', repo: 'router-agent', branch: 'main', sync: true })])
+    expect(loaded.feishu.allowed).toEqual(['ou_me'])
+    expect(loaded.feishu.botOpenIds).toEqual(['ou_bot', 'cli_bot'])
+    expect(loaded.feishu.larkHome).toBe('/tmp/lark-home')
+    expect(loaded.feishu.appId).toBe('cli_dedicated')
+    expect(loaded.feishu.reaction).toBe('THUMBSUP')
+    expect(loaded.policy.acceptMode).toBe('observe')
+    expect(loaded.server.port).toBe(3999)
+  })
+
+  it('setConfigValue 支持点路径与类型转换，非法值被拒绝', () => {
+    const cfg = loadConfig(home())
+    expect(setConfigValue(cfg, 'policy.acceptMode', 'observe')).toBe(true)
+    expect(cfg.policy.acceptMode).toBe('observe')
+    expect(setConfigValue(cfg, 'policy.acceptMode', 'yolo')).toBe(false)
+    expect(setConfigValue(cfg, 'policy.maxWorkers', '2')).toBe(true)
+    expect(cfg.policy.maxWorkers).toBe(2)
+    expect(setConfigValue(cfg, 'policy.maxWorkers', '0')).toBe(false)
+    expect(setConfigValue(cfg, 'feishu.chats', 'oc_a, oc_b')).toBe(true)
+    expect(cfg.feishu.chats).toEqual([chatEntry('oc_a'), chatEntry('oc_b')])
+    expect(setConfigValue(cfg, 'feishu.directMessages', 'false')).toBe(true)
+    expect(cfg.feishu.directMessages).toBe(false)
+    expect(setConfigValue(cfg, 'feishu.reaction', 'OnIt')).toBe(true)
+    expect(cfg.feishu.reaction).toBe('OnIt')
+    expect(setConfigValue(cfg, 'feishu.reaction', '')).toBe(true)
+    expect(cfg.feishu.reaction).toBe('')
+    expect(setConfigValue(cfg, 'workerSpec.mode', 'agent')).toBe(true)
+    expect(cfg.workerSpec.mode).toBe('agent')
+    expect(setConfigValue(cfg, 'workerSpec.mode', 'magic')).toBe(false)
+    expect(setConfigValue(cfg, 'nope.nope', 'x')).toBe(false)
+  })
+})
+
+describe('多项目与群绑定配置', () => {
+  it('读取 projects，并兼容旧的 chatBindings（绑定即监控）', () => {
+    const dir = home()
+    ensureHome(dir)
+    const { writeFileSync } = require('node:fs') as typeof import('node:fs')
+    writeFileSync(join(dir, 'config.yaml'), [
+      'projects:',
+      '  - name: router-agent',
+      '    repo: name:dsh/router-agent',
+      '    defaultBranch: main',
+      '    branches: [main, release]',
+      '  - repo: teamwork-repos',
+      'chatBindings:',
+      '  oc_a:',
+      '    repo: router-agent',
+      '    branch: main',
+      '  oc_b:',
+      '    repo: teamwork-repos',
+      '    branch: release',
+    ].join('\n'))
+    const cfg = loadConfig(dir)
+    expect(cfg.projects).toEqual([
+      { name: 'router-agent', repo: 'name:dsh/router-agent', branches: ['main', 'release'], defaultBranch: 'main' },
+      { name: 'teamwork-repos', repo: 'teamwork-repos', branches: [], defaultBranch: '' },
+    ])
+    expect(cfg.feishu.chats).toEqual([
+      chatEntry('oc_a', { repo: 'router-agent', branch: 'main' }),
+      chatEntry('oc_b', { repo: 'teamwork-repos', branch: 'release' }),
+    ])
+  })
+
+  it('旧配置（chats 字符串 / otherChats / syncChat）会迁移成统一的 chat 条目', () => {
+    const dir = home()
+    ensureHome(dir)
+    const { writeFileSync } = require('node:fs') as typeof import('node:fs')
+    writeFileSync(join(dir, 'config.yaml'), [
+      'feishu:',
+      '  chats: [oc_all]',
+      '  otherChats: [oc_at, oc_all]',
+      '  syncChat: [oc_all]',
+    ].join('\n'))
+    const cfg = loadConfig(dir)
+    expect(cfg.feishu.chats).toEqual([
+      chatEntry('oc_all', { mode: 'all', sync: true }),
+      chatEntry('oc_at', { mode: 'mention' }),
+    ])
+    // otherChats 不会覆盖 chats 里的 all 模式
+    expect(cfg.feishu.chats[0]?.mode).toBe('all')
+  })
+
+  it('setConfigValue 支持 project.<name> 与 chatBinding.<chat>，非法值被拒绝', () => {
+    const cfg = loadConfig(home())
+    expect(setConfigValue(cfg, 'project.router-agent', 'name:dsh/router-agent@main')).toBe(true)
+    expect(cfg.projects).toEqual([{ name: 'router-agent', repo: 'name:dsh/router-agent', branches: [], defaultBranch: 'main' }])
+    // 同名再设一次是覆盖，不是追加
+    expect(setConfigValue(cfg, 'project.router-agent', 'name:dsh/router-agent@release')).toBe(true)
+    expect(cfg.projects).toHaveLength(1)
+    expect(cfg.projects[0]?.defaultBranch).toBe('release')
+
+    // 绑定同时意味着监控这个群
+    expect(setConfigValue(cfg, 'chatBinding.oc_a', 'router-agent@main')).toBe(true)
+    expect(cfg.feishu.chats).toEqual([chatEntry('oc_a', { repo: 'router-agent', branch: 'main' })])
+    expect(setConfigValue(cfg, 'chatBinding.oc_a', 'router-agent@release')).toBe(true)
+    expect(cfg.feishu.chats).toHaveLength(1)
+    expect(cfg.feishu.chats[0]?.branch).toBe('release')
+
+    // 群列表替换时保留已有条目的绑定 / 模式
+    expect(setConfigValue(cfg, 'chatMode.oc_a', 'mention')).toBe(true)
+    expect(cfg.feishu.chats[0]?.mode).toBe('mention')
+    expect(setConfigValue(cfg, 'feishu.chats', 'oc_a,oc_b')).toBe(true)
+    expect(cfg.feishu.chats).toEqual([
+      chatEntry('oc_a', { mode: 'mention', repo: 'router-agent', branch: 'release' }),
+      chatEntry('oc_b'),
+    ])
+    expect(setConfigValue(cfg, 'chatSync.oc_b', 'true')).toBe(true)
+    expect(cfg.feishu.chats[1]?.sync).toBe(true)
+
+    expect(setConfigValue(cfg, 'project.', 'x')).toBe(false)
+    expect(setConfigValue(cfg, 'chatBinding.oc_a', '')).toBe(false)
+    expect(setConfigValue(cfg, 'chatMode.oc_a', 'yolo')).toBe(false)
+  })
+
+  it('writeConfig 写回后仍能读回 projects / 群配置', () => {
+    const dir = home()
+    const cfg = loadConfig(dir)
+    cfg.projects = [{ name: 'router-agent', repo: 'name:dsh/router-agent', branches: ['main'], defaultBranch: 'main' }]
+    cfg.feishu.chats = [
+      chatEntry('oc_a', { mode: 'mention', repo: 'router-agent', branch: 'main', sync: true }),
+      chatEntry('oc_b'),
+    ]
+    writeConfig(dir, cfg)
+
+    const loaded = loadConfig(dir)
+    expect(loaded.projects).toEqual(cfg.projects)
+    expect(loaded.feishu.chats).toEqual(cfg.feishu.chats)
+  })
+})
