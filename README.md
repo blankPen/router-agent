@@ -44,7 +44,7 @@ router-agent（`ra`）是一个常驻的双层 Agent 系统：**Router 只做研
 
 | 依赖 | 说明 |
 |-|-|
-| Node.js | `>= 22.19.0`（使用内置 `node:sqlite`） |
+| Node.js | `>= 22.19.0`（使用内置 `node:sqlite`；项目根目录 `.node-version` 已固定 22.19.0） |
 | pnpm | 安装依赖与构建 |
 | Orca | 提供 `orca` CLI，负责创建 worktree 与终端 |
 | lark-cli | 飞书事件消费、发消息；需要一个飞书自建应用 |
