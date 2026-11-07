@@ -207,6 +207,8 @@ describe('运行时机制', () => {
     expect(probe).toBeTruthy()
     expect(probe!.text).toContain('assigned')
     expect(probe!.text).toContain('正在修改登录超时配置')
+    expect(probe!.text).not.toContain('pnpm test 进行中')
+    expect(probe!.text).not.toContain('Cascading')
     expect(probe!.threadId).toBe('om_root')
     expect(store.getTicket(ticketId)?.stage).toBe('assigned')
   })
@@ -278,9 +280,28 @@ describe('运行时机制', () => {
 
     const probe = store.listOutbox(200).find(item => item.text.includes('进展巡检'))
     expect(probe?.text).toContain('Claude 会话记录')
-    expect(probe?.text).toContain('Edit(service.ts)')
     expect(probe?.text).toContain('正在补单测')
+    expect(probe?.text).not.toContain('Edit(service.ts)')
     expect(probe?.text).not.toContain('屏幕噪声')
+  })
+
+  it('会话记录里文本之后的工具调用折叠成动作概要，不逐条回放', async () => {
+    await launchOne()
+    backend.sessionEvents = [
+      { at: new Date(now + 5 * 60_000).toISOString(), kind: 'text', text: '开始改登录超时' },
+      { at: new Date(now + 6 * 60_000).toISOString(), kind: 'tool', text: 'Edit(login.ts)', tool: { name: 'Edit', target: 'login.ts' } },
+      { at: new Date(now + 7 * 60_000).toISOString(), kind: 'tool', text: 'Bash：跑测试' },
+      { at: new Date(now + 8 * 60_000).toISOString(), kind: 'tool', text: 'TodoWrite' },
+    ]
+    backend.sessionAt = new Date(now + 8 * 60_000).toISOString()
+
+    await service.probeProgress(now + 11 * 60_000)
+
+    const probe = store.listOutbox(200).find(item => item.text.includes('进展巡检'))
+    expect(probe?.text).toContain('开始改登录超时')
+    expect(probe?.text).toContain('动作概要：修改 login.ts、执行 跑测试')
+    expect(probe?.text).not.toContain('Edit(login.ts)')
+    expect(probe?.text).not.toContain('TodoWrite')
   })
 
   it('会话记录不可用时退回终端屏幕', async () => {
@@ -295,7 +316,7 @@ describe('运行时机制', () => {
     expect(probe?.text).toContain('终端里的进展')
   })
 
-  it('extractTerminalSnippet 过滤状态栏与输入回显，优先取活动标记', () => {
+  it('extractTerminalSnippet 过滤工具调用回显与状态栏，只留语义化动作概要', () => {
     const snippet = extractTerminalSnippet([
       '✻ Brewed for 3m · done',
       '❯ 【Router 输入 in_1】',
@@ -308,23 +329,41 @@ describe('运行时机制', () => {
       '❯',
       '  当前模型: deepseek-v4.1-flash',
     ])
-    expect(snippet).toContain('Update(tests/config.test.ts)')
-    expect(snippet).toContain('Added 11 lines')
+    expect(snippet).toContain('动作概要：修改 tests/config.test.ts')
+    expect(snippet).not.toContain('Update(')
+    expect(snippet).not.toContain('Added 11 lines')
     expect(snippet).not.toContain('给我改个东西')
     expect(snippet).not.toContain('$ pnpm test')
     expect(snippet).not.toContain('当前模型')
+    expect(snippet).not.toContain('Cascading')
     expect(snippet).not.toContain('❯')
   })
 
-  it('extractSessionSnippet 把连续重复的动作压成一条', () => {
+  it('extractSessionSnippet 只展示助手文本，过滤工具调用噪音', () => {
     const snippet = extractSessionSnippet([
       { at: '2026-11-06T10:00:00.000Z', kind: 'tool', text: 'Edit(README.md)' },
       { at: '2026-11-06T10:01:00.000Z', kind: 'tool', text: 'Edit(README.md)' },
       { at: '2026-11-06T10:02:00.000Z', kind: 'tool', text: 'Edit(README.md)' },
       { at: '2026-11-06T10:03:00.000Z', kind: 'text', text: 'README 改完了，接下来跑测试' },
     ])
-    expect(snippet).toContain('Edit(README.md) ×3')
-    expect(snippet).toContain('助手：README 改完了，接下来跑测试')
+    expect(snippet).toContain('README 改完了，接下来跑测试')
+    expect(snippet).not.toContain('Edit(README.md)')
+    expect(snippet).not.toContain('动作概要')
+  })
+
+  it('extractSessionSnippet 把最后一条文本之后的工具动作折叠成一行概要', () => {
+    const snippet = extractSessionSnippet([
+      { at: '2026-11-06T10:00:00.000Z', kind: 'text', text: '先看一下配置' },
+      { at: '2026-11-06T10:01:00.000Z', kind: 'tool', text: 'Read(service.ts)' },
+      { at: '2026-11-06T10:02:00.000Z', kind: 'tool', text: 'Edit(service.ts)', tool: { name: 'Edit', target: 'service.ts' } },
+      { at: '2026-11-06T10:03:00.000Z', kind: 'tool', text: 'Edit(service.ts)', tool: { name: 'Edit', target: 'service.ts' } },
+      { at: '2026-11-06T10:04:00.000Z', kind: 'tool', text: 'Bash：跑测试' },
+      { at: '2026-11-06T10:05:00.000Z', kind: 'tool', text: 'TodoWrite' },
+    ])
+    expect(snippet).toContain('先看一下配置')
+    expect(snippet).toContain('动作概要：查看 service.ts、修改 service.ts ×2、执行 跑测试')
+    expect(snippet).not.toContain('TodoWrite')
+    expect(snippet).not.toContain('Edit(service.ts)')
   })
 
   it('extractTerminalSnippet 没有活动标记时取输入回显之前的尾部文本', () => {

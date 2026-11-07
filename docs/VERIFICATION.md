@@ -232,10 +232,11 @@ RA_PI_VERIFY=1 npx vitest run tests/verify-pi-live.test.ts  → 1 passed
 
 - **触发**：`progress.probeMs`（默认 2 分钟）扫描；只处理 `assigned/running`，以及 `ready/blocked` 之后又收到新输入的工单（阶段仍是 `review/person` 也会巡检）。
 - **静默判定**：`lastProgressAt`（最近上报 / 新输入 / 派工时间）超过 `progress.silenceMs`（默认 10 分钟）。
-- **数据来源**：优先读 Agent 自己的结构化会话记录（Claude Code `~/.claude/projects/<cwd-slug>/<session>.jsonl` 的尾部，只取 assistant 文本与工具调用）；读不到时退回 `orca terminal read --screen --limit 60 --json` 的渲染屏幕。终端摘录会清洗状态栏、输入回显与分隔线，优先取 `⏺/⎿/✻` 活动行，最多 8 行 / 1200 字。
-- **输出**：确定性文本（不额外调用模型），发到工单话题；同一静默期按 `progress.repeatMs`（默认 15 分钟）限流，画面未变化会标注。
+- **数据来源**：优先读 Agent 自己的结构化会话记录（Claude Code `~/.claude/projects/<cwd-slug>/<session>.jsonl` 的尾部，只取 assistant 文本与工具调用）；读不到时退回 `orca terminal read --screen --limit 60 --json` 的渲染屏幕。
+- **摘要形态**：确定性语义摘要（不额外调用模型）——主内容是 assistant 文本，工具调用折叠成一行「动作概要」（修改 / 查看 / 检索 / 执行 + 文件名或一句话描述，同类动作合并计数）；`TodoWrite` 等纯流程工具直接过滤。终端兜底同样只保留自然语言活动行，工具调用回显（`⏺ Update(x)`）、工具结果（`⎿`）、状态行（`✻✽`）不进摘要。最多 4 行文本 / 1200 字。
+- **输出**：发到工单话题；同一静默期按 `progress.repeatMs`（默认 15 分钟）限流，摘要未变化会标注。
 - **兜底**：终端已退出、读不到输出或后端不支持 `read/session` 时跳过，交给 `checkIdle` 的 stale 处理；终端长时间无新输出时在消息里提示可能卡住。
-- **验证**：`tests/service-runtime.test.ts` 覆盖会话记录优先、终端兜底、静默检测、限流、review+新输入、终端退出、卡住提示与摘录清洗；`tests/worker/orca.test.ts` 覆盖会话 JSONL 解析与工具调用摘要；并用真实会话记录 / `orca terminal read` 抽样验证。
+- **验证**：`tests/service-runtime.test.ts` 覆盖会话记录优先、终端兜底、静默检测、限流、review+新输入、终端退出、卡住提示、语义摘要与工具调用噪音过滤；`tests/worker/orca.test.ts` 覆盖会话 JSONL 解析与工具调用结构化摘要；并用真实会话记录 / `orca terminal read` 抽样验证。
 
 ## 6. 结论
 

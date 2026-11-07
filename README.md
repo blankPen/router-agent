@@ -119,7 +119,7 @@ WorkerBackend 端口 ── OrcaAdapter（默认）── 未来：Codex / Headl
 - **Engine 是唯一状态写入口**：Router、Worker、面板都不直接写 SQLite。
 - **WorkerBackend 是唯一扩展点**：换后端只加一个 adapter，内核与 Router 一行不改。
 - **所有对外通知走 Outbox**：幂等 key + 2s 起步的指数退避（上限 60s）。
-- **状态判定不解析终端屏幕文本**：`checkIdle` 只读 Orca 的结构化字段（`connected` / `orphaned` / `lastOutputAt`）；主动巡检优先读 Agent 自己的会话记录（结构化 JSONL），只有读不到时才退回 `orca terminal read --screen` 并做保守清洗。
+- **状态判定不解析终端屏幕文本**：`checkIdle` 只读 Orca 的结构化字段（`connected` / `orphaned` / `lastOutputAt`）；主动巡检优先读 Agent 自己的会话记录（结构化 JSONL），只有读不到时才退回 `orca terminal read --screen` 并做保守清洗。巡检消息是语义摘要：只保留助手文本与一行动作概要，工具调用回显与状态行会被过滤或折叠。
 - **研判层是 DecisionEngine 端口**：Pi 是唯一实现，研判与礼貌回复都走同一条 Pi 通道；研判工具只产出提案，写库仍由 Engine 统一完成。
 
 ## 它能做什么
@@ -211,7 +211,7 @@ Worker **不手写状态文件**，统一用 `ra report` 上报。CLI 会 POST �
 - 需要长文档时，Worker 自己执行 `ra doc --title "…" --content @answer.md`，拿到链接后写进 `--reply`。
 - 追问以 `【Router 输入 in_xxx】` 前缀投递；Worker 用 `--ack in_xxx` 确认，否则会被反复重投。
 - `--state progress` 的 `--reply` / `--summary` 默认不即时发送：Router 按 `progress.syncMs` 定时合并后同步到话题，同一内容只发一次；带 `--ack` 的追问回答，以及 ready / blocked / failed 等终态仍即时发送。
-- **不依赖 worker 上报**：worker 超过 `progress.silenceMs` 没有新上报 / 新输入时，Router 按 `progress.probeMs` 主动取进展——优先读 Agent 自己的结构化会话记录（Claude Code 的 `~/.claude/projects/.../*.jsonl`），读不到再退回 `orca terminal read --screen` 的渲染屏幕；把最近活动摘录同步到话题，同一静默期按 `progress.repeatMs` 限流。`review` 之后又收到新输入的工单也会被巡检。
+- **不依赖 worker 上报**：worker 超过 `progress.silenceMs` 没有新上报 / 新输入时，Router 按 `progress.probeMs` 主动取进展——优先读 Agent 自己的结构化会话记录（Claude Code 的 `~/.claude/projects/.../*.jsonl`），读不到再退回 `orca terminal read --screen` 的渲染屏幕；把进展整理成语义摘要（助手文本 + 一行动作概要，工具调用噪音不逐条回放）同步到话题，同一静默期按 `progress.repeatMs` 限流。`review` 之后又收到新输入的工单也会被巡检。
 - Router 每轮按文件变化增量读取（`state.json` 兜底通道），成功后调 `Engine.report()`。
 - 终端长时间无输出 → 主动发 `status?`；仍无响应 → 标记 stale 并通知人。
 - 审计事件追加到同目录 `events.log`。
@@ -236,7 +236,7 @@ Router 不做对话，只在必要时说话：
 | `acceptMode: off` 的推断候选 | 固定说明「暂不自动开工」 |
 | worker 卡住 / 有结果 / PR 合并关闭 | 一律作为**话题回复**同步到原消息下 |
 | worker 交付结论 | 简单单行回复走**纯文本**；带 Markdown 的以**飞书卡片**渲染（卡片内 Markdown 先归一化）回话题；有文档 / PR 链接一并展示 |
-| worker 进展（`--state progress` 或 Router 主动巡检） | 上报的进展**不逐条发送**：按 `progress.syncMs` 合并成一条话题消息（追问的回答除外）；worker 静默时 Router 按 `progress.probeMs` 主动取进展（优先会话记录，其次终端屏幕），把最新活动摘录发到话题，同一静默期按 `progress.repeatMs` 限流 |
+| worker 进展（`--state progress` 或 Router 主动巡检） | 上报的进展**不逐条发送**：按 `progress.syncMs` 合并成一条话题消息（追问的回答除外）；worker 静默时 Router 按 `progress.probeMs` 主动取进展（优先会话记录，其次终端屏幕），整理成语义摘要（助手文本 + 一行动作概要，过滤工具调用噪音）发到话题，同一静默期按 `progress.repeatMs` 限流 |
 
 - 确认表情是 best-effort：失败只记 `feishu:reaction-failed`，不影响研判；只对首次入库、且是在跟它说话（@ / 私聊）的消息加；补拉与重放不会重复加；回复发出后自动撤销（`feishu:unreact-failed` 是撤销失败的日志）。`ra config set feishu.reaction ""` 可关闭。
 - 全部 emoji_type 见飞书文档「表情文案」，注意**大小写敏感**（`Typing` 不是 `TYPING`）。
@@ -256,14 +256,14 @@ Router 不做对话，只在必要时说话：
 | `input:delivered` | Service | `ticketId` `count` `text` | 实际投递进 worker 终端 |
 | `report` | Service | `ticketId` `state` `turn` `summary` `reply` `humanAction` `pr` | worker 的 `ra report` 上报 |
 | `progress:synced` / `progress:dedup` | Service | `ticketId` `count` / `skipped` | 进展定时合并同步，或内容重复被跳过 |
-| `progress:probed` | Service | `ticketId` `minutes` `count` `unchanged` | 主动巡检读终端并把进展摘录同步到话题 |
+| `progress:probed` | Service | `ticketId` `minutes` `count` `unchanged` | 主动巡检读会话记录 / 终端并把语义摘要同步到话题 |
 | `outbox:sent` / `outbox:failed` | Outbox | `key` `text` / `error` | 对外通知结果 |
 | `api:input` / `api:stop` / `api:policy` | HTTP API | — | 面板 / CLI 的操作 |
 | `idle:nudge` / `idle:stale` | Service | — | 空闲唤醒与失联标记 |
 | `pr:linked` / `pr:state` | Service | — | PR 跟踪 |
 | `recover:*` | Service | — | 重启对账 |
 
-worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态）；主动巡检优先读 Claude 会话记录，其次才把清洗后的短终端摘录发到话题。要看它做了什么，读 `report` 的 `summary` 与 `~/.router-agent/workers/<ticketId>/events.log`。
+worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态）；主动巡检优先读 Claude 会话记录，其次才把终端里的语义摘要（助手文本 + 动作概要）发到话题，不逐条回放工具调用。要看它做了什么，读 `report` 的 `summary` 与 `~/.router-agent/workers/<ticketId>/events.log`。
 
 > **同一机器人只能有一个事件总线在跑。** 如果 `ra logs` 出现 `another event bus is already connected`，先停掉其它占用该应用的消费者，或用 `ra init` 的「专属机器人」选项给 router-agent 单独配一个。
 

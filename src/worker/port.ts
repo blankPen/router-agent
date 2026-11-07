@@ -35,6 +35,8 @@ export interface SessionEvent {
   at: string
   kind: 'text' | 'tool'
   text: string
+  /** 工具调用的结构化描述（仅 kind=tool 且后端能提供时）；用于生成语义摘要，不展示原始命令。 */
+  tool?: { name: string; target?: string }
 }
 
 /** 从 Agent 自己的会话记录里读出的最近活动；比终端屏幕更干净、可结构化。 */
