@@ -4,10 +4,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Store } from '../src/store/db.js'
 import { Engine } from '../src/core/engine.js'
-import { RouterService, extractTerminalSnippet, formatProbeMessage } from '../src/service.js'
+import { RouterService, extractTerminalSnippet, extractSessionSnippet, formatProbeMessage } from '../src/service.js'
 import { defaultConfig, policyOf, type AppConfig, chatEntry } from '../src/config.js'
 import { DEFAULT_ADMISSION } from '../src/core/policy.js'
-import type { WorkerBackend, WorkerContext } from '../src/worker/port.js'
+import type { WorkerBackend, WorkerContext, SessionEvent } from '../src/worker/port.js'
 import type { Trigger } from '../src/core/model.js'
 import type { DecisionEngine } from '../src/router/decision-engine.js'
 
@@ -52,6 +52,9 @@ class FakeBackend implements WorkerBackend {
   /** 主动巡检读取的终端渲染屏幕。 */
   screen: string[] = []
   readStatus: 'running' | 'exited' | 'unknown' = 'running'
+  /** 主动巡检优选的 Agent 会话记录；为 null 时退回终端屏幕。 */
+  sessionEvents: SessionEvent[] | null = null
+  sessionAt = ''
   async start(ctx: WorkerContext) {
     const handle = `term-${this.starts.length + 1}`
     this.starts.push(ctx)
@@ -65,6 +68,10 @@ class FakeBackend implements WorkerBackend {
   async stop() {}
   async read() {
     return { status: this.readStatus, lines: this.screen, source: 'screen' }
+  }
+  async session() {
+    if (!this.sessionEvents) return null
+    return { at: this.sessionAt || new Date().toISOString(), events: this.sessionEvents }
   }
   async inspect(handle: string) {
     const entry = this.handles.get(handle)
@@ -258,6 +265,36 @@ describe('运行时机制', () => {
     expect(probe?.text).toContain('可能')
   })
 
+  it('优先使用 Agent 会话记录，不再读终端屏幕', async () => {
+    await launchOne()
+    backend.screen = ['⏺ 屏幕噪声']
+    backend.sessionEvents = [
+      { at: new Date(now + 5 * 60_000).toISOString(), kind: 'tool', text: 'Edit(service.ts)' },
+      { at: new Date(now + 6 * 60_000).toISOString(), kind: 'text', text: '正在补单测' },
+    ]
+    backend.sessionAt = new Date(now + 6 * 60_000).toISOString()
+
+    await service.probeProgress(now + 11 * 60_000)
+
+    const probe = store.listOutbox(200).find(item => item.text.includes('进展巡检'))
+    expect(probe?.text).toContain('Claude 会话记录')
+    expect(probe?.text).toContain('Edit(service.ts)')
+    expect(probe?.text).toContain('正在补单测')
+    expect(probe?.text).not.toContain('屏幕噪声')
+  })
+
+  it('会话记录不可用时退回终端屏幕', async () => {
+    await launchOne()
+    backend.sessionEvents = null
+    backend.screen = ['⏺ 终端里的进展']
+
+    await service.probeProgress(now + 11 * 60_000)
+
+    const probe = store.listOutbox(200).find(item => item.text.includes('进展巡检'))
+    expect(probe?.text).toContain('终端屏幕')
+    expect(probe?.text).toContain('终端里的进展')
+  })
+
   it('extractTerminalSnippet 过滤状态栏与输入回显，优先取活动标记', () => {
     const snippet = extractTerminalSnippet([
       '✻ Brewed for 3m · done',
@@ -279,6 +316,17 @@ describe('运行时机制', () => {
     expect(snippet).not.toContain('❯')
   })
 
+  it('extractSessionSnippet 把连续重复的动作压成一条', () => {
+    const snippet = extractSessionSnippet([
+      { at: '2026-11-06T10:00:00.000Z', kind: 'tool', text: 'Edit(README.md)' },
+      { at: '2026-11-06T10:01:00.000Z', kind: 'tool', text: 'Edit(README.md)' },
+      { at: '2026-11-06T10:02:00.000Z', kind: 'tool', text: 'Edit(README.md)' },
+      { at: '2026-11-06T10:03:00.000Z', kind: 'text', text: 'README 改完了，接下来跑测试' },
+    ])
+    expect(snippet).toContain('Edit(README.md) ×3')
+    expect(snippet).toContain('助手：README 改完了，接下来跑测试')
+  })
+
   it('extractTerminalSnippet 没有活动标记时取输入回显之前的尾部文本', () => {
     const snippet = extractTerminalSnippet(['- 删除了 ACK 文案', '  验证通过', '❯ 【Router 输入 in_2】', '  新需求'])
     expect(snippet).toBe('- 删除了 ACK 文案\n验证通过')
@@ -292,11 +340,14 @@ describe('运行时机制', () => {
       lastProgress: now,
       snippet: '⏺ 示例\n```ts\nconst a = 1\n```',
       unchanged: false,
+      lastActivityAt: now + 10 * 60_000,
       lastOutputAt: now + 10 * 60_000,
+      source: 'session',
       silenceMs: 600_000,
     })
     expect(text).not.toContain('```ts')
     expect(text).toContain("'''ts")
+    expect(text).toContain('Claude 会话记录')
   })
 
   it('PR 优先取 Orca worktree 的 linkedPR，拿不到才回退 gh', async () => {

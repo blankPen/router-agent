@@ -5,7 +5,7 @@ import type { Assignment, Report, Stage, Ticket, Trigger } from './core/model.js
 import type { Store } from './store/db.js'
 import type { AppConfig, RetentionSettings } from './config.js'
 import { replyAlwaysChatsOf } from './config.js'
-import type { WorkerBackend, WorkerContext } from './worker/port.js'
+import type { WorkerBackend, WorkerContext, SessionEvent } from './worker/port.js'
 import { AgentLoop } from './router/agent-loop.js'
 import type { DecisionAudit, DecisionEngine } from './router/decision-engine.js'
 import { dispatchSettingsOf } from './router/dispatch.js'
@@ -222,34 +222,76 @@ export function snippetFingerprint(text: string): string {
   return hash.toString(16)
 }
 
+/**
+ * 从 Agent 的会话记录里挑出最近几条活动。
+ * 比终端屏幕干净：只有 assistant 文本与工具调用，没有状态栏和输入回显。
+ */
+export function extractSessionSnippet(events: SessionEvent[], opts: { maxLines?: number; maxChars?: number } = {}): string {
+  const maxLines = opts.maxLines ?? 8
+  const maxChars = opts.maxChars ?? 1200
+  // 连续重复的同一动作（例如连续三次 Edit(README.md)）压成一条，节省摘录空间。
+  const collapsed: Array<SessionEvent & { count: number }> = []
+  for (const event of events) {
+    const last = collapsed.at(-1)
+    if (last && last.kind === event.kind && last.text === event.text) {
+      last.count += 1
+      last.at = event.at
+    } else {
+      collapsed.push({ ...event, count: 1 })
+    }
+  }
+  const lines = collapsed.slice(-maxLines).map(event => {
+    const time = clockOf(event.at)
+    const body = event.text.replace(/\s+/g, ' ').trim()
+    const truncated = body.length <= 240 ? body : `${body.slice(0, 240)}…`
+    return `${time ? `[${time}] ` : ''}${event.kind === 'text' ? '助手' : '动作'}：${truncated}${event.count > 1 ? ` ×${event.count}` : ''}`
+  })
+  return joinSnippet(lines, maxChars)
+}
+
 /** 主动巡检消息：全部是确定性文本，不额外调用模型。 */
 export function formatProbeMessage(ticket: Ticket, info: {
   nowMs: number
   lastProgress: number
   snippet: string
   unchanged: boolean
+  lastActivityAt: number
   lastOutputAt: number
+  source: 'session' | 'terminal'
   silenceMs: number
 }): string {
   const minutes = Math.max(0, Math.round((info.nowMs - info.lastProgress) / 60_000))
   const activeStage = ticket.stage === 'assigned' || ticket.stage === 'running'
+  const sourceLabel = info.source === 'session' ? 'Claude 会话记录' : '终端屏幕'
   const lines = [
     `**工单「${ticket.title}」进展巡检（${ticket.id}）**`,
     '',
     `- 当前阶段：${ticket.stage}（${STAGE_LABELS[ticket.stage]}）${activeStage ? '' : '；已有新输入，worker 应已重新开工'}`,
     `- 距上次上报 / 新输入：${minutes} 分钟`,
   ]
+  if (info.source === 'session' && Number.isFinite(info.lastActivityAt)) {
+    lines.push(`- 最近活动：${minutesAgo(info.nowMs, info.lastActivityAt)} 分钟前（${sourceLabel}）`)
+  }
   if (Number.isFinite(info.lastOutputAt)) {
-    const outputMinutes = Math.max(0, Math.round((info.nowMs - info.lastOutputAt) / 60_000))
+    const outputMinutes = minutesAgo(info.nowMs, info.lastOutputAt)
     lines.push(`- 终端最后一次输出：${outputMinutes} 分钟前`)
     if (outputMinutes * 60_000 >= info.silenceMs) {
       lines.push(`- ⚠️ 终端已经 ${outputMinutes} 分钟没有新输出，可能在等待输入或卡住，建议到 Orca 终端确认。`)
     }
+  } else if (Number.isFinite(info.lastActivityAt)) {
+    const activityMinutes = minutesAgo(info.nowMs, info.lastActivityAt)
+    if (activityMinutes * 60_000 >= info.silenceMs) {
+      lines.push(`- ⚠️ 已经 ${activityMinutes} 分钟没有新活动，可能卡住，建议到 Orca 终端确认。`)
+    }
   }
-  lines.push('', '**终端最新输出（原样摘录）**', '```text', (info.snippet || '(终端没有可读输出)').replace(/```/g, "'''"), '```')
+  lines.push('', `**最新进展（${sourceLabel}摘录）**`, '```text', (info.snippet || '(没有可读输出)').replace(/```/g, "'''"), '```')
   if (info.unchanged) lines.push('', '与上次巡检相比，终端画面没有变化。')
   lines.push('', '这是 Router 的主动巡检，不需要回复。')
   return lines.join('\n')
+}
+
+function minutesAgo(nowMs: number, at: number): number {
+  return Math.max(0, Math.round((nowMs - at) / 60_000))
 }
 
 function joinSnippet(lines: string[], maxChars: number): string {
@@ -1124,7 +1166,8 @@ export class RouterService {
    * - 已 ready 进入 review/person 后，用户又发了新输入，worker 重新开工但阶段还没变。
    */
   async probeProgress(nowMs: number = Date.parse(this.clock.now())): Promise<void> {
-    if (this.progressProbeMs <= 0 || this.probing || !this.backend.read) return
+    if (this.progressProbeMs <= 0 || this.probing) return
+    if (!this.backend.read && !this.backend.session) return
     this.probing = true
     try {
       for (const ticket of this.store.listOpenTickets()) {
@@ -1154,13 +1197,31 @@ export class RouterService {
     const samePeriod = record !== null && record.lastProgressAt === lastProgress
     if (samePeriod && nowMs - record.lastPostAt < this.progressRepeatMs) return
 
-    const output = await this.backend.read!(assignment.handle, { limit: 60 })
-    if (!output || output.status !== 'running') return
-
     const info = this.backend.inspect
       ? (await this.backend.inspect(assignment.handle)) as OrcaTerminalInfo | null
       : null
-    const snippet = extractTerminalSnippet(output.lines)
+    if (info && !info.connected) return
+
+    // 首选 Agent 自己的结构化会话记录；没有（非 Claude / 文件未落盘）再退回终端屏幕。
+    const snapshot = assignment.workdir
+      ? await this.backend.session?.(assignment.workdir, { maxEvents: 40 })
+      : null
+    let snippet: string
+    let source: 'session' | 'terminal'
+    let lastActivityAt = Number.NaN
+    if (snapshot && snapshot.events.length > 0) {
+      snippet = extractSessionSnippet(snapshot.events)
+      source = 'session'
+      lastActivityAt = Date.parse(snapshot.at)
+    } else {
+      if (!this.backend.read) return
+      const output = await this.backend.read(assignment.handle, { limit: 60 })
+      if (!output || output.status !== 'running') return
+      snippet = extractTerminalSnippet(output.lines)
+      source = 'terminal'
+      lastActivityAt = info?.lastOutputAt ? Date.parse(info.lastOutputAt) : Number.NaN
+    }
+
     const snippetHash = snippetFingerprint(snippet)
     const unchanged = samePeriod && record.snippetHash === snippetHash
     const count = samePeriod ? record.count + 1 : 1
@@ -1171,7 +1232,9 @@ export class RouterService {
       lastProgress,
       snippet,
       unchanged,
+      lastActivityAt,
       lastOutputAt,
+      source,
       silenceMs: this.progressSilenceMs,
     })
 
@@ -1190,6 +1253,7 @@ export class RouterService {
       minutes: Math.round((nowMs - lastProgress) / 60_000),
       count,
       unchanged,
+      source,
     })
   }
 

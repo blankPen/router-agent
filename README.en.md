@@ -211,7 +211,7 @@ Workers **never write state files by hand**; they report through `ra report`. Th
 - For long documents, the Worker runs `ra doc --title "..." --content @answer.md` and puts the returned link into `--reply`.
 - Follow-ups are delivered with a `【Router 输入 in_xxx】` prefix; the Worker acknowledges with `--ack in_xxx`, otherwise the same follow-up is delivered again.
 - `--state progress` replies / summaries are not sent immediately by default: the Router merges them on the `progress.syncMs` interval, de-duplicates identical content, and posts one message to the thread. Replies to a follow-up (with `--ack`) and terminal states such as ready / blocked / failed are still sent immediately.
-- **No reliance on Worker reports**: when a Worker has had no new report / input for `progress.silenceMs`, the Router reads the rendered Orca terminal (`orca terminal read --screen`) every `progress.probeMs` and posts the latest activity excerpt to the thread, rate-limited by `progress.repeatMs`. Tickets that received a new input after `ready` are covered too.
+- **No reliance on Worker reports**: when a Worker has had no new report / input for `progress.silenceMs`, the Router reads the agent's structured session transcript first (Claude Code `~/.claude/projects/.../*.jsonl`) and falls back to the rendered Orca terminal (`orca terminal read --screen`) only when unavailable. The latest activity excerpt is posted every `progress.probeMs`, rate-limited by `progress.repeatMs`. Tickets that received a new input after `ready` are covered too.
 - The Router reads incremental file changes every turn (the `state.json` fallback channel) and calls `Engine.report()` on success.
 - Long terminal silence → the Router sends `status?`; still no response → the ticket is marked stale and a human is notified.
 - Audit events are appended to `events.log` in the same directory.
@@ -236,7 +236,7 @@ The Router doesn't chat; it only speaks when necessary:
 | Inferred candidate with `acceptMode: off` | Fixed message: "not starting automatically right now" |
 | Worker stuck / has a result / PR merged or closed | Always synced as a **thread reply** under the original message |
 | Worker delivers a conclusion | Simple one-line replies go as **plain text**; Markdown goes as a **Feishu card** (normalized first) in the thread, with document / PR links |
-| Worker progress (`--state progress` or Router probe) | **Not sent one by one**: reports are merged on `progress.syncMs` into one thread message (follow-up answers excepted). When the Worker goes quiet, the Router reads the terminal on `progress.probeMs` and posts the latest activity excerpt, rate-limited by `progress.repeatMs` |
+| Worker progress (`--state progress` or Router probe) | **Not sent one by one**: reports are merged on `progress.syncMs` into one thread message (follow-up answers excepted). When the Worker goes quiet, the Router probes on `progress.probeMs` (session transcript first, terminal screen as fallback) and posts the latest activity excerpt, rate-limited by `progress.repeatMs` |
 
 - The ack reaction is best-effort: failures only log `feishu:reaction-failed` and never affect triage. It is added only to first-time ingested messages addressed to the bot (@ / direct), never to backfill or replay, and removed after the reply is sent (`feishu:unreact-failed` logs a removal failure). Turn it off with `ra config set feishu.reaction ""`.
 - All `emoji_type` values are in the Feishu "emoji copy" document; note that they are **case-sensitive** (`Typing`, not `TYPING`).

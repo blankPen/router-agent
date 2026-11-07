@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync, readFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, existsSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { OrcaAdapter, OrcaCommandError, parseCreateResult, summarizeArgs } from '../../src/worker/orca/index.js'
+import { claudeProjectSlug, describeToolUse } from '../../src/worker/orca/session.js'
 import { worktreeCreate, terminalSend, terminalClose, terminalList, terminalRead, worktreeRemove, agentLaunch } from '../../src/worker/orca/commands.js'
 import type { CommandRunner, CommandResult } from '../../src/worker/orca/commands.js'
 import type { Assignment, Ticket } from '../../src/core/model.js'
@@ -254,6 +255,54 @@ describe('OrcaAdapter', () => {
     const adapter = new OrcaAdapter({ runner, workersDir: '/tmp', spec: 'prompt' })
     expect(await adapter.read('term-1')).toEqual({ status: 'unknown', lines: [] })
     expect(await adapter.read('term-1')).toBeNull()
+  })
+})
+
+describe('Claude 会话记录', () => {
+  it('按 workdir 找到最新会话，提取 assistant 文本与工具调用', async () => {
+    const projects = mkdtempSync(join(tmpdir(), 'ra-claude-projects-'))
+    const workdir = '/tmp/acme/ra-tk-1'
+    const dir = join(projects, claudeProjectSlug(workdir))
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 's1.jsonl'), [
+      JSON.stringify({ type: 'system', timestamp: '2026-11-06T10:00:00.000Z' }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-11-06T10:01:00.000Z',
+        sessionId: 's1',
+        message: { content: [{ type: 'thinking', thinking: '想一想' }, { type: 'text', text: '正在改配置' }] },
+      }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-11-06T10:02:00.000Z',
+        sessionId: 's1',
+        message: { content: [{ type: 'tool_use', name: 'Edit', input: { file_path: '/tmp/x/service.ts' } }] },
+      }),
+    ].join('\n'))
+
+    const adapter = new OrcaAdapter({ runner: new FakeRunner(), workersDir: '/tmp', spec: 'prompt', claudeProjectsDir: projects })
+    const snapshot = await adapter.session(workdir)
+
+    expect(snapshot?.at).toBe('2026-11-06T10:02:00.000Z')
+    expect(snapshot?.events).toEqual([
+      { at: '2026-11-06T10:01:00.000Z', kind: 'text', text: '正在改配置' },
+      { at: '2026-11-06T10:02:00.000Z', kind: 'tool', text: 'Edit(service.ts)' },
+    ])
+    expect(snapshot?.sessionId).toBe('s1')
+    expect(snapshot?.filePath).toBe(join(dir, 's1.jsonl'))
+  })
+
+  it('找不到 workdir 对应的会话目录时返回 null', async () => {
+    const projects = mkdtempSync(join(tmpdir(), 'ra-claude-projects-'))
+    const adapter = new OrcaAdapter({ runner: new FakeRunner(), workersDir: '/tmp', spec: 'prompt', claudeProjectsDir: projects })
+    expect(await adapter.session('/tmp/not-there')).toBeNull()
+  })
+
+  it('工具调用压成一行人话，不把完整命令带进话题', () => {
+    expect(describeToolUse('Bash', { description: '跑测试', command: 'pnpm test' })).toBe('Bash：跑测试')
+    expect(describeToolUse('Edit', { file_path: '/tmp/a/service.ts' })).toBe('Edit(service.ts)')
+    expect(describeToolUse('Grep', { pattern: 'syncProgress' })).toBe('Grep(syncProgress)')
+    expect(describeToolUse('Task', { description: '并行审查' })).toBe('Task：并行审查')
   })
 })
 

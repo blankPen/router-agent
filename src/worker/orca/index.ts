@@ -1,8 +1,9 @@
 import { mkdirSync, writeFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import type { WorkerBackend, WorkerContext, InboundMessage, ContextItem, TerminalOutput } from '../port.js'
+import type { WorkerBackend, WorkerContext, InboundMessage, ContextItem, TerminalOutput, SessionSnapshot } from '../port.js'
 import { buildWorkerPrompt } from '../spec/index.js'
 import { workBranch, worktreeName } from '../naming.js'
+import { readClaudeSession } from './session.js'
 import {
   agentLaunch,
   terminalClose,
@@ -21,6 +22,8 @@ export interface OrcaAdapterOptions {
   /** ~/.router-agent/workers */
   workersDir: string
   spec: 'prompt' | 'agent'
+  /** Claude Code 会话记录目录；默认 ~/.claude/projects，测试可注入临时目录。 */
+  claudeProjectsDir?: string
 }
 
 export interface OrcaTerminalInfo {
@@ -173,11 +176,13 @@ export class OrcaAdapter implements WorkerBackend {
   private runner: CommandRunner
   private workersDir: string
   private spec: 'prompt' | 'agent'
+  private claudeProjectsDir?: string
 
   constructor(opts: OrcaAdapterOptions) {
     this.runner = opts.runner
     this.workersDir = opts.workersDir
     this.spec = opts.spec
+    this.claudeProjectsDir = opts.claudeProjectsDir
   }
 
   async start(ctx: WorkerContext): Promise<{ handle: string; workdir?: string }> {
@@ -244,6 +249,17 @@ export class OrcaAdapter implements WorkerBackend {
     const status = raw.status === 'running' || raw.status === 'exited' ? raw.status : 'unknown'
     const lines = Array.isArray(raw.tail) ? raw.tail.map((line: unknown) => String(line)) : []
     return { status, lines, ...(raw.source ? { source: String(raw.source) } : {}) }
+  }
+
+  /**
+   * 优先读 Agent 自己的结构化会话记录（Claude Code JSONL），
+   * 比终端屏幕干净得多；找不到时返回 null，由调用方退回 read()。
+   */
+  async session(workdir: string, opts: { maxBytes?: number; maxEvents?: number } = {}): Promise<SessionSnapshot | null> {
+    return readClaudeSession(workdir, {
+      ...(this.claudeProjectsDir ? { projectsDir: this.claudeProjectsDir } : {}),
+      ...opts,
+    })
   }
 
   async inspectWorktree(selector: string): Promise<Record<string, unknown> | null> {
