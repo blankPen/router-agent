@@ -11,7 +11,7 @@
 每张工单都有自己的分支、终端和上下文。
 
 [![Stars](https://img.shields.io/github/stars/blankPen/router-agent?style=flat&color=111111)](https://github.com/blankPen/router-agent/stargazers)
-![Node](https://img.shields.io/badge/node-%E2%89%A522.18-339933?logo=node.js&logoColor=white)
+![Node](https://img.shields.io/badge/node-%E2%89%A522.19-339933?logo=node.js&logoColor=white)
 ![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
 
@@ -44,7 +44,7 @@ router-agent（`ra`）是一个常驻的双层 Agent 系统：**Router 只做研
 
 | 依赖 | 说明 |
 |-|-|
-| Node.js | `>= 22.18.0`（使用内置 `node:sqlite`） |
+| Node.js | `>= 22.19.0`（使用内置 `node:sqlite`） |
 | pnpm | 安装依赖与构建 |
 | Orca | 提供 `orca` CLI，负责创建 worktree 与终端 |
 | lark-cli | 飞书事件消费、发消息；需要一个飞书自建应用 |
@@ -547,7 +547,7 @@ src/cli/      ra 命令
 - 实测 Orca 的 `lastOutputAt` 是毫秒数字、且 CLI 创建的终端可能 `orphaned=true` 但依然可用；适配层已分别做归一化与「只有 `connected=false` 才判死」的处理。
 - `workerSpec.mode: agent` 依赖 Orca 启动的 claude 是否加载全局 `~/.claude/agents/`；该前提尚未实测，默认使用已验证可行的 `prompt` 模式。
 - 派工草稿按「群 + 同一个人」保存，30 分钟有效；同一个群里的多个未补齐请求会互相覆盖（后一次追问覆盖前一次）。
-- Pi SDK 仍在演进，本仓库锁定 `@mariozechner/pi-coding-agent@0.73.1`，升级前先跑 `RA_PI_VERIFY=1` 的真实环境验证。
+- Pi SDK 仍在演进，本仓库锁定 `@earendil-works/pi-coding-agent@1.5.0`，升级前先跑 `RA_PI_VERIFY=1` 的真实环境验证。
 - Pi 是唯一研判引擎，没有回退到旧实现的开关；Pi 不可用时候选会按 `unavailable` 落库，不会静默重试。
 
 ## 文档

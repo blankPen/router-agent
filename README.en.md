@@ -11,7 +11,7 @@ Admission, ticketing, dispatch, follow-ups, progress sync and closure are automa
 and every ticket gets its own branch, terminal and context.
 
 [![Stars](https://img.shields.io/github/stars/blankPen/router-agent?style=flat&color=111111)](https://github.com/blankPen/router-agent/stargazers)
-![Node](https://img.shields.io/badge/node-%E2%89%A522.18-339933?logo=node.js&logoColor=white)
+![Node](https://img.shields.io/badge/node-%E2%89%A522.19-339933?logo=node.js&logoColor=white)
 ![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
 
@@ -44,7 +44,7 @@ It is a **clean rewrite** of dsh-superagent, with no dependency on the prototype
 
 | Dependency | Notes |
 |-|-|
-| Node.js | `>= 22.18.0` (uses the built-in `node:sqlite`) |
+| Node.js | `>= 22.19.0` (uses the built-in `node:sqlite`) |
 | pnpm | Install dependencies and build |
 | Orca | Provides the `orca` CLI that creates worktrees and terminals |
 | lark-cli | Feishu event consumption and messaging; needs a Feishu custom app |
@@ -515,7 +515,7 @@ src/cli/      ra commands
 - Measured Orca behavior: `lastOutputAt` is a millisecond number, and CLI-created terminals may report `orphaned=true` while still usable. The adapter normalizes the former and only treats `connected=false` as dead.
 - `workerSpec.mode: agent` depends on whether the claude launched by Orca loads the global `~/.claude/agents/`; that premise is not yet verified, so the verified `prompt` mode is the default.
 - Dispatch drafts are stored per "chat + person" and valid for 30 minutes; multiple incomplete requests in the same chat overwrite each other (the later question replaces the earlier one).
-- The Pi SDK is still evolving; this repo pins `@mariozechner/pi-coding-agent@0.73.1`. Run the `RA_PI_VERIFY=1` live check before upgrading.
+- The Pi SDK is still evolving; this repo pins `@earendil-works/pi-coding-agent@1.5.0`. Run the `RA_PI_VERIFY=1` live check before upgrading.
 - Pi is the only triage engine and there is no fallback switch; when Pi is unavailable, candidates land as `unavailable` rather than being silently retried.
 
 ## Documentation

@@ -364,17 +364,16 @@ function lastAssistantText(messages: unknown): string {
  * 真实 Pi session 装配。动态 import 让单元测试注入假 factory 时不加载 SDK。
  *
  * 隔离策略：
- * - AuthStorage / ModelRegistry / SettingsManager 全部 in-memory，不读写用户 ~/.pi；
+ * - ModelRuntime 不读 models.json，凭证用空的内存实现；API key 只通过
+ *   setRuntimeApiKey 注入内存，不读写用户 ~/.pi，也不落盘；
+ * - SettingsManager 全部 in-memory；
  * - DefaultResourceLoader 关闭 extensions / skills / prompts / themes / AGENTS.md，
  *   只注入 Router 自己的 system prompt；
  * - 研判只放行 Router 自己的 router_* 工具；回复通道工具为空。
  */
 export async function createDefaultPiSession(opts: PiSessionOptions): Promise<PiSessionLike> {
   mkdirSync(opts.agentDir, { recursive: true })
-  const pi = await import('@mariozechner/pi-coding-agent')
-  const auth = pi.AuthStorage.inMemory()
-  auth.setRuntimeApiKey(PROVIDER, opts.apiKey)
-  const registry = pi.ModelRegistry.inMemory(auth)
+  const pi = await import('@earendil-works/pi-coding-agent')
   const settings = pi.SettingsManager.inMemory({
     compaction: { enabled: false },
     retry: { enabled: false },
@@ -393,25 +392,47 @@ export async function createDefaultPiSession(opts: PiSessionOptions): Promise<Pi
   })
   await loader.reload()
 
-  const model = {
-    id: opts.model,
-    name: opts.model,
-    api: 'openai-completions' as const,
-    provider: PROVIDER,
+  // pi 1.x 把模型/凭证收敛到 ModelRuntime：先注册 OpenAI 兼容 provider，
+  // 再把 API key 作为运行时凭证注入，最后从 runtime 里取回组装好的 model 给 session 使用。
+  // 凭证存储用空的内存实现，pi 不会读写任何 auth.json。
+  const modelRuntime = await pi.ModelRuntime.create({
+    credentials: {
+      read: async () => undefined,
+      list: async () => [],
+      modify: async (_providerId: string, fn: (current: unknown) => Promise<unknown>) => fn(undefined),
+      delete: async () => {},
+    } as never,
+    modelsPath: null,
+    refreshOnCreate: false,
+  })
+  modelRuntime.registerProvider(PROVIDER, {
+    name: 'Router Agent',
+    api: 'openai-completions',
     baseUrl: opts.baseUrl,
-    reasoning: false,
-    input: ['text'] as ('text' | 'image')[],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 128_000,
-    maxTokens: 8_192,
-  }
+    models: [
+      {
+        id: opts.model,
+        name: opts.model,
+        api: 'openai-completions',
+        baseUrl: opts.baseUrl,
+        reasoning: false,
+        input: ['text'],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 128_000,
+        maxTokens: 8_192,
+      },
+    ],
+  })
+  await modelRuntime.setRuntimeApiKey(PROVIDER, opts.apiKey)
+  const model = modelRuntime.getModel(PROVIDER, opts.model)
+  if (!model) throw new Error(`pi:model-not-found(${PROVIDER}/${opts.model})`)
+
   const { session } = await pi.createAgentSession({
     cwd: opts.cwd,
     agentDir: opts.agentDir,
     model: model as never,
+    modelRuntime,
     thinkingLevel: 'off',
-    authStorage: auth,
-    modelRegistry: registry,
     tools: opts.toolNames,
     customTools: opts.tools as never,
     resourceLoader: loader,
