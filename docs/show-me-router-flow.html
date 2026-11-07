@@ -412,7 +412,7 @@
       <div class="sub">src/service.ts · src/worker/orca</div>
       <ul>
         <li><b>派工</b> — 起 worktree，注入整套 worker 手册
-          <span class="m">orca worktree create --repo … --name ra-tk-&lt;编号&gt; --branch ra/tk-&lt;编号&gt;-&lt;语义&gt;</span></li>
+          <span class="m">orca worktree create --repo … --name ra-t&lt;编号&gt; --branch ra/&lt;编号&gt;-&lt;语义&gt;</span></li>
         <li><b>追加输入</b> — 把新消息作为文本敲进终端
           <span class="m">orca terminal send &lt;handle&gt; "…"</span></li>
         <li><b>探活</b> — 长时间无输出时发一句 <code>status?</code>
@@ -444,7 +444,7 @@
         <li><b>meta.json</b> — Router 派工时写的身份映射
           <span class="m">ticketId ↔ assignmentId ↔ handle ↔ workdir</span></li>
         <li><b>events.log</b> — 可选审计流水，一行一个 JSON，不参与状态机</li>
-        <li><b>PR</b> — 自建分支 <code>ra/tk-&lt;编号&gt;-&lt;语义&gt;</code>，开 PR 后把编号写回 state.json；<b>不自己合并</b></li>
+        <li><b>PR</b> — 自建分支 <code>ra/&lt;编号&gt;-&lt;语义&gt;</code>，开 PR 后把编号写回 state.json；<b>不自己合并</b></li>
       </ul>
     </div>
   </div>

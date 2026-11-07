@@ -82,8 +82,8 @@ describe('Engine', () => {
     const first = engine.decide({ triggerId: 't1', decision: 'accept', strength: 'explicit', reason: 'ok' })
     const second = engine.decide({ triggerId: 't2', decision: 'accept', strength: 'explicit', reason: 'ok' })
 
-    expect(first.ticket?.id).toBe('tk-1')
-    expect(second.ticket?.id).toBe('tk-2')
+    expect(first.ticket?.id).toBe('T1')
+    expect(second.ticket?.id).toBe('T2')
     expect(second.ticket?.mandateId).not.toBe(first.ticket?.mandateId)
   })
 

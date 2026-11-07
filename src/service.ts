@@ -306,7 +306,7 @@ export class RouterService {
       if (!current.stale && nowMs - current.nudgedAt > this.staleAfterMs) {
         current.stale = true
         this.engine.setAttention(ticket.id, 'worker 无响应：长时间没有新的 state.json 上报，已标记 stale，请人工确认')
-        this.notify(ticket, `工单「${ticket.title}」的 worker 无响应，已标记 stale，请到 Orca 终端确认。`, `stale:${ticket.id}`)
+        this.notify(ticket, `工单 ${ticket.id}「${ticket.title}」的 worker 无响应，已标记 stale，请到 Orca 终端确认。`, `stale:${ticket.id}`)
         this.log('idle:stale', ticket.id, {})
       }
     }
@@ -363,12 +363,12 @@ export class RouterService {
       this.queueLong(ticket, '', text, `reply:${ticket.id}:${reportKey}`)
     } else if (state.state === 'ready') {
       const key = `ready:${ticket.id}:${reportKey}`
-      const base = `工单「${ticket.title}」已完成：${state.prUrl || state.summary}`
+      const base = `工单 ${ticket.id}「${ticket.title}」已完成：${state.prUrl || state.summary}`
       this.queue(ticket, state.prUrl ? base : `${base}\n\n（worker 只回了一句话，未提供完整回复；如需完整内容请在本话题继续追问）`, key)
     }
 
     if (state.state === 'blocked' && !reply) {
-      this.notify(ticket, `工单「${ticket.title}」卡住了：${state.humanAction ?? state.summary}`, `blocked:${ticket.id}:${reportKey}`)
+      this.notify(ticket, `工单 ${ticket.id}「${ticket.title}」卡住了：${state.humanAction ?? state.summary}`, `blocked:${ticket.id}:${reportKey}`)
     }
   }
 
@@ -423,7 +423,7 @@ export class RouterService {
         const closed = this.engine.closeTicket(ticket.id, `pr:${info.state}`)
         appendEvent(join(this.config.home, 'workers', ticket.id, 'events.log'), { kind: 'pr', state: info.state, at: this.clock.now() })
         const label = info.state === 'merged' ? '已合并' : '已关闭'
-        this.notify(closed, `工单「${closed.title}」的 PR ${info.url} ${label}，工单闭环。`, `pr:${ticket.id}:${info.state}`)
+        this.notify(closed, `工单 ${closed.id}「${closed.title}」的 PR ${info.url} ${label}，工单闭环。`, `pr:${ticket.id}:${info.state}`)
       }
     }
   }
@@ -492,7 +492,7 @@ export class RouterService {
     this.engine.unsubscribe(ticket.threadId, ticket.id)
     this.notify(
       ticket,
-      `工单「${ticket.title}」的执行会话意外删除，已经找不到了，无法继续执行。如果还需要继续，请在本话题里说明，我会重新开一张工单。`,
+      `工单 ${ticket.id}「${ticket.title}」的执行会话意外删除，已经找不到了，无法继续执行。如果还需要继续，请在本话题里说明，我会重新开一张工单。`,
       `worker-lost:${ticket.id}`,
     )
     this.log('worker:lost', ticket.id, { handle: assignment?.handle ?? '', reason })

@@ -18,7 +18,7 @@ class FakeRunner implements CommandRunner {
 }
 
 const ticket: Ticket = {
-  id: 'tk_1',
+  id: 'T1',
   title: '调整登录超时',
   threadId: 'feishu:oc_chat:om_root',
   source: 'feishu',
@@ -36,7 +36,7 @@ const ticket: Ticket = {
 
 const assignment: Assignment = {
   id: 'as_1',
-  ticketId: 'tk_1',
+  ticketId: 'T1',
   backendId: 'orca',
   handle: '',
   workdir: '',
@@ -103,7 +103,7 @@ describe('OrcaAdapter', () => {
     expect(handle).toBe('term-9')
     expect(workdir).toBe('/tmp/wt-9')
     expect(runner.calls[0]!.argv.slice(0, 4)).toEqual(['worktree', 'create', '--repo', 'name:dsh/router-agent'])
-    const metaPath = join(dir, 'tk_1', 'meta.json')
+    const metaPath = join(dir, 'T1', 'meta.json')
     expect(existsSync(metaPath)).toBe(true)
     const meta = JSON.parse(readFileSync(metaPath, 'utf8'))
     expect(meta.handle).toBe('term-9')
@@ -210,13 +210,13 @@ describe('多项目 / 多分支派工', () => {
     expect(argv[argv.indexOf('--repo') + 1]).toBe('name:other/repo')
     expect(argv[argv.indexOf('--base-branch') + 1]).toBe('release')
     // 工作分支由工单号 + 标题生成，而不是被 Orca 的用户前缀包一层 UUID。
-    expect(argv[argv.indexOf('--branch') + 1]).toBe('ra/tk_1-调整登录超时')
-    const meta = JSON.parse(readFileSync(join(dir, 'tk_1', 'meta.json'), 'utf8'))
+    expect(argv[argv.indexOf('--branch') + 1]).toBe('ra/T1-调整登录超时')
+    const meta = JSON.parse(readFileSync(join(dir, 'T1', 'meta.json'), 'utf8'))
     expect(meta.repo).toBe('name:other/repo')
     expect(meta.branch).toBe('release')
-    expect(meta.workBranch).toBe('ra/tk_1-调整登录超时')
+    expect(meta.workBranch).toBe('ra/T1-调整登录超时')
     const prompt = argv[argv.indexOf('--prompt') + 1]!
     expect(prompt).toContain('起始分支：release')
-    expect(prompt).toContain('分支名：`ra/tk_1-调整登录超时`')
+    expect(prompt).toContain('分支名：`ra/T1-调整登录超时`')
   })
 })

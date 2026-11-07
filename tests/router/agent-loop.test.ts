@@ -118,11 +118,14 @@ describe('Router 常驻 Agent Loop', () => {
     const outbox = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)
     const ack = outbox.find(item => item.key.startsWith('ack:'))!
     const thread = outbox.find(item => item.key.startsWith('thread:'))!
-    expect(ack.text).toContain('我帮你创建了工单')
+    const ticket = engine.store.listOpenTickets()[0]!
+    expect(ticket.id).toBe('T1')
+    expect(ack.text).toContain(`我帮你创建了工单 ${ticket.id}`)
     expect(ack.threadId).toBe('')
     expect(ack.originMessageId).toBe('om_1')
     expect(thread.threadId).toBe('om_1')
     expect(thread.originMessageId).toBe('om_1')
+    expect(thread.text).toContain(`工单 ${ticket.id}「${ticket.title}」`)
     expect(thread.text).toContain('后续进展会在这个话题里更新')
   })
 

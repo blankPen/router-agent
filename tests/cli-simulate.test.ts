@@ -69,7 +69,7 @@ describe('ra simulate', () => {
   it('接单会返回 ack 与话题开场两条回复', async () => {
     const llm = new CountingLlm('{"decision":"accept","reason":"ok","title":"改超时","scope":"x"}')
     const result = await simulate({ home: mkdtempSync(join(tmpdir(), 'ra-sim-')), config: config(), llm }, { text: '把登录超时改成 30 秒', dryRun: true })
-    expect(result.replies[0]).toContain('我帮你创建了工单')
+    expect(result.replies[0]).toContain('我帮你创建了工单 T1')
     expect(result.replies[1]).toContain('后续进展会在这个话题里更新')
   })
 

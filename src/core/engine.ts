@@ -387,9 +387,9 @@ export function deriveTitle(text: string): string {
 }
 
 /**
- * 工单编号：`tk-1`、`tk-2`……全局自增，方便在飞书与终端里直接引用。
+ * 工单编号：`T1`、`T2`……全局自增，简短到可以直接在飞书里口语引用。
  * 旧工单是 `tk_<uuid>`，与短编号不会冲突。
  */
 export function formatTicketId(seq: number): string {
-  return `tk-${seq}`
+  return `T${seq}`
 }

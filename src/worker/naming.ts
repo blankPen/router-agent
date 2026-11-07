@@ -30,10 +30,10 @@ export function ticketSlug(title: string, maxLength = MAX_SLUG_LENGTH): string {
 
 /** Orca worktree 名：短、纯 ASCII，目录里不会出现中文或 UUID。 */
 export function worktreeName(ticket: Pick<Ticket, 'id'>): string {
-  return sanitizeName(`ra-${ticket.id}`)
+  return sanitizeName(`ra-${ticket.id.toLowerCase()}`)
 }
 
-/** 实际工作分支：`ra/tk-12-<语义 slug>`，由 Orca 的 `--branch` 直接落成 git 分支名。 */
+/** 实际工作分支：`ra/T12-<语义 slug>`，由 Orca 的 `--branch` 直接落成 git 分支名。 */
 export function workBranch(ticket: Pick<Ticket, 'id' | 'title'>): string {
   return `${BRANCH_PREFIX}/${ticket.id}-${ticketSlug(ticket.title)}`
 }
