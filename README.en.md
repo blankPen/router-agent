@@ -119,7 +119,7 @@ Key constraints:
 - **Engine is the single writer**: the Router, Workers and dashboard never write SQLite directly.
 - **WorkerBackend is the only extension point**: another backend is one adapter, with no changes to the core or Router.
 - **All outbound notifications go through the Outbox**: idempotency key plus exponential backoff starting at 2s (capped at 60s).
-- **No TUI parsing for state**: `checkIdle` only reads Orca's structured fields (`connected` / `orphaned` / `lastOutputAt`); the proactive probe reads `orca terminal read --screen` only to post a conservatively cleaned progress excerpt.
+- **No TUI parsing for state**: `checkIdle` only reads Orca's structured fields (`connected` / `orphaned` / `lastOutputAt`); the proactive probe reads the agent's session transcript first and falls back to `orca terminal read --screen`. Probe messages are semantic summaries: assistant text plus a one-line action digest, with tool-call echoes and status lines filtered or collapsed.
 - **Triage is a DecisionEngine port**: Pi is the only implementation, and both triage and polite replies go through the same Pi channel; triage tools only produce proposals, and the Engine still writes everything.
 
 ## What it does
@@ -225,7 +225,7 @@ Workers **never write state files by hand**; they report through `ra report`. Th
 - For long documents, the Worker runs `ra doc --title "..." --content @answer.md` and puts the returned link into `--reply`.
 - Follow-ups are delivered with a `【Router 输入 in_xxx】` prefix; the Worker acknowledges with `--ack in_xxx`, otherwise the same follow-up is delivered again.
 - `--state progress` replies / summaries are not sent immediately by default: the Router merges them on the `progress.syncMs` interval, de-duplicates identical content, and posts one message to the thread. Replies to a follow-up (with `--ack`) and terminal states such as ready / blocked / failed are still sent immediately.
-- **No reliance on Worker reports**: when a Worker has had no new report / input for `progress.silenceMs`, the Router reads the agent's structured session transcript first (Claude Code `~/.claude/projects/.../*.jsonl`) and falls back to the rendered Orca terminal (`orca terminal read --screen`) only when unavailable. The latest activity excerpt is posted every `progress.probeMs`, rate-limited by `progress.repeatMs`. Tickets that received a new input after `ready` are covered too.
+- **No reliance on Worker reports**: when a Worker has had no new report / input for `progress.silenceMs`, the Router reads the agent's structured session transcript first (Claude Code `~/.claude/projects/.../*.jsonl`) and falls back to the rendered Orca terminal (`orca terminal read --screen`) only when unavailable. Progress is condensed into a semantic summary (assistant text plus a one-line action digest, no per-call tool noise) and posted every `progress.probeMs`, rate-limited by `progress.repeatMs`. Tickets that received a new input after `ready` are covered too.
 - The Router reads incremental file changes every turn (the `state.json` fallback channel) and calls `Engine.report()` on success.
 - Long terminal silence → the Router sends `status?`; still no response → the ticket is marked stale and a human is notified.
 - Audit events are appended to `events.log` in the same directory.
@@ -250,7 +250,7 @@ The Router doesn't chat; it only speaks when necessary:
 | Inferred candidate with `acceptMode: off` | Fixed message: "not starting automatically right now" |
 | Worker stuck / has a result / PR merged or closed | Always synced as a **thread reply** under the original message |
 | Worker delivers a conclusion | Simple one-line replies go as **plain text**; Markdown goes as a **Feishu card** (normalized first) in the thread, with document / PR links |
-| Worker progress (`--state progress` or Router probe) | **Not sent one by one**: reports are merged on `progress.syncMs` into one thread message (follow-up answers excepted). When the Worker goes quiet, the Router probes on `progress.probeMs` (session transcript first, terminal screen as fallback) and posts the latest activity excerpt, rate-limited by `progress.repeatMs` |
+| Worker progress (`--state progress` or Router probe) | **Not sent one by one**: reports are merged on `progress.syncMs` into one thread message (follow-up answers excepted). When the Worker goes quiet, the Router probes on `progress.probeMs` (session transcript first, terminal screen as fallback) and posts a semantic summary (assistant text plus a one-line action digest, tool-call noise filtered), rate-limited by `progress.repeatMs` |
 
 - The ack reaction is best-effort: failures only log `feishu:reaction-failed` and never affect triage. It is added only to first-time ingested messages addressed to the bot (@ / direct), never to backfill or replay, and removed after the reply is sent (`feishu:unreact-failed` logs a removal failure). Turn it off with `ra config set feishu.reaction ""`.
 - All `emoji_type` values are in the Feishu "emoji copy" document; note that they are **case-sensitive** (`Typing`, not `TYPING`).
@@ -270,14 +270,14 @@ The Router doesn't chat; it only speaks when necessary:
 | `input:delivered` | Service | `ticketId` `count` `text` | Actually delivered into the Worker terminal |
 | `report` | Service | `ticketId` `state` `turn` `summary` `reply` `humanAction` `pr` | Worker's `ra report` |
 | `progress:synced` / `progress:dedup` | Service | `ticketId` `count` / `skipped` | Merged progress sync, or duplicate content skipped |
-| `progress:probed` | Service | `ticketId` `minutes` `count` `unchanged` | Proactive terminal probe posted to the thread |
+| `progress:probed` | Service | `ticketId` `minutes` `count` `unchanged` | Proactive probe posted a semantic summary to the thread |
 | `outbox:sent` / `outbox:failed` | Outbox | `key` `text` / `error` | Outbound notification result |
 | `api:input` / `api:stop` / `api:policy` | HTTP API | — | Dashboard / CLI actions |
 | `idle:nudge` / `idle:stale` | Service | — | Idle nudge and stale marking |
 | `pr:linked` / `pr:state` | Service | — | PR tracking |
 | `recover:*` | Service | — | Restart reconciliation |
 
-Raw terminal output **never enters the logs** (to avoid parsing TUI text); to see what a Worker did, read the `report` `summary` and `~/.router-agent/workers/<ticketId>/events.log`.
+Raw terminal output **never enters the logs** (to avoid parsing TUI text); the proactive probe prefers the Claude session transcript and otherwise posts a semantic summary (assistant text plus an action digest), never a replay of tool calls. To see what a Worker did, read the `report` `summary` and `~/.router-agent/workers/<ticketId>/events.log`.
 
 > **Only one event bus may run per bot.** If `ra logs` shows `another event bus is already connected`, stop the other consumer using that app, or give router-agent its own bot via the "dedicated bot" option in `ra init`.
 

@@ -78,7 +78,12 @@ export function readClaudeSession(workdir: string, opts: ReadSessionOptions = {}
         const text = String(block.text ?? '').trim()
         if (text) events.push({ at: timestamp, kind: 'text', text })
       } else if (block.type === 'tool_use') {
-        events.push({ at: timestamp, kind: 'tool', text: describeToolUse(block.name, block.input) })
+        events.push({
+          at: timestamp,
+          kind: 'tool',
+          text: describeToolUse(block.name, block.input),
+          tool: describeToolInfo(block.name, block.input),
+        })
       }
     }
     if (events.length > before) {
@@ -114,27 +119,59 @@ function readTailLines(path: string, maxBytes: number): string[] {
   return lines.filter(line => line.trim().length > 0)
 }
 
-/** 把工具调用压成一行人话；不把完整命令 / 文件内容带进话题。 */
-export function describeToolUse(name: unknown, input: unknown): string {
+/** 工具调用的结构化摘要：只保留「工具名 + 目标」，不把完整命令 / 文件内容带进话题。 */
+export interface ToolInfo {
+  name: string
+  target?: string
+}
+
+/** 从工具名与入参里提炼结构化目标，供进展巡检生成语义摘要。 */
+export function describeToolInfo(name: unknown, input: unknown): ToolInfo {
   const tool = String(name ?? 'tool')
   const args = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
   const file = typeof args.file_path === 'string' ? basename(args.file_path) : ''
+  const target = (value: unknown): { target: string } | Record<string, never> => {
+    const text = oneLine(value)
+    return text ? { target: text } : {}
+  }
   switch (tool) {
     case 'Bash':
-      return `Bash：${oneLine(args.description ?? args.command) || '执行命令'}`
+      return { name: 'Bash', ...target(args.description ?? args.command) }
     case 'Read':
     case 'Edit':
     case 'Write':
     case 'MultiEdit':
     case 'NotebookEdit':
-      return file ? `${tool}(${file})` : tool
+      return { name: tool, ...(file ? { target: file } : {}) }
     case 'Grep':
     case 'Glob':
-      return `${tool}(${oneLine(args.pattern) || '搜索'})`
+      return { name: tool, ...target(args.pattern) }
     case 'Task':
-      return `Task：${oneLine(args.description) || '子任务'}`
+      return { name: 'Task', ...target(args.description) }
     default:
-      return tool
+      return { name: tool }
+  }
+}
+
+/** 把工具调用压成一行人话；不把完整命令 / 文件内容带进话题。 */
+export function describeToolUse(name: unknown, input: unknown): string {
+  const info = describeToolInfo(name, input)
+  switch (info.name) {
+    case 'Bash':
+      return `Bash：${info.target ?? '执行命令'}`
+    case 'Read':
+    case 'Edit':
+    case 'Write':
+    case 'MultiEdit':
+    case 'NotebookEdit':
+      return info.target ? `${info.name}(${info.target})` : info.name
+    case 'Grep':
+    case 'Glob':
+      return `${info.name}(${info.target ?? '搜索'})`
+    case 'Task':
+      return `Task：${info.target ?? '子任务'}`
+    default:
+      return info.name
   }
 }
 

@@ -93,7 +93,7 @@ interface ProbeRecord {
   lastPostAt: number
   /** 本轮静默期的提醒次数，用来生成稳定的 outbox key。 */
   count: number
-  /** 终端摘录指纹；画面没变时可以明确告诉用户。 */
+  /** 语义摘要指纹；摘要没变时可以明确告诉用户。 */
   snippetHash: string
 }
 
@@ -181,17 +181,105 @@ const STAGE_LABELS: Record<Stage, string> = {
   closed: '已关闭',
 }
 
-/** Claude Code / Codex 在渲染屏幕里的活动标记：⏺ 文本、⎿ 工具结果、✻✽ 状态行。 */
-const ACTIVITY_MARKERS = /^[⏺⎿✻✽✶✳⏵◆◇●○]/
+/** 巡检时不在摘要里展开的纯流程工具：只影响 agent 内部节奏，对用户没有信息量。 */
+const NOISE_TOOLS = new Set(['TodoWrite', 'TodoRead', 'ExitPlanMode', 'EnterPlanMode', 'BashOutput', 'KillShell'])
+
+/** 渲染屏幕里的活动标记：⏺ 等是 agent 输出，⎿ 是工具结果，✻✽ 是状态行。 */
+const ACTIVITY_MARKER = /^[⏺◆◇●○]\s*(.*)$/
+const TOOL_RESULT_LINE = /^⎿/
+const STATUS_LINE = /^[✻✽✶✳⏵]/
+
+/** Claude Code 在渲染屏幕里的工具调用回显：`⏺ Update(path)`、`⏺ Bash(命令)` 等。 */
+const TERMINAL_TOOL_LINE = new RegExp(
+  `^[⏺◆◇●○]\\s*(Update|Edit|MultiEdit|Write|Read|Bash|Shell|Grep|Glob|Task|Agent|WebFetch|WebSearch|NotebookEdit|TodoWrite|TodoRead|ExitPlanMode|BashOutput|KillShell)\\b(?:\\s*\\((.*)\\)|\\s*[:：]\\s*(.*))?$`,
+)
+
+interface ActionItem {
+  key: string
+  label: string
+}
+
+/** 把工具事件解析成 `{ 工具名, 目标 }`；优先用结构化信息，旧数据从展示文本反解。 */
+function toolInfoOf(event: SessionEvent): { name: string; target?: string } | null {
+  if (event.tool?.name) return event.tool
+  const body = event.text.replace(/\s+/g, ' ').trim()
+  if (!body) return null
+  const call = body.match(/^([A-Za-z][\w.-]*)(?:\((.*)\))?$/)
+  if (call) return { name: call[1]!, ...(call[2] ? { target: call[2] } : {}) }
+  const colon = body.match(/^([A-Za-z][\w.-]*)[：:]\s*(.+)$/)
+  if (colon) return { name: colon[1]!, target: colon[2]! }
+  return { name: body }
+}
+
+/**
+ * 把一次工具调用翻译成用户能看懂的动作：修改 / 查看 / 检索 / 执行。
+ * 目标只保留文件名或一句话描述，绝不回放完整命令或文件内容。
+ */
+function semanticActionOf(event: SessionEvent): ActionItem | null {
+  const info = toolInfoOf(event)
+  if (!info || NOISE_TOOLS.has(info.name)) return null
+  const target = (info.target ?? '').replace(/\s+/g, ' ').trim()
+  const short = target.length <= 60 ? target : `${target.slice(0, 60)}…`
+  switch (info.name) {
+    case 'Edit':
+    case 'Write':
+    case 'MultiEdit':
+    case 'NotebookEdit':
+    case 'Update':
+      return { key: `edit:${short}`, label: short ? `修改 ${short}` : '修改代码' }
+    case 'Read':
+      return { key: `read:${short}`, label: short ? `查看 ${short}` : '查看代码' }
+    case 'Grep':
+    case 'Glob':
+      return { key: `search:${short}`, label: short ? `检索 ${short}` : '搜索代码' }
+    case 'Bash':
+    case 'Shell':
+      return { key: `run:${short}`, label: short ? `执行 ${short}` : '执行命令' }
+    case 'Task':
+    case 'Agent':
+      return { key: `task:${short}`, label: short ? `子任务：${short}` : '子任务' }
+    case 'WebFetch':
+    case 'WebSearch':
+      return { key: 'web', label: '查询资料' }
+    default:
+      return { key: `other:${info.name}`, label: short ? `${info.name}：${short}` : info.name }
+  }
+}
+
+/**
+ * 把一批工具事件折叠成一句话的动作概要。
+ * 同一类动作只报一次并按次数合并，最多展开 maxItems 项，避免工具调用刷屏。
+ */
+export function summarizeToolActions(events: SessionEvent[], opts: { maxItems?: number } = {}): string {
+  const maxItems = opts.maxItems ?? 4
+  const items = new Map<string, { label: string; count: number }>()
+  for (const event of events) {
+    if (event.kind !== 'tool') continue
+    const action = semanticActionOf(event)
+    if (!action) continue
+    const found = items.get(action.key)
+    if (found) {
+      found.count += 1
+      found.label = action.label
+    } else {
+      items.set(action.key, { label: action.label, count: 1 })
+    }
+  }
+  if (items.size === 0) return ''
+  const entries = [...items.values()]
+  const shown = entries.slice(0, maxItems).map(item => (item.count > 1 ? `${item.label} ×${item.count}` : item.label))
+  if (entries.length > maxItems) shown.push(`等 ${entries.length} 项动作`)
+  return shown.join('、')
+}
 
 /**
  * 从 Orca 渲染屏幕里挑出最后几行「像进展」的输出。
  *
- * 不解析 TUI 语义，只做保守清洗：去掉状态栏、空 prompt、分隔线；
- * 优先取本轮 Router 输入之后的 ⏺/⎿/✻ 行，其次取屏幕尾部的自然文本。
+ * 只保留 agent 的自然语言输出，把工具调用回显（`⏺ Update(x)`）、工具结果（`⎿`）
+ * 与状态行（`✻✽`）折叠成一行动作概要；没有活动标记时退回屏幕尾部的自然文本。
  */
 export function extractTerminalSnippet(lines: string[], opts: { maxLines?: number; maxChars?: number } = {}): string {
-  const maxLines = opts.maxLines ?? 8
+  const maxLines = opts.maxLines ?? 6
   const maxChars = opts.maxChars ?? 1200
   const cleaned = lines
     .map(line => line.trim())
@@ -205,15 +293,40 @@ export function extractTerminalSnippet(lines: string[], opts: { maxLines?: numbe
 
   const inputAt = lastIndexWhere(cleaned, line => /^[❯›]\s*【Router 输入/.test(line))
   const afterInput = inputAt >= 0 ? cleaned.slice(inputAt + 1) : cleaned
-  const afterInputMarkers = afterInput.filter(line => ACTIVITY_MARKERS.test(line))
-  if (afterInputMarkers.length > 0) return joinSnippet(afterInputMarkers.slice(-maxLines), maxChars)
 
-  const markers = cleaned.filter(line => ACTIVITY_MARKERS.test(line))
-  if (markers.length >= 2) return joinSnippet(markers.slice(-maxLines), maxChars)
+  const textLines: Array<{ index: number; text: string }> = []
+  const toolEvents: Array<{ index: number; event: SessionEvent }> = []
+  afterInput.forEach((line, index) => {
+    if (TOOL_RESULT_LINE.test(line) || STATUS_LINE.test(line)) return
+    const tool = parseTerminalToolLine(line)
+    if (tool) {
+      toolEvents.push({ index, event: { at: '', kind: 'tool', text: tool.text, tool: tool.info } })
+      return
+    }
+    const match = line.match(ACTIVITY_MARKER)
+    const text = (match ? match[1]! : '').trim()
+    if (text) textLines.push({ index, text })
+  })
+
+  const lastTextIndex = textLines.at(-1)?.index ?? -1
+  const actionSummary = summarizeToolActions(toolEvents.filter(item => item.index >= lastTextIndex).map(item => item.event))
+  const summary = textLines.slice(-maxLines).map(item => item.text)
+  if (actionSummary) summary.push(`动作概要：${actionSummary}`)
+  if (summary.length > 0) return joinSnippet(summary, maxChars)
 
   // 没有活动标记（普通 shell / 已结束的会话）：取输入回显之前的屏幕尾部。
-  const fallback = inputAt >= 0 ? cleaned.slice(0, inputAt) : cleaned
+  const fallback = (inputAt >= 0 ? cleaned.slice(0, inputAt) : cleaned)
+    .filter(line => !STATUS_LINE.test(line) && !TOOL_RESULT_LINE.test(line))
   return joinSnippet(fallback.slice(-maxLines), maxChars)
+}
+
+/** 解析渲染屏幕里的工具调用回显；解析不出来返回 null（当作自然语言文本）。 */
+function parseTerminalToolLine(line: string): { text: string; info: { name: string; target?: string } } | null {
+  const match = line.match(TERMINAL_TOOL_LINE)
+  if (!match) return null
+  const name = match[1]!
+  const target = (match[2] ?? match[3] ?? '').replace(/\s+/g, ' ').trim() || undefined
+  return { text: target ? `${name}(${target})` : name, info: { name, ...(target ? { target } : {}) } }
 }
 
 /** 终端摘录指纹：只用来判断「画面有没有变化」，不做安全用途。 */
@@ -224,29 +337,39 @@ export function snippetFingerprint(text: string): string {
 }
 
 /**
- * 从 Agent 的会话记录里挑出最近几条活动。
- * 比终端屏幕干净：只有 assistant 文本与工具调用，没有状态栏和输入回显。
+ * 从 Agent 的会话记录里生成语义化摘要。
+ * 主内容是 assistant 自己的话（连续重复的压成一条）；工具调用不再逐条回放，
+ * 只把最后一条文本之后的动作折叠成一行「动作概要」。
  */
 export function extractSessionSnippet(events: SessionEvent[], opts: { maxLines?: number; maxChars?: number } = {}): string {
-  const maxLines = opts.maxLines ?? 8
+  const maxLines = opts.maxLines ?? 4
   const maxChars = opts.maxChars ?? 1200
-  // 连续重复的同一动作（例如连续三次 Edit(README.md)）压成一条，节省摘录空间。
-  const collapsed: Array<SessionEvent & { count: number }> = []
-  for (const event of events) {
-    const last = collapsed.at(-1)
-    if (last && last.kind === event.kind && last.text === event.text) {
+
+  const textEvents: Array<{ at: string; text: string; count: number }> = []
+  let lastTextIndex = -1
+  events.forEach((event, index) => {
+    if (event.kind !== 'text') return
+    const body = event.text.replace(/\s+/g, ' ').trim()
+    if (!body) return
+    lastTextIndex = index
+    const last = textEvents.at(-1)
+    if (last && last.text === body) {
       last.count += 1
       last.at = event.at
     } else {
-      collapsed.push({ ...event, count: 1 })
+      textEvents.push({ at: event.at, text: body, count: 1 })
     }
-  }
-  const lines = collapsed.slice(-maxLines).map(event => {
-    const time = clockOf(event.at)
-    const body = event.text.replace(/\s+/g, ' ').trim()
-    const truncated = body.length <= 240 ? body : `${body.slice(0, 240)}…`
-    return `${time ? `[${time}] ` : ''}${event.kind === 'text' ? '助手' : '动作'}：${truncated}${event.count > 1 ? ` ×${event.count}` : ''}`
   })
+
+  const recentTools = events.slice(lastTextIndex + 1).filter(event => event.kind === 'tool')
+  const actionSummary = summarizeToolActions(recentTools)
+
+  const lines = textEvents.slice(-maxLines).map(event => {
+    const time = clockOf(event.at)
+    const truncated = event.text.length <= 180 ? event.text : `${event.text.slice(0, 180)}…`
+    return `${time ? `[${time}] ` : ''}${truncated}${event.count > 1 ? ` ×${event.count}` : ''}`
+  })
+  if (actionSummary) lines.push(`动作概要：${actionSummary}`)
   return joinSnippet(lines, maxChars)
 }
 
@@ -285,8 +408,10 @@ export function formatProbeMessage(ticket: Ticket, info: {
       lines.push(`- ⚠️ 已经 ${activityMinutes} 分钟没有新活动，可能卡住，建议到 Orca 终端确认。`)
     }
   }
-  lines.push('', `**最新进展（${sourceLabel}摘录）**`, '```text', (info.snippet || '(没有可读输出)').replace(/```/g, "'''"), '```')
-  if (info.unchanged) lines.push('', '与上次巡检相比，终端画面没有变化。')
+  // 摘要按行渲染成列表：语义摘要不是原始日志，代码块只会让「动作概要」更像噪音。
+  const snippetLines = (info.snippet || '(没有可读输出)').replace(/```/g, "'''").split('\n')
+  lines.push('', `**最新进展（语义摘要 · ${sourceLabel}）**`, ...snippetLines.filter(Boolean).map(line => `- ${line}`))
+  if (info.unchanged) lines.push('', `与上次巡检相比，${sourceLabel}没有新变化。`)
   lines.push('', '这是 Router 的主动巡检，不需要回复。')
   return lines.join('\n')
 }
@@ -1206,8 +1331,8 @@ export class RouterService {
   // ---------- 工单进展主动巡检 ----------
 
   /**
-   * 不依赖 worker 上报：定时读 Orca 终端的渲染屏幕，判断 worker 是否还在动，
-   * 并把最近输出摘录同步到工单话题。
+   * 不依赖 worker 上报：定时读 worker 的会话记录 / Orca 终端，判断 worker 是否还在动，
+   * 并把最近进展整理成语义摘要同步到工单话题。
    *
    * 覆盖两类场景：
    * - 执行中（assigned/running）但长时间没上报；

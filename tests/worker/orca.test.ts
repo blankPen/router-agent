@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, existsSync, writeFileSync } from 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { OrcaAdapter, OrcaCommandError, parseCreateResult, summarizeArgs } from '../../src/worker/orca/index.js'
-import { claudeProjectSlug, describeToolUse } from '../../src/worker/orca/session.js'
+import { claudeProjectSlug, describeToolInfo, describeToolUse } from '../../src/worker/orca/session.js'
 import { worktreeCreate, terminalSend, terminalClose, terminalList, terminalRead, worktreeRemove, agentLaunch } from '../../src/worker/orca/commands.js'
 import type { CommandRunner, CommandResult } from '../../src/worker/orca/commands.js'
 import type { Assignment, Ticket } from '../../src/core/model.js'
@@ -286,7 +286,7 @@ describe('Claude 会话记录', () => {
     expect(snapshot?.at).toBe('2026-11-06T10:02:00.000Z')
     expect(snapshot?.events).toEqual([
       { at: '2026-11-06T10:01:00.000Z', kind: 'text', text: '正在改配置' },
-      { at: '2026-11-06T10:02:00.000Z', kind: 'tool', text: 'Edit(service.ts)' },
+      { at: '2026-11-06T10:02:00.000Z', kind: 'tool', text: 'Edit(service.ts)', tool: { name: 'Edit', target: 'service.ts' } },
     ])
     expect(snapshot?.sessionId).toBe('s1')
     expect(snapshot?.filePath).toBe(join(dir, 's1.jsonl'))
@@ -303,6 +303,10 @@ describe('Claude 会话记录', () => {
     expect(describeToolUse('Edit', { file_path: '/tmp/a/service.ts' })).toBe('Edit(service.ts)')
     expect(describeToolUse('Grep', { pattern: 'syncProgress' })).toBe('Grep(syncProgress)')
     expect(describeToolUse('Task', { description: '并行审查' })).toBe('Task：并行审查')
+    // 结构化信息供进展巡检生成语义摘要：只留工具名与目标，不带完整命令。
+    expect(describeToolInfo('Bash', { command: 'pnpm test --run' })).toEqual({ name: 'Bash', target: 'pnpm test --run' })
+    expect(describeToolInfo('Edit', { file_path: '/tmp/a/service.ts' })).toEqual({ name: 'Edit', target: 'service.ts' })
+    expect(describeToolInfo('Grep', { pattern: 'syncProgress' })).toEqual({ name: 'Grep', target: 'syncProgress' })
   })
 })
 
