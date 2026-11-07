@@ -43,6 +43,35 @@ export interface EffectItem {
   lastError?: string
 }
 
+/** 一个会话（群/话题 + 人）当前的落盘 session。 */
+export interface ChatSessionRecord {
+  sessionKey: string
+  chatId: string
+  actorId: string
+  threadId: string
+  sessionFile: string
+  sessionId: string
+  soulVersion: string
+  policyVersion: string
+  createdAt: string
+  lastUsedAt: string
+  status: 'active' | 'superseded' | 'purged'
+  resetAt: string | null
+  resetBy: string | null
+  purgedAt: string | null
+}
+
+export interface ChatSessionResetRecord {
+  id: string
+  sessionKey: string
+  chatId: string
+  actorId: string
+  oldFile: string
+  newFile: string
+  actorName: string
+  createdAt: string
+}
+
 export interface EnqueueOutbox {
   id: string
   key: string
@@ -147,14 +176,50 @@ CREATE TABLE IF NOT EXISTS tickets (
 CREATE INDEX IF NOT EXISTS idx_tickets_stage ON tickets (stage, created_at);
 
 CREATE TABLE IF NOT EXISTS dispatch_drafts (
-  chat_id TEXT PRIMARY KEY,
-  thread_id TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
   actor_id TEXT NOT NULL,
+  thread_id TEXT NOT NULL,
   task TEXT NOT NULL,
   repo TEXT NOT NULL,
   branch TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (chat_id, actor_id)
 );
+
+-- 会话复用：一个 session_key（群/话题 + 人）对应一个落盘的 Pi session。
+-- 一个 key 会随着 /new 留下多行历史：active 是当前，superseded 等清理，purged 是已删文件。
+CREATE TABLE IF NOT EXISTS chat_sessions (
+  id             TEXT PRIMARY KEY,
+  session_key    TEXT NOT NULL,
+  chat_id        TEXT NOT NULL,
+  actor_id       TEXT NOT NULL,
+  thread_id      TEXT NOT NULL DEFAULT '',
+  session_file   TEXT NOT NULL,
+  session_id     TEXT NOT NULL,
+  soul_version   TEXT NOT NULL DEFAULT '',
+  policy_version TEXT NOT NULL DEFAULT '',
+  created_at     TEXT NOT NULL,
+  last_used_at   TEXT NOT NULL,
+  status         TEXT NOT NULL DEFAULT 'active',
+  reset_at       TEXT,
+  reset_by       TEXT,
+  purged_at      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_chat_sessions_key ON chat_sessions (session_key, status);
+CREATE INDEX IF NOT EXISTS idx_chat_sessions_owner ON chat_sessions (chat_id, actor_id, status);
+CREATE INDEX IF NOT EXISTS idx_chat_sessions_status ON chat_sessions (status, reset_at);
+
+CREATE TABLE IF NOT EXISTS chat_session_resets (
+  id           TEXT PRIMARY KEY,
+  session_key  TEXT NOT NULL,
+  chat_id      TEXT NOT NULL,
+  actor_id     TEXT NOT NULL,
+  old_file     TEXT NOT NULL,
+  new_file     TEXT NOT NULL,
+  actor_name   TEXT NOT NULL,
+  created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chat_session_resets_key ON chat_session_resets (session_key, created_at);
 
 CREATE TABLE IF NOT EXISTS assignments (
   id TEXT PRIMARY KEY,
@@ -299,6 +364,59 @@ export class Store {
     if (!ticketColumns.some(column => column.name === 'branch')) {
       this.db.exec("ALTER TABLE tickets ADD COLUMN branch TEXT NOT NULL DEFAULT ''")
     }
+    // 派工草稿从「一个群一条」改成「一个群 + 一个人一条」：旧库需要重建主键。
+    const draftColumns = this.db.prepare('PRAGMA table_info(dispatch_drafts)').all() as Row[]
+    const actorPk = Number(draftColumns.find(column => column.name === 'actor_id')?.pk ?? 0)
+    if (actorPk === 0) {
+      this.db.exec(`
+        ALTER TABLE dispatch_drafts RENAME TO dispatch_drafts_legacy;
+        CREATE TABLE dispatch_drafts (
+          chat_id TEXT NOT NULL,
+          actor_id TEXT NOT NULL,
+          thread_id TEXT NOT NULL,
+          task TEXT NOT NULL,
+          repo TEXT NOT NULL,
+          branch TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (chat_id, actor_id)
+        );
+        INSERT OR REPLACE INTO dispatch_drafts (chat_id, actor_id, thread_id, task, repo, branch, updated_at)
+          SELECT chat_id, actor_id, thread_id, task, repo, branch, updated_at FROM dispatch_drafts_legacy;
+        DROP TABLE dispatch_drafts_legacy;
+      `)
+    }
+    // chat_sessions 早期版本用 session_key 做主键；改成 id 以保留 /new 后的历史文件。
+    const sessionColumns = this.db.prepare('PRAGMA table_info(chat_sessions)').all() as Row[]
+    if (sessionColumns.length > 0 && !sessionColumns.some(column => column.name === 'id')) {
+      this.db.exec(`
+        ALTER TABLE chat_sessions RENAME TO chat_sessions_legacy;
+        CREATE TABLE chat_sessions (
+          id             TEXT PRIMARY KEY,
+          session_key    TEXT NOT NULL,
+          chat_id        TEXT NOT NULL,
+          actor_id       TEXT NOT NULL,
+          thread_id      TEXT NOT NULL DEFAULT '',
+          session_file   TEXT NOT NULL,
+          session_id     TEXT NOT NULL,
+          soul_version   TEXT NOT NULL DEFAULT '',
+          policy_version TEXT NOT NULL DEFAULT '',
+          created_at     TEXT NOT NULL,
+          last_used_at   TEXT NOT NULL,
+          status         TEXT NOT NULL DEFAULT 'active',
+          reset_at       TEXT,
+          reset_by       TEXT,
+          purged_at      TEXT
+        );
+        INSERT INTO chat_sessions
+          (id, session_key, chat_id, actor_id, thread_id, session_file, session_id, soul_version, policy_version, created_at, last_used_at, status, reset_at, reset_by, purged_at)
+          SELECT session_key || ':' || session_id, session_key, chat_id, actor_id, thread_id, session_file, session_id, soul_version, policy_version, created_at, last_used_at, status, reset_at, reset_by, purged_at
+          FROM chat_sessions_legacy;
+        DROP TABLE chat_sessions_legacy;
+        CREATE INDEX IF NOT EXISTS idx_chat_sessions_key ON chat_sessions (session_key, status);
+        CREATE INDEX IF NOT EXISTS idx_chat_sessions_owner ON chat_sessions (chat_id, actor_id, status);
+        CREATE INDEX IF NOT EXISTS idx_chat_sessions_status ON chat_sessions (status, reset_at);
+      `)
+    }
   }
 
   close(): void {
@@ -431,15 +549,15 @@ export class Store {
   // ---------- 派工草稿（多项目 / 多分支补齐） ----------
 
   saveDispatchDraft(draft: DispatchDraft): void {
-    this.db.prepare(`INSERT INTO dispatch_drafts (chat_id, thread_id, actor_id, task, repo, branch, updated_at)
+    this.db.prepare(`INSERT INTO dispatch_drafts (chat_id, actor_id, thread_id, task, repo, branch, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(chat_id) DO UPDATE SET thread_id = excluded.thread_id, actor_id = excluded.actor_id,
+      ON CONFLICT(chat_id, actor_id) DO UPDATE SET thread_id = excluded.thread_id,
         task = excluded.task, repo = excluded.repo, branch = excluded.branch, updated_at = excluded.updated_at`)
-      .run(draft.chatId, draft.threadId, draft.actorId, draft.task, draft.repo, draft.branch, draft.updatedAt)
+      .run(draft.chatId, draft.actorId, draft.threadId, draft.task, draft.repo, draft.branch, draft.updatedAt)
   }
 
-  getDispatchDraft(chatId: string): DispatchDraft | null {
-    const row = this.db.prepare('SELECT * FROM dispatch_drafts WHERE chat_id = ?').get(chatId) as Row | undefined
+  getDispatchDraft(chatId: string, actorId: string): DispatchDraft | null {
+    const row = this.db.prepare('SELECT * FROM dispatch_drafts WHERE chat_id = ? AND actor_id = ?').get(chatId, actorId) as Row | undefined
     if (!row) return null
     return {
       chatId: String(row.chat_id),
@@ -452,8 +570,69 @@ export class Store {
     }
   }
 
-  clearDispatchDraft(chatId: string): void {
-    this.db.prepare('DELETE FROM dispatch_drafts WHERE chat_id = ?').run(chatId)
+  clearDispatchDraft(chatId: string, actorId: string): void {
+    this.db.prepare('DELETE FROM dispatch_drafts WHERE chat_id = ? AND actor_id = ?').run(chatId, actorId)
+  }
+
+  // ---------- 会话复用（chat + 人） ----------
+
+  getChatSession(sessionKey: string): ChatSessionRecord | null {
+    const row = this.db.prepare("SELECT * FROM chat_sessions WHERE session_key = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1")
+      .get(sessionKey) as Row | undefined
+    return row ? chatSessionFromRow(row) : null
+  }
+
+  getChatSessionByFile(sessionFile: string): ChatSessionRecord | null {
+    const row = this.db.prepare('SELECT * FROM chat_sessions WHERE session_file = ? ORDER BY created_at DESC LIMIT 1')
+      .get(sessionFile) as Row | undefined
+    return row ? chatSessionFromRow(row) : null
+  }
+
+  upsertChatSession(record: ChatSessionRecord): void {
+    const id = `${record.sessionKey}:${record.sessionId || record.sessionFile}`
+    this.db.prepare(`INSERT INTO chat_sessions
+      (id, session_key, chat_id, actor_id, thread_id, session_file, session_id, soul_version, policy_version, created_at, last_used_at, status, reset_at, reset_by, purged_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        session_file = excluded.session_file,
+        session_id = excluded.session_id,
+        soul_version = excluded.soul_version,
+        policy_version = excluded.policy_version,
+        last_used_at = excluded.last_used_at,
+        status = excluded.status,
+        reset_at = excluded.reset_at,
+        reset_by = excluded.reset_by,
+        purged_at = excluded.purged_at`)
+      .run(
+        id, record.sessionKey, record.chatId, record.actorId, record.threadId, record.sessionFile, record.sessionId,
+        record.soulVersion, record.policyVersion, record.createdAt, record.lastUsedAt, record.status,
+        record.resetAt, record.resetBy, record.purgedAt,
+      )
+  }
+
+  touchChatSession(sessionKey: string, at: string): void {
+    this.db.prepare("UPDATE chat_sessions SET last_used_at = ? WHERE session_key = ? AND status = 'active'").run(at, sessionKey)
+  }
+
+  markChatSessionSuperseded(sessionKey: string, at: string, by: string): void {
+    this.db.prepare("UPDATE chat_sessions SET status = 'superseded', reset_at = ?, reset_by = ? WHERE session_key = ? AND status = 'active'")
+      .run(at, by, sessionKey)
+  }
+
+  listSupersededChatSessions(before: string): ChatSessionRecord[] {
+    return (this.db.prepare("SELECT * FROM chat_sessions WHERE status = 'superseded' AND reset_at IS NOT NULL AND reset_at <= ? ORDER BY reset_at")
+      .all(before) as Row[]).map(chatSessionFromRow)
+  }
+
+  markChatSessionPurged(sessionFile: string, at: string): void {
+    this.db.prepare("UPDATE chat_sessions SET status = 'purged', purged_at = ? WHERE session_file = ? AND status = 'superseded'")
+      .run(at, sessionFile)
+  }
+
+  insertChatSessionReset(reset: ChatSessionResetRecord): void {
+    this.db.prepare(`INSERT OR IGNORE INTO chat_session_resets (id, session_key, chat_id, actor_id, old_file, new_file, actor_name, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(reset.id, reset.sessionKey, reset.chatId, reset.actorId, reset.oldFile, reset.newFile, reset.actorName, reset.createdAt)
   }
 
   insertMandate(m: Mandate): void {
@@ -871,5 +1050,24 @@ function effectFromRow(row: Row, bump: number): EffectItem {
     nextAt: String(row.next_at),
     createdAt: String(row.created_at),
     ...(row.last_error ? { lastError: String(row.last_error) } : {}),
+  }
+}
+
+function chatSessionFromRow(row: Row): ChatSessionRecord {
+  return {
+    sessionKey: String(row.session_key),
+    chatId: String(row.chat_id),
+    actorId: String(row.actor_id),
+    threadId: String(row.thread_id ?? ''),
+    sessionFile: String(row.session_file),
+    sessionId: String(row.session_id),
+    soulVersion: String(row.soul_version ?? ''),
+    policyVersion: String(row.policy_version ?? ''),
+    createdAt: String(row.created_at),
+    lastUsedAt: String(row.last_used_at),
+    status: row.status as ChatSessionRecord['status'],
+    resetAt: row.reset_at ? String(row.reset_at) : null,
+    resetBy: row.reset_by ? String(row.reset_by) : null,
+    purgedAt: row.purged_at ? String(row.purged_at) : null,
   }
 }

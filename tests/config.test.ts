@@ -335,3 +335,42 @@ describe('Pi 研判层配置', () => {
     expect(loaded.router.tokenBudget).toBe(16000)
   })
 })
+
+describe('会话复用与人格配置', () => {
+  it('默认开启按人隔离、7 天保留、Pi 压缩', () => {
+    const cfg = loadConfig(home())
+    expect(cfg.router.session).toMatchObject({
+      enabled: true,
+      keyScope: 'user',
+      retentionDays: 7,
+      maxActive: 50,
+      compaction: { enabled: true, reserveTokens: 16384, keepRecentTokens: 20000 },
+    })
+    expect(cfg.router.persona).toMatchObject({ name: '阿罗', style: 'friendly', language: 'zh-CN' })
+  })
+
+  it('YAML 覆盖 session / persona 后能读回', () => {
+    const dir = home()
+    ensureHome(dir)
+    const { writeFileSync } = require('node:fs') as typeof import('node:fs')
+    writeFileSync(join(dir, 'config.yaml'), [
+      'router:',
+      '  session:',
+      '    enabled: false',
+      '    keyScope: thread',
+      '    retentionDays: 3',
+      '    compaction:',
+      '      enabled: false',
+      '  persona:',
+      '    name: 小助手',
+      '    style: concise',
+    ].join('\n'))
+    const cfg = loadConfig(dir)
+    expect(cfg.router.session.enabled).toBe(false)
+    expect(cfg.router.session.keyScope).toBe('thread')
+    expect(cfg.router.session.retentionDays).toBe(3)
+    expect(cfg.router.session.compaction.enabled).toBe(false)
+    expect(cfg.router.persona.name).toBe('小助手')
+    expect(cfg.router.persona.style).toBe('concise')
+  })
+})

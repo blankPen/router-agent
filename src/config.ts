@@ -51,7 +51,44 @@ export interface PolicySettings {
   admission: AdmissionTable
 }
 
-/** 研判层配置：Pi 的超时、预算与独立配置目录。 */
+/** 会话复用：一个飞书会话（按人隔离）对应一个落盘的 Pi session。 */
+export interface SessionSettings {
+  /** false 时退回旧行为：每次研判新建 in-memory session。 */
+  enabled: boolean
+  /** user：chat + 人；thread：chat + 话题 + 人。 */
+  keyScope: 'user' | 'thread'
+  /** session 落盘根目录；空表示 ~/.router-agent/sessions。 */
+  dir: string
+  /** 多久没有新消息就回收内存（文件保留）。 */
+  idleTtlMs: number
+  /** 同时驻留内存的 session 上限，超出按 LRU 回收。 */
+  maxActive: number
+  /** /new 之后旧 session 文件保留天数；0 表示不清理。 */
+  retentionDays: number
+  /** 清理任务间隔（小时）。 */
+  cleanupIntervalHours: number
+  /** 带会话的一轮硬超时（包含压缩耗时）。 */
+  turnTimeoutMs: number
+  /** 会话内的 token 预算；0 表示不限制（交给 compaction）。 */
+  tokenBudget: number
+  /** Pi 自动压缩配置。 */
+  compaction: {
+    enabled: boolean
+    reserveTokens: number
+    keepRecentTokens: number
+  }
+}
+
+/** Router 的人格配置；只影响语气与表达，不影响工具权限。 */
+export interface PersonaSettings {
+  name: string
+  /** 自定义 soul 文件；空表示用内置 prompts/soul.md。 */
+  soulFile: string
+  style: 'friendly' | 'concise' | 'professional'
+  language: string
+}
+
+/** 研判层配置：Pi 的超时、预算、独立配置目录、会话与人格。 */
 export interface RouterSettings {
   /** 每次研判的硬超时。 */
   timeoutMs: number
@@ -59,6 +96,8 @@ export interface RouterSettings {
   tokenBudget: number
   /** Pi 的独立配置目录；空表示 ~/.router-agent/pi。 */
   agentDir: string
+  session: SessionSettings
+  persona: PersonaSettings
 }
 
 /** 一个可派工的项目。name 是用户/模型口中引用的名字，repo 是交给 Orca 的选择器。 */
@@ -118,7 +157,7 @@ export interface AppConfig {
   workerSpec: { mode: WorkerSpecMode }
   backend: { default: 'orca' }
   server: { port: number }
-  llm?: { baseUrl?: string; apiKey?: string; model?: string; temperature?: number }
+  llm?: { baseUrl?: string; apiKey?: string; model?: string; temperature?: number; contextWindow?: number }
 }
 
 /**
@@ -155,6 +194,24 @@ export function defaultConfig(): AppConfig {
       timeoutMs: 60_000,
       tokenBudget: 32_000,
       agentDir: '',
+      session: {
+        enabled: true,
+        keyScope: 'user',
+        dir: '',
+        idleTtlMs: 30 * 60_000,
+        maxActive: 50,
+        retentionDays: 7,
+        cleanupIntervalHours: 24,
+        turnTimeoutMs: 180_000,
+        tokenBudget: 0,
+        compaction: { enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 },
+      },
+      persona: {
+        name: '阿罗',
+        soulFile: '',
+        style: 'friendly',
+        language: 'zh-CN',
+      },
     },
     progress: {
       syncMs: 60_000,
@@ -203,6 +260,29 @@ router:
   tokenBudget: 32000
   agentDir: ""             # Pi 独立配置目录；空=~/.router-agent/pi
 
+  # 会话复用：一个飞书会话按人一个 session，落盘、可恢复、自动压缩
+  session:
+    enabled: true
+    keyScope: user         # user=群+人；thread=群+话题+人
+    dir: ""                # 空=~/.router-agent/sessions
+    idleTtlMs: 1800000     # 30 分钟无消息回收内存（文件保留）
+    maxActive: 50          # 同时驻留内存的 session 上限
+    retentionDays: 7       # /new 之后旧 session 文件保留天数；0=不清理
+    cleanupIntervalHours: 24
+    turnTimeoutMs: 180000  # 带会话的一轮硬超时（含压缩）
+    tokenBudget: 0         # 会话 token 预算；0=不限制，交给压缩
+    compaction:
+      enabled: true
+      reserveTokens: 16384
+      keepRecentTokens: 20000
+
+  # 人格：只影响语气与表达，不影响工具权限
+  persona:
+    name: "阿罗"
+    soulFile: ""           # 空=内置 prompts/soul.md
+    style: friendly        # friendly | concise | professional
+    language: zh-CN
+
 progress:
   syncMs: 60000        # 工单进展合并同步间隔（毫秒）；0 = 关闭定时同步
   probeMs: 120000      # 主动巡检间隔（毫秒）：读 worker 终端并同步进展；0 = 关闭
@@ -238,6 +318,7 @@ server:
 #   baseUrl: https://api.deepseek.com/v1
 #   model: deepseek-v4-flash
 #   apiKey: sk-xxx
+#   contextWindow: 128000    # 用于会话自动压缩的阈值计算
 `
 
 /** 创建 ~/.router-agent 目录结构；不覆盖已有配置。 */
@@ -354,11 +435,54 @@ function parseRouter(value: unknown, base: RouterSettings): RouterSettings {
   const doc = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>
   const timeoutMs = Number(doc.timeoutMs)
   const tokenBudget = Number(doc.tokenBudget)
+  const sessionDoc = (doc.session && typeof doc.session === 'object' ? doc.session : {}) as Record<string, unknown>
+  const compactionDoc = (sessionDoc.compaction && typeof sessionDoc.compaction === 'object' ? sessionDoc.compaction : {}) as Record<string, unknown>
+  const personaDoc = (doc.persona && typeof doc.persona === 'object' ? doc.persona : {}) as Record<string, unknown>
+  const baseSession = base.session
   return {
     timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : base.timeoutMs,
     tokenBudget: Number.isFinite(tokenBudget) && tokenBudget >= 0 ? tokenBudget : base.tokenBudget,
     agentDir: stringOr(doc.agentDir, base.agentDir),
+    session: {
+      enabled: booleanOr(sessionDoc.enabled, baseSession.enabled),
+      keyScope: pickKeyScope(sessionDoc.keyScope, baseSession.keyScope),
+      dir: stringOr(sessionDoc.dir, baseSession.dir),
+      idleTtlMs: positiveIntOr(sessionDoc.idleTtlMs, baseSession.idleTtlMs, 0, 86_400_000),
+      maxActive: positiveIntOr(sessionDoc.maxActive, baseSession.maxActive, 1, 1_000),
+      retentionDays: positiveIntOr(sessionDoc.retentionDays, baseSession.retentionDays, 0, 3_650),
+      cleanupIntervalHours: positiveNumberOr(sessionDoc.cleanupIntervalHours, baseSession.cleanupIntervalHours, 1, 24 * 30),
+      turnTimeoutMs: positiveIntOr(sessionDoc.turnTimeoutMs, baseSession.turnTimeoutMs, 1_000, 3_600_000),
+      tokenBudget: positiveIntOr(sessionDoc.tokenBudget, baseSession.tokenBudget, 0, 10_000_000),
+      compaction: {
+        enabled: booleanOr(compactionDoc.enabled, baseSession.compaction.enabled),
+        reserveTokens: positiveIntOr(compactionDoc.reserveTokens, baseSession.compaction.reserveTokens, 1_024, 1_000_000),
+        keepRecentTokens: positiveIntOr(compactionDoc.keepRecentTokens, baseSession.compaction.keepRecentTokens, 1_024, 1_000_000),
+      },
+    },
+    persona: {
+      name: stringOr(personaDoc.name, base.persona.name),
+      soulFile: stringOr(personaDoc.soulFile, base.persona.soulFile),
+      style: pickPersonaStyle(personaDoc.style, base.persona.style),
+      language: stringOr(personaDoc.language, base.persona.language),
+    },
   }
+}
+
+function pickKeyScope(value: unknown, fallback: 'user' | 'thread'): 'user' | 'thread' {
+  return value === 'user' || value === 'thread' ? value : fallback
+}
+
+function pickPersonaStyle(value: unknown, fallback: PersonaSettings['style']): PersonaSettings['style'] {
+  return value === 'friendly' || value === 'concise' || value === 'professional' ? value : fallback
+}
+
+function booleanOr(value: unknown, fallback: boolean): boolean {
+  return typeof value === 'boolean' ? value : fallback
+}
+
+function positiveIntOr(value: unknown, fallback: number, min: number, max: number): number {
+  const n = Number(value)
+  return Number.isInteger(n) && n >= min && n <= max ? n : fallback
 }
 
 function pickAdmission(value: unknown, fallback: string, allowed: string[]): string {
@@ -371,10 +495,6 @@ function stringArray(value: unknown, fallback: string[]): string[] {
 
 function stringOr(value: unknown, fallback: string): string {
   return typeof value === 'string' ? value : fallback
-}
-
-function booleanOr(value: unknown, fallback: boolean): boolean {
-  return typeof value === 'boolean' ? value : fallback
 }
 
 /** 毫秒配置：非法值、越界值都退回默认值；min=0 的字段可以关闭。 */
@@ -524,6 +644,14 @@ export function writeConfig(home: string, config: AppConfig): void {
       timeoutMs: config.router.timeoutMs,
       tokenBudget: config.router.tokenBudget,
       ...(config.router.agentDir ? { agentDir: config.router.agentDir } : {}),
+      session: {
+        ...config.router.session,
+        ...(config.router.session.dir ? { dir: config.router.session.dir } : {}),
+      },
+      persona: {
+        ...config.router.persona,
+        ...(config.router.persona.soulFile ? { soulFile: config.router.persona.soulFile } : {}),
+      },
     },
     progress: {
       syncMs: config.progress.syncMs,

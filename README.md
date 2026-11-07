@@ -153,6 +153,20 @@ WorkerBackend 端口 ── OrcaAdapter（默认）── 未来：Codex / Headl
 
 Pi 侧完全隔离：AuthStorage / SettingsManager / SessionManager 全为 in-memory，关闭 extensions / skills / prompts / themes / AGENTS.md，不读写用户 `~/.pi`。
 
+### 记：一个会话一个 session
+
+Router 不再「逐条失忆」：同一个群里的每个人各有一个落盘的 Pi session，所有对话持续累积，直到本人发送 `/new`。
+
+- **按人隔离**：`chat:<chatId>:user:<actorId>`；张三和李四在同一个群互不可见，`/new` 只清自己的上下文；
+- **@ 准入**：`mode: mention` 的群只把 @机器人 / 私聊的消息放进 session；`mode: all` 的群全量进入；名单外成员不进；
+- **落盘与恢复**：session 写在 `~/.router-agent/sessions/`，Router 重启后按映射自动 `SessionManager.open` 恢复；
+- **空闲回收**：30 分钟无消息只释放内存，文件保留，下一条消息重新打开；
+- **自动压缩**：用 Pi 原生 compaction，`contextTokens > contextWindow - reserveTokens` 时保留最近约 20k tokens，把更早的消息总结成结构化摘要；
+- **`/new`**：整条消息精确匹配，只重置发送者自己的 session；旧文件保留 7 天后由清理任务删除；
+- **人格**：`router.persona.soulFile` 可配置 soul；只改语气，不改工具白名单和权限判定。
+
+确定性回复（寒暄短路、附件提示、关闭话题提示等）也会写进 session，保证下一轮模型知道「刚才发生过什么」。
+
 ### 派：每个工单一个 worktree
 
 开单需要三个要素：**任务、项目（repo）、起始分支（branch）**。三者都明确，Router 才会建单；缺项目或分支时它**不会开单**，而是在会话里追问：
@@ -307,6 +321,29 @@ router:
   tokenBudget: 32000       # 单次研判 token 预算；0 表示不限制
   agentDir: ""             # Pi 独立配置目录；空=~/.router-agent/pi
 
+  # 会话复用：一个飞书会话按人一个 session，落盘、可恢复、自动压缩
+  session:
+    enabled: true          # false = 回到每次新建 in-memory session
+    keyScope: user         # user=群+人；thread=群+话题+人
+    dir: ""                # 空=~/.router-agent/sessions
+    idleTtlMs: 1800000     # 30 分钟无消息回收内存（文件保留）
+    maxActive: 50          # 同时驻留内存的 session 上限
+    retentionDays: 7       # /new 之后旧 session 文件保留天数；0=不清理
+    cleanupIntervalHours: 24
+    turnTimeoutMs: 180000  # 带会话的一轮硬超时（含压缩）
+    tokenBudget: 0         # 会话 token 预算；0=不限制，交给压缩
+    compaction:            # Pi 原生自动压缩
+      enabled: true
+      reserveTokens: 16384
+      keepRecentTokens: 20000
+
+  # 人格：只影响语气与表达，不影响工具权限
+  persona:
+    name: "阿罗"
+    soulFile: ""           # 空=内置 prompts/soul.md
+    style: friendly        # friendly | concise | professional
+    language: zh-CN
+
 progress:
   # 工单进展定时轮询：把这段时间内的 progress 上报合并成一条消息同步到话题
   syncMs: 60000        # 毫秒；0 = 关闭（progress 上报不再同步到话题）
@@ -389,7 +426,7 @@ orca repo list --json | jq -r '.result.repos[] | "\(.displayName)\t\(.path)\t\(.
 
 ### 模型配置
 
-模型配置会自动复用 `~/.trove/config.json` 里的 `llm` 段（`baseUrl` / `model` / `apiKey`）；也可以在本文件写 `llm:` 段，或用 `RA_LLM_BASE_URL` / `RA_LLM_API_KEY` / `RA_LLM_MODEL` 覆盖。
+模型配置会自动复用 `~/.trove/config.json` 里的 `llm` 段（`baseUrl` / `model` / `apiKey`）；也可以在本文件写 `llm:` 段，或用 `RA_LLM_BASE_URL` / `RA_LLM_API_KEY` / `RA_LLM_MODEL` 覆盖。会话自动压缩依赖 `llm.contextWindow`（默认 128000），换模型时记得同步改。
 
 优先级：**环境变量 > `config.yaml` > `.trove`**。
 

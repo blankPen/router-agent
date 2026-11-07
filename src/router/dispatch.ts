@@ -5,7 +5,7 @@ import type { DispatchDraft } from '../core/model.js'
 export const DRAFT_TTL_MS = 30 * 60_000
 
 export interface DraftSource {
-  getDispatchDraft(chatId: string): DispatchDraft | null
+  getDispatchDraft(chatId: string, actorId: string): DispatchDraft | null
 }
 
 /** 取当前会话里仍然有效、且属于同一个人的派工草稿。 */
@@ -16,7 +16,7 @@ export function activeDraft(
   now: string,
   ttlMs: number = DRAFT_TTL_MS,
 ): DispatchDraft | null {
-  const draft = source.getDispatchDraft(chatId)
+  const draft = source.getDispatchDraft(chatId, actorId)
   if (!draft || draft.actorId !== actorId) return null
   const updated = Date.parse(draft.updatedAt)
   const current = Date.parse(now)

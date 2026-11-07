@@ -1,4 +1,5 @@
 import type { Decision, Strength, Trigger } from '../core/model.js'
+import type { SessionKeyParts } from './session-registry.js'
 
 /**
  * 研判层端口。
@@ -33,12 +34,16 @@ export interface DecisionRequest {
    * 缺省为 false，保证嵌入用法不会意外获得写权限。
    */
   canMutate?: boolean
+  /** 会话复用：本轮落在哪个 session；不传则保持旧的「一次一建」行为。 */
+  session?: SessionKeyParts
 }
 
 /** 一次礼貌回复的输入。 */
 export interface ReplyRequest {
   systemPrompt: string
   userPrompt: string
+  /** 会话复用：本轮落在哪个 session；不传则保持旧的「一次一建」行为。 */
+  session?: SessionKeyParts
 }
 
 export interface DecisionToolCall {
@@ -88,6 +93,14 @@ export interface DecisionEngine {
   assess(req: DecisionRequest): Promise<DecisionEngineResult>
   /** 生成一句礼貌回复（普通消息）。失败抛错，由调用方退回固定话术。 */
   reply(req: ReplyRequest): Promise<string>
+  /** /new：只重置这个会话；旧 session 文件交给清理任务。 */
+  resetSession?(session: SessionKeyParts, by: string): Promise<void>
+  /** 确定性回复写进会话（不调用模型），供下一轮模型看到。 */
+  recordTranscript?(session: SessionKeyParts, text: string, systemPrompt: string): Promise<void>
+  /** 空闲 session 回收（只释放内存，文件保留）。 */
+  evictIdleSessions?(now?: number): Promise<number>
+  /** 服务停止时释放所有内存 session。 */
+  disposeAllSessions?(): Promise<void>
 }
 
 export type ProposalParseResult =

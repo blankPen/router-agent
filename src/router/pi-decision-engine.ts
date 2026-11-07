@@ -1,4 +1,5 @@
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
+import { join } from 'node:path'
 import { extractJsonObject, type PiModelConfig } from './model-config.js'
 import type {
   DecisionAudit,
@@ -13,14 +14,17 @@ import type {
 import { proposalFromJson } from './decision-engine.js'
 import { DECISION_TOOL_NAMES, toolSpec, type PiToolDefinition } from './tool-spec.js'
 import type { RouterToolbox } from './tools.js'
+import {
+  SessionRegistry,
+  type ManagedSessionLike,
+  type PersistedSessionRecord,
+  type SessionKeyParts,
+  type SessionPersistence,
+} from './session-registry.js'
 
 /** Pi 侧只依赖这几个方法，便于测试时注入假 session。 */
-export interface PiSessionLike {
-  prompt(text: string): Promise<void>
+export interface PiSessionLike extends ManagedSessionLike {
   subscribe(listener: (event: PiSessionEvent) => void): () => void
-  abort(): Promise<void>
-  dispose(): void
-  readonly messages?: unknown
 }
 
 export interface PiSessionEvent {
@@ -45,6 +49,12 @@ export interface PiSessionOptions {
   apiKey: string
   baseUrl: string
   model: string
+  /** 落盘 SessionManager；不传则 in-memory（旧行为）。 */
+  sessionManager?: unknown
+  /** 自动压缩配置；不传则关闭。 */
+  compaction?: { enabled: boolean; reserveTokens: number; keepRecentTokens: number }
+  /** 模型上下文窗口，用于压缩阈值。 */
+  contextWindow?: number
 }
 
 export type PiSessionFactory = (opts: PiSessionOptions) => Promise<PiSessionLike>
@@ -61,9 +71,26 @@ export interface PiDecisionEngineOptions {
   tokenBudget?: number
   /** 测试注入：默认走真实 Pi SDK。 */
   sessionFactory?: PiSessionFactory
+  /** 会话持久化端口；不传则不启用会话复用。 */
+  sessionPersistence?: SessionPersistence
+  /** session 落盘根目录；启用会话复用时必填。 */
+  sessionDir?: string
+  /** 空闲回收阈值（毫秒）。 */
+  sessionIdleTtlMs?: number
+  /** 同时驻留内存的 session 上限。 */
+  maxActiveSessions?: number
+  /** 带会话的一轮硬超时（含压缩），默认 180s。 */
+  sessionTimeoutMs?: number
+  /** 会话内 token 预算；0 表示不限制（交给压缩）。 */
+  sessionTokenBudget?: number
+  /** Pi 自动压缩配置。 */
+  compaction?: { enabled: boolean; reserveTokens: number; keepRecentTokens: number }
+  /** 模型上下文窗口。 */
+  contextWindow?: number
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000
+const DEFAULT_SESSION_TIMEOUT_MS = 180_000
 const DEFAULT_TOKEN_BUDGET = 32_000
 const PROVIDER = 'router-agent'
 
@@ -78,6 +105,15 @@ interface SessionOutcome {
 interface ToolState {
   proposal: DecisionProposal | undefined
   toolCalls: DecisionToolCall[]
+}
+
+/**
+ * 工具闭包读取的可变本轮上下文。
+ * 复用 session 后工具只绑定一次，但每轮的 trigger / 权限不同，必须通过 ref 切换。
+ */
+interface TurnRef {
+  request?: DecisionRequest | ReplyRequest
+  state: ToolState
 }
 
 /**
@@ -98,6 +134,15 @@ export class PiDecisionEngine implements DecisionEngine {
   private timeoutMs: number
   private tokenBudget: number
   private sessionFactory: PiSessionFactory
+  private sessionPersistence?: SessionPersistence
+  private sessionDir?: string
+  private sessionTimeoutMs: number
+  private sessionTokenBudget: number
+  private compaction?: { enabled: boolean; reserveTokens: number; keepRecentTokens: number }
+  private contextWindow: number
+  private sessions: SessionRegistry<PiSessionLike> | null = null
+  /** 复用 session 后，工具闭包通过它读取本轮上下文。 */
+  private turnRefs = new WeakMap<object, TurnRef>()
 
   constructor(opts: PiDecisionEngineOptions) {
     this.model = opts.model
@@ -107,13 +152,67 @@ export class PiDecisionEngine implements DecisionEngine {
     this.timeoutMs = opts.timeoutMs && opts.timeoutMs > 0 ? opts.timeoutMs : DEFAULT_TIMEOUT_MS
     this.tokenBudget = opts.tokenBudget === undefined ? DEFAULT_TOKEN_BUDGET : Math.max(0, opts.tokenBudget)
     this.sessionFactory = opts.sessionFactory ?? createDefaultPiSession
+    this.sessionPersistence = opts.sessionPersistence
+    this.sessionDir = opts.sessionDir
+    this.sessionTimeoutMs = opts.sessionTimeoutMs && opts.sessionTimeoutMs > 0 ? opts.sessionTimeoutMs : DEFAULT_SESSION_TIMEOUT_MS
+    this.sessionTokenBudget = opts.sessionTokenBudget === undefined ? 0 : Math.max(0, opts.sessionTokenBudget)
+    this.compaction = opts.compaction
+    this.contextWindow = opts.contextWindow && opts.contextWindow > 0 ? opts.contextWindow : 128_000
+
+    if (opts.sessionPersistence && opts.sessionDir) {
+      this.sessions = new SessionRegistry<PiSessionLike>({
+        persistence: opts.sessionPersistence,
+        create: input => this.createPersistentSession(input),
+        idleTtlMs: opts.sessionIdleTtlMs ?? 30 * 60_000,
+        maxActive: opts.maxActiveSessions ?? 50,
+      })
+    }
   }
 
   async assess(req: DecisionRequest): Promise<DecisionEngineResult> {
-    const started = Date.now()
-    const audit: DecisionAudit = {
+    if (req.session && this.sessions) return this.assessPersistent(req)
+    return this.assessTransient(req)
+  }
+
+  /** 寒暄 / 追问的礼貌回复：同一个 Pi 通道，但不开任何工具。 */
+  async reply(req: ReplyRequest): Promise<string> {
+    if (req.session && this.sessions) return this.replyPersistent(req)
+
+    const outcome = await this.runSession({
+      systemPrompt: req.systemPrompt,
+      userPrompt: req.userPrompt,
+      toolNames: [],
+      tools: [],
+    })
+    if (outcome.timedOut) throw new Error(`pi:timeout(${this.timeoutMs}ms)`)
+    if (outcome.overBudget) throw new Error(`pi:token-budget(${this.tokenBudget})`)
+    const text = lastAssistantText(outcome.messages).trim()
+    if (!text) throw new Error(outcome.error ? `pi:error:${outcome.error}` : 'pi:empty-reply')
+    return text
+  }
+
+  async resetSession(session: SessionKeyParts, by: string): Promise<void> {
+    await this.sessions?.reset(session, by)
+  }
+
+  async recordTranscript(session: SessionKeyParts, text: string, systemPrompt: string): Promise<void> {
+    if (!this.sessions) return
+    await this.sessions.recordTranscript(session, text, systemPrompt)
+  }
+
+  async evictIdleSessions(now?: number): Promise<number> {
+    return this.sessions ? this.sessions.evictIdle(now) : 0
+  }
+
+  async disposeAllSessions(): Promise<void> {
+    await this.sessions?.disposeAll()
+  }
+
+  private auditOf(req: DecisionRequest | ReplyRequest): DecisionAudit {
+    const triggerId = 'trigger' in req ? req.trigger.id : ''
+    return {
       engine: 'pi',
-      triggerId: req.trigger.id,
+      triggerId,
       durationMs: 0,
       toolCalls: [],
       tokens: { input: 0, output: 0, total: 0 },
@@ -123,21 +222,98 @@ export class PiDecisionEngine implements DecisionEngine {
       systemPrompt: req.systemPrompt,
       userPrompt: req.userPrompt,
     }
+  }
+
+  private assessTransient(req: DecisionRequest): Promise<DecisionEngineResult> {
+    const started = Date.now()
+    const audit = this.auditOf(req)
     const state: ToolState = { proposal: undefined, toolCalls: [] }
-    const tools = this.buildTools(req, state)
-    const outcome = await this.runSession({
+    const turnRef: TurnRef = { request: req, state }
+    return this.runSession({
       systemPrompt: req.systemPrompt,
       userPrompt: req.userPrompt,
       toolNames: [...DECISION_TOOL_NAMES],
-      tools,
-      state,
+      tools: this.buildTools(turnRef),
+    }).then(outcome => this.finishAssess(audit, req, state, outcome, started, this.timeoutMs, this.tokenBudget))
+  }
+
+  private async assessPersistent(req: DecisionRequest): Promise<DecisionEngineResult> {
+    const started = Date.now()
+    const audit = this.auditOf(req)
+    const state: ToolState = { proposal: undefined, toolCalls: [] }
+    const entry = await this.sessions!.acquire(req.session!, req.systemPrompt)
+    await this.sessions!.prepare(entry)
+    const turnRef = this.turnRefs.get(entry.session)
+    if (!turnRef) {
+      this.sessions!.drop(entry.parts.key)
+      return this.finish(audit, { unavailableReason: 'pi:session-tools-unbound' })
+    }
+    turnRef.request = req
+    turnRef.state = state
+    entry.session.setActiveToolsByName?.([...DECISION_TOOL_NAMES])
+
+    const before = Array.isArray(entry.session.messages) ? entry.session.messages.length : 0
+    const outcome = await this.runOnSession(entry.session as PiSessionLike, {
+      userPrompt: this.sessions!.pendingPrompt(entry) + req.userPrompt,
+      timeoutMs: this.sessionTimeoutMs,
+      tokenBudget: this.sessionTokenBudget,
+      disposeOnFinish: false,
+      messagesBefore: before,
     })
+    if (outcome.timedOut || outcome.overBudget) this.sessions!.drop(entry.parts.key)
+    else this.sessions!.clearPendingTranscripts(entry)
+    return this.finishAssess(audit, req, state, outcome, started, this.sessionTimeoutMs, this.sessionTokenBudget)
+  }
+
+  private async replyPersistent(req: ReplyRequest): Promise<string> {
+    const entry = await this.sessions!.acquire(req.session!, req.systemPrompt)
+    await this.sessions!.prepare(entry)
+    const turnRef = this.turnRefs.get(entry.session)
+    if (!turnRef) {
+      this.sessions!.drop(entry.parts.key)
+      throw new Error('pi:session-tools-unbound')
+    }
+    turnRef.request = req
+    turnRef.state = { proposal: undefined, toolCalls: [] }
+    entry.session.setActiveToolsByName?.([])
+
+    const before = Array.isArray(entry.session.messages) ? entry.session.messages.length : 0
+    const outcome = await this.runOnSession(entry.session as PiSessionLike, {
+      userPrompt: this.sessions!.pendingPrompt(entry) + req.userPrompt,
+      timeoutMs: this.sessionTimeoutMs,
+      tokenBudget: this.sessionTokenBudget,
+      disposeOnFinish: false,
+      messagesBefore: before,
+    })
+    if (outcome.timedOut) {
+      this.sessions!.drop(entry.parts.key)
+      throw new Error(`pi:timeout(${this.sessionTimeoutMs}ms)`)
+    }
+    if (outcome.overBudget) {
+      this.sessions!.drop(entry.parts.key)
+      throw new Error(`pi:token-budget(${this.sessionTokenBudget})`)
+    }
+    this.sessions!.clearPendingTranscripts(entry)
+    const text = lastAssistantText(outcome.messages).trim()
+    if (!text) throw new Error(outcome.error ? `pi:error:${outcome.error}` : 'pi:empty-reply')
+    return text
+  }
+
+  private finishAssess(
+    audit: DecisionAudit,
+    req: DecisionRequest,
+    state: ToolState,
+    outcome: SessionOutcome,
+    started: number,
+    timeoutMs: number,
+    tokenBudget: number,
+  ): DecisionEngineResult {
     audit.toolCalls = state.toolCalls
     audit.tokens = outcome.tokens
     audit.durationMs = Date.now() - started
 
-    if (outcome.timedOut) return this.finish(audit, { unavailableReason: `pi:timeout(${this.timeoutMs}ms)` })
-    if (outcome.overBudget) return this.finish(audit, { unavailableReason: `pi:token-budget(${this.tokenBudget})` })
+    if (outcome.timedOut) return this.finish(audit, { unavailableReason: `pi:timeout(${timeoutMs}ms)` })
+    if (outcome.overBudget) return this.finish(audit, { unavailableReason: `pi:token-budget(${tokenBudget})` })
 
     // 查询 / 清理工具执行完后，Pi 的最终文本就是给用户看的答复；
     // 有决定时一并带回，AgentLoop 不必再调用一次回复模型。
@@ -172,41 +348,14 @@ export class PiDecisionEngine implements DecisionEngine {
     })
   }
 
-  /** 寒暄 / 追问的礼貌回复：同一个 Pi 通道，但不开任何工具。 */
-  async reply(req: ReplyRequest): Promise<string> {
-    const outcome = await this.runSession({
-      systemPrompt: req.systemPrompt,
-      userPrompt: req.userPrompt,
-      toolNames: [],
-      tools: [],
-      state: { proposal: undefined, toolCalls: [] },
-    })
-    if (outcome.timedOut) throw new Error(`pi:timeout(${this.timeoutMs}ms)`)
-    if (outcome.overBudget) throw new Error(`pi:token-budget(${this.tokenBudget})`)
-    const text = lastAssistantText(outcome.messages).trim()
-    if (!text) throw new Error(outcome.error ? `pi:error:${outcome.error}` : 'pi:empty-reply')
-    return text
-  }
-
+  /** 一次性 session：旧行为，每次新建 + dispose。 */
   private async runSession(opts: {
     systemPrompt: string
     userPrompt: string
     toolNames: string[]
     tools: PiToolDefinition[]
-    state: ToolState
   }): Promise<SessionOutcome> {
-    const tokens: DecisionTokens = { input: 0, output: 0, total: 0 }
     let session: PiSessionLike | null = null
-    let unsubscribe: (() => void) | null = null
-    let timedOut = false
-    let overBudget = false
-    let error = ''
-    const timer = setTimeout(() => {
-      timedOut = true
-      void session?.abort().catch(() => {})
-    }, this.timeoutMs)
-    timer.unref?.()
-
     try {
       session = await this.sessionFactory({
         cwd: this.cwd,
@@ -217,8 +366,43 @@ export class PiDecisionEngine implements DecisionEngine {
         apiKey: this.model.apiKey,
         baseUrl: this.model.baseUrl,
         model: this.model.model,
+        compaction: this.compaction,
+        contextWindow: this.contextWindow,
       })
+    } catch (caught) {
+      return {
+        messages: undefined,
+        tokens: { input: 0, output: 0, total: 0 },
+        timedOut: false,
+        overBudget: false,
+        error: caught instanceof Error ? caught.message : String(caught),
+      }
+    }
+    return this.runOnSession(session, {
+      userPrompt: opts.userPrompt,
+      timeoutMs: this.timeoutMs,
+      tokenBudget: this.tokenBudget,
+      disposeOnFinish: true,
+    })
+  }
 
+  /** 在已有 session 上跑一轮；是否 dispose 由调用方决定。 */
+  private async runOnSession(
+    session: PiSessionLike,
+    opts: { userPrompt: string; timeoutMs: number; tokenBudget: number; disposeOnFinish: boolean; messagesBefore?: number },
+  ): Promise<SessionOutcome> {
+    const tokens: DecisionTokens = { input: 0, output: 0, total: 0 }
+    let unsubscribe: (() => void) | null = null
+    let timedOut = false
+    let overBudget = false
+    let error = ''
+    const timer = setTimeout(() => {
+      timedOut = true
+      void session.abort().catch(() => {})
+    }, opts.timeoutMs)
+    timer.unref?.()
+
+    try {
       unsubscribe = session.subscribe(event => {
         if (event.type !== 'message_end') return
         const message = event.message
@@ -232,9 +416,9 @@ export class PiDecisionEngine implements DecisionEngine {
           tokens.total += Number.isFinite(total) ? total : 0
           if (message.errorMessage) error = message.errorMessage
         }
-        if (this.tokenBudget > 0 && tokens.total > this.tokenBudget && !overBudget) {
+        if (opts.tokenBudget > 0 && tokens.total > opts.tokenBudget && !overBudget) {
           overBudget = true
-          void session?.abort().catch(() => {})
+          void session.abort().catch(() => {})
         }
       })
 
@@ -244,17 +428,22 @@ export class PiDecisionEngine implements DecisionEngine {
     } finally {
       clearTimeout(timer)
       unsubscribe?.()
-      try {
-        session?.dispose()
-      } catch {
-        // dispose 失败不影响已拿到的结果。
+      if (opts.disposeOnFinish) {
+        try {
+          session.dispose()
+        } catch {
+          // dispose 失败不影响已拿到的结果。
+        }
       }
     }
 
-    return { messages: session?.messages, tokens, timedOut, overBudget, error }
+    const messages = Array.isArray(session.messages) && opts.messagesBefore !== undefined
+      ? session.messages.slice(opts.messagesBefore)
+      : session.messages
+    return { messages, tokens, timedOut, overBudget, error }
   }
 
-  private buildTools(req: DecisionRequest, state: ToolState): PiToolDefinition[] {
+  private buildTools(turnRef: TurnRef): PiToolDefinition[] {
     return DECISION_TOOL_NAMES.map(name => {
       const spec = toolSpec(name)
       return {
@@ -263,10 +452,14 @@ export class PiDecisionEngine implements DecisionEngine {
         description: spec.description,
         parameters: spec.parameters,
         execute: async (_toolCallId: string, params: Record<string, unknown>) => {
+          const req = turnRef.request
+          const state = turnRef.state
+          if (!req) return textResult({ error: 'pi:no-turn-context' })
           const args = params ?? {}
           const argsText = safeJson(args).slice(0, 500)
           try {
             if (name === 'router_decide') {
+              if (!('trigger' in req)) return textResult({ error: 'pi:not-in-assess-mode' })
               const outcome = this.toolbox.propose(args, { strength: req.strength, triggerId: req.trigger.id })
               if ('error' in outcome) {
                 state.toolCalls.push({ name, args: argsText, ok: false, error: outcome.error })
@@ -280,7 +473,7 @@ export class PiDecisionEngine implements DecisionEngine {
                 proposal: outcome.proposal,
               })
             }
-            const ctx = { canMutate: req.canMutate === true }
+            const ctx = { canMutate: 'canMutate' in req && req.canMutate === true }
             let result: unknown
             switch (name) {
               case 'router_read':
@@ -319,6 +512,45 @@ export class PiDecisionEngine implements DecisionEngine {
     })
   }
 
+  /** 打开/新建落盘 session，并绑定本轮可变的工具上下文。 */
+  private async createPersistentSession(input: {
+    parts: SessionKeyParts
+    systemPrompt: string
+  }): Promise<{ session: PiSessionLike; file: string }> {
+    if (!this.sessionPersistence || !this.sessionDir) throw new Error('pi:session-not-configured')
+    const pi = await import('@earendil-works/pi-coding-agent')
+    const dir = join(this.sessionDir, safeSegment(input.parts.chatId), safeSegment(input.parts.actorId))
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    const record: PersistedSessionRecord | null = this.sessionPersistence.get(input.parts.key)
+    const hasFile = Boolean(record?.sessionFile && existsSync(record.sessionFile))
+    const manager = hasFile
+      ? pi.SessionManager.open(record!.sessionFile, dir)
+      : pi.SessionManager.create(this.cwd, dir)
+    const file = manager.getSessionFile()
+    if (!file) throw new Error('pi:session-file-missing')
+    if (!hasFile && record) {
+      // 记录还在但文件被删了：先把旧行标记 superseded；新记录由 SessionRegistry 统一保存。
+      this.sessionPersistence.markSuperseded(input.parts.key, new Date().toISOString(), 'system:missing-file')
+    }
+
+    const turnRef: TurnRef = { state: { proposal: undefined, toolCalls: [] } }
+    const session = await this.sessionFactory({
+      cwd: this.cwd,
+      agentDir: this.agentDir,
+      systemPrompt: input.systemPrompt,
+      toolNames: [...DECISION_TOOL_NAMES],
+      tools: this.buildTools(turnRef),
+      apiKey: this.model.apiKey,
+      baseUrl: this.model.baseUrl,
+      model: this.model.model,
+      sessionManager: manager,
+      compaction: this.compaction,
+      contextWindow: this.contextWindow,
+    })
+    this.turnRefs.set(session, turnRef)
+    return { session, file }
+  }
+
   private finish(
     audit: DecisionAudit,
     result: { proposal: DecisionProposal; reply?: string } | { unavailableReason: string },
@@ -342,6 +574,12 @@ function safeJson(value: unknown): string {
   } catch {
     return String(value)
   }
+}
+
+/** 会话 key 里的飞书 id 只保留安全字符，避免目录穿越。 */
+function safeSegment(value: string): string {
+  const safe = value.replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 120)
+  return safe || 'unknown'
 }
 
 function lastAssistantText(messages: unknown): string {
@@ -375,7 +613,7 @@ export async function createDefaultPiSession(opts: PiSessionOptions): Promise<Pi
   mkdirSync(opts.agentDir, { recursive: true })
   const pi = await import('@earendil-works/pi-coding-agent')
   const settings = pi.SettingsManager.inMemory({
-    compaction: { enabled: false },
+    compaction: opts.compaction ?? { enabled: false },
     retry: { enabled: false },
   } as never)
   const loader = new pi.DefaultResourceLoader({
@@ -418,7 +656,7 @@ export async function createDefaultPiSession(opts: PiSessionOptions): Promise<Pi
         reasoning: false,
         input: ['text'],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 128_000,
+        contextWindow: opts.contextWindow && opts.contextWindow > 0 ? opts.contextWindow : 128_000,
         maxTokens: 8_192,
       },
     ],
@@ -436,7 +674,7 @@ export async function createDefaultPiSession(opts: PiSessionOptions): Promise<Pi
     tools: opts.toolNames,
     customTools: opts.tools as never,
     resourceLoader: loader,
-    sessionManager: pi.SessionManager.inMemory(),
+    sessionManager: (opts.sessionManager as never) ?? pi.SessionManager.inMemory(),
     settingsManager: settings,
   })
   return session as unknown as PiSessionLike
