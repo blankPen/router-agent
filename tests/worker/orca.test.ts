@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { OrcaAdapter, OrcaCommandError, parseCreateResult, summarizeArgs } from '../../src/worker/orca/index.js'
-import { worktreeCreate, terminalSend, terminalClose, terminalList, worktreeRemove, agentLaunch } from '../../src/worker/orca/commands.js'
+import { worktreeCreate, terminalSend, terminalClose, terminalList, terminalRead, worktreeRemove, agentLaunch } from '../../src/worker/orca/commands.js'
 import type { CommandRunner, CommandResult } from '../../src/worker/orca/commands.js'
 import type { Assignment, Ticket } from '../../src/core/model.js'
 import { buildWorkerPrompt } from '../../src/worker/spec/index.js'
@@ -71,9 +71,12 @@ describe('Orca 命令构造', () => {
     expect(terminalSend('term-1', 'hello')).toEqual(['terminal', 'send', '--terminal', 'term-1', '--text', 'hello', '--enter', '--json'])
   })
 
-  it('terminal close / list / worktree rm / agent launch 参数正确', () => {
+  it('terminal close / list / read / worktree rm / agent launch 参数正确', () => {
     expect(terminalClose('term-1')).toEqual(['terminal', 'close', '--terminal', 'term-1'])
     expect(terminalList()).toEqual(['terminal', 'list', '--json'])
+    // 巡检读渲染屏幕，而不是默认的累计流（TUI 重绘会产生堆叠碎片）。
+    expect(terminalRead('term-1')).toEqual(['terminal', 'read', '--terminal', 'term-1', '--screen', '--limit', '60', '--json'])
+    expect(terminalRead('term-1', { limit: 20 })).toEqual(['terminal', 'read', '--terminal', 'term-1', '--screen', '--limit', '20', '--json'])
     // 默认不 --force：脏工作区交给 Orca 拒绝，避免误删未提交改动。
     expect(worktreeRemove('path:/tmp/wt')).toEqual(['worktree', 'rm', '--worktree', 'path:/tmp/wt', '--json'])
     expect(worktreeRemove('path:/tmp/wt', { force: true })).toEqual(['worktree', 'rm', '--worktree', 'path:/tmp/wt', '--force', '--json'])
@@ -226,6 +229,31 @@ describe('OrcaAdapter', () => {
     expect(info).toMatchObject({ handle: 'term-1', connected: true, orphaned: false, worktreePath: '/tmp/wt' })
     // Orca 实测返回毫秒数字，必须归一化成 ISO，否则 idle 判定永远失效
     expect(info?.lastOutputAt).toBe(new Date(1793897105303).toISOString())
+  })
+
+  it('read 读取渲染屏幕尾部，供 Router 主动巡检', async () => {
+    const runner = new FakeRunner([{
+      code: 0,
+      stdout: JSON.stringify({
+        ok: true,
+        result: { terminal: { handle: 'term-1', status: 'running', source: 'screen', tail: ['⏺ 正在改登录超时', '⎿ pnpm test'] } },
+      }),
+      stderr: '',
+    }])
+    const adapter = new OrcaAdapter({ runner, workersDir: '/tmp', spec: 'prompt' })
+    const output = await adapter.read('term-1', { limit: 20 })
+    expect(runner.calls[0]!.argv).toEqual(terminalRead('term-1', { limit: 20 }))
+    expect(output).toEqual({ status: 'running', source: 'screen', lines: ['⏺ 正在改登录超时', '⎿ pnpm test'] })
+  })
+
+  it('read 遇到未知 status 或缺失 terminal 时返回安全值', async () => {
+    const runner = new FakeRunner([
+      { code: 0, stdout: JSON.stringify({ ok: true, result: { terminal: { status: 'weird', tail: [] } } }), stderr: '' },
+      { code: 0, stdout: JSON.stringify({ ok: true, result: {} }), stderr: '' },
+    ])
+    const adapter = new OrcaAdapter({ runner, workersDir: '/tmp', spec: 'prompt' })
+    expect(await adapter.read('term-1')).toEqual({ status: 'unknown', lines: [] })
+    expect(await adapter.read('term-1')).toBeNull()
   })
 })
 

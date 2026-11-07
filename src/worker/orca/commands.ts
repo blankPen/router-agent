@@ -57,6 +57,11 @@ export function terminalList(): string[] {
   return ['terminal', 'list', '--json']
 }
 
+/** 读取渲染屏幕的尾部行；--screen 比默认的累计流更适合看「现在在做什么」。 */
+export function terminalRead(handle: string, opts: { limit?: number } = {}): string[] {
+  return ['terminal', 'read', '--terminal', handle, '--screen', '--limit', String(opts.limit ?? 60), '--json']
+}
+
 export function worktreeShow(selector: string): string[] {
   return ['worktree', 'show', '--worktree', selector, '--json']
 }

@@ -78,10 +78,16 @@ export interface ChatBinding {
   branch: string
 }
 
-/** 工单进展的定时同步策略。 */
+/** 工单进展的定时同步与主动巡检策略。 */
 export interface ProgressSettings {
   /** 轮询间隔（毫秒）：把这段时间内的 progress 上报合并成一条消息同步到话题；0 表示关闭。 */
   syncMs: number
+  /** 主动巡检间隔（毫秒）：读取 worker 终端并同步进展到话题；0 表示关闭。 */
+  probeMs: number
+  /** 多久没有新上报 / 新输入才算「静默」，默认 10 分钟。 */
+  silenceMs: number
+  /** 同一静默期内重复提醒的最小间隔，默认 15 分钟。 */
+  repeatMs: number
 }
 
 /**
@@ -150,7 +156,13 @@ export function defaultConfig(): AppConfig {
       tokenBudget: 32_000,
       agentDir: '',
     },
-    progress: { syncMs: 60_000 },
+    progress: {
+      syncMs: 60_000,
+      // 用户口径：worker 可能长时间执行任务且不主动上报，Router 要自己读终端。
+      probeMs: 120_000,
+      silenceMs: 600_000,
+      repeatMs: 900_000,
+    },
     retention: {
       enabled: true,
       // 用户口径：1 天没有任何新进展先提醒，提醒后 6 小时没回复自动关闭。
@@ -193,6 +205,9 @@ router:
 
 progress:
   syncMs: 60000        # 工单进展合并同步间隔（毫秒）；0 = 关闭定时同步
+  probeMs: 120000      # 主动巡检间隔（毫秒）：读 worker 终端并同步进展；0 = 关闭
+  silenceMs: 600000    # 多久没有新上报/新输入才算静默（毫秒）
+  repeatMs: 900000     # 同一静默期内重复提醒的最小间隔（毫秒）
 
 # 闲置工单治理：先提醒，宽限期后自动关闭并回收 workspace
 retention:
@@ -252,7 +267,11 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
   const acceptMode = pickAcceptMode(doc.policy?.acceptMode, base.policy.acceptMode)
   const mode = pickMode(doc.workerSpec?.mode, base.workerSpec.mode)
   const port = Number(doc.server?.port)
-  const progressSyncMs = Number(doc.progress?.syncMs)
+  const progressDoc = doc.progress ?? {}
+  const progressSyncMs = Number(progressDoc.syncMs)
+  const progressProbeMs = Number(progressDoc.probeMs)
+  const progressSilenceMs = Number(progressDoc.silenceMs)
+  const progressRepeatMs = Number(progressDoc.repeatMs)
   const retentionDoc = doc.retention ?? {}
 
   const admissionDoc = doc.policy?.admission ?? {}
@@ -283,7 +302,10 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
     },
     router: parseRouter(doc.router, base.router),
     progress: {
-      syncMs: Number.isInteger(progressSyncMs) && progressSyncMs >= 0 && progressSyncMs <= 3_600_000 ? progressSyncMs : base.progress.syncMs,
+      syncMs: msOr(progressSyncMs, base.progress.syncMs, 0),
+      probeMs: msOr(progressProbeMs, base.progress.probeMs, 0),
+      silenceMs: msOr(progressSilenceMs, base.progress.silenceMs, 1_000),
+      repeatMs: msOr(progressRepeatMs, base.progress.repeatMs, 1_000),
     },
     retention: {
       enabled: booleanOr(retentionDoc.enabled, base.retention.enabled),
@@ -353,6 +375,11 @@ function stringOr(value: unknown, fallback: string): string {
 
 function booleanOr(value: unknown, fallback: boolean): boolean {
   return typeof value === 'boolean' ? value : fallback
+}
+
+/** 毫秒配置：非法值、越界值都退回默认值；min=0 的字段可以关闭。 */
+function msOr(value: number, fallback: number, min: number): number {
+  return Number.isInteger(value) && value >= min && value <= 3_600_000 ? value : fallback
 }
 
 /** 解析正数阈值：非法值、越界值都退回默认值，避免写错配置把清理时钟调成 0。 */
@@ -498,7 +525,12 @@ export function writeConfig(home: string, config: AppConfig): void {
       tokenBudget: config.router.tokenBudget,
       ...(config.router.agentDir ? { agentDir: config.router.agentDir } : {}),
     },
-    progress: { syncMs: config.progress.syncMs },
+    progress: {
+      syncMs: config.progress.syncMs,
+      probeMs: config.progress.probeMs,
+      silenceMs: config.progress.silenceMs,
+      repeatMs: config.progress.repeatMs,
+    },
     retention: {
       enabled: config.retention.enabled,
       idleHours: config.retention.idleHours,
@@ -648,6 +680,25 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
       const n = Number(value)
       if (!Number.isInteger(n) || n < 0 || n > 3_600_000) return false
       config.progress.syncMs = n
+      return true
+    }
+    case 'progress.probeMs': {
+      // 0 表示关闭主动巡检
+      const n = Number(value)
+      if (!Number.isInteger(n) || n < 0 || n > 3_600_000) return false
+      config.progress.probeMs = n
+      return true
+    }
+    case 'progress.silenceMs': {
+      const n = Number(value)
+      if (!Number.isInteger(n) || n < 1_000 || n > 3_600_000) return false
+      config.progress.silenceMs = n
+      return true
+    }
+    case 'progress.repeatMs': {
+      const n = Number(value)
+      if (!Number.isInteger(n) || n < 1_000 || n > 3_600_000) return false
+      config.progress.repeatMs = n
       return true
     }
     case 'retention.enabled': {

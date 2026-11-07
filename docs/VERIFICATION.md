@@ -228,6 +228,15 @@ RA_PI_VERIFY=1 npx vitest run tests/verify-pi-live.test.ts  → 1 passed
 | 超时 + 预算 | `router.timeoutMs` / `router.tokenBudget` |
 | 审计与回放 | `DecisionAudit` 统一结构；CLI 写 JSONL |
 
+### 5.6 工单进展主动巡检（不依赖 Worker 上报）
+
+- **触发**：`progress.probeMs`（默认 2 分钟）扫描；只处理 `assigned/running`，以及 `ready/blocked` 之后又收到新输入的工单（阶段仍是 `review/person` 也会巡检）。
+- **静默判定**：`lastProgressAt`（最近上报 / 新输入 / 派工时间）超过 `progress.silenceMs`（默认 10 分钟）。
+- **数据来源**：`orca terminal read --screen --limit 60 --json` 读取渲染屏幕；清洗状态栏、输入回显与分隔线后，优先取 `⏺/⎿/✻` 活动行，最多 8 行 / 1200 字。
+- **输出**：确定性文本（不额外调用模型），发到工单话题；同一静默期按 `progress.repeatMs`（默认 15 分钟）限流，画面未变化会标注。
+- **兜底**：终端已退出、读不到输出或后端不支持 `read` 时跳过，交给 `checkIdle` 的 stale 处理；终端长时间无新输出时在消息里提示可能卡住。
+- **验证**：`tests/service-runtime.test.ts` 覆盖静默检测、限流、review+新输入、终端退出、卡住提示与摘录清洗；并用真实 `orca terminal read` 抽样验证了摘录质量。
+
 ## 6. 结论
 
 - 领域内核、Router、WorkerBackend、上报协议、飞书 / GitHub Source、HTTP API、Web 面板、CLI 均已实现并有测试覆盖。

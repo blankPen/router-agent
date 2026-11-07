@@ -1,12 +1,13 @@
 import { mkdirSync, writeFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import type { WorkerBackend, WorkerContext, InboundMessage, ContextItem } from '../port.js'
+import type { WorkerBackend, WorkerContext, InboundMessage, ContextItem, TerminalOutput } from '../port.js'
 import { buildWorkerPrompt } from '../spec/index.js'
 import { workBranch, worktreeName } from '../naming.js'
 import {
   agentLaunch,
   terminalClose,
   terminalList,
+  terminalRead,
   terminalSend,
   worktreeCreate,
   worktreeRemove,
@@ -232,6 +233,17 @@ export class OrcaAdapter implements WorkerBackend {
     const terminals = extractTerminals(parsed)
     const found = terminals.find(t => String(t.handle) === handle)
     return found ? normalizeTerminal(found) : null
+  }
+
+  /** 读取终端渲染屏幕的尾部输出；失败（终端已销毁 / 旧版 Orca）时交给调用方跳过本轮巡检。 */
+  async read(handle: string, opts: { limit?: number } = {}): Promise<TerminalOutput | null> {
+    const res = await this.run(terminalRead(handle, opts))
+    const parsed = parseJsonOrThrow(res.stdout) as Record<string, any>
+    const raw = parsed.result?.terminal ?? parsed.terminal
+    if (!raw) return null
+    const status = raw.status === 'running' || raw.status === 'exited' ? raw.status : 'unknown'
+    const lines = Array.isArray(raw.tail) ? raw.tail.map((line: unknown) => String(line)) : []
+    return { status, lines, ...(raw.source ? { source: String(raw.source) } : {}) }
   }
 
   async inspectWorktree(selector: string): Promise<Record<string, unknown> | null> {

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Store } from '../src/store/db.js'
 import { Engine } from '../src/core/engine.js'
-import { RouterService } from '../src/service.js'
+import { RouterService, extractTerminalSnippet, formatProbeMessage } from '../src/service.js'
 import { defaultConfig, policyOf, type AppConfig, chatEntry } from '../src/config.js'
 import { DEFAULT_ADMISSION } from '../src/core/policy.js'
 import type { WorkerBackend, WorkerContext } from '../src/worker/port.js'
@@ -49,6 +49,9 @@ class FakeBackend implements WorkerBackend {
   delivered: { handle: string; text: string }[] = []
   handles = new Map<string, { lastOutputAt: string }>()
   linkedPr: Record<string, unknown> | null = null
+  /** 主动巡检读取的终端渲染屏幕。 */
+  screen: string[] = []
+  readStatus: 'running' | 'exited' | 'unknown' = 'running'
   async start(ctx: WorkerContext) {
     const handle = `term-${this.starts.length + 1}`
     this.starts.push(ctx)
@@ -60,6 +63,9 @@ class FakeBackend implements WorkerBackend {
   }
   async registerContext() {}
   async stop() {}
+  async read() {
+    return { status: this.readStatus, lines: this.screen, source: 'screen' }
+  }
   async inspect(handle: string) {
     const entry = this.handles.get(handle)
     return entry ? { handle, connected: true, writable: true, orphaned: false, lastOutputAt: entry.lastOutputAt, worktreePath: '', branch: '' } : null
@@ -181,6 +187,116 @@ describe('运行时机制', () => {
     })
     await service.checkIdle(now + 2000)
     expect(backend.delivered.length).toBe(before)
+  })
+
+  it('worker 长时间不报进展时，Router 主动读终端并同步到话题', async () => {
+    const { ticketId, handle } = await launchOne()
+    backend.screen = ['⏺ 正在修改登录超时配置', '⎿ pnpm test 进行中', '✻ Cascading… (30s)']
+    backend.handles.set(handle, { lastOutputAt: new Date(now + 10 * 60_000).toISOString() })
+
+    await service.probeProgress(now + 11 * 60_000)
+
+    const probe = store.listOutbox(200).find(item => item.text.includes('进展巡检'))
+    expect(probe).toBeTruthy()
+    expect(probe!.text).toContain('assigned')
+    expect(probe!.text).toContain('正在修改登录超时配置')
+    expect(probe!.threadId).toBe('om_root')
+    expect(store.getTicket(ticketId)?.stage).toBe('assigned')
+  })
+
+  it('同一静默期按 repeatMs 限流，避免重复刷屏', async () => {
+    await launchOne()
+    backend.screen = ['⏺ 正在跑测试']
+
+    await service.probeProgress(now + 11 * 60_000)
+    await service.probeProgress(now + 20 * 60_000)
+    expect(store.listOutbox(200).filter(item => item.text.includes('进展巡检'))).toHaveLength(1)
+
+    // 距上次提醒 16 分钟，超过 repeatMs（15 分钟），允许再次提醒。
+    await service.probeProgress(now + 27 * 60_000)
+    expect(store.listOutbox(200).filter(item => item.text.includes('进展巡检'))).toHaveLength(2)
+  })
+
+  it('ready 之后又收到新输入时，仍会主动巡检正在补做的 worker', async () => {
+    const { ticketId, assignmentId } = await launchOne()
+    service.onWorkerState({
+      ticketId, assignmentId, turn: 1, state: 'ready', summary: '第一轮完成', prNumber: 0, prUrl: '',
+      ackedInputs: [], updatedAt: new Date(now).toISOString(),
+    })
+    expect(store.getTicket(ticketId)?.stage).toBe('review')
+
+    now += 1_000
+    engine.deliverInput(ticketId, { kind: 'followup', text: '再补一个单测' })
+    backend.screen = ['⏺ 正在补充单测', '✽ Cascading… (12s)']
+
+    await service.probeProgress(now + 11 * 60_000)
+
+    const probe = store.listOutbox(200).find(item => item.text.includes('进展巡检'))
+    expect(probe).toBeTruthy()
+    expect(probe!.text).toContain('正在补充单测')
+    expect(probe!.text).toContain('review')
+  })
+
+  it('终端已退出时不发巡检消息（交给空闲巡检处理）', async () => {
+    await launchOne()
+    backend.readStatus = 'exited'
+    backend.screen = ['⏺ 旧画面']
+
+    await service.probeProgress(now + 11 * 60_000)
+    expect(store.listOutbox(200).filter(item => item.text.includes('进展巡检'))).toHaveLength(0)
+  })
+
+  it('终端长时间没有新输出时，巡检消息会提示可能卡住', async () => {
+    const { handle } = await launchOne()
+    backend.screen = ['⏺ 最后一条输出']
+    backend.handles.set(handle, { lastOutputAt: new Date(now - 20 * 60_000).toISOString() })
+
+    await service.probeProgress(now + 21 * 60_000)
+
+    const probe = store.listOutbox(200).find(item => item.text.includes('进展巡检'))
+    expect(probe?.text).toContain('没有新输出')
+    expect(probe?.text).toContain('可能')
+  })
+
+  it('extractTerminalSnippet 过滤状态栏与输入回显，优先取活动标记', () => {
+    const snippet = extractTerminalSnippet([
+      '✻ Brewed for 3m · done',
+      '❯ 【Router 输入 in_1】',
+      '  给我改个东西',
+      '⏺ Update(tests/config.test.ts)',
+      '⎿  Added 11 lines',
+      '  ⎿  $ pnpm test',
+      '✽ Cascading… (30s)',
+      '────────────────────────',
+      '❯',
+      '  当前模型: deepseek-v4.1-flash',
+    ])
+    expect(snippet).toContain('Update(tests/config.test.ts)')
+    expect(snippet).toContain('Added 11 lines')
+    expect(snippet).not.toContain('给我改个东西')
+    expect(snippet).not.toContain('$ pnpm test')
+    expect(snippet).not.toContain('当前模型')
+    expect(snippet).not.toContain('❯')
+  })
+
+  it('extractTerminalSnippet 没有活动标记时取输入回显之前的尾部文本', () => {
+    const snippet = extractTerminalSnippet(['- 删除了 ACK 文案', '  验证通过', '❯ 【Router 输入 in_2】', '  新需求'])
+    expect(snippet).toBe('- 删除了 ACK 文案\n验证通过')
+  })
+
+  it('formatProbeMessage 会中和摘录里的三反引号，避免破坏飞书代码块', async () => {
+    const { ticketId } = await launchOne()
+    const ticket = store.getTicket(ticketId)!
+    const text = formatProbeMessage(ticket, {
+      nowMs: now + 11 * 60_000,
+      lastProgress: now,
+      snippet: '⏺ 示例\n```ts\nconst a = 1\n```',
+      unchanged: false,
+      lastOutputAt: now + 10 * 60_000,
+      silenceMs: 600_000,
+    })
+    expect(text).not.toContain('```ts')
+    expect(text).toContain("'''ts")
   })
 
   it('PR 优先取 Orca worktree 的 linkedPR，拿不到才回退 gh', async () => {

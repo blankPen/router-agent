@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Clock, Engine } from './core/engine.js'
-import type { Assignment, Report, Ticket, Trigger } from './core/model.js'
+import type { Assignment, Report, Stage, Ticket, Trigger } from './core/model.js'
 import type { Store } from './store/db.js'
 import type { AppConfig, RetentionSettings } from './config.js'
 import { replyAlwaysChatsOf } from './config.js'
@@ -80,6 +80,22 @@ function reminderCursorKey(ticketId: string): string {
   return `retention:reminder:${ticketId}`
 }
 
+/** 主动巡检水位：记录当前静默期已经提醒过的次数与终端画面指纹，避免刷屏。 */
+function probeCursorKey(ticketId: string): string {
+  return `progress:probe:${ticketId}`
+}
+
+interface ProbeRecord {
+  /** 本轮静默期的起点（最后一次上报 / 新输入 / 派工时间）。 */
+  lastProgressAt: number
+  /** 上次主动巡检消息的发送时间。 */
+  lastPostAt: number
+  /** 本轮静默期的提醒次数，用来生成稳定的 outbox key。 */
+  count: number
+  /** 终端摘录指纹；画面没变时可以明确告诉用户。 */
+  snippetHash: string
+}
+
 /** PR 催办水位：同一段闲置期只催一次；有新进展后自动清空。 */
 function prUrgeCursorKey(ticketId: string): string {
   return `retention:pr-urge:${ticketId}`
@@ -153,6 +169,99 @@ function clockOf(at: string): string {
   return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
 }
 
+const STAGE_LABELS: Record<Stage, string> = {
+  draft: '草稿',
+  accepted: '已接单',
+  assigned: '已派工',
+  running: '执行中',
+  review: '待验收',
+  person: '等人处理',
+  idle: '空闲',
+  closed: '已关闭',
+}
+
+/** Claude Code / Codex 在渲染屏幕里的活动标记：⏺ 文本、⎿ 工具结果、✻✽ 状态行。 */
+const ACTIVITY_MARKERS = /^[⏺⎿✻✽✶✳⏵◆◇●○]/
+
+/**
+ * 从 Orca 渲染屏幕里挑出最后几行「像进展」的输出。
+ *
+ * 不解析 TUI 语义，只做保守清洗：去掉状态栏、空 prompt、分隔线；
+ * 优先取本轮 Router 输入之后的 ⏺/⎿/✻ 行，其次取屏幕尾部的自然文本。
+ */
+export function extractTerminalSnippet(lines: string[], opts: { maxLines?: number; maxChars?: number } = {}): string {
+  const maxLines = opts.maxLines ?? 8
+  const maxChars = opts.maxChars ?? 1200
+  const cleaned = lines
+    .map(line => line.trim())
+    .filter(line => line.length > 0)
+    .filter(line => !/^[─━═\-—_]{8,}$/.test(line))
+    .filter(line => !/^[❯›]\s*$/.test(line))
+    .filter(line => !/^[⎿›].*\$\s/.test(line))
+    .filter(line => !(/^[⎿›]/.test(line) && line.length > 240))
+    .filter(line => !/(当前模型|bypass permissions|shift\+tab|esc to interrupt|ctrl[-+]c to|new task\?|\/clear to save|context left)/i.test(line))
+    .map(line => (line.length <= 300 ? line : `${line.slice(0, 300)}…`))
+
+  const inputAt = lastIndexWhere(cleaned, line => /^[❯›]\s*【Router 输入/.test(line))
+  const afterInput = inputAt >= 0 ? cleaned.slice(inputAt + 1) : cleaned
+  const afterInputMarkers = afterInput.filter(line => ACTIVITY_MARKERS.test(line))
+  if (afterInputMarkers.length > 0) return joinSnippet(afterInputMarkers.slice(-maxLines), maxChars)
+
+  const markers = cleaned.filter(line => ACTIVITY_MARKERS.test(line))
+  if (markers.length >= 2) return joinSnippet(markers.slice(-maxLines), maxChars)
+
+  // 没有活动标记（普通 shell / 已结束的会话）：取输入回显之前的屏幕尾部。
+  const fallback = inputAt >= 0 ? cleaned.slice(0, inputAt) : cleaned
+  return joinSnippet(fallback.slice(-maxLines), maxChars)
+}
+
+/** 终端摘录指纹：只用来判断「画面有没有变化」，不做安全用途。 */
+export function snippetFingerprint(text: string): string {
+  let hash = 0
+  for (let i = 0; i < text.length; i += 1) hash = (hash * 31 + text.charCodeAt(i)) | 0
+  return hash.toString(16)
+}
+
+/** 主动巡检消息：全部是确定性文本，不额外调用模型。 */
+export function formatProbeMessage(ticket: Ticket, info: {
+  nowMs: number
+  lastProgress: number
+  snippet: string
+  unchanged: boolean
+  lastOutputAt: number
+  silenceMs: number
+}): string {
+  const minutes = Math.max(0, Math.round((info.nowMs - info.lastProgress) / 60_000))
+  const activeStage = ticket.stage === 'assigned' || ticket.stage === 'running'
+  const lines = [
+    `**工单「${ticket.title}」进展巡检（${ticket.id}）**`,
+    '',
+    `- 当前阶段：${ticket.stage}（${STAGE_LABELS[ticket.stage]}）${activeStage ? '' : '；已有新输入，worker 应已重新开工'}`,
+    `- 距上次上报 / 新输入：${minutes} 分钟`,
+  ]
+  if (Number.isFinite(info.lastOutputAt)) {
+    const outputMinutes = Math.max(0, Math.round((info.nowMs - info.lastOutputAt) / 60_000))
+    lines.push(`- 终端最后一次输出：${outputMinutes} 分钟前`)
+    if (outputMinutes * 60_000 >= info.silenceMs) {
+      lines.push(`- ⚠️ 终端已经 ${outputMinutes} 分钟没有新输出，可能在等待输入或卡住，建议到 Orca 终端确认。`)
+    }
+  }
+  lines.push('', '**终端最新输出（原样摘录）**', '```text', (info.snippet || '(终端没有可读输出)').replace(/```/g, "'''"), '```')
+  if (info.unchanged) lines.push('', '与上次巡检相比，终端画面没有变化。')
+  lines.push('', '这是 Router 的主动巡检，不需要回复。')
+  return lines.join('\n')
+}
+
+function joinSnippet(lines: string[], maxChars: number): string {
+  const text = lines.join('\n').trim()
+  return text.length <= maxChars ? text : `${text.slice(0, maxChars)}…`
+}
+
+function lastIndexWhere(items: string[], predicate: (item: string) => boolean): number {
+  for (let i = items.length - 1; i >= 0; i -= 1) if (predicate(items[i]!)) return i
+  return -1
+}
+
 /**
  * 服务编排：把 AgentLoop、上报轮询、Effects、PR 跟踪与 WorkerBackend 接在一起。
  * 本身不持有终端状态；重启后靠 recover() 与 Orca 对账。
@@ -188,6 +297,14 @@ export class RouterService {
   private queueNotified = new Set<string>()
   /** 工单进展合并同步的轮询间隔；0 表示关闭。 */
   private progressSyncMs: number
+  /** 主动巡检间隔：读 worker 终端并同步进展；0 表示关闭。 */
+  private progressProbeMs: number
+  /** 多久没有新上报 / 新输入才算静默。 */
+  private progressSilenceMs: number
+  /** 同一静默期内重复提醒的最小间隔。 */
+  private progressRepeatMs: number
+  /** 防止上一轮巡检还没结束、下一轮又进来。 */
+  private probing = false
   /** 每张工单已经同步过的进展签名（有界），用于内容去重。 */
   private progressSeen = new Map<string, Set<string>>()
   /** 闲置治理阈值；配置缺失时关闭，避免旧测试或嵌入用法被意外清理。 */
@@ -206,6 +323,9 @@ export class RouterService {
     this.idleAfterMs = opts.idleAfterMs ?? 120_000
     this.staleAfterMs = opts.staleAfterMs ?? 300_000
     this.progressSyncMs = opts.config.progress?.syncMs ?? 60_000
+    this.progressProbeMs = opts.config.progress?.probeMs ?? 120_000
+    this.progressSilenceMs = opts.config.progress?.silenceMs ?? 600_000
+    this.progressRepeatMs = opts.config.progress?.repeatMs ?? 900_000
     this.retention = opts.config.retention ?? {
       enabled: false,
       idleHours: 24,
@@ -299,6 +419,7 @@ export class RouterService {
     every(5000, () => this.trackPullRequests())
     every(15_000, () => this.checkIdle())
     if (this.progressSyncMs > 0) every(this.progressSyncMs, () => this.syncProgress())
+    if (this.progressProbeMs > 0) every(this.progressProbeMs, () => this.probeProgress())
     if (this.retention.enabled) every(this.retention.sweepMinutes * 60_000, () => this.sweepRetention())
   }
 
@@ -990,6 +1111,113 @@ export class RouterService {
       this.progressSeen.set(ticketId, seen)
     }
     return seen
+  }
+
+  // ---------- 工单进展主动巡检 ----------
+
+  /**
+   * 不依赖 worker 上报：定时读 Orca 终端的渲染屏幕，判断 worker 是否还在动，
+   * 并把最近输出摘录同步到工单话题。
+   *
+   * 覆盖两类场景：
+   * - 执行中（assigned/running）但长时间没上报；
+   * - 已 ready 进入 review/person 后，用户又发了新输入，worker 重新开工但阶段还没变。
+   */
+  async probeProgress(nowMs: number = Date.parse(this.clock.now())): Promise<void> {
+    if (this.progressProbeMs <= 0 || this.probing || !this.backend.read) return
+    this.probing = true
+    try {
+      for (const ticket of this.store.listOpenTickets()) {
+        try {
+          await this.probeTicket(ticket, nowMs)
+        } catch (error) {
+          this.logger.warn('progress:probe-failed', {
+            ticketId: ticket.id,
+            message: error instanceof Error ? error.message : String(error),
+          })
+        }
+      }
+    } finally {
+      this.probing = false
+    }
+  }
+
+  private async probeTicket(ticket: Ticket, nowMs: number): Promise<void> {
+    const assignment = this.store.latestAssignment(ticket.id)
+    if (!assignment?.handle || assignment.status === 'ended') return
+    if (!this.awaitingWorker(ticket)) return
+
+    const lastProgress = this.lastProgressAt(ticket)
+    if (!lastProgress || nowMs - lastProgress < this.progressSilenceMs) return
+
+    const record = this.readProbeRecord(ticket.id)
+    const samePeriod = record !== null && record.lastProgressAt === lastProgress
+    if (samePeriod && nowMs - record.lastPostAt < this.progressRepeatMs) return
+
+    const output = await this.backend.read!(assignment.handle, { limit: 60 })
+    if (!output || output.status !== 'running') return
+
+    const info = this.backend.inspect
+      ? (await this.backend.inspect(assignment.handle)) as OrcaTerminalInfo | null
+      : null
+    const snippet = extractTerminalSnippet(output.lines)
+    const snippetHash = snippetFingerprint(snippet)
+    const unchanged = samePeriod && record.snippetHash === snippetHash
+    const count = samePeriod ? record.count + 1 : 1
+    const lastOutputAt = info?.lastOutputAt ? Date.parse(info.lastOutputAt) : Number.NaN
+
+    const text = formatProbeMessage(ticket, {
+      nowMs,
+      lastProgress,
+      snippet,
+      unchanged,
+      lastOutputAt,
+      silenceMs: this.progressSilenceMs,
+    })
+
+    this.queue(ticket, text, `progress:probe:${ticket.id}:${lastProgress}:${count}`)
+    this.store.setCursor(
+      probeCursorKey(ticket.id),
+      JSON.stringify({
+        lastProgressAt: lastProgress,
+        lastPostAt: nowMs,
+        count,
+        snippetHash,
+      } satisfies ProbeRecord),
+      this.clock.now(),
+    )
+    this.log('progress:probed', ticket.id, {
+      minutes: Math.round((nowMs - lastProgress) / 60_000),
+      count,
+      unchanged,
+    })
+  }
+
+  /** worker 是否应该在工作：执行中，或 ready / blocked 之后又收到了新输入。 */
+  private awaitingWorker(ticket: Ticket): boolean {
+    if (ticket.stage === 'assigned' || ticket.stage === 'running') return true
+    const latest = this.store.latestReport(ticket.id)
+    const newestInput = this.store.listInputs(ticket.id).at(-1)
+    if (!newestInput) return false
+    const inputAt = Date.parse(newestInput.createdAt)
+    return Number.isFinite(inputAt) && (!latest || inputAt > Date.parse(latest.at))
+  }
+
+  private readProbeRecord(ticketId: string): ProbeRecord | null {
+    const raw = this.store.getCursor(probeCursorKey(ticketId))
+    if (!raw) return null
+    try {
+      const parsed = JSON.parse(raw) as Partial<ProbeRecord>
+      if (typeof parsed.lastProgressAt !== 'number' || typeof parsed.lastPostAt !== 'number') return null
+      return {
+        lastProgressAt: parsed.lastProgressAt,
+        lastPostAt: parsed.lastPostAt,
+        count: typeof parsed.count === 'number' ? parsed.count : 0,
+        snippetHash: typeof parsed.snippetHash === 'string' ? parsed.snippetHash : '',
+      }
+    } catch {
+      return null
+    }
   }
 
   // ---------- 停止 ----------
