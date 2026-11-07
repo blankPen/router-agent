@@ -44,7 +44,7 @@ It is a **clean rewrite** of dsh-superagent, with no dependency on the prototype
 
 | Dependency | Notes |
 |-|-|
-| Node.js | `>= 22.19.0` (uses the built-in `node:sqlite`) |
+| Node.js | `>= 22.19.0` (uses the built-in `node:sqlite`; pinned to 22.19.0 via `.node-version`) |
 | pnpm | Install dependencies and build |
 | Orca | Provides the `orca` CLI that creates worktrees and terminals |
 | lark-cli | Feishu event consumption and messaging; needs a Feishu custom app |
