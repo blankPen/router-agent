@@ -1,6 +1,7 @@
 import { join } from 'node:path'
 import type { AppConfig } from '../config.js'
 import type { Store } from '../store/db.js'
+import type { Engine } from '../core/engine.js'
 import type { PiModelConfig } from './model-config.js'
 import { PiDecisionEngine } from './pi-decision-engine.js'
 import { RouterToolbox } from './tools.js'
@@ -9,13 +10,18 @@ export interface DecisionEngineFactoryOptions {
   config: AppConfig
   store: Store
   model: PiModelConfig
+  /** 关单 / 回收 workspace 等运维工具需要 Engine；只读场景可不传。 */
+  engine?: Engine
 }
 
 /** 装配唯一的研判引擎：Pi。 */
 export function createDecisionEngine(opts: DecisionEngineFactoryOptions): PiDecisionEngine {
   return new PiDecisionEngine({
     model: opts.model,
-    toolbox: new RouterToolbox({ store: opts.store }),
+    toolbox: new RouterToolbox({
+      store: opts.store,
+      ...(opts.engine ? { engine: opts.engine } : {}),
+    }),
     agentDir: opts.config.router.agentDir || join(opts.config.home, 'pi'),
     cwd: opts.config.home,
     timeoutMs: opts.config.router.timeoutMs,

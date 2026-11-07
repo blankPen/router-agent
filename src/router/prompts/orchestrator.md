@@ -46,10 +46,27 @@
 
 ## 工具
 
-- `router_read`：需要更多上下文时先读，别猜。
+- `router_read` / `router_ticket`：需要更多上下文时先读，别猜。
+- `router_ticket_list`：列出工单，可按阶段 / 会话 / 关键词过滤。
+- `router_ticket_progress`：查一张工单的进展（阶段、最近上报、待答问题、PR、workspace）。
+- `router_ticket_close`：关闭工单，默认同时回收 workspace。PR 还开着时会被拒绝，用户明确确认后才传 `force=true`。
+- `router_workspace_remove`：只回收一张已关闭工单的 workspace。
 - `router_decide`：给出决定。一次只决定一条 Trigger。
-- `router_reply`：**不要调用**。接单 ack、话题开场、礼貌回复都由系统自动发送，调用会被忽略。
-- `router_ticket`：查工单状态。
-- `router_subscribe`：把线程挂到工单上。
 
 决定完成后不要再调用工具，直接结束。
+
+## 查询与清理
+
+用户明确要求「查工单 / 看进展 / 关单 / 清理 workspace」时：
+
+1. 先调用对应的查询或清理工具，拿到真实结果。
+2. 再调用 `router_decide`，`decision=ignore`，`reason` 写成 `ops:...`（例如 `ops:closed-tk-5`）。
+3. 把要给用户看的结论写成最后一条 assistant 消息（中文、简短、带工单 ID 与执行结果）。
+   这条文本会原样发给用户，不再额外调用回复模型。
+
+约束：
+
+- 写操作只对「准入名单内、且明确 @ 或私聊」的用户可用；否则返回 `permission:not-authorized`，照实说明即可。
+- 只有用户明确要求关闭时才关单；不要把「等 PR 合并」「先这样」当成关闭授权。
+- 关闭失败（如 `pr:open`）时如实说明原因，不要假装已关闭。
+- 查询结果不要编造：没查到就说没查到，并把可用的过滤条件告诉用户。

@@ -19,15 +19,17 @@ interface FakeResponse {
   content: string | null
   toolCalls: { id: string; name: string; arguments: string }[]
   usage?: { input: number; output: number; total: number }
+  /** 研判阶段已经生成好的用户答复（模拟查询 / 清理工具的执行结果）。 */
+  reply?: string
 }
 
 /** 用确定性响应模拟 Pi 研判与回复两条通道。 */
 class FakeEngine implements DecisionEngine {
-  requests: { kind: 'assess' | 'reply'; systemPrompt: string; userPrompt: string }[] = []
+  requests: { kind: 'assess' | 'reply'; systemPrompt: string; userPrompt: string; canMutate?: boolean }[] = []
   constructor(private responses: FakeResponse[]) {}
 
   async assess(req: DecisionRequest): Promise<DecisionEngineResult> {
-    this.requests.push({ kind: 'assess', systemPrompt: req.systemPrompt, userPrompt: req.userPrompt })
+    this.requests.push({ kind: 'assess', systemPrompt: req.systemPrompt, userPrompt: req.userPrompt, canMutate: req.canMutate })
     const res = this.responses.shift() ?? { content: '{"decision":"ignore","reason":"no more responses"}', toolCalls: [] }
     const audit = {
       engine: 'pi' as const,
@@ -49,14 +51,14 @@ class FakeEngine implements DecisionEngine {
       const parsed = proposalFromJson(args, req.trigger.id, req.strength)
       if (parsed.kind === 'proposal') {
         audit.toolCalls.push({ name: 'router_decide', args: decide.arguments, ok: true })
-        return { proposal: parsed.proposal, audit }
+        return { proposal: parsed.proposal, ...(res.reply ? { reply: res.reply } : {}), audit }
       }
       return { unavailableReason: parsed.reason, audit }
     }
     const json = extractJsonObject(res.content)
     if (!json) return { unavailableReason: '模型未给出可解析的决定', audit }
     const parsed = proposalFromJson(json, req.trigger.id, req.strength)
-    if (parsed.kind === 'proposal') return { proposal: parsed.proposal, audit }
+    if (parsed.kind === 'proposal') return { proposal: parsed.proposal, ...(res.reply ? { reply: res.reply } : {}), audit }
     return { unavailableReason: parsed.reason, audit }
   }
 
@@ -144,6 +146,44 @@ describe('Router 常驻 Agent Loop', () => {
     expect(outbox).toHaveLength(1)
     expect(outbox[0]?.text).toBe('你好呀，需要我帮你改点什么？')
     expect(outbox[0]?.threadId).toBe('')
+  })
+
+  it('写工具授权只看名单：名单内 @ / 私聊允许，名单外即使 @ 也拒绝', async () => {
+    const { engine, llm, loop } = setup([])
+    engine.ingest(trigger({ id: 't_listed', externalId: 'om_listed', threadId: 'feishu:oc_dev:om_listed', actorId: 'ou_alice', addressed: 'mention' }))
+    engine.ingest(trigger({ id: 't_unlisted', externalId: 'om_unlisted', threadId: 'feishu:oc_dev:om_unlisted', actorId: 'ou_mallory', addressed: 'mention' }))
+    engine.ingest(trigger({ id: 't_dm', externalId: 'om_dm', threadId: 'feishu:oc_dev:om_dm', actorId: 'ou_alice', addressed: 'direct' }))
+
+    await loop.tick()
+
+    const assessed = llm.requests
+      .filter(item => item.kind === 'assess')
+      .map(item => {
+        const prompt = JSON.parse(item.userPrompt) as { trigger: { actor: string; addressed: string } }
+        return { actor: prompt.trigger.actor, addressed: prompt.trigger.addressed, canMutate: item.canMutate }
+      })
+    expect(assessed).toEqual(expect.arrayContaining([
+      { actor: 'ou_alice', addressed: 'mention', canMutate: true },
+      { actor: 'ou_mallory', addressed: 'mention', canMutate: false },
+      { actor: 'ou_alice', addressed: 'direct', canMutate: true },
+    ]))
+    expect(assessed).toHaveLength(3)
+  })
+
+  it('查询 / 清理工具已经生成答复时直接发送，不再多调一次回复模型', async () => {
+    const { engine, llm, loop, store } = setup([{
+      content: JSON.stringify({ decision: 'ignore', reason: 'ops:closed-tk-1' }),
+      toolCalls: [],
+      reply: '已关闭工单 tk-1，workspace 正在回收。',
+    }])
+    engine.ingest(trigger({ text: '把 tk-1 关掉' }))
+
+    const result = await loop.tick()
+    expect(result.replied).toBe(1)
+    expect(llm.requests.filter(item => item.kind === 'reply')).toHaveLength(0)
+    const outbox = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)
+    expect(outbox).toHaveLength(1)
+    expect(outbox[0]?.text).toBe('已关闭工单 tk-1，workspace 正在回收。')
   })
 
   it('纯附件消息不开单：不调模型，回一句请补充文字', async () => {

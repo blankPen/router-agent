@@ -166,10 +166,11 @@ ra stop && ra start
 
 研判层保留 `DecisionEngine` 端口，**Pi 是唯一实现**：
 
-- `assess()`：Pi session + 三个只读/提案工具（`router_read / router_ticket / router_decide`）；
+- `assess()`：Pi session + 读 / 查 / 清理 / 提案工具（`router_read / router_ticket / router_ticket_list / router_ticket_progress / router_ticket_close / router_workspace_remove / router_decide`）；
 - `reply()`：同一个 Pi 引擎、零工具，生成寒暄 / 追问的礼貌回复；
 - 删除自研 `CustomDecisionEngine`、`OpenAiCompatClient`、影子模式、`decision_shadows` 表与 `/api/decisions/shadow`；
 - `router_decide` 只产出 proposal，`Engine.decide()` 仍由 AgentLoop 统一调用；
+- 关单走 `Engine.closeTicket/stopTicket`，workspace 回收只排 `Effects`；写工具只对准入名单内、明确 @ 或私聊的用户开放；
 - 两个通道共用 60s 硬超时 + 32k token 预算，超时/超预算落 `unavailable` 或退回固定话术。
 
 ### 5.2 自动化验证
@@ -184,7 +185,8 @@ Tests       334 passed | 5 skipped (339)
 |-|-|
 | `tests/router/pi-decision-engine.test.ts` | 工具白名单、proposal-only、prompt 注入、超时 abort、token 预算、JSON 兜底、reply 零工具、dispose（8） |
 | `tests/router/decision-engine.test.ts` | proposal 解析与非法决定（3） |
-| `tests/router/tool-spec.test.ts` | 只有三个 Pi 工具、TypeBox schema 校验（3） |
+| `tests/router/tool-spec.test.ts` | 读 / 查 / 清理 / 决定工具集、TypeBox schema 校验（4） |
+| `tests/router/tools.test.ts` | 列表 / 进展查询、权限与 PR 保护、关单幂等、workspace 回收排队（9） |
 | `tests/router/agent-loop.test.ts` | Gate / 派工 / 追问 / 扇出 / 回复 / 并发去重（25） |
 | `tests/config.test.ts` | `router.*` 默认值、读取、`config set`、写回（18） |
 | `tests/cli-simulate.test.ts` | 模拟研判 / observe / 寒暄回复 / dry-run（7） |
@@ -221,10 +223,19 @@ RA_PI_VERIFY=1 npx vitest run tests/verify-pi-live.test.ts  → 1 passed
 | 约束 | 实现 |
 |-|-|
 | Gate 在 Pi 之前 | `AgentLoop.handle()` 先 `gate()`，只有通过准入才调用 `assess()` |
-| 工具白名单 | `PiDecisionEngine` 只注册三个 router_* 工具，关闭 Pi 内置工具；回复通道零工具 |
-| 工具不写库 | `RouterToolbox` 只有 read / ticket / propose |
+| 工具白名单 | `PiDecisionEngine` 只注册 Router 自己的 router_* 工具，关闭 Pi 内置工具；回复通道零工具 |
+| 写操作有界 | `RouterToolbox` 的写工具只做两件事：`Engine.closeTicket/stopTicket` 关单、把 workspace 回收排进 `Effects`；权限由 AgentLoop 按名单 + @/私聊判定 |
 | 超时 + 预算 | `router.timeoutMs` / `router.tokenBudget` |
 | 审计与回放 | `DecisionAudit` 统一结构；CLI 写 JSONL |
+
+### 5.6 工单进展主动巡检（不依赖 Worker 上报）
+
+- **触发**：`progress.probeMs`（默认 2 分钟）扫描；只处理 `assigned/running`，以及 `ready/blocked` 之后又收到新输入的工单（阶段仍是 `review/person` 也会巡检）。
+- **静默判定**：`lastProgressAt`（最近上报 / 新输入 / 派工时间）超过 `progress.silenceMs`（默认 10 分钟）。
+- **数据来源**：优先读 Agent 自己的结构化会话记录（Claude Code `~/.claude/projects/<cwd-slug>/<session>.jsonl` 的尾部，只取 assistant 文本与工具调用）；读不到时退回 `orca terminal read --screen --limit 60 --json` 的渲染屏幕。终端摘录会清洗状态栏、输入回显与分隔线，优先取 `⏺/⎿/✻` 活动行，最多 8 行 / 1200 字。
+- **输出**：确定性文本（不额外调用模型），发到工单话题；同一静默期按 `progress.repeatMs`（默认 15 分钟）限流，画面未变化会标注。
+- **兜底**：终端已退出、读不到输出或后端不支持 `read/session` 时跳过，交给 `checkIdle` 的 stale 处理；终端长时间无新输出时在消息里提示可能卡住。
+- **验证**：`tests/service-runtime.test.ts` 覆盖会话记录优先、终端兜底、静默检测、限流、review+新输入、终端退出、卡住提示与摘录清洗；`tests/worker/orca.test.ts` 覆盖会话 JSONL 解析与工具调用摘要；并用真实会话记录 / `orca terminal read` 抽样验证。
 
 ## 6. 结论
 

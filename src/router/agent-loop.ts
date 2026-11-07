@@ -46,6 +46,8 @@ export interface AssessResult {
   outcome: 'accept' | 'ignore' | 'unavailable' | 'clarify'
   ticket?: Ticket
   clarify?: ClarifyInfo
+  /** 研判过程中已经生成好的用户答复（查询 / 清理类工具），直接发送，不再多调一次回复模型。 */
+  reply?: string
 }
 
 export interface TickResult {
@@ -274,7 +276,9 @@ export class AgentLoop {
     result.ignored += 1
     // 全量接收的会话（mode: all）里，不接单也要正常回一句，只是不开单。
     if (this.shouldReply(trigger)) {
-      await this.converse(trigger, 'Router 判断这不是可执行的工作请求')
+      // 查询 / 清理类工具已经在研判阶段生成好答复时直接用，避免重复调用模型。
+      if (assessed.reply) this.reply(trigger, assessed.reply, `chat:${trigger.id}`)
+      else await this.converse(trigger, 'Router 判断这不是可执行的工作请求')
       result.replied += 1
     }
   }
@@ -336,13 +340,28 @@ export class AgentLoop {
         strength,
         systemPrompt: this.systemPromptFor(trigger),
         userPrompt: this.contextPrompt(trigger),
+        canMutate: this.canMutate(trigger),
       })
       .catch(error => failedResult(trigger.id, error))
     this.onAudit?.(result.audit)
 
     if (result.unavailableReason) return this.markUnavailable(trigger, result.unavailableReason)
     if (!result.proposal) return this.markUnavailable(trigger, '研判未产出决定')
-    return this.applyProposal(trigger, result.proposal, strength)
+    const applied = this.applyProposal(trigger, result.proposal, strength)
+    return result.reply ? { ...applied, reply: result.reply } : applied
+  }
+
+  /**
+   * 写工具授权：发送人必须在当前会话的 allowed 名单内，且消息是 @ 或私聊。
+   * 只看 addressed 不够——名单外的人 @ 机器人时 Gate 仍可能放行到研判，
+   * 但不能因此获得关单 / 回收 workspace 的权限。
+   */
+  private canMutate(trigger: Trigger): boolean {
+    if (trigger.isBot || trigger.addressed === 'none') return false
+    const policy = this.engine.policy()
+    const scoped = policy.allowedByChat?.[trigger.chatId]
+    const allowed = scoped && scoped.length > 0 ? scoped : policy.allowed
+    return allowed.includes(trigger.actorId)
   }
 
   /** 只有这里会写库：派工解析 + Engine.decide。 */

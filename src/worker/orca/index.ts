@@ -1,12 +1,14 @@
 import { mkdirSync, writeFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import type { WorkerBackend, WorkerContext, InboundMessage, ContextItem } from '../port.js'
+import type { WorkerBackend, WorkerContext, InboundMessage, ContextItem, TerminalOutput, SessionSnapshot } from '../port.js'
 import { buildWorkerPrompt } from '../spec/index.js'
 import { workBranch, worktreeName } from '../naming.js'
+import { readClaudeSession } from './session.js'
 import {
   agentLaunch,
   terminalClose,
   terminalList,
+  terminalRead,
   terminalSend,
   worktreeCreate,
   worktreeRemove,
@@ -20,6 +22,8 @@ export interface OrcaAdapterOptions {
   /** ~/.router-agent/workers */
   workersDir: string
   spec: 'prompt' | 'agent'
+  /** Claude Code 会话记录目录；默认 ~/.claude/projects，测试可注入临时目录。 */
+  claudeProjectsDir?: string
 }
 
 export interface OrcaTerminalInfo {
@@ -172,11 +176,13 @@ export class OrcaAdapter implements WorkerBackend {
   private runner: CommandRunner
   private workersDir: string
   private spec: 'prompt' | 'agent'
+  private claudeProjectsDir?: string
 
   constructor(opts: OrcaAdapterOptions) {
     this.runner = opts.runner
     this.workersDir = opts.workersDir
     this.spec = opts.spec
+    this.claudeProjectsDir = opts.claudeProjectsDir
   }
 
   async start(ctx: WorkerContext): Promise<{ handle: string; workdir?: string }> {
@@ -232,6 +238,28 @@ export class OrcaAdapter implements WorkerBackend {
     const terminals = extractTerminals(parsed)
     const found = terminals.find(t => String(t.handle) === handle)
     return found ? normalizeTerminal(found) : null
+  }
+
+  /** 读取终端渲染屏幕的尾部输出；失败（终端已销毁 / 旧版 Orca）时交给调用方跳过本轮巡检。 */
+  async read(handle: string, opts: { limit?: number } = {}): Promise<TerminalOutput | null> {
+    const res = await this.run(terminalRead(handle, opts))
+    const parsed = parseJsonOrThrow(res.stdout) as Record<string, any>
+    const raw = parsed.result?.terminal ?? parsed.terminal
+    if (!raw) return null
+    const status = raw.status === 'running' || raw.status === 'exited' ? raw.status : 'unknown'
+    const lines = Array.isArray(raw.tail) ? raw.tail.map((line: unknown) => String(line)) : []
+    return { status, lines, ...(raw.source ? { source: String(raw.source) } : {}) }
+  }
+
+  /**
+   * 优先读 Agent 自己的结构化会话记录（Claude Code JSONL），
+   * 比终端屏幕干净得多；找不到时返回 null，由调用方退回 read()。
+   */
+  async session(workdir: string, opts: { maxBytes?: number; maxEvents?: number } = {}): Promise<SessionSnapshot | null> {
+    return readClaudeSession(workdir, {
+      ...(this.claudeProjectsDir ? { projectsDir: this.claudeProjectsDir } : {}),
+      ...opts,
+    })
   }
 
   async inspectWorktree(selector: string): Promise<Record<string, unknown> | null> {

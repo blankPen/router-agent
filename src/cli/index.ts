@@ -284,7 +284,7 @@ async function cmdSimulate(
     output.stderr(error instanceof Error ? error.message : String(error))
     return 1
   }
-  const decisionEngine = (store: Store) => createDecisionEngine({ config, store, model })
+  const decisionEngine = (store: Store, engine: Engine) => createDecisionEngine({ config, store, model, engine })
 
   const result = await simulate(
     { home, config, decisionEngine },
@@ -650,7 +650,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   const sender = new FeishuSender(larkRunner)
   const prTracker = new GitHubTracker(ghRunner)
   const model = resolvePiModelConfig({ configPath: join(home, 'config.yaml') })
-  const decisionEngine = createDecisionEngine({ config, store, model })
+  const decisionEngine = createDecisionEngine({ config, store, model, engine })
   const auditPath = join(home, 'logs', 'decisions.jsonl')
   const onDecisionAudit = (audit: DecisionAudit): void => {
     try {

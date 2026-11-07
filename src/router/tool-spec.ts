@@ -3,8 +3,10 @@ import { Type, type TSchema } from 'typebox'
 /**
  * 研判工具的单一事实来源。
  *
- * 只有三个工具：读上下文、查工单、给决定。
- * 不给 shell / 文件 / MCP / 通用 coding skills —— 研判层的价值是判断，不是执行。
+ * 工具分三类：读上下文（router_read / router_ticket）、查工单（list / progress）、
+ * 清理工单（close / workspace_remove），以及最终的决定（router_decide）。
+ * 仍然不给 shell / 文件 / MCP / 通用 coding skills —— 研判层的价值是判断与运维，
+ * 不是执行；写操作只允许关单和回收 workspace，且必须经过 Engine 与 Effects 队列。
  */
 export interface RouterToolSpec {
   name: string
@@ -13,6 +15,8 @@ export interface RouterToolSpec {
 }
 
 const stringEnum = (values: string[]): TSchema => Type.Unsafe({ type: 'string', enum: values })
+
+const STAGES = ['draft', 'accepted', 'assigned', 'running', 'review', 'person', 'idle', 'closed']
 
 export const ROUTER_TOOL_SPECS: RouterToolSpec[] = [
   {
@@ -26,11 +30,46 @@ export const ROUTER_TOOL_SPECS: RouterToolSpec[] = [
   },
   {
     name: 'router_ticket',
-    description: '查询工单：给 ticket_id 取详情，或按 stage 列表。',
+    description: '查询工单：给 ticket_id 取详情，或按 stage 列表。列表查询建议用 router_ticket_list。',
     parameters: Type.Object({
       ticket_id: Type.Optional(Type.String()),
       stage: Type.Optional(Type.String()),
       limit: Type.Optional(Type.Number()),
+    }),
+  },
+  {
+    name: 'router_ticket_list',
+    description: '查询工单列表：可按阶段、会话（chat_id）、关键词（标题或工单 ID）过滤，按创建时间倒序。',
+    parameters: Type.Object({
+      stage: Type.Optional(stringEnum(STAGES)),
+      chat_id: Type.Optional(Type.String({ description: '只查某个飞书会话里的工单' })),
+      keyword: Type.Optional(Type.String({ description: '标题或工单 ID 的关键词，不区分大小写' })),
+      limit: Type.Optional(Type.Number({ description: '最多返回多少条，默认 20，上限 50' })),
+    }),
+  },
+  {
+    name: 'router_ticket_progress',
+    description: '查询一张工单的进展：当前阶段、最近上报、待答问题、PR、workspace 与未处理输入。',
+    parameters: Type.Object({
+      ticket_id: Type.String({ description: '工单 ID，例如 tk-8' }),
+    }),
+  },
+  {
+    name: 'router_ticket_close',
+    description: '关闭一张工单，默认同时回收它的 workspace（停终端、删 worktree）。PR 仍开着时会被拒绝，除非 force=true。',
+    parameters: Type.Object({
+      ticket_id: Type.String({ description: '要关闭的工单 ID' }),
+      reason: Type.String({ description: '关单原因，写给人看' }),
+      force: Type.Optional(Type.Boolean({ description: 'PR 还开着时也强制关闭；只有用户明确确认才传' })),
+      remove_workspace: Type.Optional(Type.Boolean({ description: '是否同时回收 workspace，默认 true' })),
+    }),
+  },
+  {
+    name: 'router_workspace_remove',
+    description: '只回收一张已关闭工单的 workspace（停终端、删 worktree），不改变工单状态。',
+    parameters: Type.Object({
+      ticket_id: Type.String({ description: '已关闭的工单 ID' }),
+      reason: Type.Optional(Type.String({ description: '回收原因' })),
     }),
   },
   {
@@ -50,7 +89,15 @@ export const ROUTER_TOOL_SPECS: RouterToolSpec[] = [
   },
 ]
 
-export const DECISION_TOOL_NAMES = ['router_read', 'router_ticket', 'router_decide'] as const
+export const DECISION_TOOL_NAMES = [
+  'router_read',
+  'router_ticket',
+  'router_ticket_list',
+  'router_ticket_progress',
+  'router_ticket_close',
+  'router_workspace_remove',
+  'router_decide',
+] as const
 
 export function toolSpec(name: string): RouterToolSpec {
   const spec = ROUTER_TOOL_SPECS.find(item => item.name === name)

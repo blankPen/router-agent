@@ -125,6 +125,9 @@ describe('全局状态目录与配置', () => {
     cfg.feishu.reaction = 'THUMBSUP'
     cfg.policy.acceptMode = 'observe'
     cfg.progress.syncMs = 30_000
+    cfg.progress.probeMs = 90_000
+    cfg.progress.silenceMs = 300_000
+    cfg.progress.repeatMs = 600_000
     cfg.server.port = 3999
     writeConfig(dir, cfg)
 
@@ -137,6 +140,9 @@ describe('全局状态目录与配置', () => {
     expect(loaded.feishu.reaction).toBe('THUMBSUP')
     expect(loaded.policy.acceptMode).toBe('observe')
     expect(loaded.progress.syncMs).toBe(30_000)
+    expect(loaded.progress.probeMs).toBe(90_000)
+    expect(loaded.progress.silenceMs).toBe(300_000)
+    expect(loaded.progress.repeatMs).toBe(600_000)
     expect(loaded.server.port).toBe(3999)
   })
 
@@ -154,6 +160,17 @@ describe('全局状态目录与配置', () => {
     expect(cfg.progress.syncMs).toBe(0)
     expect(setConfigValue(cfg, 'progress.syncMs', '-1')).toBe(false)
     expect(setConfigValue(cfg, 'progress.syncMs', 'abc')).toBe(false)
+    expect(setConfigValue(cfg, 'progress.probeMs', '90000')).toBe(true)
+    expect(cfg.progress.probeMs).toBe(90_000)
+    expect(setConfigValue(cfg, 'progress.probeMs', '0')).toBe(true)
+    expect(cfg.progress.probeMs).toBe(0)
+    expect(setConfigValue(cfg, 'progress.probeMs', '-1')).toBe(false)
+    expect(setConfigValue(cfg, 'progress.silenceMs', '300000')).toBe(true)
+    expect(cfg.progress.silenceMs).toBe(300_000)
+    expect(setConfigValue(cfg, 'progress.silenceMs', '0')).toBe(false)
+    expect(setConfigValue(cfg, 'progress.repeatMs', '600000')).toBe(true)
+    expect(cfg.progress.repeatMs).toBe(600_000)
+    expect(setConfigValue(cfg, 'progress.repeatMs', 'abc')).toBe(false)
     expect(setConfigValue(cfg, 'feishu.chats', 'oc_a, oc_b')).toBe(true)
     expect(cfg.feishu.chats).toEqual([chatEntry('oc_a'), chatEntry('oc_b')])
     expect(setConfigValue(cfg, 'feishu.directMessages', 'false')).toBe(true)
