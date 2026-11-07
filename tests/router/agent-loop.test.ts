@@ -14,6 +14,7 @@ import { extractJsonObject } from '../../src/router/model-config.js'
 import type { Trigger } from '../../src/core/model.js'
 import { DEFAULT_ADMISSION, type Policy } from '../../src/core/policy.js'
 import type { DispatchSettings } from '../../src/router/dispatch.js'
+import type { SessionKeyParts } from '../../src/router/session-registry.js'
 
 interface FakeResponse {
   content: string | null
@@ -25,11 +26,12 @@ interface FakeResponse {
 
 /** 用确定性响应模拟 Pi 研判与回复两条通道。 */
 class FakeEngine implements DecisionEngine {
-  requests: { kind: 'assess' | 'reply'; systemPrompt: string; userPrompt: string; canMutate?: boolean }[] = []
+  requests: { kind: 'assess' | 'reply'; systemPrompt: string; userPrompt: string; canMutate?: boolean; session?: SessionKeyParts }[] = []
+  sessions = { reset: [] as string[], transcripts: [] as { key: string; text: string }[] }
   constructor(private responses: FakeResponse[]) {}
 
   async assess(req: DecisionRequest): Promise<DecisionEngineResult> {
-    this.requests.push({ kind: 'assess', systemPrompt: req.systemPrompt, userPrompt: req.userPrompt, canMutate: req.canMutate })
+    this.requests.push({ kind: 'assess', systemPrompt: req.systemPrompt, userPrompt: req.userPrompt, canMutate: req.canMutate, ...(req.session ? { session: req.session } : {}) })
     const res = this.responses.shift() ?? { content: '{"decision":"ignore","reason":"no more responses"}', toolCalls: [] }
     const audit = {
       engine: 'pi' as const,
@@ -66,6 +68,14 @@ class FakeEngine implements DecisionEngine {
     this.requests.push({ kind: 'reply', systemPrompt: req.systemPrompt, userPrompt: req.userPrompt })
     return this.responses.shift()?.content ?? ''
   }
+
+  async resetSession(session: SessionKeyParts, by: string): Promise<void> {
+    this.sessions.reset.push(`${session.key}@${by}`)
+  }
+
+  async recordTranscript(session: SessionKeyParts, text: string): Promise<void> {
+    this.sessions.transcripts.push({ key: session.key, text })
+  }
 }
 
 const policy: Policy = {
@@ -101,12 +111,18 @@ function trigger(over: Partial<Trigger> = {}): Trigger {
   }
 }
 
-function setup(responses: FakeResponse[] = [], dispatch?: DispatchSettings, replyAlwaysChats?: string[]) {
+function setup(
+  responses: FakeResponse[] = [],
+  dispatch?: DispatchSettings,
+  replyAlwaysChats?: string[],
+  sessions = false,
+  policyOverride?: Policy,
+) {
   const store = new Store(':memory:')
   const clock = { now: () => '2026-11-06T10:00:10.000Z' }
   let n = 0
   const ids = { next: (p: string) => `${p}_${++n}` }
-  const engine = new Engine({ store, policy, clock, ids })
+  const engine = new Engine({ store, policy: policyOverride ?? policy, clock, ids })
   const fake = new FakeEngine(responses)
   const loop = new AgentLoop({
     engine,
@@ -116,6 +132,7 @@ function setup(responses: FakeResponse[] = [], dispatch?: DispatchSettings, repl
     source: 'feishu',
     ...(dispatch ? { dispatch } : {}),
     ...(replyAlwaysChats ? { replyAlwaysChats } : {}),
+    ...(sessions ? { sessionsEnabled: true, sessionKeyScope: 'user' as const } : {}),
   })
   return { store, engine, llm: fake, loop }
 }
@@ -448,7 +465,7 @@ describe('多项目 / 多分支派工', () => {
     expect(result.ignored).toBe(1)
     expect(result.replied).toBe(1)
     expect(store.listTickets()).toHaveLength(0)
-    const draft = store.getDispatchDraft('oc_dev')!
+    const draft = store.getDispatchDraft('oc_dev', 'ou_alice')!
     expect(draft.task).toBe('登录总是 10 秒就超时，帮我改成 30 秒')
     expect(draft.repo).toBe('')
     const outbox = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)
@@ -477,7 +494,7 @@ describe('多项目 / 多分支派工', () => {
     expect(result.accepted[0]?.repo).toBe('name:dsh/router-agent')
     expect(result.accepted[0]?.branch).toBe('main')
     expect(result.accepted[0]?.title).toBe('改登录超时')
-    expect(store.getDispatchDraft('oc_dev')).toBeNull()
+    expect(store.getDispatchDraft('oc_dev', 'ou_alice')).toBeNull()
   })
 
   it('群绑定 repo/branch 时直接开单，不再追问', async () => {
@@ -523,7 +540,7 @@ describe('多项目 / 多分支派工', () => {
 
     expect(result.accepted).toHaveLength(0)
     expect(store.listTickets()).toHaveLength(0)
-    const draft = store.getDispatchDraft('oc_dev')!
+    const draft = store.getDispatchDraft('oc_dev', 'ou_alice')!
     expect(draft.branch).toBe('')
     const decision = store.getDecision(store.listTriggers()[0]!.decisionId!)
     expect(decision?.reason).toBe('clarify:missing-branch')
@@ -547,7 +564,7 @@ describe('多项目 / 多分支派工', () => {
 
     expect(result.accepted).toHaveLength(0)
     expect(store.listTickets()).toHaveLength(0)
-    expect(store.getDispatchDraft('oc_dev')).not.toBeNull()
+    expect(store.getDispatchDraft('oc_dev', 'ou_alice')).not.toBeNull()
     expect(store.claimOutbox('2026-11-06T10:00:20.000Z', 10)[0]?.text).toContain('分支')
   })
 })
@@ -637,5 +654,81 @@ describe('已关闭工单话题', () => {
     expect(store.getMandate(reopened.mandateId)?.scope).toContain('3081')
     const outbox = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)
     expect(outbox.some(item => item.text.includes(`基于原工单 ${closedId}`))).toBe(true)
+  })
+})
+
+describe('会话复用与 /new', () => {
+  it('研判按「群 + 人」传 session key', async () => {
+    const { engine, llm, loop } = setup([ACCEPT()], undefined, undefined, true)
+    engine.ingest(trigger())
+
+    await loop.tick()
+
+    expect(llm.requests[0]?.session?.key).toBe('chat:oc_dev:user:ou_alice')
+  })
+
+  it('mode: mention 群里没 @ 的消息不进 session', async () => {
+    const { engine, llm, loop } = setup([IGNORE()], undefined, undefined, true)
+    engine.ingest(trigger({ addressed: 'none' }))
+
+    await loop.tick()
+
+    expect(llm.requests[0]?.session).toBeUndefined()
+  })
+
+  it('mode: all 群里没 @ 的消息也进 session', async () => {
+    const { engine, llm, loop } = setup([IGNORE()], undefined, ['oc_dev'], true)
+    engine.ingest(trigger({ addressed: 'none' }))
+
+    await loop.tick()
+
+    expect(llm.requests[0]?.session?.key).toBe('chat:oc_dev:user:ou_alice')
+  })
+
+  it('/new 只重置发送者自己的 session', async () => {
+    const { engine, llm, loop, store } = setup([], undefined, undefined, true)
+    engine.ingest(trigger({ text: '/new' }))
+
+    const result = await loop.tick()
+
+    expect(result.replied).toBe(1)
+    expect(llm.sessions.reset).toEqual(['chat:oc_dev:user:ou_alice@ou_alice'])
+    const outbox = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)
+    expect(outbox[0]?.text).toContain('重新开始')
+    expect(outbox[0]?.text).toContain('其他人的会话也不受影响')
+  })
+
+  it('/new 对名单外成员静默忽略，不重置任何会话', async () => {
+    const { engine, llm, loop } = setup([], undefined, undefined, true)
+    engine.ingest(trigger({ text: '/new', actorId: 'ou_bob', actorName: 'Bob' }))
+
+    const result = await loop.tick()
+
+    expect(result.replied).toBe(0)
+    expect(result.ignored).toBe(1)
+    expect(llm.sessions.reset).toEqual([])
+  })
+
+  it('确定性回复会写进当前用户的 transcript', async () => {
+    const { engine, llm, loop } = setup([], undefined, undefined, true)
+    engine.ingest(trigger({ mediaOnly: true, text: '看下这个图' }))
+
+    await loop.tick()
+
+    expect(llm.sessions.transcripts).toHaveLength(1)
+    expect(llm.sessions.transcripts[0]?.key).toBe('chat:oc_dev:user:ou_alice')
+    expect(llm.sessions.transcripts[0]?.text).toContain('附件')
+  })
+})
+
+describe('/new 命令识别', () => {
+  it('只认整条消息，允许前面带一个 @机器人', async () => {
+    const { parseSessionResetCommand } = await import('../../src/router/agent-loop.js')
+    expect(parseSessionResetCommand('/new')).toBe(true)
+    expect(parseSessionResetCommand('  /new  ')).toBe(true)
+    expect(parseSessionResetCommand('@阿罗 /new')).toBe(true)
+    expect(parseSessionResetCommand('/new chat')).toBe(false)
+    expect(parseSessionResetCommand('帮我 /new 一下')).toBe(false)
+    expect(parseSessionResetCommand('/newer')).toBe(false)
   })
 })

@@ -815,3 +815,80 @@ describe('RouterService 编排', () => {
     })
   })
 })
+
+describe('会话文件清理', () => {
+  function serviceWithSession(): { service: RouterService; store: Store; config: AppConfig; home: string } {
+    const home = mkdtempSync(join(tmpdir(), 'ra-clean-'))
+    const store = new Store(':memory:')
+    const config = { ...defaultConfig(), home }
+    config.feishu = { ...config.feishu, chats: [chatEntry('oc_dev')], allowed: ['ou_alice'] }
+    const engine = new Engine({ store, policy: policyOf(config), clock: { now: () => '2026-11-06T10:00:00.000Z' } })
+    const service = new RouterService({
+      config,
+      store,
+      engine,
+      backend: new FakeBackend(),
+      decisionEngine: new AcceptEngine(),
+      prTracker: new FakePrTracker(),
+      clock: { now: () => '2026-11-20T00:00:00.000Z' },
+    })
+    return { service, store, config, home }
+  }
+
+  it('只删 /new 后超过 7 天、且位于 sessions 根目录下的文件', async () => {
+    const { service, store, config, home } = serviceWithSession()
+    const { mkdirSync, writeFileSync, existsSync } = await import('node:fs')
+    const sessionDir = join(home, 'sessions')
+    mkdirSync(sessionDir, { recursive: true })
+    const oldFile = join(sessionDir, 'old.jsonl')
+    writeFileSync(oldFile, '{}')
+    store.upsertChatSession({
+      sessionKey: 'chat:oc_dev:user:ou_alice',
+      chatId: 'oc_dev',
+      actorId: 'ou_alice',
+      threadId: '',
+      sessionFile: oldFile,
+      sessionId: 'sid',
+      soulVersion: '',
+      policyVersion: '',
+      createdAt: '2026-10-01T00:00:00.000Z',
+      lastUsedAt: '2026-10-01T00:00:00.000Z',
+      status: 'superseded',
+      resetAt: '2026-10-01T00:00:00.000Z',
+      resetBy: 'ou_alice',
+      purgedAt: null,
+    })
+    expect(config.router.session.retentionDays).toBe(7)
+
+    expect(await service.cleanupChatSessions()).toBe(1)
+    expect(existsSync(oldFile)).toBe(false)
+    expect(store.getChatSession('chat:oc_dev:user:ou_alice')).toBeNull()
+    expect(store.getChatSessionByFile(oldFile)?.status).toBe('purged')
+  })
+
+  it('路径不在 sessions 根目录下的记录不会被删除', async () => {
+    const { service, store } = serviceWithSession()
+    const { writeFileSync, existsSync, mkdtempSync: mk } = await import('node:fs')
+    const outside = join(mk(join(tmpdir(), 'ra-outside-')), 'keep.jsonl')
+    writeFileSync(outside, '{}')
+    store.upsertChatSession({
+      sessionKey: 'chat:oc_dev:user:ou_bob',
+      chatId: 'oc_dev',
+      actorId: 'ou_bob',
+      threadId: '',
+      sessionFile: outside,
+      sessionId: 'sid',
+      soulVersion: '',
+      policyVersion: '',
+      createdAt: '2026-10-01T00:00:00.000Z',
+      lastUsedAt: '2026-10-01T00:00:00.000Z',
+      status: 'superseded',
+      resetAt: '2026-10-01T00:00:00.000Z',
+      resetBy: 'ou_bob',
+      purgedAt: null,
+    })
+
+    expect(await service.cleanupChatSessions()).toBe(0)
+    expect(existsSync(outside)).toBe(true)
+  })
+})

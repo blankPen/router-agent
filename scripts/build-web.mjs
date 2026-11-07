@@ -31,6 +31,7 @@ const assets = [
   'src/router/prompts/orchestrator.md',
   'src/router/prompts/admission.md',
   'src/router/prompts/conversation.md',
+  'src/router/prompts/soul.md',
 ]
 for (const asset of assets) {
   const from = join(root, asset)

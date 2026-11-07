@@ -5,6 +5,7 @@ import type { Clock, Engine } from '../core/engine.js'
 import { gate, type Policy } from '../core/policy.js'
 import type { SourceKind, Strength, Ticket, Trigger } from '../core/model.js'
 import { activeDraft, resolveDispatch, type DispatchMissing, type DispatchSettings } from './dispatch.js'
+import type { SessionKeyParts } from './session-registry.js'
 import type {
   DecisionAudit,
   DecisionEngine,
@@ -28,6 +29,14 @@ export interface AgentLoopOptions {
    * 这些群里的消息无论有没有 @，都要正常回复；判不接单就回一句，不开单。
    */
   replyAlwaysChats?: string[]
+  /** 是否启用「一个会话一个落盘 session」。关闭时退回旧行为。 */
+  sessionsEnabled?: boolean
+  /** 会话粒度：user=群+人；thread=群+话题+人。 */
+  sessionKeyScope?: 'user' | 'thread'
+  /** 人格文案；不传则读内置 prompts/soul.md。 */
+  soul?: string
+  /** 人格配置（名字 / 语气 / 语言），只影响 system prompt 的设定段。 */
+  persona?: { name: string; style: string; language: string }
   /** 审计出口：每次研判都会回调一次（CLI 落 decisions.jsonl）。 */
   onAudit?: (audit: DecisionAudit) => void
 }
@@ -86,8 +95,13 @@ export function closedThreadText(ticket: Ticket): string {
 }
 
 /** 已关闭话题里用户先描述的需求：暂存到游标，等「重新开工」时一起带进新工单。 */
-function reopenDraftKey(threadId: string): string {
-  return `reopen:draft:${threadId}`
+function reopenDraftKey(threadId: string, actorId: string): string {
+  return `reopen:draft:${threadId}:${actorId}`
+}
+
+/** `/new`：只有整条消息就是命令时才生效，允许前面带一个 @机器人。 */
+export function parseSessionResetCommand(text: string): boolean {
+  return /^\s*(?:@\S+\s+)?\/new\s*$/.test(text)
 }
 
 /** 显式 @ 也可能是寒暄/测试；只匹配纯寒暄，不误伤简短需求（如「修个 bug」）。 */
@@ -113,6 +127,13 @@ export class AgentLoop {
   private dispatch?: DispatchSettings
   /** 全量接收的会话：这些群里不 @ 也要回复。 */
   private replyAlwaysChats: Set<string>
+  /** 会话复用开关与粒度。 */
+  private sessionsEnabled: boolean
+  private sessionKeyScope: 'user' | 'thread'
+  /** 会话模式使用的统一 system prompt（人格 + 职责 + 准入 + 回复 + 策略）。 */
+  private unifiedSystemPrompt: string
+  private soul: string
+  private persona?: { name: string; style: string; language: string }
   /** 可替换：测试与模拟可以直接注入假引擎。 */
   decisionEngine: DecisionEngine
   private onAudit?: (audit: DecisionAudit) => void
@@ -127,6 +148,11 @@ export class AgentLoop {
     this.conversationPrompt = readPrompt('conversation.md')
     this.dispatch = opts.dispatch
     this.replyAlwaysChats = new Set(opts.replyAlwaysChats ?? [])
+    this.sessionsEnabled = opts.sessionsEnabled === true
+    this.sessionKeyScope = opts.sessionKeyScope ?? 'user'
+    this.soul = opts.soul ?? readPrompt('soul.md')
+    this.persona = opts.persona
+    this.unifiedSystemPrompt = buildUnifiedSystemPrompt(opts.engine.policy(), this.soul, this.persona)
     this.decisionEngine = opts.decisionEngine
     this.onAudit = opts.onAudit
   }
@@ -134,6 +160,7 @@ export class AgentLoop {
   setPolicy(policy: Policy): void {
     this.engine.updatePolicy(policy)
     this.systemPrompt = buildSystemPrompt(policy)
+    this.unifiedSystemPrompt = buildUnifiedSystemPrompt(policy, this.soul, this.persona)
   }
 
   async tick(): Promise<TickResult> {
@@ -158,24 +185,32 @@ export class AgentLoop {
   /** 处理单条已领取的 Trigger。 */
   private async handle(trigger: Trigger, result: TickResult): Promise<void> {
     {
+      // /new 优先于一切：即使话题里有活跃工单，也要能重置会话。
+      if (parseSessionResetCommand(trigger.text)) {
+        await this.handleSessionReset(trigger, result)
+        return
+      }
+
       // 订阅扇出优先：已订阅线程的消息不经过研判。
       if (this.hasLiveSubscription(trigger.threadId)) {
         const delivered = this.engine.fanOut(trigger.id)
         if (delivered.length > 0) {
+          await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}`)
           result.fannedOut += delivered.length
           return
         }
       }
 
       // 已关闭工单的话题：确定性回复，不再交给模型，也不自动开单。
-      const closed = this.closedTicketForThread(trigger.threadId)
+      const closed = this.closedTicketForThread(trigger.threadId, trigger.actorId)
       if (closed) {
-        this.handleClosedThread(trigger, closed, result)
+        await this.handleClosedThread(trigger, closed, result)
         return
       }
 
       const verdict = gate(trigger, this.engine.policy())
       if (verdict.action === 'ignore') {
+        await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}`)
         this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'inferred', reason: verdict.reason })
         result.ignored += 1
         return
@@ -191,12 +226,13 @@ export class AgentLoop {
         result.ignored += 1
         if (this.shouldReply(trigger)) {
           this.reply(trigger, MEDIA_ONLY_TEXT, `media:${trigger.id}`)
+          await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：[附件消息，未解析]\nRouter：${MEDIA_ONLY_TEXT}`)
           result.replied += 1
         }
         return
       }
       if (verdict.action === 'reply-only') {
-        this.replyOnly(trigger, verdict.reason)
+        await this.replyOnly(trigger, verdict.reason)
         result.replied += 1
         return
       }
@@ -222,7 +258,7 @@ export class AgentLoop {
   private async applyAssess(trigger: Trigger, assessed: AssessResult, result: TickResult, strength: Strength): Promise<void> {
     if (assessed.outcome === 'accept' && assessed.ticket) {
       // 派工信息已经凑齐并开单，草稿使命结束。
-      this.store.clearDispatchDraft(trigger.chatId)
+      this.store.clearDispatchDraft(trigger.chatId, trigger.actorId)
       result.accepted.push(assessed.ticket)
       // 只发一条：话题开场同时承担开单确认，后续 worker 进展都挂在这条原消息下。
       this.reply(trigger, THREAD_INTRO(assessed.ticket.title, assessed.ticket.id), `thread:${assessed.ticket.id}`, { thread: true })
@@ -286,10 +322,19 @@ export class AgentLoop {
   /** 让 Pi 组织一句礼貌回复（普通消息，不进话题）。失败时退回固定话术。 */
   async converse(trigger: Trigger, reason: string, extra: Record<string, unknown> = {}, fallback: string = SMALL_TALK_FALLBACK): Promise<string> {
     let text = ''
+    const session = this.sessionFor(trigger)
     try {
       text = await this.decisionEngine.reply({
-        systemPrompt: this.systemPromptFor(trigger, this.conversationPrompt),
-        userPrompt: JSON.stringify({ message: trigger.text, addressed: trigger.addressed, reason, ...extra }),
+        systemPrompt: this.sessionsEnabled ? this.unifiedSystemPrompt : this.systemPromptFor(trigger, this.conversationPrompt),
+        userPrompt: JSON.stringify({
+          message: trigger.text,
+          addressed: trigger.addressed,
+          reason,
+          mode: 'reply',
+          ...(this.sessionsEnabled ? { chat: this.chatContextData(trigger) } : {}),
+          ...extra,
+        }),
+        ...(session ? { session } : {}),
       })
       text = text.trim()
     } catch {
@@ -334,13 +379,15 @@ export class AgentLoop {
 
   /** 单条候选的研判。研判与回复都走同一条 Pi 通道。 */
   async assess(trigger: Trigger, strength: Strength = 'inferred'): Promise<AssessResult> {
+    const session = this.sessionFor(trigger)
     const result = await this.decisionEngine
       .assess({
         trigger,
         strength,
-        systemPrompt: this.systemPromptFor(trigger),
+        systemPrompt: this.sessionsEnabled ? this.unifiedSystemPrompt : this.systemPromptFor(trigger),
         userPrompt: this.contextPrompt(trigger),
         canMutate: this.canMutate(trigger),
+        ...(session ? { session } : {}),
       })
       .catch(error => failedResult(trigger.id, error))
     this.onAudit?.(result.audit)
@@ -417,9 +464,103 @@ export class AgentLoop {
     return { outcome: 'unavailable' }
   }
 
-  private replyOnly(trigger: Trigger, reason: string): void {
+  private async replyOnly(trigger: Trigger, reason: string): Promise<void> {
     this.reply(trigger, REPLY_ONLY_TEXT, `replyonly:${trigger.id}`)
+    await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}\nRouter：${REPLY_ONLY_TEXT}`)
     this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'inferred', reason })
+  }
+
+  /** 会话 key：默认按「群 + 人」隔离；thread 粒度再叠加话题。 */
+  private sessionKeyOf(trigger: Trigger): SessionKeyParts | null {
+    if (!this.sessionsEnabled) return null
+    const thread = this.sessionKeyScope === 'thread' ? `:thread:${trigger.threadId}` : ''
+    return {
+      key: `chat:${trigger.chatId}${thread}:user:${trigger.actorId}`,
+      chatId: trigger.chatId,
+      actorId: trigger.actorId,
+      threadId: trigger.threadId,
+    }
+  }
+
+  /** 发送人是否在当前群的 allowed 名单内（不看 @）。 */
+  private isAllowed(trigger: Trigger): boolean {
+    const policy = this.engine.policy()
+    const scoped = policy.allowedByChat?.[trigger.chatId]
+    const allowed = scoped && scoped.length > 0 ? scoped : policy.allowed
+    return allowed.includes(trigger.actorId)
+  }
+
+  /**
+   * 这条消息要不要进 session：
+   * - 机器人、名单外成员不进；
+   * - mode: mention 群只进 @ / 私聊；mode: all 群全进。
+   */
+  private shouldTrackConversation(trigger: Trigger): boolean {
+    if (!this.sessionsEnabled || trigger.isBot) return false
+    if (!this.isAllowed(trigger)) return false
+    return trigger.addressed !== 'none' || this.replyAlwaysChats.has(trigger.chatId)
+  }
+
+  /** 只有应该进会话的消息才返回 session；没 @ 的 mention 群消息保持一次性调用。 */
+  private sessionFor(trigger: Trigger): SessionKeyParts | null {
+    return this.shouldTrackConversation(trigger) ? this.sessionKeyOf(trigger) : null
+  }
+
+  /** 确定性回复也写进会话，保证下一轮模型知道「刚才发生过什么」。 */
+  private async recordTranscript(trigger: Trigger, text: string): Promise<void> {
+    if (!this.shouldTrackConversation(trigger)) return
+    const parts = this.sessionKeyOf(trigger)
+    if (!parts) return
+    try {
+      await this.decisionEngine.recordTranscript?.(parts, text, this.unifiedSystemPrompt)
+    } catch {
+      // 会话写入失败不能影响正常回复与决策。
+    }
+  }
+
+  /** `/new`：只重置发送者自己的 session，不影响同群其他人。 */
+  private async handleSessionReset(trigger: Trigger, result: TickResult): Promise<void> {
+    const parts = this.sessionKeyOf(trigger)
+
+    // 机器人、名单外成员、没 @ 的消息：静默忽略，避免刷屏或机器人互相触发。
+    if (trigger.isBot || !this.isAllowed(trigger) || !this.shouldReply(trigger)) {
+      this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'explicit', reason: 'session:reset:ignored' })
+      result.ignored += 1
+      return
+    }
+    if (!this.sessionsEnabled) {
+      this.reply(trigger, '会话复用还没开启，暂时不需要 /new。', `session-reset-disabled:${trigger.id}`)
+      this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'explicit', reason: 'session:reset:disabled' })
+      result.replied += 1
+      return
+    }
+    if (!parts) {
+      this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'explicit', reason: 'session:reset:unavailable' })
+      result.ignored += 1
+      return
+    }
+    if (!this.decisionEngine.resetSession) {
+      this.reply(trigger, '当前引擎没有接入会话复用，暂时不需要 /new。', `session-reset-unavailable:${trigger.id}`)
+      this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'explicit', reason: 'session:reset:unavailable' })
+      result.replied += 1
+      return
+    }
+
+    try {
+      await this.decisionEngine.resetSession?.(parts, trigger.actorId)
+    } catch {
+      this.reply(trigger, '这次重置没成功，稍后再试一下。', `session-reset-failed:${trigger.id}`)
+      this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'explicit', reason: 'session:reset:failed' })
+      result.replied += 1
+      return
+    }
+    this.reply(
+      trigger,
+      '好，之前你和我的上下文我不带了，咱们重新开始。\n工单和历史记录都还在，群里其他人的会话也不受影响。',
+      `session-reset:${trigger.id}`,
+    )
+    this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'explicit', reason: 'session:reset' })
+    result.replied += 1
   }
 
   /**
@@ -457,12 +598,17 @@ export class AgentLoop {
     })
   }
 
-  /** 该线程是否只对应已关闭工单（没有在办工单）；返回最近关闭的那张。 */
-  private closedTicketForThread(threadId: string): Ticket | null {
+  /**
+   * 该线程是否只对应已关闭工单（没有在办工单）；返回当前发送人最近关闭的那张。
+   * 按人过滤，避免 B 在 A 的已关闭话题里被误判成「重开 A 的单」。
+   */
+  private closedTicketForThread(threadId: string, actorId: string): Ticket | null {
     const subscriptions = this.store.listSubscriptions(threadId)
     for (let i = subscriptions.length - 1; i >= 0; i -= 1) {
       const ticket = this.store.getTicket(subscriptions[i]!.ticketId)
-      if (ticket?.stage === 'closed') return ticket
+      if (ticket?.stage !== 'closed') continue
+      const mandate = this.store.getMandate(ticket.mandateId)
+      if (mandate?.actorId === actorId) return ticket
     }
     return null
   }
@@ -472,7 +618,7 @@ export class AgentLoop {
    * - 普通消息：回复「工单已关闭」并记住内容，供随后的「重新开工」一并作为新工单上下文；
    * - 明确要求重开：基于原工单的 repo / 起始分支创建一张新工单。
    */
-  private handleClosedThread(trigger: Trigger, closed: Ticket, result: TickResult): void {
+  private async handleClosedThread(trigger: Trigger, closed: Ticket, result: TickResult): Promise<void> {
     if (trigger.isBot) {
       this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'inferred', reason: 'thread:closed:bot' })
       result.ignored += 1
@@ -503,15 +649,20 @@ export class AgentLoop {
 
     if (!trigger.mediaOnly && !isSmallTalk(trigger.text)) {
       // 用户可能是先描述需求、再补一句「重新开工」；把这条原文记下来。
-      this.store.setCursor(reopenDraftKey(trigger.threadId), trigger.text.trim().slice(0, 4000), this.clock.now())
+      this.store.setCursor(reopenDraftKey(trigger.threadId, trigger.actorId), trigger.text.trim().slice(0, 4000), this.clock.now())
     }
     this.reply(trigger, closedThreadText(closed), `closed-thread:${trigger.id}`, { thread: true })
+    await this.recordTranscript(
+      trigger,
+      `${trigger.actorName || trigger.actorId}：${trigger.text}\nRouter：${closedThreadText(closed)}`,
+    )
     this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength, reason: 'thread:closed' })
     result.replied += 1
   }
 
   private reopenTicket(trigger: Trigger, closed: Ticket, strength: Strength): Ticket | null {
-    const draft = this.store.getCursor(reopenDraftKey(trigger.threadId))
+    const draftKey = reopenDraftKey(trigger.threadId, trigger.actorId)
+    const draft = this.store.getCursor(draftKey)
     const task = [draft, trigger.text].map(text => text?.trim() ?? '').filter(Boolean).join('\n\n')
     const outcome = this.engine.decide({
       triggerId: trigger.id,
@@ -523,7 +674,7 @@ export class AgentLoop {
       ...(closed.repo ? { repo: closed.repo } : {}),
       ...(closed.branch ? { branch: closed.branch } : {}),
     })
-    this.store.deleteCursor(reopenDraftKey(trigger.threadId))
+    this.store.deleteCursor(draftKey)
 
     if (!outcome.ticket) {
       this.reply(
@@ -544,17 +695,14 @@ export class AgentLoop {
   }
 
   private contextPrompt(trigger: Trigger): string {
-    const thread = this.store.listTriggersByThread(trigger.threadId, 10)
-    const tickets = this.store.listSubscriptions(trigger.threadId).map(s => this.store.getTicket(s.ticketId)).filter(Boolean)
     const policy = this.engine.policy()
-    return JSON.stringify({
+    const base = {
       policy: {
         version: policy.version,
         acceptMode: policy.acceptMode,
         allowed: policy.allowed,
         admission: policy.admission,
       },
-      // 会话级上下文（群绑定 / 可选项目 / 草稿）统一放在 system prompt 的「当前会话」段。
       trigger: {
         id: trigger.id,
         source: trigger.source,
@@ -565,14 +713,90 @@ export class AgentLoop {
         text: trigger.text,
         receivedAt: trigger.receivedAt,
       },
+    }
+
+    // 会话复用：历史在 session 里，不再重复注入最近 10 条；工单只注入当前用户发起的。
+    if (this.sessionsEnabled) {
+      return JSON.stringify({
+        ...base,
+        mode: 'assess',
+        chat: this.chatContextData(trigger),
+        tickets: this.ticketsForUser(trigger),
+      }, null, 2)
+    }
+
+    const thread = this.store.listTriggersByThread(trigger.threadId, 10)
+    const tickets = this.store.listSubscriptions(trigger.threadId).map(s => this.store.getTicket(s.ticketId)).filter(Boolean)
+    return JSON.stringify({
+      ...base,
+      // 会话级上下文（群绑定 / 可选项目 / 草稿）统一放在 system prompt 的「当前会话」段。
       thread: thread.map(t => ({ id: t.id, actor: t.actorId, text: t.text, at: t.receivedAt })),
       tickets: tickets.map(t => ({ id: t?.id, title: t?.title, stage: t?.stage, prUrl: t?.prUrl })),
     }, null, 2)
+  }
+
+  /** 每轮动态的会话级上下文：群绑定、可选项目、当前用户的派工草稿。 */
+  private chatContextData(trigger: Trigger): Record<string, unknown> {
+    const data: Record<string, unknown> = {
+      id: trigger.chatId,
+      ...(trigger.chatName ? { name: trigger.chatName } : {}),
+    }
+    if (!this.dispatch) return data
+    const binding = this.dispatch.bindings.find(item => item.chat === trigger.chatId)
+    const resolution = resolveDispatch({ settings: this.dispatch, chatId: trigger.chatId })
+    if (resolution.repo && resolution.branch) {
+      data.project = {
+        name: resolution.project?.name ?? resolution.repo,
+        repo: resolution.project?.repo ?? resolution.repo,
+        branch: resolution.branch,
+        source: binding ? 'binding' : 'default',
+      }
+    } else {
+      data.missing = resolution.missing
+    }
+    if (this.dispatch.projects.length > 0) {
+      data.projects = this.dispatch.projects.map(project => ({
+        name: project.name,
+        defaultBranch: project.defaultBranch,
+        branches: project.branches,
+      }))
+    }
+    const draft = activeDraft(this.store, trigger.chatId, trigger.actorId, this.clock.now())
+    if (draft) data.draft = { task: draft.task, repo: draft.repo, branch: draft.branch }
+    return data
+  }
+
+  /** 只把当前发送人发起的工单带进上下文，避免跨用户泄漏。 */
+  private ticketsForUser(trigger: Trigger): Array<{ id?: string; title?: string; stage?: string; prUrl?: string }> {
+    return this.store.listSubscriptions(trigger.threadId)
+      .map(subscription => this.store.getTicket(subscription.ticketId))
+      .filter((ticket): ticket is Ticket => Boolean(ticket))
+      .filter(ticket => this.store.getMandate(ticket.mandateId)?.actorId === trigger.actorId)
+      .map(ticket => ({ id: ticket.id, title: ticket.title, stage: ticket.stage, prUrl: ticket.prUrl }))
   }
 }
 
 export function buildSystemPrompt(policy: Policy): string {
   return [readPrompt('orchestrator.md'), readPrompt('admission.md'), policySection(policy)].join('\n\n---\n\n')
+}
+
+/** 会话模式：人格 + 职责 + 准入 + 回复规则 + 策略，一次注入后由 session 复用。 */
+export function buildUnifiedSystemPrompt(
+  policy: Policy,
+  soul: string,
+  persona?: { name: string; style: string; language: string },
+): string {
+  const header = persona
+    ? `# 人格设定\n- 名字：${persona.name}\n- 语气：${persona.style}\n- 语言：${persona.language}`
+    : ''
+  return [
+    header,
+    soul,
+    readPrompt('orchestrator.md'),
+    readPrompt('admission.md'),
+    readPrompt('conversation.md'),
+    policySection(policy),
+  ].filter(Boolean).join('\n\n---\n\n')
 }
 
 /** 引擎抛异常时的兜底结果：按 unavailable 处理，并留下可审计的记录。 */

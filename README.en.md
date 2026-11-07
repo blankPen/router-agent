@@ -153,6 +153,20 @@ Five constraints:
 
 Pi is fully isolated: AuthStorage / SettingsManager / SessionManager are all in-memory, extensions / skills / prompts / themes / AGENTS.md are disabled, and the user's `~/.pi` is never read or written.
 
+### Remember: one session per conversation
+
+Each person in a chat gets their own persisted Pi session, so Router no longer loses context between messages. The session lives until that person sends `/new`.
+
+- **Per-person isolation**: key is `chat:<chatId>:user:<actorId>`; `/new` only resets the sender's session.
+- **@ admission**: in `mode: mention` chats only @bot / DM messages enter the session; `mode: all` chats accept everything; unlisted members never enter.
+- **Persistence**: sessions are written under `~/.router-agent/sessions/` and restored with `SessionManager.open` after a restart.
+- **Idle eviction**: after 30 minutes the in-memory session is released; the file stays and is reopened on the next message.
+- **Compaction**: Pi's native compaction keeps the recent ~20k tokens and summarizes older context.
+- **`/new`**: exact-match command; old files are deleted after 7 days by a cleanup job.
+- **Persona**: `router.persona.soulFile` changes tone only, never the tool whitelist or authorization.
+
+Deterministic replies (small talk, attachment notices, closed-thread notices) are also appended to the session so the next model turn knows what happened.
+
 ### Dispatch: one worktree per ticket
 
 Opening a ticket needs three things: **the task, the project (repo) and the base branch**. The Router only creates the ticket when all three are clear; if either is missing it **won't open a ticket** and asks in the conversation:
@@ -306,6 +320,29 @@ router:
   timeoutMs: 60000         # hard timeout per triage; lands as unavailable
   tokenBudget: 32000       # token budget per triage; 0 = unlimited
   agentDir: ""             # isolated Pi config dir; empty = ~/.router-agent/pi
+
+  # Session reuse: one persisted Pi session per Feishu chat + user
+  session:
+    enabled: true          # false = create an in-memory session for every triage
+    keyScope: user         # user=chat+person; thread=chat+thread+person
+    dir: ""                # empty = ~/.router-agent/sessions
+    idleTtlMs: 1800000     # evict idle sessions from memory (files stay)
+    maxActive: 50
+    retentionDays: 7       # keep superseded files after /new for 7 days
+    cleanupIntervalHours: 24
+    turnTimeoutMs: 180000  # includes compaction
+    tokenBudget: 0         # 0 = delegate to compaction
+    compaction:
+      enabled: true
+      reserveTokens: 16384
+      keepRecentTokens: 20000
+
+  # Persona only affects tone; tool permissions are unchanged
+  persona:
+    name: "A-Luo"
+    soulFile: ""           # empty = built-in prompts/soul.md
+    style: friendly        # friendly | concise | professional
+    language: zh-CN
 
 progress:
   # Progress polling: merges progress reports from this window into one thread message

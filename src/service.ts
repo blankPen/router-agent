@@ -1,5 +1,6 @@
-import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join, resolve } from 'node:path'
 import type { Clock, Engine } from './core/engine.js'
 import type { Assignment, Report, Stage, Ticket, Trigger } from './core/model.js'
 import type { Store } from './store/db.js'
@@ -313,6 +314,7 @@ export class RouterService {
   readonly engine: Engine
   readonly loop: AgentLoop
   readonly config: AppConfig
+  private decisionEngine: DecisionEngine
   private backend: WorkerBackend & {
     inspect?: (handle: string) => Promise<unknown | null>
     inspectWorktree?: (selector: string) => Promise<Record<string, unknown> | null>
@@ -376,6 +378,8 @@ export class RouterService {
       sweepMinutes: 5,
     }
     this.backfill = opts.backfill
+    this.decisionEngine = opts.decisionEngine
+    const soul = loadSoul(opts.config)
     this.loop = new AgentLoop({
       engine: opts.engine,
       decisionEngine: opts.decisionEngine,
@@ -383,6 +387,10 @@ export class RouterService {
       batchWindowMs: opts.agentLoopOptions?.batchWindowMs ?? 8000,
       dispatch: dispatchSettingsOf(opts.config),
       replyAlwaysChats: replyAlwaysChatsOf(opts.config),
+      sessionsEnabled: opts.config.router.session.enabled,
+      sessionKeyScope: opts.config.router.session.keyScope,
+      persona: opts.config.router.persona,
+      ...(soul ? { soul } : {}),
       ...(opts.onDecisionAudit ? { onAudit: opts.onDecisionAudit } : {}),
     })
     this.poller = opts.poller ?? new ReportPoller({
@@ -460,6 +468,12 @@ export class RouterService {
     every(1000, () => this.runOnce())
     every(5000, () => this.trackPullRequests())
     every(15_000, () => this.checkIdle())
+    if (this.config.router.session.enabled) {
+      every(60_000, async () => { await this.decisionEngine.evictIdleSessions?.(Date.now()) })
+      if (this.config.router.session.retentionDays > 0) {
+        every(this.config.router.session.cleanupIntervalHours * 3_600_000, async () => { await this.cleanupChatSessions() })
+      }
+    }
     if (this.progressSyncMs > 0) every(this.progressSyncMs, () => this.syncProgress())
     if (this.progressProbeMs > 0) every(this.progressProbeMs, () => this.probeProgress())
     if (this.retention.enabled) every(this.retention.sweepMinutes * 60_000, () => this.sweepRetention())
@@ -469,6 +483,40 @@ export class RouterService {
     for (const timer of this.timers) clearInterval(timer)
     this.timers = []
     this.running = false
+    void this.decisionEngine.disposeAllSessions?.().catch(() => {})
+  }
+
+  /**
+   * 清理 /new 之后超过保留期的旧 session 文件。
+   * 只删 superseded 且路径位于 sessions 根目录下的文件，审计记录保留。
+   */
+  async cleanupChatSessions(): Promise<number> {
+    const session = this.config.router.session
+    if (!session.enabled || session.retentionDays <= 0) return 0
+    const root = resolve(session.dir || join(this.config.home, 'sessions'))
+    const nowMs = Date.parse(this.clock.now())
+    const baseMs = Number.isFinite(nowMs) ? nowMs : Date.now()
+    const before = new Date(baseMs - session.retentionDays * 86_400_000).toISOString()
+    let removed = 0
+    for (const record of this.store.listSupersededChatSessions(before)) {
+      const file = resolve(record.sessionFile)
+      if (!file.startsWith(`${root}/`)) {
+        this.logger.warn('session:cleanup:skip', { file, root })
+        continue
+      }
+      try {
+        rmSync(file, { force: true })
+        this.store.markChatSessionPurged(record.sessionFile, this.clock.now())
+        removed += 1
+      } catch (error) {
+        this.logger.warn('session:cleanup:failed', {
+          file,
+          message: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+    if (removed > 0) this.logger.info('session:cleanup', { removed })
+    return removed
   }
 
   // ---------- 派工 ----------
@@ -1552,4 +1600,16 @@ function reasonKey(reason: string): string {
     hash = (hash * 31 + reason.charCodeAt(i)) >>> 0
   }
   return hash.toString(36)
+}
+
+/** 读取自定义 soul；没配置或读取失败时返回 undefined，由 AgentLoop 用内置 prompts/soul.md。 */
+function loadSoul(config: AppConfig): string | undefined {
+  const file = config.router.persona.soulFile.trim()
+  if (!file) return undefined
+  const path = file.startsWith('~') ? join(homedir(), file.slice(1)) : file
+  try {
+    return readFileSync(path, 'utf8')
+  } catch {
+    return undefined
+  }
 }
