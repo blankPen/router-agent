@@ -30,7 +30,7 @@
     "url": "https://github.com/blankPen/router-agent/issues"
   },
   "engines": {
-    "node": ">=22.18.0"
+    "node": ">=22.19.0"
   },
   "packageManager": "pnpm@10.33.3",
   "publishConfig": {
@@ -53,7 +53,7 @@
   },
   "dependencies": {
     "@inquirer/prompts": "7.8.6",
-    "@mariozechner/pi-coding-agent": "0.73.1",
+    "@earendil-works/pi-coding-agent": "1.5.0",
     "commander": "12.1.0",
     "typebox": "1.1.24",
     "yaml": "2.8.1",
