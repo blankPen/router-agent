@@ -7,12 +7,24 @@ import { Engine } from '../src/core/engine.js'
 import { RouterService } from '../src/service.js'
 import { defaultConfig, policyOf, type AppConfig, chatEntry } from '../src/config.js'
 import { DEFAULT_ADMISSION } from '../src/core/policy.js'
-import type { WorkerBackend, WorkerContext } from '../src/worker/port.js'
+import type {
+  WorkerBackend,
+  WorkerContext,
+  WorkerRef,
+  StartResult,
+  DeliveryReceipt,
+  AgentStatus,
+  WorkspaceInfo,
+} from '../src/worker/port.js'
 import type { DecisionEngine, DecisionEngineResult, DecisionRequest } from '../src/router/decision-engine.js'
 import type { Trigger } from '../src/core/model.js'
 
 class FakeBackend implements WorkerBackend {
   readonly id = 'orca'
+  readonly capabilities = {
+    agent: { liveStatus: true, processExit: false, output: true, activity: true, structuredInput: true, nudge: true },
+    workspace: { cleanup: true, prLink: true, discovery: true },
+  }
   starts: WorkerContext[] = []
   delivered: { handle: string; text: string }[] = []
   stopped: string[] = []
@@ -20,34 +32,52 @@ class FakeBackend implements WorkerBackend {
   handles = new Map<string, boolean>()
   /** 测试可指定终端最后一次输出时间；默认取当前时间。 */
   outputAt = ''
-  /** 测试可模拟 Orca 拒绝删除（如工作区有未提交改动）。 */
+  /** 测试可模拟 provider 拒绝删除（如工作区有未提交改动）。 */
   removeError = ''
-  async start(ctx: WorkerContext) {
+  async start(ctx: WorkerContext): Promise<StartResult> {
     const handle = `term-${this.starts.length + 1}`
     this.starts.push(ctx)
     this.handles.set(handle, true)
-    return { handle, workdir: `/tmp/${ctx.ticket.id}` }
+    return { handle, workdir: `/tmp/${ctx.ticket.id}`, branch: `ra/${ctx.ticket.id}` }
   }
-  async deliver(handle: string, inputs: { text: string }[]) {
+  async deliver(ref: WorkerRef | string, inputs: { text: string; id: string }[]): Promise<DeliveryReceipt> {
+    const handle = typeof ref === 'string' ? ref : ref.handle
     if (!this.handles.has(handle)) throw new Error('orca:command-failed(terminal send): terminal not found')
     for (const input of inputs) this.delivered.push({ handle, text: input.text })
+    return { status: 'accepted', inputIds: inputs.map(input => input.id) }
   }
   async registerContext() {}
-  async stop(handle: string) {
+  async stop(ref: WorkerRef | string) {
+    const handle = typeof ref === 'string' ? ref : ref.handle
     this.stopped.push(handle)
     this.handles.delete(handle)
   }
-  async removeWorktree(selector: string) {
-    if (this.removeError) throw new Error(this.removeError)
-    this.removed.push(selector)
+  async nudge(ref: WorkerRef | string) {
+    const handle = typeof ref === 'string' ? ref : ref.handle
+    this.delivered.push({ handle, text: 'status?' })
   }
-  async inspect(handle: string) {
-    return this.handles.has(handle)
-      ? { handle, connected: true, writable: true, orphaned: false, lastOutputAt: this.outputAt || new Date().toISOString(), worktreePath: '', branch: '' }
-      : null
+  async status(ref: WorkerRef | string): Promise<AgentStatus | null> {
+    const handle = typeof ref === 'string' ? ref : ref.handle
+    if (!this.handles.has(handle)) return { alive: false, phase: 'lost', acceptingInput: false }
+    return {
+      alive: true,
+      phase: 'running',
+      acceptingInput: true,
+      lastActivityAt: this.outputAt || new Date().toISOString(),
+    }
   }
-  async inspectWorktree() {
+  async output() {
+    return { status: 'running' as const, lines: [] }
+  }
+  async activity() {
     return null
+  }
+  async inspectWorkspace(): Promise<WorkspaceInfo | null> {
+    return null
+  }
+  async removeWorkspace(ref: { workdir: string }) {
+    if (this.removeError) throw new Error(this.removeError)
+    this.removed.push(`path:${ref.workdir}`)
   }
 }
 

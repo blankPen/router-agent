@@ -6,7 +6,7 @@ import type { Engine } from '../core/engine.js'
 import { policyOf, type AppConfig } from '../config.js'
 import type { AcceptMode } from '../core/policy.js'
 import { noopSink, preview, type EventSink } from '../core/events.js'
-import type { WorkerStateFile } from '../worker/orca/report-poller.js'
+import type { WorkerStateFile } from '../worker/report-poller.js'
 
 export interface ApiServerOptions {
   engine: Engine

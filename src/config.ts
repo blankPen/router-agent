@@ -5,8 +5,21 @@ import { join } from 'node:path'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { DEFAULT_ADMISSION, type AcceptMode, type AdmissionTable, type Policy } from './core/policy.js'
 import type { WorkerSpecMode } from './worker/spec/index.js'
+import type { ToolPolicy } from './worker/port.js'
 
 export type ChatMode = 'all' | 'mention'
+
+/** worker 的默认工具策略：只允许上报/文档/git/gh，默认无网络。 */
+export const DEFAULT_WORKER_TOOLS: ToolPolicy = {
+  fileAccess: 'read-write',
+  shell: 'allowlist',
+  shellAllow: [
+    'ra report', 'ra doc', 'git', 'gh',
+    'pnpm', 'npm', 'npx', 'node', 'yarn', 'bun',
+    'python', 'python3', 'pytest', 'cargo', 'go', 'make', 'mvn', 'gradle',
+  ],
+  allowNetwork: false,
+}
 
 /**
  * 一个被监控的群：接收方式、派工绑定、历史补拉都写在这一条里，
@@ -166,7 +179,8 @@ export interface AppConfig {
   progress: ProgressSettings
   retention: RetentionSettings
   workerSpec: { mode: WorkerSpecMode }
-  backend: { default: 'orca' }
+  worker: { tools: ToolPolicy }
+  backend: { default: string; options?: Record<string, unknown> }
   server: { port: number }
   llm?: { baseUrl?: string; apiKey?: string; model?: string; temperature?: number; contextWindow?: number }
 }
@@ -245,6 +259,7 @@ export function defaultConfig(): AppConfig {
       sweepMinutes: 5,
     },
     workerSpec: { mode: 'prompt' },
+    worker: { tools: { ...DEFAULT_WORKER_TOOLS } },
     backend: { default: 'orca' },
     server: { port: 3083 },
   }
@@ -383,6 +398,18 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
     unlistedNotAddressed: pickAdmission(admissionDoc.unlistedNotAddressed, base.policy.admission.unlistedNotAddressed, ['inferred', 'ignore']) as never,
   }
 
+  // 安全参数只由 worker.tools 与 adapter 内置基线决定，不允许 backend.options 放宽。
+  if (doc.backend?.options && typeof doc.backend.options === 'object') {
+    const forbidden = new Set(['allowedTools', 'permissionMode', 'sandbox', 'shellAllow', 'allowNetwork', 'fileAccess'])
+    for (const [id, options] of Object.entries(doc.backend.options as Record<string, unknown>)) {
+      if (!options || typeof options !== 'object') continue
+      const bad = Object.keys(options as Record<string, unknown>).filter(key => forbidden.has(key))
+      if (bad.length > 0) {
+        throw new Error(`backend.options.${id} 不允许覆盖安全参数: ${bad.join(', ')}`)
+      }
+    }
+  }
+
   return {
     home,
     projects: parseProjects(doc.projects),
@@ -422,7 +449,20 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
       sweepMinutes: positiveNumberOr(retentionDoc.sweepMinutes, base.retention.sweepMinutes, 1, 24 * 60),
     },
     workerSpec: { mode },
-    backend: { default: 'orca' },
+    worker: {
+      tools: {
+        fileAccess: doc.worker?.tools?.fileAccess === 'read-only' ? 'read-only' : base.worker.tools.fileAccess,
+        shell: (['deny', 'allowlist', 'allow'].includes(String(doc.worker?.tools?.shell))
+          ? String(doc.worker.tools.shell)
+          : base.worker.tools.shell) as ToolPolicy['shell'],
+        shellAllow: stringArray(doc.worker?.tools?.shellAllow, base.worker.tools.shellAllow ?? []),
+        allowNetwork: booleanOr(doc.worker?.tools?.allowNetwork, base.worker.tools.allowNetwork),
+      },
+    },
+    backend: {
+      default: stringOr(doc.backend?.default, base.backend.default),
+      ...(doc.backend?.options && typeof doc.backend.options === 'object' ? { options: doc.backend.options } : {}),
+    },
     server: { port: Number.isFinite(port) && port >= 0 && port < 65536 ? port : base.server.port },
     ...(doc.llm ? { llm: doc.llm } : {}),
   }
@@ -694,7 +734,11 @@ export function writeConfig(home: string, config: AppConfig): void {
       sweepMinutes: config.retention.sweepMinutes,
     },
     workerSpec: { mode: config.workerSpec.mode },
-    backend: { default: config.backend.default },
+    worker: { tools: config.worker.tools },
+    backend: {
+      default: config.backend.default,
+      ...(config.backend.options ? { options: config.backend.options } : {}),
+    },
     projects: config.projects,
     server: { port: config.server.port },
   }
@@ -924,8 +968,8 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
       return true
     }
     case 'backend.default':
-      if (value !== 'orca') return false
-      config.backend.default = 'orca'
+      if (!value.trim()) return false
+      config.backend.default = value.trim()
       return true
     case 'llm.baseUrl':
     case 'llm.apiKey':

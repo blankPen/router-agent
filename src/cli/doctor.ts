@@ -1,5 +1,6 @@
 import type { AppConfig } from '../config.js'
 import type { CommandRunner } from '../infra/process.js'
+import type { WorkerBackend } from '../worker/port.js'
 import {
   parseAuthUser,
   parseBotAvailable,
@@ -27,6 +28,8 @@ export interface DoctorDeps {
   llm: () => { ok: boolean; detail: string }
   portFree: () => Promise<boolean>
   servicePid: number | null
+  /** 当前默认后端；有 doctor() 时追加其后端自检。 */
+  backend?: WorkerBackend
 }
 
 /** 启动前自检：把“配好了吗、能不能收到消息、能不能派工”一次性查清。 */
@@ -56,26 +59,28 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
     ...(config.policy.acceptMode === 'auto' ? { hint: '首次验收建议 ra config set policy.acceptMode observe' } : {}),
   })
 
-  checks.push(await check('Orca runtime', async () => {
-    const res = await deps.orca.run(['status'])
-    const parsed = parseOrcaStatus(res.stdout)
-    const ready = res.code === 0 && parsed.runtimeReachable === 'true'
-    return { status: ready ? 'ok' : 'fail', detail: ready ? `runtimeState=${parsed.runtimeState ?? 'unknown'}` : (res.stderr || res.stdout).trim().slice(0, 160), ...(ready ? {} : { hint: '打开 Orca 应用或运行 orca open' }) }
-  }))
+  if (config.backend.default === 'orca') {
+    checks.push(await check('Orca runtime', async () => {
+      const res = await deps.orca.run(['status'])
+      const parsed = parseOrcaStatus(res.stdout)
+      const ready = res.code === 0 && parsed.runtimeReachable === 'true'
+      return { status: ready ? 'ok' : 'fail', detail: ready ? `runtimeState=${parsed.runtimeState ?? 'unknown'}` : (res.stderr || res.stdout).trim().slice(0, 160), ...(ready ? {} : { hint: '打开 Orca 应用或运行 orca open' }) }
+    }))
 
-  checks.push(await check('Orca 仓库', async () => {
-    const res = await deps.orca.run(['repo', 'list', '--json'])
-    const repos = res.code === 0 ? parseOrcaRepos(res.stdout) : []
-    const wanted = config.projects.map(project => project.repo)
-    if (wanted.length === 0) return { status: 'fail', detail: '未配置任何项目', hint: 'ra config set project.<name> <repo>@<分支>' }
-    const missingRepos = wanted.filter(repo => {
-      const name = repo.replace(/^(id|name|path):/, '')
-      return !repos.some(item => item.name === name || item.path === name)
-    })
-    return missingRepos.length === 0
-      ? { status: 'ok', detail: wanted.join(', ') }
-      : { status: 'fail', detail: `未找到仓库 ${missingRepos.join(', ')}`, hint: 'orca repo list 查看可选项，或 orca repo add --path <dir>' }
-  }))
+    checks.push(await check('Orca 仓库', async () => {
+      const res = await deps.orca.run(['repo', 'list', '--json'])
+      const repos = res.code === 0 ? parseOrcaRepos(res.stdout) : []
+      const wanted = config.projects.map(project => project.repo)
+      if (wanted.length === 0) return { status: 'fail', detail: '未配置任何项目', hint: 'ra config set project.<name> <repo>@<分支>' }
+      const missingRepos = wanted.filter(repo => {
+        const name = repo.replace(/^(id|name|path):/, '')
+        return !repos.some(item => item.name === name || item.path === name)
+      })
+      return missingRepos.length === 0
+        ? { status: 'ok', detail: wanted.join(', ') }
+        : { status: 'fail', detail: `未找到仓库 ${missingRepos.join(', ')}`, hint: 'orca repo list 查看可选项，或 orca repo add --path <dir>' }
+    }))
+  }
 
   checks.push(await check('飞书机器人身份', async () => {
     const res = await deps.lark.run(['auth', 'status'])
@@ -136,6 +141,19 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
     detail: deps.servicePid && alive(deps.servicePid) ? `运行中 (pid ${deps.servicePid})` : '未运行',
     ...(deps.servicePid && alive(deps.servicePid) ? {} : { hint: 'ra start' }),
   })
+
+  if (deps.backend?.doctor) {
+    checks.push(await check(`Worker backend (${deps.backend.id})`, async () => {
+      const result = await deps.backend!.doctor!()
+      const failed = result.find(item => item.status === 'fail')
+      const warned = result.find(item => item.status === 'warn')
+      return {
+        status: failed ? 'fail' : warned ? 'warn' : 'ok',
+        detail: result.map(item => `${item.name}: ${item.detail}`).join('；') || 'ok',
+        ...(failed?.hint ? { hint: failed.hint } : {}),
+      }
+    }))
+  }
 
   return checks
 }

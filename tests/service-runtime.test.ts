@@ -7,7 +7,16 @@ import { Engine } from '../src/core/engine.js'
 import { RouterService, extractTerminalSnippet, extractSessionSnippet, formatProbeMessage } from '../src/service.js'
 import { defaultConfig, policyOf, type AppConfig, chatEntry } from '../src/config.js'
 import { DEFAULT_ADMISSION } from '../src/core/policy.js'
-import type { WorkerBackend, WorkerContext, SessionEvent } from '../src/worker/port.js'
+import type {
+  WorkerBackend,
+  WorkerContext,
+  SessionEvent,
+  WorkerRef,
+  StartResult,
+  DeliveryReceipt,
+  AgentStatus,
+  WorkspaceInfo,
+} from '../src/worker/port.js'
 import type { Trigger } from '../src/core/model.js'
 import type { DecisionEngine } from '../src/router/decision-engine.js'
 
@@ -45,6 +54,10 @@ function acceptEngine(): DecisionEngine {
 
 class FakeBackend implements WorkerBackend {
   readonly id = 'orca'
+  readonly capabilities = {
+    agent: { liveStatus: true, processExit: false, output: true, activity: true, structuredInput: true, nudge: true },
+    workspace: { cleanup: true, prLink: true, discovery: true },
+  }
   starts: WorkerContext[] = []
   delivered: { handle: string; text: string }[] = []
   handles = new Map<string, { lastOutputAt: string }>()
@@ -55,27 +68,50 @@ class FakeBackend implements WorkerBackend {
   /** 主动巡检优选的 Agent 会话记录；为 null 时退回终端屏幕。 */
   sessionEvents: SessionEvent[] | null = null
   sessionAt = ''
-  async start(ctx: WorkerContext) {
+  async start(ctx: WorkerContext): Promise<StartResult> {
     const handle = `term-${this.starts.length + 1}`
     this.starts.push(ctx)
     this.handles.set(handle, { lastOutputAt: new Date().toISOString() })
-    return { handle, workdir: `/tmp/${ctx.ticket.id}` }
+    return { handle, workdir: `/tmp/${ctx.ticket.id}`, branch: `ra/${ctx.ticket.id}` }
   }
-  async deliver(handle: string, inputs: { text: string }[]) {
+  async deliver(ref: WorkerRef | string, inputs: { text: string; id: string }[]): Promise<DeliveryReceipt> {
+    const handle = typeof ref === 'string' ? ref : ref.handle
     for (const input of inputs) this.delivered.push({ handle, text: input.text })
+    return { status: 'accepted', inputIds: inputs.map(input => input.id) }
   }
   async registerContext() {}
   async stop() {}
+  async nudge(ref: WorkerRef | string) {
+    this.delivered.push({ handle: typeof ref === 'string' ? ref : ref.handle, text: 'status?' })
+  }
+  async status(ref: WorkerRef | string): Promise<AgentStatus | null> {
+    const handle = typeof ref === 'string' ? ref : ref.handle
+    const entry = this.handles.get(handle)
+    if (!entry) return { alive: false, phase: 'lost', acceptingInput: false }
+    return { alive: true, phase: 'running', acceptingInput: true, lastActivityAt: entry.lastOutputAt }
+  }
   async read() {
     return { status: this.readStatus, lines: this.screen, source: 'screen' }
+  }
+  async output() {
+    return this.read()
   }
   async session() {
     if (!this.sessionEvents) return null
     return { at: this.sessionAt || new Date().toISOString(), events: this.sessionEvents }
   }
-  async inspect(handle: string) {
-    const entry = this.handles.get(handle)
-    return entry ? { handle, connected: true, writable: true, orphaned: false, lastOutputAt: entry.lastOutputAt, worktreePath: '', branch: '' } : null
+  async activity() {
+    return this.session()
+  }
+  async inspectWorkspace(): Promise<WorkspaceInfo | null> {
+    const linked = this.linkedPr?.linkedPR as { number?: number; url?: string } | undefined
+    return {
+      workdir: '',
+      branch: '',
+      ...(linked && Number(linked.number) > 0
+        ? { linkedPr: { number: Number(linked.number), url: String(linked.url ?? '') } }
+        : {}),
+    }
   }
   async inspectWorktree() {
     return this.linkedPr
@@ -131,6 +167,15 @@ describe('运行时机制', () => {
     const assignment = store.latestAssignment(ticket.id)!
     return { ticketId: ticket.id, handle: assignment.handle, assignmentId: assignment.id }
   }
+
+  it('accepted 未 ack 时按退避，不每秒重投', async () => {
+    const { ticketId } = await launchOne()
+    engine.deliverInput(ticketId, { kind: 'followup', text: '第一件事' })
+    await service.runOnce()
+    const afterFirst = backend.delivered.length
+    await service.runOnce()
+    expect(backend.delivered.length).toBe(afterFirst)
+  })
 
   it('有新输入时，把未 ack 的旧输入一并重投（去重靠 id）', async () => {
     const { ticketId, handle } = await launchOne()
@@ -401,11 +446,13 @@ describe('运行时机制', () => {
     const { ticketId } = await launchOne()
     const assignment = store.latestAssignment(ticketId)!
     // 模拟实测行为：CLI 创建的终端 orphaned=true，但连接正常
-    const original = backend.inspect.bind(backend)
-    backend.inspect = async handle => {
-      const info = await original(handle)
-      return info ? { ...info, orphaned: true } : null
-    }
+    backend.status = async () => ({
+      alive: true,
+      phase: 'running',
+      acceptingInput: true,
+      lastActivityAt: new Date().toISOString(),
+      detail: { orphaned: true },
+    })
     await service.recover()
     expect(backend.starts).toHaveLength(1)
     expect(store.latestAssignment(ticketId)!.id).toBe(assignment.id)
@@ -413,7 +460,7 @@ describe('运行时机制', () => {
 
   it('worktree 已被删除时 PR 跟踪静默跳过，不抛错也不刷日志', async () => {
     const { ticketId } = await launchOne()
-    backend.inspectWorktree = async () => { throw new Error('orca:command-failed(worktree show): selector_not_found') }
+    backend.inspectWorkspace = async () => { throw new Error('orca:command-failed(worktree show): selector_not_found') }
     await expect(service.trackPullRequests()).resolves.toBeUndefined()
     expect(store.getTicket(ticketId)?.prNumber).toBe(0)
   })

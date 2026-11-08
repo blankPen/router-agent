@@ -1,4 +1,4 @@
-import { appendFileSync, closeSync, mkdirSync, existsSync, openSync, readFileSync, readSync, statSync, writeFileSync, unlinkSync } from 'node:fs'
+import { appendFileSync, closeSync, mkdirSync, existsSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync, unlinkSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { spawn } from 'node:child_process'
 import { join, resolve } from 'node:path'
@@ -9,7 +9,7 @@ import { Command, CommanderError } from 'commander'
 import { ensureHome, loadConfig, policyOf, replyAlwaysChatsOf, setConfigValue, writeConfig } from '../config.js'
 import { Store } from '../store/db.js'
 import { Engine } from '../core/engine.js'
-import { OrcaAdapter } from '../worker/orca/index.js'
+import { createBackends } from '../worker/registry.js'
 import { GitHubTracker } from '../sources/github.js'
 import { FeishuConsumer, FeishuSender, attachQuotedMessage, normalizeFeishuEventDetailed } from '../sources/feishu.js'
 import { attachImageText } from '../sources/feishu-image.js'
@@ -44,8 +44,10 @@ export interface CliIo {
   env: Record<string, string | undefined>
   /** 交互式初始化用；不存在时退化为非交互。 */
   prompts?: Prompter
-  /** 测试注入点；默认用真实 orca / lark-cli。 */
+  /** 测试注入点；默认用真实 orca / claude / git / lark-cli。 */
   orca?: CommandRunner
+  claude?: CommandRunner
+  git?: CommandRunner
   larkFor?: (home?: string) => CommandRunner
   /** 交互式接管终端的 lark-cli 命令（新建应用、用户授权）。 */
   stream?: (argv: string[], env: NodeJS.ProcessEnv) => Promise<number>
@@ -125,7 +127,8 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
     .option('--pr-url <url>', 'PR 链接')
     .option('--reply <text>', '要发给发起人的完整回复：字面量 / @文件 / - 读 stdin')
     .option('--ack <id>', '确认已读的输入 ID，可重复', collect, [])
-    .action(async (opts: ReportOptions & { home?: string }) => {
+    .option('--port <n>', 'Router 端口（默认读 config/server.port 或 RA_PORT）')
+    .action(async (opts: ReportOptions & { home?: string; port?: string }) => {
       setCode(await cmdReport(homeOf(opts, output), opts, output))
     })
 
@@ -217,10 +220,24 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
   ensureHome(home)
   const config = loadConfig(home, output.env as NodeJS.ProcessEnv)
   const lark = output.larkFor ?? (larkHome => createLarkRunner({ home: larkHome }))
+  let backend: import('../worker/port.js').WorkerBackend | undefined
+  try {
+    backend = createBackends(config, {
+      home,
+      workersDir: join(home, 'workers'),
+      spec: config.workerSpec.mode,
+      orca: output.orca ?? realRunner('orca'),
+      claude: output.claude ?? realRunner('claude'),
+      git: output.git ?? realRunner('git'),
+    }).default()
+  } catch {
+    // 未注册/拼错的 backend 由配置检查单独报错，不让 doctor 直接崩溃。
+  }
   const checks = await runDoctor({
     config,
     orca: output.orca ?? realRunner('orca'),
     lark: lark(config.feishu.larkHome),
+    ...(backend ? { backend } : {}),
     llm: () => {
       try {
         const resolved = resolvePiModelConfig({ configPath: join(home, 'config.yaml') })
@@ -232,6 +249,14 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
     portFree: () => isPortFree(config.server.port),
     servicePid: readPid(home),
   })
+  if (!backend) {
+    checks.unshift({
+      name: 'Worker backend',
+      status: 'fail' as const,
+      detail: `未注册 backend: ${config.backend.default}`,
+      hint: 'ra config set backend.default orca|claude-cli',
+    })
+  }
   if (opts.json) {
     output.stdout(JSON.stringify(checks, null, 2))
   } else {
@@ -243,10 +268,12 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
   return checks.some(check => check.status === 'fail') ? 1 : 0
 }
 
-async function cmdReport(home: string, opts: ReportOptions, output: CliIo): Promise<number> {
+async function cmdReport(home: string, opts: ReportOptions & { port?: string }, output: CliIo): Promise<number> {
   const config = loadConfig(home)
+  const envPort = Number(output.env.RA_PORT)
+  const port = Number(opts.port) > 0 ? Number(opts.port) : (Number.isFinite(envPort) && envPort > 0 ? envPort : config.server.port)
   return runReport(
-    { home, port: config.server.port, stdout: output.stdout, stderr: output.stderr },
+    { home, port, stdout: output.stdout, stderr: output.stderr },
     opts,
   )
 }
@@ -622,6 +649,29 @@ function cmdStop(home: string, output: CliIo): number {
 async function cmdServe(home: string, output: CliIo): Promise<number> {
   const config = loadConfig(home)
   ensureHome(home)
+  // 单实例锁：目录创建是原子的，避免两个 ra serve 同时跑循环。
+  const lockDir = join(home, 'router-agent.lock')
+  const acquireLock = (): boolean => {
+    try {
+      mkdirSync(lockDir)
+      return true
+    } catch {
+      return false
+    }
+  }
+  if (!acquireLock()) {
+    const pid = readPid(home)
+    if (pid && alive(pid)) {
+      output.stderr(`Router 已在运行 (pid ${pid})，无需重复启动。`)
+      return 1
+    }
+    // 旧进程已经不在：清掉残留锁后重试一次。
+    rmSync(lockDir, { recursive: true, force: true })
+    if (!acquireLock()) {
+      output.stderr('Router 正在启动中，请稍后重试。')
+      return 1
+    }
+  }
   writeFileSync(join(home, 'router-agent.pid'), String(process.pid), 'utf8')
   const logger = createLogger(home, output)
   const sink = (event: { event: string; [key: string]: unknown }): void => {
@@ -643,13 +693,19 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   if (repaired > 0) logger.warn('outbox:repaired', { count: repaired })
   const engine = new Engine({ store, policy: policyOf(config), onEvent: sink })
   const orcaRunner = realRunner('orca')
+  const claudeRunner = output.claude ?? realRunner('claude')
+  const gitRunner = output.git ?? realRunner('git')
   const larkRunner = createLarkRunner({ home: config.feishu.larkHome })
   const ghRunner = realRunner('gh')
-  const backend = new OrcaAdapter({
-    runner: orcaRunner,
+  const backends = createBackends(config, {
+    home,
     workersDir: join(home, 'workers'),
     spec: config.workerSpec.mode,
+    orca: orcaRunner,
+    claude: claudeRunner,
+    git: gitRunner,
   })
+  const backend = backends.default()
   const sender = new FeishuSender(larkRunner)
   const prTracker = new GitHubTracker(ghRunner)
   const model = resolvePiModelConfig({ configPath: join(home, 'config.yaml') })
@@ -729,6 +785,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     store,
     engine,
     backend,
+    backends,
     prTracker,
     logger,
     effects,
@@ -848,6 +905,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     store.close()
     void api.close()
     cleanupPid(home)
+    rmSync(lockDir, { recursive: true, force: true })
     process.exit(0)
   }
   process.on('SIGTERM', shutdown)

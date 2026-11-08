@@ -35,6 +35,34 @@ export function buildWorkerPrompt(input: WorkerPromptInput): string {
   })
 }
 
+/** 后端中立的工单契约：Claude CLI / Codex 等非 Orca 后端使用。 */
+export interface WorkerContractInput {
+  ticketId: string
+  title: string
+  scope: string
+  repo: string
+  branch?: string
+  workBranch?: string
+  workdir?: string
+  statePath: string
+  eventsPath: string
+}
+
+export function buildNeutralContract(input: WorkerContractInput): string {
+  const template = readSpec('contract.md')
+  return render(template, {
+    ticketId: input.ticketId,
+    title: input.title,
+    scope: input.scope,
+    repo: input.repo,
+    branch: input.branch ?? '(仓库默认分支)',
+    workBranch: input.workBranch ?? `ra/${input.ticketId}`,
+    workdir: input.workdir ?? '(由后端决定)',
+    statePath: input.statePath,
+    eventsPath: input.eventsPath,
+  })
+}
+
 function readSpec(file: string): string {
   return readFileSync(fileURLToPath(new URL(`./${file}`, import.meta.url)), 'utf8')
 }
