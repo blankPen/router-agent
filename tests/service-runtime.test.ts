@@ -8,7 +8,7 @@ import { RouterService, extractTerminalSnippet, extractSessionSnippet, formatPro
 import { defaultConfig, policyOf, type AppConfig, chatEntry } from '../src/config.js'
 import { DEFAULT_ADMISSION } from '../src/core/policy.js'
 import type {
-  WorkerBackend,
+  WorkerRuntime,
   WorkerContext,
   SessionEvent,
   WorkerRef,
@@ -52,7 +52,7 @@ function acceptEngine(): DecisionEngine {
   }
 }
 
-class FakeBackend implements WorkerBackend {
+class FakeBackend implements WorkerRuntime {
   readonly id = 'orca'
   readonly capabilities = {
     agent: { liveStatus: true, processExit: false, output: true, activity: true, structuredInput: true, nudge: true },

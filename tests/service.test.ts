@@ -8,7 +8,7 @@ import { RouterService } from '../src/service.js'
 import { defaultConfig, policyOf, type AppConfig, chatEntry } from '../src/config.js'
 import { DEFAULT_ADMISSION } from '../src/core/policy.js'
 import type {
-  WorkerBackend,
+  WorkerRuntime,
   WorkerContext,
   WorkerRef,
   StartResult,
@@ -19,7 +19,7 @@ import type {
 import type { DecisionEngine, DecisionEngineResult, DecisionRequest } from '../src/router/decision-engine.js'
 import type { Trigger } from '../src/core/model.js'
 
-class FakeBackend implements WorkerBackend {
+class FakeBackend implements WorkerRuntime {
   readonly id = 'orca'
   readonly capabilities = {
     agent: { liveStatus: true, processExit: false, output: true, activity: true, structuredInput: true, nudge: true },

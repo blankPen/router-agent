@@ -1,6 +1,6 @@
 import type { AppConfig } from '../config.js'
 import type { CommandRunner } from '../infra/process.js'
-import type { WorkerBackend } from '../worker/port.js'
+import type { WorkerRuntime } from '../worker/port.js'
 import {
   parseAuthUser,
   parseBotAvailable,
@@ -29,7 +29,7 @@ export interface DoctorDeps {
   portFree: () => Promise<boolean>
   servicePid: number | null
   /** 当前默认后端；有 doctor() 时追加其后端自检。 */
-  backend?: WorkerBackend
+  backend?: WorkerRuntime
 }
 
 /** 启动前自检：把“配好了吗、能不能收到消息、能不能派工”一次性查清。 */

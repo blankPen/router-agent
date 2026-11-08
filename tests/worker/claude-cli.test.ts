@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { CommandResult, CommandRunner } from '../../src/infra/process.js'
 import { ClaudeCliBackend, allowedToolsFrom } from '../../src/worker/backends/claude-cli/index.js'
-import { WorkerBackendError, type WorkerContext, type WorkerRef } from '../../src/worker/port.js'
+import { WorkerRuntimeError, type WorkerContext, type WorkerRef } from '../../src/worker/port.js'
 import { claudeProjectSlug } from '../../src/worker/orca/session.js'
 import { parseGitHubRepo } from '../../src/worker/workspaces/git-worktree.js'
 
@@ -159,7 +159,7 @@ describe('ClaudeCliBackend', () => {
       workdir: join(home, 'worktrees', 'ra-tk-1-demo'), repo: '/tmp/repo', branch: 'main',
       workBranch: 'ra/tk-1-demo', sessionId: 's1', status: 'running',
     }))
-    await expect(backend.deliver(ref(home), [{ id: 'in_3', kind: 'followup', text: '继续' }])).rejects.toBeInstanceOf(WorkerBackendError)
+    await expect(backend.deliver(ref(home), [{ id: 'in_3', kind: 'followup', text: '继续' }])).rejects.toBeInstanceOf(WorkerRuntimeError)
   })
 
   it('agents 查询失败时 queued，不盲目 resume', async () => {

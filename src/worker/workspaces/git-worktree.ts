@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 import type { CommandRunner } from '../../infra/process.js'
-import { WorkerBackendError, type WorkspaceInfo, type WorkspaceProvider, type WorkspaceRequest, type Workspace } from '../port.js'
+import { WorkerRuntimeError, type WorkspaceInfo, type WorkspaceProvider, type WorkspaceRequest, type Workspace } from '../port.js'
 
 export interface GitWorktreeProviderOptions {
   git: CommandRunner
@@ -27,8 +27,8 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     const repoPath = this.repoPathOf(req.repo)
     const base = req.baseBranch.trim()
     const requestedBranch = req.workBranch.trim()
-    if (!base) throw new WorkerBackendError('workspace:missing-branch', '起始分支为空，拒绝创建 worktree')
-    if (!requestedBranch) throw new WorkerBackendError('workspace:missing-branch', '工作分支为空，拒绝创建 worktree')
+    if (!base) throw new WorkerRuntimeError('workspace:missing-branch', '起始分支为空，拒绝创建 worktree')
+    if (!requestedBranch) throw new WorkerRuntimeError('workspace:missing-branch', '工作分支为空，拒绝创建 worktree')
     await this.assertBranch(base, repoPath)
     const requestedWorkdir = this.assertWorkdir(req.workdir)
 
@@ -46,14 +46,14 @@ export class GitWorktreeProvider implements WorkspaceProvider {
       workdir = `${requestedWorkdir}-${i + 1}`
     }
     if (!free) {
-      throw new WorkerBackendError('workspace:create-failed', `分支/目录已被占用，无法创建工作区: ${requestedBranch}`, {
+      throw new WorkerRuntimeError('workspace:create-failed', `分支/目录已被占用，无法创建工作区: ${requestedBranch}`, {
         detail: { workdir: requestedWorkdir, branch: requestedBranch },
       })
     }
     await this.assertBranch(branch, repoPath)
     const res = await this.git.run(['worktree', 'add', '-b', branch, '--', workdir, base], { cwd: repoPath })
     if (res.code !== 0) {
-      throw new WorkerBackendError('workspace:create-failed', `git worktree add 失败: ${res.stderr || res.stdout}`, {
+      throw new WorkerRuntimeError('workspace:create-failed', `git worktree add 失败: ${res.stderr || res.stdout}`, {
         cause: res.stderr || res.stdout,
         detail: { workdir, branch, repo: repoPath },
       })
@@ -82,7 +82,7 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     const workdir = this.assertWorkdir(ref)
     const res = await this.git.run(['worktree', 'remove', '--', workdir])
     if (res.code !== 0) {
-      throw new WorkerBackendError('workspace:remove-failed', `git worktree remove 失败: ${res.stderr || res.stdout}`, {
+      throw new WorkerRuntimeError('workspace:remove-failed', `git worktree remove 失败: ${res.stderr || res.stdout}`, {
         cause: res.stderr || res.stdout,
         detail: { workdir },
       })
@@ -95,7 +95,7 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     await this.assertBranch(branch, path)
     const res = await this.git.run(['branch', '-D', '--', branch], { cwd: path })
     if (res.code !== 0) {
-      throw new WorkerBackendError('workspace:remove-failed', `git branch -D 失败: ${res.stderr || res.stdout}`, {
+      throw new WorkerRuntimeError('workspace:remove-failed', `git branch -D 失败: ${res.stderr || res.stdout}`, {
         cause: res.stderr || res.stdout,
         detail: { branch, repo: path },
       })
@@ -122,28 +122,28 @@ export class GitWorktreeProvider implements WorkspaceProvider {
 
   private async assertBranch(branch: string, repoPath: string): Promise<void> {
     if (branch.startsWith('-')) {
-      throw new WorkerBackendError('workspace:missing-branch', `非法分支名: ${branch}`)
+      throw new WorkerRuntimeError('workspace:missing-branch', `非法分支名: ${branch}`)
     }
     const res = await this.git.run(['check-ref-format', '--branch', branch], { cwd: repoPath })
     if (res.code !== 0) {
-      throw new WorkerBackendError('workspace:missing-branch', `非法分支名: ${branch}`)
+      throw new WorkerRuntimeError('workspace:missing-branch', `非法分支名: ${branch}`)
     }
   }
 
   private repoPathOf(repo: string): string {
     const path = repo.trim().replace(/^(id|name|path):/, '')
     if (!path || !isAbsolute(path)) {
-      throw new WorkerBackendError('workspace:missing-repo', `git worktree 需要本地仓库绝对路径（path:/abs），收到: ${repo}`)
+      throw new WorkerRuntimeError('workspace:missing-repo', `git worktree 需要本地仓库绝对路径（path:/abs），收到: ${repo}`)
     }
     return resolve(path)
   }
 
   private assertWorkdir(input?: string): string {
-    if (!input) throw new WorkerBackendError('workspace:create-failed', 'workdir 为空')
-    if (input.includes('..')) throw new WorkerBackendError('workspace:create-failed', `workdir 不允许包含 ..: ${input}`)
+    if (!input) throw new WorkerRuntimeError('workspace:create-failed', 'workdir 为空')
+    if (input.includes('..')) throw new WorkerRuntimeError('workspace:create-failed', `workdir 不允许包含 ..: ${input}`)
     const workdir = isAbsolute(input) ? resolve(input) : resolve(input)
     if (this.worktreesRoot && !workdir.startsWith(`${this.worktreesRoot}/`) && workdir !== this.worktreesRoot) {
-      throw new WorkerBackendError('workspace:create-failed', `workdir 越界: ${workdir}`)
+      throw new WorkerRuntimeError('workspace:create-failed', `workdir 越界: ${workdir}`)
     }
     return workdir
   }

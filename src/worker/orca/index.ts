@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type {
-  WorkerBackend,
+  WorkerRuntime,
   WorkerContext,
   InboundMessage,
   ContextItem,
@@ -188,7 +188,7 @@ export function parseCreateResult(stdout: string): { handle: string; workdir?: s
   }
 }
 
-export class OrcaAdapter implements WorkerBackend {
+export class OrcaAdapter implements WorkerRuntime {
   readonly id = 'orca'
   readonly capabilities = {
     agent: { liveStatus: true, processExit: false, output: true, activity: true, structuredInput: true, nudge: true },

@@ -104,7 +104,7 @@ Router（AgentLoop + DecisionEngine(Pi) + HTTP API + Web）
 领域内核（TS 零依赖：Ticket / Mandate / Assignment / Stage / Policy）
         │ Assignment
         ▼
-WorkerBackend 端口 ── OrcaAdapter（默认）/ ClaudeCliAdapter ── 未来：Codex
+WorkerRuntime 端口 ── OrcaAdapter（默认）/ ClaudeCliAdapter ── 未来：Codex
 ```
 
 一条消息会依次经过四步：
@@ -117,7 +117,7 @@ WorkerBackend 端口 ── OrcaAdapter（默认）/ ClaudeCliAdapter ── 未
 关键约束：
 
 - **Engine 是唯一状态写入口**：Router、Worker、面板都不直接写 SQLite。
-- **WorkerBackend 是唯一扩展点**：换后端只加一个 adapter，内核与 Router 一行不改。
+- **WorkerRuntime 是唯一扩展点**：换后端只加一个 adapter，内核与 Router 一行不改。
 - **所有对外通知走 Outbox**：幂等 key + 2s 起步的指数退避（上限 60s）。
 - **状态判定不解析终端屏幕文本**：`checkIdle` 只读中立 `AgentStatus`（Orca 映射自 `connected / orphaned / lastOutputAt`，Claude 映射自 `claude agents --json`）；主动巡检优先读 Agent 自己的会话记录（结构化 JSONL），只有读不到时才退回终端输出并做保守清洗。巡检消息是语义摘要：只保留助手文本与一行动作概要，工具调用回显与状态行会被过滤或折叠。
 - **研判层是 DecisionEngine 端口**：Pi 是唯一实现，研判与礼貌回复都走同一条 Pi 通道；研判工具只产出提案，写库仍由 Engine 统一完成。
@@ -593,7 +593,7 @@ RA_PI_VERIFY=1 npx vitest run tests/verify-pi-live.test.ts   # 真实 Pi + 真�
 ```text
 src/core/     领域内核（model / stage / policy / engine / effects）
 src/store/    SQLite（node:sqlite）
-src/worker/   WorkerBackend 端口、BackendRegistry、OrcaAdapter、ClaudeCliBackend、state.json 轮询、worker 手册
+src/worker/   WorkerRuntime 端口、BackendRegistry、OrcaAdapter、ClaudeCliBackend、state.json 轮询、worker 手册
 src/sources/  飞书事件、历史补拉、GitHub PR 跟踪
 src/router/   AgentLoop、工具契约、提示词、HTTP API
 src/web/      React 面板
@@ -632,4 +632,4 @@ src/cli/      ra 命令
 
 ---
 
-问题、建议或想接入新的 WorkerBackend，欢迎提 Issue。
+问题、建议或想接入新的 WorkerRuntime，欢迎提 Issue。

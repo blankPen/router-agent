@@ -2,13 +2,13 @@ import { describe, expect, it } from 'vitest'
 import { defaultConfig } from '../../src/config.js'
 import type { CommandRunner } from '../../src/infra/process.js'
 import { BackendRegistry, createBackends } from '../../src/worker/registry.js'
-import { WorkerBackendError, type WorkerBackend } from '../../src/worker/port.js'
+import { WorkerRuntimeError, type WorkerRuntime } from '../../src/worker/port.js'
 
 function runner(): CommandRunner {
   return { async run() { return { code: 0, stdout: '', stderr: '' } } }
 }
 
-function fake(id: string): WorkerBackend {
+function fake(id: string): WorkerRuntime {
   return {
     id,
     capabilities: {
@@ -28,7 +28,7 @@ describe('BackendRegistry', () => {
       ['claude-cli', fake('claude-cli')],
     ]), 'orca')
     expect(registry.get('claude-cli').id).toBe('claude-cli')
-    expect(() => registry.get('nope')).toThrow(WorkerBackendError)
+    expect(() => registry.get('nope')).toThrow(WorkerRuntimeError)
     expect(registry.ids()).toEqual(['orca', 'claude-cli'])
   })
 

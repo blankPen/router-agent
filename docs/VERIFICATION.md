@@ -240,7 +240,7 @@ RA_PI_VERIFY=1 npx vitest run tests/verify-pi-live.test.ts  → 1 passed
 
 ## 6. 结论
 
-- 领域内核、Router、WorkerBackend、上报协议、飞书 / GitHub Source、HTTP API、Web 面板、CLI 均已实现并有测试覆盖。
+- 领域内核、Router、WorkerRuntime、上报协议、飞书 / GitHub Source、HTTP API、Web 面板、CLI 均已实现并有测试覆盖。
 - 研判层已切换为 Pi 单引擎：`assess` 与 `reply` 都走 Pi，工具白名单、proposal-only、超时预算与审计均已落地并有测试。
 - 多项目 / 多分支：开单前强制明确「任务 + 项目 + 起始分支」，缺信息先在会话里追问并落草稿；群级 `chatBindings` 可免问答。
 - 真实 LLM、Orca、lark-cli、HTTP 服务与 CLI 常驻链路均已跑通。

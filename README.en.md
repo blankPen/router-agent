@@ -104,7 +104,7 @@ Router (AgentLoop + DecisionEngine(Pi) + HTTP API + Web)
 Domain core (zero-dep TS: Ticket / Mandate / Assignment / Stage / Policy)
         │ Assignment
         ▼
-WorkerBackend port ── OrcaAdapter (default) ── future: Codex / Headless Claude
+WorkerRuntime port ── OrcaAdapter (default) ── future: Codex / Headless Claude
 ```
 
 A message goes through four steps:
@@ -117,7 +117,7 @@ A message goes through four steps:
 Key constraints:
 
 - **Engine is the single writer**: the Router, Workers and dashboard never write SQLite directly.
-- **WorkerBackend is the only extension point**: another backend is one adapter, with no changes to the core or Router.
+- **WorkerRuntime is the only extension point**: another backend is one adapter, with no changes to the core or Router.
 - **All outbound notifications go through the Outbox**: idempotency key plus exponential backoff starting at 2s (capped at 60s).
 - **No TUI parsing for state**: `checkIdle` only reads Orca's structured fields (`connected` / `orphaned` / `lastOutputAt`); the proactive probe reads the agent's session transcript first and falls back to `orca terminal read --screen`. Probe messages are semantic summaries: assistant text plus a one-line action digest, with tool-call echoes and status lines filtered or collapsed.
 - **Triage is a DecisionEngine port**: Pi is the only implementation, and both triage and polite replies go through the same Pi channel; triage tools only produce proposals, and the Engine still writes everything.
@@ -550,7 +550,7 @@ Source layout:
 ```text
 src/core/     domain core (model / stage / policy / engine / effects)
 src/store/    SQLite (node:sqlite)
-src/worker/   WorkerBackend port, OrcaAdapter, state.json polling (CLI fallback), worker handbook
+src/worker/   WorkerRuntime port, OrcaAdapter, state.json polling (CLI fallback), worker handbook
 src/sources/  Feishu events, history backfill, GitHub PR tracking
 src/router/   AgentLoop, tool contracts, prompts, HTTP API
 src/web/      React dashboard
@@ -585,4 +585,4 @@ The design reference is the Feishu document "router-agent（ra）技术设计方
 
 ---
 
-Questions, suggestions, or a new WorkerBackend? Open an issue.
+Questions, suggestions, or a new WorkerRuntime? Open an issue.

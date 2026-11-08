@@ -1,6 +1,6 @@
 import type { AppConfig } from '../config.js'
 import type { CommandRunner } from '../infra/process.js'
-import { WorkerBackendError, type WorkerBackend } from './port.js'
+import { WorkerRuntimeError, type WorkerRuntime } from './port.js'
 import { OrcaAdapter } from './orca/index.js'
 import { ClaudeCliBackend } from './backends/claude-cli/index.js'
 
@@ -21,17 +21,17 @@ export interface BackendDeps {
 /** 按 id 持有后端；内核只通过它取后端，不直接 new OrcaAdapter。 */
 export class BackendRegistry {
   constructor(
-    private readonly backends: Map<string, WorkerBackend>,
+    private readonly backends: Map<string, WorkerRuntime>,
     private readonly defaultId: string,
   ) {
     if (!backends.has(defaultId)) {
-      throw new WorkerBackendError('backend:unknown', `默认 backend 未注册: ${defaultId}`)
+      throw new WorkerRuntimeError('backend:unknown', `默认 backend 未注册: ${defaultId}`)
     }
   }
 
-  get(id: string): WorkerBackend {
+  get(id: string): WorkerRuntime {
     const backend = this.backends.get(id)
-    if (!backend) throw new WorkerBackendError('backend:unknown', `未知 backend: ${id}`)
+    if (!backend) throw new WorkerRuntimeError('backend:unknown', `未知 backend: ${id}`)
     return backend
   }
 
@@ -43,14 +43,14 @@ export class BackendRegistry {
     return [...this.backends.keys()]
   }
 
-  default(): WorkerBackend {
+  default(): WorkerRuntime {
     return this.get(this.defaultId)
   }
 }
 
 /** 生产环境装配：只注册已实现的后端；配置了未注册后端会在启动期失败。 */
 export function createBackends(config: AppConfig, deps: BackendDeps): BackendRegistry {
-  const backends = new Map<string, WorkerBackend>()
+  const backends = new Map<string, WorkerRuntime>()
   backends.set('orca', new OrcaAdapter({
     runner: deps.orca,
     workersDir: deps.workersDir,

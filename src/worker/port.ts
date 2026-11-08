@@ -197,7 +197,7 @@ export interface DiagnosticCheck {
   hint?: string
 }
 
-/** 后端错误码；所有 adapter 必须抛 WorkerBackendError。 */
+/** 运行时错误码；所有 adapter 必须抛 WorkerRuntimeError。 */
 export type WorkerErrorCode =
   | 'workspace:create-failed'
   | 'workspace:missing-repo'
@@ -210,7 +210,7 @@ export type WorkerErrorCode =
   | 'backend:unavailable'
   | 'backend:unknown'
 
-export class WorkerBackendError extends Error {
+export class WorkerRuntimeError extends Error {
   readonly code: WorkerErrorCode
   readonly retryable: boolean
   readonly reason: string
@@ -223,7 +223,7 @@ export class WorkerBackendError extends Error {
     opts: { retryable?: boolean; cause?: string; detail?: Record<string, unknown> } = {},
   ) {
     super(reason)
-    this.name = 'WorkerBackendError'
+    this.name = 'WorkerRuntimeError'
     this.code = code
     this.reason = reason
     this.retryable = opts.retryable ?? false
@@ -232,8 +232,8 @@ export class WorkerBackendError extends Error {
   }
 }
 
-/** Worker 后端端口：换后端只加一个 adapter，内核与 Router 不改。 */
-export interface WorkerBackend {
+/** Worker 运行时端口：换后端只加一个 adapter，内核与 Router 不改。 */
+export interface WorkerRuntime {
   readonly id: string
   readonly capabilities: BackendCapabilities
 

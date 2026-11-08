@@ -6,7 +6,7 @@ import type { Assignment, Report, Stage, Ticket, Trigger } from './core/model.js
 import type { Store } from './store/db.js'
 import type { AppConfig, RetentionSettings } from './config.js'
 import { replyAlwaysChatsOf } from './config.js'
-import { WorkerBackendError, type WorkerBackend, type WorkerContext, type SessionEvent, type WorkerRef, type AgentStatus } from './worker/port.js'
+import { WorkerRuntimeError, type WorkerRuntime, type WorkerContext, type SessionEvent, type WorkerRef, type AgentStatus } from './worker/port.js'
 import { AgentLoop } from './router/agent-loop.js'
 import type { DecisionAudit, DecisionEngine } from './router/decision-engine.js'
 import { dispatchSettingsOf } from './router/dispatch.js'
@@ -40,7 +40,7 @@ export interface RouterServiceOptions {
   config: AppConfig
   store: Store
   engine: Engine
-  backend: WorkerBackend
+  backend: WorkerRuntime
   /** 多后端注册表；不传时退化为只含 backend 的单后端注册表。 */
   backends?: BackendRegistry
   /** 唯一研判引擎（Pi）。 */
@@ -432,7 +432,7 @@ function lastIndexWhere(items: string[], predicate: (item: string) => boolean): 
 }
 
 /**
- * 服务编排：把 AgentLoop、上报轮询、Effects、PR 跟踪与 WorkerBackend 接在一起。
+ * 服务编排：把 AgentLoop、上报轮询、Effects、PR 跟踪与 WorkerRuntime 接在一起。
  * 本身不持有终端状态；重启后靠 recover() 与 Orca 对账。
  */
 export class RouterService {
@@ -567,7 +567,7 @@ export class RouterService {
   }
 
   /** 按 assignment 的 backendId 取后端；旧工单不会被新默认后端接管。 */
-  private backendFor(assignment: Assignment): WorkerBackend {
+  private backendFor(assignment: Assignment): WorkerRuntime {
     return this.backends.get(assignment.backendId)
   }
 
@@ -805,7 +805,7 @@ export class RouterService {
       return updated
     } catch (error) {
       // launch 半成功：把已创建的 workdir 落库，后续 cleanup 才能回收。
-      const failedWorkdir = error instanceof WorkerBackendError && typeof error.detail?.workdir === 'string'
+      const failedWorkdir = error instanceof WorkerRuntimeError && typeof error.detail?.workdir === 'string'
         ? String(error.detail.workdir)
         : assignment.workdir
       this.store.updateAssignment({ ...assignment, workdir: failedWorkdir, status: 'ended', endedAt: this.clock.now() })
@@ -1799,7 +1799,7 @@ export class RouterService {
 export interface CreateServiceDeps {
   config: AppConfig
   runner: CommandRunner
-  backend: WorkerBackend
+  backend: WorkerRuntime
   prTracker: GhTracker
   sender: FeishuOutbound
   logger: Logger
@@ -1878,7 +1878,7 @@ interface ProviderFailureDetail {
  * 只取 stderr 会得到没有信息量的 `code=1`。
  */
 export function describeLaunchError(error: unknown): LaunchErrorDetail {
-  if (error instanceof WorkerBackendError) {
+  if (error instanceof WorkerRuntimeError) {
     const detail = error.detail ?? {}
     return {
       reason: error.reason,

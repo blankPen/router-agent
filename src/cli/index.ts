@@ -220,7 +220,7 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
   ensureHome(home)
   const config = loadConfig(home, output.env as NodeJS.ProcessEnv)
   const lark = output.larkFor ?? (larkHome => createLarkRunner({ home: larkHome }))
-  let backend: import('../worker/port.js').WorkerBackend | undefined
+  let backend: import('../worker/port.js').WorkerRuntime | undefined
   try {
     backend = createBackends(config, {
       home,

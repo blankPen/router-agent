@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { CommandResult, CommandRunner } from '../../src/infra/process.js'
 import { GitWorktreeProvider, parseGitHubRepo } from '../../src/worker/workspaces/git-worktree.js'
-import { WorkerBackendError } from '../../src/worker/port.js'
+import { WorkerRuntimeError } from '../../src/worker/port.js'
 
 interface Call {
   argv: string[]
@@ -60,10 +60,10 @@ describe('GitWorktreeProvider', () => {
     const provider = new GitWorktreeProvider({ git, worktreesRoot: '/tmp/ra-root' })
     await expect(provider.create({
       ticketId: 'tk-1', repo: 'acme/web', baseBranch: 'main', workBranch: 'ra/x', name: 'x', workdir: '/tmp/ra-root/x',
-    })).rejects.toBeInstanceOf(WorkerBackendError)
+    })).rejects.toBeInstanceOf(WorkerRuntimeError)
     await expect(provider.create({
       ticketId: 'tk-1', repo: '/tmp/repo', baseBranch: 'main', workBranch: 'ra/x', name: 'x', workdir: '/etc/x',
-    })).rejects.toBeInstanceOf(WorkerBackendError)
+    })).rejects.toBeInstanceOf(WorkerRuntimeError)
   })
 
   it('从 origin 解析 owner/repo', async () => {
