@@ -43,6 +43,17 @@ export interface FeishuSettings {
   bots: string[]
   botOpenIds: string[]
   botNames: string[]
+  images: ImageSettings
+}
+
+/** 飞书图片转文本：下载 image_key 后交给多模态模型识别，再进入研判。 */
+export interface ImageSettings {
+  /** 关闭后图片仍按纯附件处理（回一句请补充文字）。 */
+  enabled: boolean
+  /** 单张图片转写结果的最大字符数。 */
+  maxChars: number
+  /** 单张图片识别的硬超时。 */
+  timeoutMs: number
 }
 
 export interface PolicySettings {
@@ -184,6 +195,11 @@ export function defaultConfig(): AppConfig {
       bots: [],
       botOpenIds: [],
       botNames: [],
+      images: {
+        enabled: true,
+        maxChars: 2_000,
+        timeoutMs: 60_000,
+      },
     },
     policy: {
       acceptMode: 'auto',
@@ -249,6 +265,11 @@ feishu:
   bots: []             # 允许产生推断候选的机器人 open_id
   botOpenIds: []       # 机器人自己的 open_id
   botNames: []         # 机器人显示名
+  # 图片消息：下载 image_key 后转成文本再进入研判
+  images:
+    enabled: true
+    maxChars: 2000     # 单张图片转写结果的最大字符数
+    timeoutMs: 60000   # 单张图片识别超时（毫秒）
 
 policy:
   acceptMode: auto     # off / observe / auto
@@ -375,6 +396,11 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
       bots: stringArray(doc.feishu?.bots, base.feishu.bots),
       botOpenIds: stringArray(doc.feishu?.botOpenIds, base.feishu.botOpenIds),
       botNames: stringArray(doc.feishu?.botNames, base.feishu.botNames),
+      images: {
+        enabled: booleanOr(doc.feishu?.images?.enabled, base.feishu.images.enabled),
+        maxChars: positiveIntOr(doc.feishu?.images?.maxChars, base.feishu.images.maxChars, 100, 20_000),
+        timeoutMs: positiveIntOr(doc.feishu?.images?.timeoutMs, base.feishu.images.timeoutMs, 1_000, 300_000),
+      },
     },
     policy: {
       acceptMode,
@@ -634,6 +660,7 @@ export function writeConfig(home: string, config: AppConfig): void {
       bots: config.feishu.bots,
       botOpenIds: config.feishu.botOpenIds,
       botNames: config.feishu.botNames,
+      images: config.feishu.images,
     },
     policy: {
       acceptMode: config.policy.acceptMode,

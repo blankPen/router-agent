@@ -129,7 +129,7 @@ WorkerBackend 端口 ── OrcaAdapter（默认）── 未来：Codex / Headl
 - 群消息默认按配置工作：`mode: all` 收全部消息且不 @ 也回复，`mode: mention` 只收 @机器人。
 - 私聊单独开关；机器人、系统消息、互动卡片不会进入领域。
 - 群级 `allowed` 非空时，这个群只有名单内的人能触发；名单外的人 @ 机器人也会被静默忽略。
-- 只发图片 / 文件、没有文字的消息**不开单**，@ 或私聊时回一句「看不到附件内容，请用文字说明」，不烧模型调用。
+- 图片消息会先下载 `image_key` 并转成文字（含引用消息里的图片、富文本里的图片），再和文字一起进入研判；识别失败时仍按纯附件处理，@ 或私聊回一句「看不到附件内容，请用文字说明」。文件 / 语音等其它附件不下载、不做多模态识别。
 - 历史补拉按群游标增量进行，首次见到某个群只记基线，不会把历史消息当新需求。
 
 ### 判：Gate 在前，Pi 在后
@@ -243,7 +243,8 @@ Router 不做对话，只在必要时说话：
 | 群里 @机器人，是真需求 | 只发一条**话题**消息：「工单「标题」（id）已开始执行。后续进展会在这个话题里更新。」，不再额外回「我帮你创建了工单」之类的普通消息 ack |
 | 未 @ 的群消息 | 走 Pi 研判；判为闲聊则**完全静默**（不刷屏） |
 | 私聊 | 走 Pi 研判；判为闲聊时用 Pi 礼貌回复（普通消息） |
-| 只发了图片 / 文件（没有文字） | **不开单**：@ 或私聊时回一句「看不到附件内容，请用文字说明」 |
+| 只发了图片 | 先下载 `image_key` 转成文字再走研判；识别失败才回「看不到附件内容，请用文字说明」 |
+| 只发了文件 / 语音等其它附件 | **不开单**：@ 或私聊时回一句「看不到附件内容，请用文字说明」 |
 | 系统消息（建群 / 拉人 / 改群名） | 直接丢弃，不进领域 |
 | 互动卡片消息 | 直接丢弃（`content` 是原始卡片 JSON，不能当需求读） |
 | 研判没完成（unavailable） | 若在跟它说话，用 Pi 追问一句 |
@@ -310,6 +311,10 @@ feishu:
   bots: []             # 允许产生推断候选的机器人
   botOpenIds: []       # 机器人自己的 open_id / app_id
   botNames: []         # 机器人显示名
+  images:              # 图片消息：下载 image_key 转文本后进入研判
+    enabled: true
+    maxChars: 2000     # 单张图片转写结果的最大字符数
+    timeoutMs: 60000   # 单张图片识别超时（毫秒）
 
 policy:
   acceptMode: auto     # off / observe / auto
@@ -429,6 +434,17 @@ orca repo list --json | jq -r '.result.repos[] | "\(.displayName)\t\(.path)\t\(.
 模型配置会自动复用 `~/.trove/config.json` 里的 `llm` 段（`baseUrl` / `model` / `apiKey`）；也可以在本文件写 `llm:` 段，或用 `RA_LLM_BASE_URL` / `RA_LLM_API_KEY` / `RA_LLM_MODEL` 覆盖。会话自动压缩依赖 `llm.contextWindow`（默认 128000），换模型时记得同步改。
 
 优先级：**环境变量 > `config.yaml` > `.trove`**。
+
+图片消息转文本默认复用同一个模型；如果主模型不支持多模态，单独指定视觉模型即可（只覆盖图片链路，不影响研判）：
+
+```yaml
+llm:
+  imageModel: qwen3-vl-plus
+  imageBaseUrl: https://dashscope.aliyuncs.com/compatible-mode/v1
+  imageApiKey: sk-xxx
+```
+
+也可以用 `RA_LLM_IMAGE_MODEL` / `RA_LLM_IMAGE_BASE_URL` / `RA_LLM_IMAGE_API_KEY` 覆盖。`feishu.images.enabled: false` 可关闭图片转文本（回到「只回一句请补充文字」的行为）。
 
 ### Worker 规范注入
 
@@ -579,7 +595,8 @@ src/cli/      ra 命令
 - 不做自动合并 PR，只跟踪与通知。
 - GitHub Source 只用于 PR 状态跟踪，不消费 Issue / 评论。
 - 上报走 `ra report`，`state.json` 只作为服务不可达时的兜底通道。
-- 图片 / 文件只识别到「这是一条附件消息」，不下载、不做多模态识别；需要内容时请用文字描述。
+- 图片会下载并用多模态模型转成文字；文件 / 语音等其它附件只识别到「这是一条附件消息」，需要内容时请用文字描述。
+- 图片转文本依赖模型支持 image 输入；主模型不支持时请在 `llm.imageModel` 单独配置视觉模型，否则图片仍按纯附件处理。
 - 历史补拉按群游标增量进行：首次见到某个群只记基线（最新一条消息时间），不会把历史消息当新需求。
 - 实测 Orca 的 `lastOutputAt` 是毫秒数字、且 CLI 创建的终端可能 `orphaned=true` 但依然可用；适配层已分别做归一化与「只有 `connected=false` 才判死」的处理。
 - `workerSpec.mode: agent` 依赖 Orca 启动的 claude 是否加载全局 `~/.claude/agents/`；该前提尚未实测，默认使用已验证可行的 `prompt` 模式。

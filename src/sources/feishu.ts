@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline'
 import type { Trigger } from '../core/model.js'
 import type { ChatSettings } from '../config.js'
 import type { CommandRunner } from '../infra/process.js'
+import { parseImageKeysFromContent } from './feishu-image.js'
 
 export interface FeishuConfig {
   /** 监控的群：每条含接收方式与派工绑定。 */
@@ -93,6 +94,11 @@ export function normalizeFeishuEventDetailed(raw: Record<string, unknown>, cfg: 
   const rootId = event.root_id || messageId
   // 被引用消息：lark-cli 用 reply_to，飞书原始事件用 parent_id。正文不在 content 里，必须回查。
   const replyTo = event.reply_to || event.parent_id || ''
+  const imageKeys = mediaOnly || messageType === 'post' ? parseImageKeysFromContent(text) : []
+  const rawMeta: Record<string, unknown> = {}
+  if (replyTo) rawMeta.parentId = replyTo
+  if (messageType !== 'text') rawMeta.messageType = messageType
+  if (imageKeys.length > 0) rawMeta.imageKeys = imageKeys
   const trigger: Trigger = {
     id: `feishu_${messageId}`,
     source: 'feishu',
@@ -109,7 +115,8 @@ export function normalizeFeishuEventDetailed(raw: Record<string, unknown>, cfg: 
     receivedAt: toIso(event.create_time),
     disposition: 'pending',
     // 记住被引用消息的 ID：正文要靠 lark-cli 回查，见 attachQuotedMessage。
-    raw: replyTo ? { parentId: replyTo } : {},
+    // 图片消息同时记下 image_key，入库前由 attachImageText 下载并转文本。
+    raw: rawMeta,
   }
   return { trigger, chatId, actorId: trigger.actorId, addressed: trigger.addressed }
 }
@@ -130,6 +137,8 @@ export interface QuotedMessage {
   id: string
   text: string
   author: string
+  /** 被引用消息里的图片资源；正文为空但只有图时也要能带出去。 */
+  images: { key: string }[]
 }
 
 /** 单条消息回查命令（`+messages-mget` 支持批量，这里只查一条）。 */
@@ -150,11 +159,13 @@ export function parseQuotedMessage(stdout: string, fallbackId = ''): QuotedMessa
   const message = Array.isArray(list) ? (list[0] as Record<string, any> | undefined) : undefined
   if (!message) return null
   const text = extractMessageText(message)
-  if (!text) return null
+  const images = parseImageKeysFromContent(String(message.content ?? '')).map(key => ({ key }))
+  if (!text && images.length === 0) return null
   return {
     id: String(message.message_id ?? fallbackId),
     text,
     author: String(message.sender?.name ?? ''),
+    images,
   }
 }
 
@@ -219,12 +230,18 @@ export async function attachQuotedMessage(
     const max = opts.maxChars ?? QUOTED_MAX_CHARS
     const body = quoted.text.length > max ? `${quoted.text.slice(0, max)}…` : quoted.text
     const who = quoted.author ? ` ${quoted.author}` : ''
-    const header = `[引用${who}的消息] ${body}`
-    const text = trigger.text.trim()
+    // 引用的是一条只有图片的消息时没有正文，先记下资源，入库前由 attachImageText 下载转文本。
+    const header = body ? `[引用${who}的消息] ${body}` : ''
+    const text = [header, trigger.text.trim()].filter(Boolean).join('\n\n')
+    const quoteImages = quoted.images.map(image => ({ key: image.key, messageId: parentId }))
     return {
       ...trigger,
-      text: text ? `${header}\n\n${text}` : header,
-      raw: { ...(trigger.raw as Record<string, unknown>), quote: quoted },
+      text: text || trigger.text,
+      raw: {
+        ...(trigger.raw as Record<string, unknown>),
+        ...(body ? { quote: quoted } : {}),
+        ...(quoteImages.length > 0 ? { quoteImages } : {}),
+      },
     }
   } catch {
     return trigger
