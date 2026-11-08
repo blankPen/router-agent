@@ -3,7 +3,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs'
 import { extname, join, normalize, resolve } from 'node:path'
 import type { Store } from '../store/db.js'
 import type { Engine } from '../core/engine.js'
-import { policyOf, type AppConfig } from '../config.js'
+import { applyConfigPatch, policyOf, publicConfig, publicDefaults, requiresRestart, writeConfig, type AppConfig } from '../config.js'
 import type { AcceptMode } from '../core/policy.js'
 import { noopSink, preview, type EventSink } from '../core/events.js'
 import type { WorkerStateFile } from '../worker/report-poller.js'
@@ -16,6 +16,8 @@ export interface ApiServerOptions {
   port?: number
   webRoot?: string
   onPolicyChange?: (config: AppConfig) => void | Promise<void>
+  /** 配置面板保存后回调；服务层可据此提示「哪些项需要重启」。 */
+  onConfigChange?: (config: AppConfig, changed: string[]) => void | Promise<void>
   onEvent?: EventSink
   /** Worker 通过 `ra report` POST 上来的状态；由服务层接到 onWorkerState。 */
   onReport?: (state: WorkerStateFile) => void | Promise<void>
@@ -163,6 +165,51 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       return respond(res, 201, { ok: true, ticketId, assignmentId: assignment.id, turn, state, reply: Boolean(reply) })
     }
 
+    if (path === '/api/config') {
+      if (req.method === 'GET') {
+        return respond(res, 200, configPayload(config))
+      }
+      if (req.method === 'PUT' || req.method === 'POST') {
+        const body = await readJson(req)
+        const patch = isRecord(body.patch) ? body.patch : body
+        if (!isRecord(patch)) return respond(res, 400, { error: 'patch-required' })
+
+        // 先在克隆上校验并试写，确认能落盘再改内存里的配置，避免「面板显示已保存但文件没写成」。
+        const preview = structuredClone(config)
+        const result = applyConfigPatch(preview, patch)
+        if (result.errors.length > 0) {
+          return respond(res, 400, { error: 'invalid-config', errors: result.errors })
+        }
+        if (config.home && result.changed.length > 0) {
+          try {
+            writeConfig(config.home, preview)
+          } catch (error) {
+            return respond(res, 500, {
+              error: 'config-write-failed',
+              message: error instanceof Error ? error.message : String(error),
+            })
+          }
+        }
+        // 试写成功后，把同一批补丁作用到活配置对象上（服务里其他模块持有它的引用）。
+        applyConfigPatch(config, patch)
+
+        const beforePolicy = opts.engine.policy()
+        const nextPolicy = opts.engine.updatePolicy(policyOf(config))
+        const policyChanged = nextPolicy.version !== beforePolicy.version
+        if (policyChanged) await opts.onPolicyChange?.(config)
+        await opts.onConfigChange?.(config, result.changed)
+        onEvent({ event: 'api:config', changed: result.changed })
+        return respond(res, 200, {
+          ...configPayload(config),
+          ok: true,
+          changed: result.changed,
+          policyChanged,
+          restartRequired: requiresRestart(result.changed),
+        })
+      }
+      return respond(res, 405, { error: 'method-not-allowed' })
+    }
+
     if (path === '/api/sources/feishu/chats' && req.method === 'GET') {
       return respond(res, 200, {
         chats: config.feishu.chats,
@@ -191,8 +238,11 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
           config.policy.admission = { ...config.policy.admission, ...(body.admission as object) }
         }
         const policy = opts.engine.updatePolicy(policyOf(config))
+        // 面板保存要落盘，否则重启后策略又回到旧值；home 为空（单测）时跳过写文件。
+        if (config.home) writeConfig(config.home, config)
         onEvent({ event: 'api:policy', acceptMode: policy.acceptMode, maxWorkers: policy.maxWorkers, version: policy.version })
         await opts.onPolicyChange?.(config)
+        await opts.onConfigChange?.(config, ['policy.acceptMode', 'policy.maxWorkers', 'policy.admission'])
         return respond(res, 200, { policy, config: config.policy })
       }
       return respond(res, 405, { error: 'method-not-allowed' })
@@ -217,6 +267,19 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
     close: () => new Promise<void>(resolvePromise => {
       server.close(() => resolvePromise())
     }),
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+/** 配置面板的读/写都用同一份口径：安全快照 + 默认值 + 配置文件路径。 */
+function configPayload(config: AppConfig): Record<string, unknown> {
+  return {
+    config: publicConfig(config),
+    defaults: publicDefaults(),
+    configPath: config.home ? join(config.home, 'config.yaml') : '',
   }
 }
 

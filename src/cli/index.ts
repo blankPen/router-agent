@@ -825,6 +825,9 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     onPolicyChange: updated => {
       logger.info('policy:updated', { version: engine.policy().version, acceptMode: updated.policy.acceptMode })
     },
+    onConfigChange: (_updated, changed) => {
+      logger.info('config:updated', { changed })
+    },
   })
   logger.info('api:listening', { port: config.server.port })
 

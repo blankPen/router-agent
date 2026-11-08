@@ -751,10 +751,295 @@ export function writeConfig(home: string, config: AppConfig): void {
   writeFileSync(join(home, 'config.yaml'), `${header}${stringifyYaml(doc, { lineWidth: 0 })}`, 'utf8')
 }
 
+// ---------------------------------------------------------------------------
+// Web 配置面板：安全视图 + 批量补丁
+// ---------------------------------------------------------------------------
+
+/** 配置补丁里的一项校验错误；path 是点路径，前端按它高亮字段。 */
+export interface ConfigPatchError {
+  path: string
+  message: string
+}
+
+export interface ConfigPatchResult {
+  /** 空数组表示全部通过，配置已写入入参对象。 */
+  errors: ConfigPatchError[]
+  /** 实际发生变化的点路径，用于日志与「哪些改动需要重启」提示。 */
+  changed: string[]
+}
+
+/** 立即生效的配置路径前缀；其余改动都需要重启 `ra start`。 */
+export const HOT_CONFIG_PREFIXES = ['policy.'] as const
+
+function clone<T>(value: T): T {
+  return structuredClone(value)
+}
+
+/**
+ * 供 Web 面板读取的安全配置快照：深拷贝 + 去掉/遮蔽敏感字段。
+ * 面板保存时只会提交白名单里的字段，不会把这份快照整体写回。
+ */
+export function publicConfig(config: AppConfig): Record<string, unknown> {
+  const doc = clone(config) as unknown as Record<string, unknown>
+  const llm = (doc.llm ?? {}) as Record<string, unknown>
+  // 明文密钥不下发；apiKeySet 只用来告诉面板「已经配过」。
+  doc.llm = {
+    baseUrl: String(llm.baseUrl ?? ''),
+    model: String(llm.model ?? ''),
+    apiKeySet: Boolean(llm.apiKey),
+  }
+  return doc
+}
+
+/** 面板「恢复默认值」用的基准：只保留可编辑口径，避免泄露模板之外的内容。 */
+export function publicDefaults(): Record<string, unknown> {
+  const base = defaultConfig()
+  return {
+    feishu: {
+      larkHome: base.feishu.larkHome,
+      appId: base.feishu.appId,
+      reaction: base.feishu.reaction,
+      directMessages: base.feishu.directMessages,
+      images: base.feishu.images,
+    },
+    policy: base.policy,
+    router: base.router,
+    progress: base.progress,
+    retention: base.retention,
+    workerSpec: base.workerSpec,
+    backend: base.backend,
+    server: base.server,
+  }
+}
+
+function getPath(doc: unknown, path: string): unknown {
+  return path.split('.').reduce<unknown>((node, part) => {
+    if (!node || typeof node !== 'object') return undefined
+    return (node as Record<string, unknown>)[part]
+  }, doc)
+}
+
+function setPath(doc: Record<string, unknown>, path: string, value: unknown): void {
+  const parts = path.split('.')
+  let node: Record<string, unknown> = doc
+  for (const part of parts.slice(0, -1)) {
+    const next = node[part]
+    if (!next || typeof next !== 'object') node[part] = {}
+    node = node[part] as Record<string, unknown>
+  }
+  node[parts.at(-1)!] = value
+}
+
+interface Validator {
+  check(value: unknown): string | null
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+
+const stringValue: Validator = {
+  check: value => (typeof value === 'string' ? null : '需要字符串'),
+}
+
+function enumValue(allowed: readonly string[]): Validator {
+  return { check: value => (typeof value === 'string' && allowed.includes(value) ? null : `只能是 ${allowed.join(' / ')}`) }
+}
+
+function intValue(min: number, max: number, unit = ''): Validator {
+  return {
+    check: value => {
+      if (typeof value !== 'number' || !Number.isInteger(value)) return '需要整数'
+      if (value < min || value > max) return `取值范围 ${min}–${max}${unit}`
+      return null
+    },
+  }
+}
+
+function boolValue(): Validator {
+  return { check: value => (typeof value === 'boolean' ? null : '需要 true / false') }
+}
+
+function stringListValue(): Validator {
+  return {
+    check: value => {
+      if (!Array.isArray(value)) return '需要字符串数组'
+      if (value.some(item => typeof item !== 'string')) return '数组里只能放字符串'
+      return null
+    },
+  }
+}
+
 const ACCEPT_MODES = ['off', 'observe', 'auto']
 const WORKER_MODES = ['prompt', 'agent']
 const ADMISSION_LISTED = ['inferred', 'ignore']
 const ADMISSION_UNLISTED_ADDRESSED = ['explicit', 'inferred', 'ignore']
+
+/**
+ * 一份显式的路径白名单：校验规则跟着路径走，不再让请求体直接 merge 进配置。
+ * 这样做的好处是 API 永远不会因为面板拼错字段名而把 config.yaml 写成垃圾。
+ */
+const CONFIG_VALIDATORS: Record<string, Validator> = {
+  'feishu.larkHome': stringValue,
+  'feishu.appId': stringValue,
+  'feishu.reaction': stringValue,
+  'feishu.directMessages': boolValue(),
+  'feishu.allowed': stringListValue(),
+  'feishu.bots': stringListValue(),
+  'feishu.botOpenIds': stringListValue(),
+  'feishu.botNames': stringListValue(),
+  'feishu.images.enabled': boolValue(),
+  'feishu.images.maxChars': intValue(100, 20_000, ' 字'),
+  'feishu.images.timeoutMs': intValue(1_000, 300_000, ' 毫秒'),
+
+  'policy.acceptMode': enumValue(ACCEPT_MODES),
+  'policy.maxWorkers': intValue(1, 64),
+  'policy.admission.listedNotAddressed': enumValue(ADMISSION_LISTED),
+  'policy.admission.unlistedAddressed': enumValue(ADMISSION_UNLISTED_ADDRESSED),
+  'policy.admission.unlistedNotAddressed': enumValue(ADMISSION_LISTED),
+
+  'router.timeoutMs': intValue(1_000, 600_000, ' 毫秒'),
+  'router.tokenBudget': intValue(0, 10_000_000),
+  'router.agentDir': stringValue,
+  'router.session.enabled': boolValue(),
+  'router.session.keyScope': enumValue(['user', 'thread']),
+  'router.session.dir': stringValue,
+  'router.session.idleTtlMs': intValue(0, 86_400_000, ' 毫秒'),
+  'router.session.maxActive': intValue(1, 1_000),
+  'router.session.retentionDays': intValue(0, 3_650, ' 天'),
+  'router.session.cleanupIntervalHours': intValue(1, 720, ' 小时'),
+  'router.session.turnTimeoutMs': intValue(1_000, 3_600_000, ' 毫秒'),
+  'router.session.tokenBudget': intValue(0, 10_000_000),
+  'router.session.compaction.enabled': boolValue(),
+  'router.session.compaction.reserveTokens': intValue(1_024, 1_000_000),
+  'router.session.compaction.keepRecentTokens': intValue(1_024, 1_000_000),
+  'router.persona.name': stringValue,
+  'router.persona.soulFile': stringValue,
+  'router.persona.style': enumValue(['friendly', 'concise', 'professional']),
+  'router.persona.language': stringValue,
+
+  'progress.syncMs': intValue(0, 3_600_000, ' 毫秒'),
+  'progress.probeMs': intValue(0, 3_600_000, ' 毫秒'),
+  'progress.silenceMs': intValue(1_000, 3_600_000, ' 毫秒'),
+  'progress.repeatMs': intValue(1_000, 3_600_000, ' 毫秒'),
+
+  'retention.enabled': boolValue(),
+  'retention.idleHours': intValue(1, 8_760, ' 小时'),
+  'retention.closeGraceHours': intValue(1, 8_760, ' 小时'),
+  'retention.zombieHours': intValue(1, 8_760, ' 小时'),
+  'retention.sweepMinutes': intValue(1, 1_440, ' 分钟'),
+
+  'workerSpec.mode': enumValue(WORKER_MODES),
+  'backend.default': enumValue(['orca']),
+  'server.port': intValue(1, 65_535),
+
+  'llm.baseUrl': stringValue,
+  'llm.model': stringValue,
+}
+
+/** 整段替换的复杂字段（项目、群、白名单这类不适合逐项点路径编辑的配置）。 */
+const LIST_PATHS = ['projects', 'feishu.chats'] as const
+
+function validateProjects(value: unknown): { error: string | null; value: ProjectConfig[] } {
+  if (!Array.isArray(value)) return { error: '需要项目数组', value: [] }
+  const projects: ProjectConfig[] = []
+  const names = new Set<string>()
+  for (const [index, item] of value.entries()) {
+    if (!isRecord(item)) return { error: `第 ${index + 1} 项不是对象`, value: [] }
+    const repo = typeof item.repo === 'string' ? item.repo.trim() : ''
+    const name = typeof item.name === 'string' ? item.name.trim() : ''
+    if (!repo) return { error: `第 ${index + 1} 项缺少 repo`, value: [] }
+    const finalName = name || projectNameOf(repo)
+    if (names.has(finalName)) return { error: `项目名重复：${finalName}`, value: [] }
+    names.add(finalName)
+    const branches = Array.isArray(item.branches) ? item.branches.map(String).map(b => b.trim()).filter(Boolean) : []
+    const defaultBranch = typeof item.defaultBranch === 'string' ? item.defaultBranch.trim() : ''
+    if (defaultBranch && branches.length > 0 && !branches.includes(defaultBranch)) {
+      return { error: `项目 ${finalName} 的默认分支 ${defaultBranch} 不在白名单里`, value: [] }
+    }
+    projects.push({ name: finalName, repo, branches, defaultBranch })
+  }
+  return { error: null, value: projects }
+}
+
+function validateChats(value: unknown): { error: string | null; value: ChatSettings[] } {
+  if (!Array.isArray(value)) return { error: '需要群数组', value: [] }
+  const chats: ChatSettings[] = []
+  const seen = new Set<string>()
+  for (const [index, item] of value.entries()) {
+    if (!isRecord(item)) return { error: `第 ${index + 1} 项不是对象`, value: [] }
+    const chat = typeof item.chat === 'string' ? item.chat.trim() : ''
+    if (!chat) return { error: `第 ${index + 1} 项缺少 chat_id`, value: [] }
+    if (seen.has(chat)) return { error: `群重复：${chat}`, value: [] }
+    seen.add(chat)
+    const mode = item.mode === 'mention' ? 'mention' : 'all'
+    const allowed = Array.isArray(item.allowed) ? item.allowed.map(String).map(id => id.trim()).filter(Boolean) : []
+    chats.push(chatEntry(chat, {
+      mode,
+      repo: typeof item.repo === 'string' ? item.repo.trim() : '',
+      branch: typeof item.branch === 'string' ? item.branch.trim() : '',
+      sync: item.sync === true,
+      allowed,
+    }))
+  }
+  return { error: null, value: chats }
+}
+
+/**
+ * 把面板提交的一批点路径改动写进配置对象。
+ *
+ * - 全部字段先校验，有任意一项不合法就整体拒绝（不会写一半）。
+ * - `projects` / `feishu.chats` 走整段替换，并做去重、默认分支白名单等交叉校验。
+ * - 返回 changed 供调用方判断是否需要刷新策略 / 提示重启。
+ */
+export function applyConfigPatch(config: AppConfig, patch: Record<string, unknown>): ConfigPatchResult {
+  const errors: ConfigPatchError[] = []
+  const accepted: { path: string; value: unknown }[] = []
+
+  for (const [path, value] of Object.entries(patch)) {
+    if ((LIST_PATHS as readonly string[]).includes(path)) {
+      if (path === 'projects') {
+        const result = validateProjects(value)
+        if (result.error) errors.push({ path, message: result.error })
+        else accepted.push({ path, value: result.value })
+      } else {
+        const result = validateChats(value)
+        if (result.error) errors.push({ path, message: result.error })
+        else accepted.push({ path, value: result.value })
+      }
+      continue
+    }
+    if (path === 'llm.apiKey') {
+      // 面板不接收明文密钥；显式忽略而不是写入。
+      continue
+    }
+    const validator = CONFIG_VALIDATORS[path]
+    if (!validator) {
+      errors.push({ path, message: '不是可编辑的配置项' })
+      continue
+    }
+    const message = validator.check(value)
+    if (message) errors.push({ path, message })
+    else accepted.push({ path, value })
+  }
+
+  if (errors.length > 0) return { errors, changed: [] }
+
+  const changed: string[] = []
+  for (const { path, value } of accepted) {
+    const before = getPath(config, path)
+    if (JSON.stringify(before) === JSON.stringify(value)) continue
+    if (path === 'projects') config.projects = value as ProjectConfig[]
+    else if (path === 'feishu.chats') config.feishu.chats = value as ChatSettings[]
+    else setPath(config as unknown as Record<string, unknown>, path, value)
+    changed.push(path)
+  }
+  return { errors: [], changed }
+}
+
+/** 除了策略以外，配置都在服务启动时读入，保存后需要重启 `ra start` 才生效。 */
+export function requiresRestart(changed: string[]): boolean {
+  return changed.some(path => !HOT_CONFIG_PREFIXES.some(prefix => path.startsWith(prefix)))
+}
 
 /** `repo@branch` → [repo, branch]；没有 @ 时分支为空。 */
 function splitBranch(value: string): [string, string] {
