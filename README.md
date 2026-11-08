@@ -273,7 +273,7 @@ Router 不做对话，只在必要时说话：
 | `progress:synced` / `progress:dedup` | Service | `ticketId` `count` / `skipped` | 进展定时合并同步，或内容重复被跳过 |
 | `progress:probed` | Service | `ticketId` `minutes` `count` `unchanged` | 主动巡检读会话记录 / 终端并把语义摘要同步到话题 |
 | `outbox:sent` / `outbox:failed` | Outbox | `key` `text` / `error` | 对外通知结果 |
-| `api:input` / `api:stop` / `api:policy` | HTTP API | — | 面板 / CLI 的操作 |
+| `api:input` / `api:stop` / `api:policy` / `api:config` | HTTP API | — | 面板 / CLI 的操作 |
 | `idle:nudge` / `idle:stale` | Service | — | 空闲唤醒与失联标记 |
 | `pr:linked` / `pr:state` | Service | — | PR 跟踪 |
 | `recover:*` | Service | — | 重启对账 |
@@ -281,6 +281,16 @@ Router 不做对话，只在必要时说话：
 worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态）；主动巡检优先读 Claude 会话记录，其次才把终端里的语义摘要（助手文本 + 动作概要）发到话题，不逐条回放工具调用。要看它做了什么，读 `report` 的 `summary` 与 `~/.router-agent/workers/<ticketId>/events.log`。
 
 > **同一机器人只能有一个事件总线在跑。** 如果 `ra logs` 出现 `another event bus is already connected`，先停掉其它占用该应用的消费者，或用 `ra init` 的「专属机器人」选项给 router-agent 单独配一个。
+
+#### Web 面板
+
+`ra web` 打开的面板分三块：
+
+- **工单**：按阶段分组 + 计数、关键字搜索（标题 / 工单号 / 仓库 / PR）、自动刷新开关与手动刷新；详情页有阶段、派工、PR、授权范围、上报时间线（含完整回复与 `humanAction`）、投递记录，可直接投递 follow-up 或停止工单。
+- **配置**：按「准入策略 / 研判与人格 / 会话复用 / 进展同步 / 闲置治理 / 飞书接入 / 派工与服务 / 项目清单 / 群与绑定」分组；每个字段带说明与默认值提示，改动逐项标脏，保存前做前端 + 后端双重校验，保存后写回 `config.yaml`。
+- **来源**：服务状态、监控群、接收范围概览。
+
+配置项会标注生效范围：**策略**（`acceptMode` / `maxWorkers` / `admission`）保存后立即生效；其余配置在服务启动时读入，保存后需 `ra start` 重启才生效。面板不会展示或接收模型密钥明文（`llm.apiKey` 请用 CLI / 环境变量配置），保存会重写 `config.yaml`，原文件的注释会丢失。
 
 ### PR 闭环
 
@@ -562,7 +572,8 @@ ra report \
 | POST | `/api/tickets/:id/stop` | 停止工单 |
 | POST | `/api/tickets/:id/assignment` | 手工绑定 Assignment |
 | POST | `/api/reports` | Worker 上报状态与回复（`ra report` 的入口） |
-| GET / PUT | `/api/policy` | 读写策略 |
+| GET / PUT | `/api/policy` | 读写策略（保存后落盘） |
+| GET / PUT | `/api/config` | 配置面板：读安全快照 / 按点路径提交补丁（白名单校验 + 落盘） |
 | GET | `/api/sources/feishu/chats` | 飞书来源配置 |
 
 ## 开发
