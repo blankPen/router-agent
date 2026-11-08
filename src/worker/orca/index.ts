@@ -1,6 +1,23 @@
 import { mkdirSync, writeFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import type { WorkerBackend, WorkerContext, InboundMessage, ContextItem, TerminalOutput, SessionSnapshot } from '../port.js'
+import type {
+  WorkerBackend,
+  WorkerContext,
+  InboundMessage,
+  ContextItem,
+  TerminalOutput,
+  SessionSnapshot,
+  WorkerRef,
+  StartResult,
+  DeliveryReceipt,
+  DeliverOptions,
+  AgentStatus,
+  AgentOutput,
+  ActivityQuery,
+  WorkspaceInfo,
+  WorkspaceRef,
+  RepoDescriptor,
+} from '../port.js'
 import { buildWorkerPrompt } from '../spec/index.js'
 import { workBranch, worktreeName } from '../naming.js'
 import { readClaudeSession } from './session.js'
@@ -173,6 +190,10 @@ export function parseCreateResult(stdout: string): { handle: string; workdir?: s
 
 export class OrcaAdapter implements WorkerBackend {
   readonly id = 'orca'
+  readonly capabilities = {
+    agent: { liveStatus: true, processExit: false, output: true, activity: true, structuredInput: true, nudge: true },
+    workspace: { cleanup: true, prLink: true, discovery: true },
+  } as const
   private runner: CommandRunner
   private workersDir: string
   private spec: 'prompt' | 'agent'
@@ -185,9 +206,9 @@ export class OrcaAdapter implements WorkerBackend {
     this.claudeProjectsDir = opts.claudeProjectsDir
   }
 
-  async start(ctx: WorkerContext): Promise<{ handle: string; workdir?: string }> {
-    const statePath = join(this.workersDir, ctx.ticket.id, 'state.json')
-    const eventsPath = join(this.workersDir, ctx.ticket.id, 'events.log')
+  async start(ctx: WorkerContext): Promise<StartResult> {
+    const statePath = ctx.report?.statePath ?? join(this.workersDir, ctx.ticket.id, 'state.json')
+    const eventsPath = ctx.report?.eventsPath ?? join(this.workersDir, ctx.ticket.id, 'events.log')
     const name = worktreeName(ctx.ticket)
     // 每张工单自带 repo/branch（多项目派工）；缺了说明是脏数据，直接报错不猜。
     const repo = ctx.ticket.repo
@@ -196,7 +217,7 @@ export class OrcaAdapter implements WorkerBackend {
     const branch = workBranch(ctx.ticket)
     if (!repo) throw new Error('orca:missing-repo: 工单没有指定仓库，拒绝创建 worktree')
     if (!baseBranch) throw new Error('orca:missing-branch: 工单没有指定起始分支，拒绝创建 worktree')
-    const prompt = buildWorkerPrompt({
+    const prompt = ctx.brief?.contract ?? buildWorkerPrompt({
       mode: this.spec,
       ticket: ctx.ticket,
       mandateScope: ctx.ticket.title,
@@ -210,28 +231,125 @@ export class OrcaAdapter implements WorkerBackend {
     const res = await this.run(worktreeCreate({ repo, name, prompt, branch, ...(baseBranch ? { baseBranch } : {}) }))
     const parsed = parseCreateResult(res.stdout)
     const workdir = parsed.workdir ?? ctx.workdir
+    if (!workdir) throw new Error('orca:workdir-missing: worktree create 没有返回路径')
     this.writeMeta(ctx, { handle: parsed.handle, workdir, statePath, eventsPath, repo, branch: baseBranch, workBranch: parsed.branch ?? branch })
-    return { handle: parsed.handle, workdir }
-  }
-
-  async deliver(handle: string, inputs: InboundMessage[]): Promise<void> {
-    for (const input of inputs) {
-      if (!input.text.trim()) continue
-      await this.run(terminalSend(handle, renderInput(input)))
+    return {
+      handle: parsed.handle,
+      workdir,
+      ...(parsed.branch ? { branch: parsed.branch } : { branch }),
     }
   }
 
-  async registerContext(handle: string, items: ContextItem[]): Promise<void> {
+  async deliver(ref: WorkerRef | string, inputs: InboundMessage[], _opts?: DeliverOptions): Promise<DeliveryReceipt> {
+    const handle = this.handleOf(ref)
+    const accepted: string[] = []
+    for (const input of inputs) {
+      if (!input.text.trim()) continue
+      await this.run(terminalSend(handle, renderInput(input)))
+      accepted.push(input.id)
+    }
+    return { status: 'accepted', inputIds: accepted }
+  }
+
+  async registerContext(ref: WorkerRef | string, items: ContextItem[]): Promise<void> {
     const text = renderContext(items)
     if (!text) return
-    await this.run(terminalSend(handle, text))
+    await this.run(terminalSend(this.handleOf(ref), text))
   }
 
-  async stop(handle: string, reason: string): Promise<void> {
+  async stop(ref: WorkerRef | string, reason: string): Promise<void> {
     void reason
-    await this.run(terminalClose(handle))
+    await this.run(terminalClose(this.handleOf(ref)))
   }
 
+  async nudge(ref: WorkerRef | string): Promise<void> {
+    await this.run(terminalSend(this.handleOf(ref), 'status?'))
+  }
+
+  /** 中立活性：把 Orca 终端字段映射成 AgentStatus；查询失败返回 null。 */
+  async status(ref: WorkerRef | string): Promise<AgentStatus | null> {
+    const handle = this.handleOf(ref)
+    let info: OrcaTerminalInfo | null
+    try {
+      info = await this.inspect(handle)
+    } catch {
+      return null
+    }
+    if (!info) return { alive: false, phase: 'lost', acceptingInput: false, detail: { source: 'orca' } }
+    if (!info.connected) {
+      return { alive: false, phase: 'lost', acceptingInput: false, detail: { source: 'orca', connected: false, orphaned: info.orphaned } }
+    }
+    if (info.orphaned && !info.writable) {
+      return {
+        alive: false,
+        phase: 'unknown',
+        acceptingInput: false,
+        ...(info.lastOutputAt ? { lastActivityAt: info.lastOutputAt } : {}),
+        detail: { source: 'orca', orphaned: true, writable: false },
+      }
+    }
+    return {
+      alive: true,
+      phase: 'running',
+      acceptingInput: info.writable,
+      ...(info.lastOutputAt ? { lastActivityAt: info.lastOutputAt } : {}),
+      detail: { source: 'orca', orphaned: info.orphaned, writable: info.writable },
+    }
+  }
+
+  /** 输出尾部：等价于旧的 read()。 */
+  async output(ref: WorkerRef | string, opts: { limit?: number } = {}): Promise<AgentOutput | null> {
+    return this.read(this.handleOf(ref), opts)
+  }
+
+  /** 结构化活动：优先读 Claude Code 的会话记录；没有 workdir 时返回 null。 */
+  async activity(query: ActivityQuery): Promise<SessionSnapshot | null> {
+    const workdir = query.ref.workdir
+    if (!workdir) return null
+    return this.session(workdir, query.opts ?? {})
+  }
+
+  async inspectWorkspace(ref: WorkspaceRef): Promise<WorkspaceInfo | null> {
+    const selector = ref.workspaceRef ?? `path:${ref.workdir}`
+    const worktree = await this.inspectWorktree(selector)
+    if (!worktree) return null
+    const linked = (worktree.linkedPR ?? worktree.linkedGitLabMR ?? (worktree.worktree as Record<string, any> | undefined)?.linkedPR) as
+      | { number?: number; iid?: number; url?: string; webUrl?: string; state?: string }
+      | undefined
+    const branch = String(worktree.branch ?? (worktree.worktree as Record<string, any> | undefined)?.branch ?? '').replace(/^refs\/heads\//, '')
+    return {
+      workdir: String(worktree.path ?? (worktree.worktree as Record<string, any> | undefined)?.path ?? ref.workdir),
+      branch,
+      ...(linked && Number(linked.number ?? linked.iid) > 0
+        ? {
+            linkedPr: {
+              number: Number(linked.number ?? linked.iid),
+              url: String(linked.url ?? linked.webUrl ?? ''),
+              ...(linked.state === 'open' || linked.state === 'merged' || linked.state === 'closed' ? { state: linked.state } : {}),
+            },
+          }
+        : {}),
+    }
+  }
+
+  async removeWorkspace(ref: WorkspaceRef): Promise<void> {
+    const selector = ref.workspaceRef ?? `path:${ref.workdir}`
+    await this.removeWorktree(selector)
+  }
+
+  async listRepos(): Promise<RepoDescriptor[]> {
+    const res = await this.run(['repo', 'list', '--json'])
+    const parsed = parseJsonOrThrow(res.stdout) as Record<string, any>
+    const result = (parsed.result ?? parsed) as Record<string, any>
+    const list = result.repos ?? result.rows ?? result.items ?? (Array.isArray(result) ? result : [])
+    return (Array.isArray(list) ? list : []).map((item: Record<string, any>) => ({
+      name: String(item.displayName ?? item.name ?? ''),
+      path: String(item.path ?? ''),
+      ...(item.kind ? { kind: String(item.kind) } : {}),
+    }))
+  }
+
+  /** 旧接口：保留给兼容调用与单测。 */
   async inspect(handle: string): Promise<OrcaTerminalInfo | null> {
     const res = await this.run(terminalList())
     const parsed = parseJsonOrThrow(res.stdout)
@@ -277,6 +395,10 @@ export class OrcaAdapter implements WorkerBackend {
     await this.run(agentLaunch({ worktree, prompt }))
   }
 
+  private handleOf(ref: WorkerRef | string): string {
+    return typeof ref === 'string' ? ref : ref.handle
+  }
+
   private async run(argv: string[]): Promise<CommandResult> {
     const res = await this.runner.run(argv)
     if (res.code !== 0) {
@@ -290,6 +412,7 @@ export class OrcaAdapter implements WorkerBackend {
     mkdirSync(dir, { recursive: true })
     const metaPath = join(dir, 'meta.json')
     const meta = {
+      schemaVersion: 2,
       ticketId: ctx.ticket.id,
       assignmentId: ctx.assignment.id,
       handle: extra.handle,
@@ -302,6 +425,7 @@ export class OrcaAdapter implements WorkerBackend {
       /** worktree 自己实际使用的工作分支。 */
       workBranch: extra.workBranch,
       backend: this.id,
+      status: 'running',
       startedAt: new Date().toISOString(),
     }
     writeFileSync(metaPath, `${JSON.stringify(meta, null, 2)}\n`, 'utf8')

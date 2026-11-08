@@ -123,6 +123,17 @@ async function pickRepo(
   prompts: Prompter,
   out: (line: string) => void,
 ): Promise<void> {
+  const existingRepo = config.projects[0]?.repo ?? ''
+  // Claude CLI 用 git worktree，需要本地仓库绝对路径，不走 Orca 的 displayName。
+  if (config.backend.default === 'claude-cli') {
+    const repo = await prompts.input({
+      message: '本地仓库绝对路径（Claude CLI 用，例如 /Users/me/project）',
+      default: existingRepo,
+    })
+    await registerProject(config, repo, prompts, out)
+    return
+  }
+
   let repos: { name: string; path: string }[] = []
   try {
     const res = await deps.orca.run(['repo', 'list', '--json'])
@@ -131,7 +142,6 @@ async function pickRepo(
     // orca 不可用时退回手输
   }
 
-  const existingRepo = config.projects[0]?.repo ?? ''
   if (repos.length === 0) {
     const repo = await prompts.input({
       message: 'Orca 仓库名（orca repo list 里的 displayName）',

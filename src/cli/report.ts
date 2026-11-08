@@ -1,6 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import type { WorkerStateFile } from '../worker/orca/report-poller.js'
 
 export interface ReportOptions {
   ticket: string

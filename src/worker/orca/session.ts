@@ -19,6 +19,8 @@ export interface ReadSessionOptions {
   maxBytes?: number
   /** 最多保留多少条最近活动。 */
   maxEvents?: number
+  /** 精确匹配会话 ID；找不到时返回 null，不退化成「最新文件」。 */
+  sessionId?: string
 }
 
 /**
@@ -41,6 +43,12 @@ export function readClaudeSession(workdir: string, opts: ReadSessionOptions = {}
     return null
   }
   if (files.length === 0) return null
+
+  if (opts.sessionId) {
+    const exact = files.find(file => file === `${opts.sessionId}.jsonl` || file.includes(opts.sessionId!))
+    if (!exact) return null
+    files = [exact]
+  }
 
   const latest = files
     .map(file => {

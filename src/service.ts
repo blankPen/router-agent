@@ -6,12 +6,15 @@ import type { Assignment, Report, Stage, Ticket, Trigger } from './core/model.js
 import type { Store } from './store/db.js'
 import type { AppConfig, RetentionSettings } from './config.js'
 import { replyAlwaysChatsOf } from './config.js'
-import type { WorkerBackend, WorkerContext, SessionEvent } from './worker/port.js'
+import { WorkerBackendError, type WorkerBackend, type WorkerContext, type SessionEvent, type WorkerRef, type AgentStatus } from './worker/port.js'
 import { AgentLoop } from './router/agent-loop.js'
 import type { DecisionAudit, DecisionEngine } from './router/decision-engine.js'
 import { dispatchSettingsOf } from './router/dispatch.js'
-import { ReportPoller, appendEvent, judgeIdle, type WorkerMeta, type WorkerStateFile } from './worker/orca/report-poller.js'
-import { OrcaCommandError, type OrcaTerminalInfo } from './worker/orca/index.js'
+import { ReportPoller, appendEvent, type WorkerMeta, type WorkerStateFile } from './worker/report-poller.js'
+import { classifyAgentStatus } from './worker/status.js'
+import { BackendRegistry } from './worker/registry.js'
+import { buildNeutralContract, buildWorkerPrompt } from './worker/spec/index.js'
+import { workBranch } from './worker/naming.js'
 import { EffectsProcessor } from './core/effects.js'
 import { preview } from './core/events.js'
 import { shouldSendAsText } from './sources/feishu.js'
@@ -37,11 +40,9 @@ export interface RouterServiceOptions {
   config: AppConfig
   store: Store
   engine: Engine
-  backend: WorkerBackend & {
-    inspect?: (handle: string) => Promise<unknown | null>
-    inspectWorktree?: (selector: string) => Promise<Record<string, unknown> | null>
-    removeWorktree?: (selector: string) => Promise<void>
-  }
+  backend: WorkerBackend
+  /** 多后端注册表；不传时退化为只含 backend 的单后端注册表。 */
+  backends?: BackendRegistry
   /** 唯一研判引擎（Pi）。 */
   decisionEngine: DecisionEngine
   prTracker: PrTracker
@@ -440,11 +441,7 @@ export class RouterService {
   readonly loop: AgentLoop
   readonly config: AppConfig
   private decisionEngine: DecisionEngine
-  private backend: WorkerBackend & {
-    inspect?: (handle: string) => Promise<unknown | null>
-    inspectWorktree?: (selector: string) => Promise<Record<string, unknown> | null>
-    removeWorktree?: (selector: string) => Promise<void>
-  }
+  private backends: BackendRegistry
   private clock: Clock
   private logger: Logger
   private poller: { scan(): number; reset?: () => void }
@@ -455,9 +452,13 @@ export class RouterService {
   private running = false
   private idleAfterMs: number
   private staleAfterMs: number
-  private idle = new Map<string, { turn: number; nudgedAt: number | null; stale: boolean }>()
+  private idle = new Map<string, { turn: number; nudgedAt: number | null; stale: boolean; blocked?: boolean; transferred?: boolean }>()
   private ticking = false
   private backfill?: () => Promise<Trigger[]>
+  /** 每条输入已经投递过几次；用于区分并发去重与串行重投。 */
+  private deliveryAttempts = new Map<string, number>()
+  /** queued/rejected 后的退避截止时间，避免每秒拉起一次 Agent 查询。 */
+  private deliveryCooldown = new Map<string, number>()
   /** 派工失败记录：用于限制「旧输入」反复触发重试，并累计尝试次数。内存缓存 + cursors 持久化。 */
   private launchFailures = new Map<string, LaunchFailureRecord>()
   /** 排队状态的去重签名，避免每秒刷同一条排队日志。 */
@@ -485,7 +486,7 @@ export class RouterService {
     this.store = opts.store
     this.engine = opts.engine
     this.config = opts.config
-    this.backend = opts.backend
+    this.backends = opts.backends ?? new BackendRegistry(new Map([[opts.backend.id, opts.backend]]), opts.backend.id)
     this.clock = opts.clock ?? { now: () => new Date().toISOString() }
     this.logger = opts.logger ?? noopLogger
     this.prTracker = opts.prTracker
@@ -538,7 +539,8 @@ export class RouterService {
       const ticketId = String(payload.ticketId ?? '')
       const assignment = this.store.latestAssignment(ticketId)
       if (!assignment?.handle) return
-      await this.backend.stop(assignment.handle, 'ticket-stopped')
+      const backend = this.backendFor(assignment)
+      await backend.stop(this.refOf(assignment), 'ticket-stopped')
       this.log('worker:stopped', ticketId, { handle: assignment.handle })
     })
     effects.register('launch-worker', async payload => {
@@ -549,6 +551,35 @@ export class RouterService {
     effects.register('cleanup-workspace', async (payload, item) => {
       await this.cleanupWorkspace(String(payload.ticketId ?? ''), item.attempts)
     })
+  }
+
+  /** 把 Assignment 折成后端可消费的中立引用。 */
+  private refOf(assignment: Assignment): WorkerRef {
+    return {
+      handle: assignment.handle,
+      ticketId: assignment.ticketId,
+      ...(assignment.workdir ? { workdir: assignment.workdir } : {}),
+    }
+  }
+
+  private workspaceRefOf(assignment: Assignment): { ticketId: string; workdir: string } {
+    return { ticketId: assignment.ticketId, workdir: assignment.workdir }
+  }
+
+  /** 按 assignment 的 backendId 取后端；旧工单不会被新默认后端接管。 */
+  private backendFor(assignment: Assignment): WorkerBackend {
+    return this.backends.get(assignment.backendId)
+  }
+
+  /** 读一次中立活性；没有能力或查询失败时返回 null。 */
+  private async statusOf(assignment: Assignment): Promise<AgentStatus | null> {
+    const backend = this.backendFor(assignment)
+    if (!backend.status) return null
+    try {
+      return await backend.status(this.refOf(assignment))
+    } catch {
+      return null
+    }
   }
 
   /** 一个完整周期：研判 → 上报 → Effects → 派工 → 投递。周期之间串行，避免重叠。 */
@@ -705,8 +736,14 @@ export class RouterService {
   }
 
   private async launch(ticket: Ticket): Promise<Assignment> {
+    // 旧工单沿用创建时的后端；新工单用默认后端。
+    const latest = this.store.latestAssignment(ticket.id)
+    const backendId = latest?.backendId && this.backends.has(latest.backendId)
+      ? latest.backendId
+      : this.backends.default().id
+    const backend = this.backends.get(backendId)
     const assignment = this.engine.startAssignment(ticket.id, {
-      backendId: this.backend.id,
+      backendId,
       handle: '',
       workdir: '',
     })
@@ -715,18 +752,64 @@ export class RouterService {
       const latest = this.store.latestReport(ticket.id)
       this.store.setCursor(progressCursorKey(ticket.id), latest?.id ?? PROGRESS_FROM_START, this.clock.now())
     }
-    const ctx: WorkerContext = { ticket, assignment, workdir: '' }
+    const workerDir = join(this.config.home, 'workers', ticket.id)
+    mkdirSync(workerDir, { recursive: true })
+    const statePath = join(workerDir, 'state.json')
+    const eventsPath = join(workerDir, 'events.log')
+    const branchName = workBranch(ticket)
+    const contract = backend.id === 'orca'
+      ? buildWorkerPrompt({
+          mode: this.config.workerSpec.mode,
+          ticket,
+          mandateScope: ticket.title,
+          statePath,
+          eventsPath,
+          repo: ticket.repo,
+          branch: ticket.branch,
+          workBranch: branchName,
+          workdir: '',
+        })
+      : buildNeutralContract({
+          ticketId: ticket.id,
+          title: ticket.title,
+          scope: ticket.title,
+          repo: ticket.repo,
+          branch: ticket.branch,
+          workBranch: branchName,
+          workdir: '',
+          statePath,
+          eventsPath,
+        })
+    const ctx: WorkerContext = {
+      ticket,
+      assignment,
+      workdir: '',
+      report: { statePath, eventsPath },
+      brief: {
+        ticketId: ticket.id,
+        title: ticket.title,
+        scope: ticket.title,
+        workBranch: branchName,
+        contract,
+      },
+      tools: this.config.worker.tools,
+    }
     try {
-      const { handle, workdir } = await this.backend.start(ctx)
-      const updated: Assignment = { ...assignment, handle, workdir: workdir ?? '' }
+      const started = await backend.start(ctx)
+      const updated: Assignment = { ...assignment, handle: started.handle, workdir: started.workdir }
       this.store.updateAssignment(updated)
       this.engine.refreshStage(ticket.id)
       this.clearLaunchFailure(ticket.id)
       this.queueNotified.delete(ticket.id)
-      this.log('launch', ticket.id, { handle, workdir })
+      this.log('launch', ticket.id, { handle: started.handle, workdir: started.workdir })
       return updated
     } catch (error) {
-      this.store.updateAssignment({ ...assignment, status: 'ended', endedAt: this.clock.now() })
+      // launch 半成功：把已创建的 workdir 落库，后续 cleanup 才能回收。
+      const failedWorkdir = error instanceof WorkerBackendError && typeof error.detail?.workdir === 'string'
+        ? String(error.detail.workdir)
+        : assignment.workdir
+      this.store.updateAssignment({ ...assignment, workdir: failedWorkdir, status: 'ended', endedAt: this.clock.now() })
+      if (failedWorkdir) this.enqueueWorkspaceCleanup(ticket)
       this.reportLaunchFailure(ticket, error)
       throw error
     }
@@ -757,7 +840,7 @@ export class RouterService {
       ...(failure.cause ? { cause: failure.cause } : {}),
       ...(failure.operationId ? { operationId: failure.operationId } : {}),
       ...(failure.code !== undefined ? { exitCode: failure.code } : {}),
-      ...(failure.orcaCode ? { orcaCode: failure.orcaCode } : {}),
+      ...(failure.providerCode ? { providerCode: failure.providerCode } : {}),
       ...(failure.args ? { args: failure.args } : {}),
       ...(failure.stdout ? { stdout: failure.stdout } : {}),
       ...(failure.stderr ? { stderr: failure.stderr } : {}),
@@ -771,7 +854,7 @@ export class RouterService {
         '',
         `失败原因：${failure.reason}`,
         ...(failure.cause ? [`底层原因：${failure.cause}`] : []),
-        ...(failure.orcaCode ? [`错误码：${failure.orcaCode}`] : []),
+        ...(failure.providerCode ? [`错误码：${failure.providerCode}`] : []),
         `项目：${ticket.repo}　起始分支：${ticket.branch}`,
         `已尝试次数：${attempts}`,
         '',
@@ -821,7 +904,11 @@ export class RouterService {
       if (ticket.stage === 'closed') continue
       const assignment = this.store.latestAssignment(ticket.id)
       const pending = this.store.pendingInputs(ticket.id)
-      if (pending.length === 0) continue
+      const unacked = this.store.unackedInputs(ticket.id)
+      if (pending.length === 0 && unacked.length === 0) continue
+      const nowMs = Date.parse(this.clock.now())
+      const cooldownUntil = this.deliveryCooldown.get(ticket.id) ?? 0
+      if (Number.isFinite(nowMs) && cooldownUntil > nowMs) continue
       // 没有活着的 worker：新输入视为「重试派工」信号。
       // 派工失败后工单会转人工，用户在该话题里回复即可重新拉起 worker。
       if (!assignment || assignment.status === 'ended' || !assignment.handle) {
@@ -829,11 +916,39 @@ export class RouterService {
         continue
       }
       // 下次唤醒时把上次已投递但没 ack 的输入一并重发，靠 id 去重。
-      const unacked = this.store.unackedInputs(ticket.id)
-      const batch = [...unacked, ...pending]
+      const batch = [...unacked, ...pending.filter(item => !unacked.some(u => u.id === item.id))]
       try {
         // 用 input.id（而不是 assignmentId:seq）作为投递 id：worker 会原样写进 acked_inputs。
-        await this.backend.deliver(assignment.handle, batch.map(input => ({ id: input.id, kind: input.kind, text: input.text })))
+        const backend = this.backendFor(assignment)
+        const lastId = batch.at(-1)?.id
+        const attempt = lastId ? (this.deliveryAttempts.get(lastId) ?? 0) + 1 : 1
+        if (lastId) this.deliveryAttempts.set(lastId, attempt)
+        if (attempt > 5) {
+          this.engine.setAttention(ticket.id, `输入 ${lastId ?? ''} 已重投 ${attempt - 1} 次仍未 ack，请人工确认`)
+          this.deliveryCooldown.set(ticket.id, nowMs + 10 * 60_000)
+          this.logger.warn('input:redeliver-giveup', { ticketId: ticket.id, inputId: lastId, attempt })
+          continue
+        }
+        const receipt = await backend.deliver(
+          this.refOf(assignment),
+          batch.map(input => ({ id: input.id, kind: input.kind, text: input.text })),
+          { attempt, redeliver: attempt > 1 },
+        )
+        if (receipt.status === 'queued') {
+          this.deliveryCooldown.set(ticket.id, nowMs + 30_000)
+          this.log('input:queued', ticket.id, { count: batch.length, reason: receipt.reason ?? 'backend-busy' })
+          continue
+        }
+        if (receipt.status === 'rejected') {
+          if (receipt.retryable === false) {
+            this.handleLostWorker(ticket, `input-rejected:${receipt.reason}`)
+            continue
+          }
+          this.deliveryCooldown.set(ticket.id, nowMs + (receipt.retryAfterMs ?? 60_000))
+          this.logger.warn('input:rejected', { ticketId: ticket.id, reason: receipt.reason })
+          continue
+        }
+        this.deliveryCooldown.delete(ticket.id)
         this.store.markInputsDelivered(ticket.id, this.clock.now())
         this.log('input:delivered', ticket.id, {
           count: batch.length,
@@ -841,8 +956,9 @@ export class RouterService {
           text: preview(batch.map(item => item.text).join(' / ')),
         })
       } catch (error) {
+        this.deliveryCooldown.set(ticket.id, nowMs + 30_000)
         // 终端被删掉时 send 会一直失败；先确认会话是否还在，别每秒重试。
-        if (await this.workerGone(assignment.handle)) {
+        if (await this.workerGone(assignment)) {
           this.handleLostWorker(ticket, 'input-deliver-failed')
           continue
         }
@@ -878,26 +994,24 @@ export class RouterService {
   // ---------- 空闲与失联 ----------
 
   /**
-   * 用 Orca 的结构化字段判断 worker 是否空闲：
-   * 长时间无输出 → 主动发 `status?` 唤醒；仍然无响应 → 标 stale 并通知人。
+   * 用中立 AgentStatus 判断 worker 是否空闲：
+   * 长时间无活动 → nudge（仅支持的后端）；仍然无响应 → 标 stale 并通知人。
    */
   async checkIdle(nowMs: number = Date.parse(this.clock.now())): Promise<void> {
-    if (!this.backend.inspect) return
     for (const ticket of this.store.listOpenTickets()) {
       if (ticket.stage !== 'running' && ticket.stage !== 'assigned') continue
       const assignment = this.store.latestAssignment(ticket.id)
       if (!assignment?.handle || assignment.status === 'ended') continue
-      let info: OrcaTerminalInfo | null
-      try {
-        info = (await this.backend.inspect(assignment.handle)) as OrcaTerminalInfo | null
-      } catch {
-        // Orca 暂时不可用，下一轮再看。
+      const backend = this.backendFor(assignment)
+      if (!backend.status) continue
+      const status = await this.statusOf(assignment)
+      const verdict = classifyAgentStatus(status)
+      if (verdict === 'unknown') continue
+      if (verdict === 'lost') {
+        this.handleLostWorker(ticket, 'status-lost')
         continue
       }
-      if (!info || !info.connected) {
-        this.handleLostWorker(ticket, 'inspect-dead')
-        continue
-      }
+
       const turn = this.store.latestReport(ticket.id)?.turn ?? 0
       const state = this.idle.get(ticket.id)
       if (!state) {
@@ -907,22 +1021,45 @@ export class RouterService {
         continue
       }
       const current = this.idle.get(ticket.id)!
-      const verdict = judgeIdle({ info, turn, lastTurn: turn, now: nowMs, idleAfterMs: this.idleAfterMs })
-      if (verdict !== 'idle') continue
 
-      if (!current.nudgedAt) {
-        await this.backend.deliver(assignment.handle, [{ id: `${assignment.id}:status-check`, kind: 'retry', text: 'status?' }])
+      if (verdict === 'transfer') {
+        if (!current.transferred) {
+          current.transferred = true
+          this.store.setCursor(zombieCursorKey(ticket.id), String(nowMs), this.clock.now())
+          this.engine.setAttention(ticket.id, 'worker 已退出且无法恢复，请人工确认')
+          this.notify(ticket, `工单「${ticket.title}」的 worker 已退出且无法自动恢复，已转人工处理。`, `transfer:${ticket.id}:${turn}`)
+          this.log('idle:transfer', ticket.id, {})
+        }
+        continue
+      }
+
+      if (status?.phase === 'blocked') {
+        if (!current.blocked) {
+          current.blocked = true
+          this.engine.setAttention(ticket.id, `worker 正在等待人工处理：${status.detail?.waitingFor ?? '权限或输入'}`)
+          this.notify(ticket, `工单「${ticket.title}」的 worker 正在等待人工处理（权限/输入），请到 Claude 会话或 Orca 终端确认。`, `blocked:${ticket.id}:${turn}`)
+          this.log('idle:blocked', ticket.id, { detail: status.detail })
+        }
+        continue
+      }
+
+      // keep：用 lastActivityAt 判断是否 idle；没有时间戳就不主动 nudge。
+      const lastActivity = Date.parse(status?.lastActivityAt ?? '')
+      if (!Number.isFinite(lastActivity) || nowMs - lastActivity <= this.idleAfterMs) continue
+
+      if (!current.nudgedAt && backend.nudge) {
+        await backend.nudge(this.refOf(assignment))
         current.nudgedAt = nowMs
         this.log('idle:nudge', ticket.id, { handle: assignment.handle })
         continue
       }
 
-      if (!current.stale && nowMs - current.nudgedAt > this.staleAfterMs) {
+      if (!current.stale && current.nudgedAt && nowMs - current.nudgedAt > this.staleAfterMs) {
         current.stale = true
         // 标记为僵尸：闲置治理只转人工，不再提醒关单、不自动关闭。
         this.store.setCursor(zombieCursorKey(ticket.id), String(nowMs), this.clock.now())
         this.engine.setAttention(ticket.id, 'worker 无响应：长时间没有新的 state.json 上报，已标记 stale，请人工确认')
-        this.notify(ticket, `工单「${ticket.title}」的 worker 无响应，已标记 stale，请到 Orca 终端确认。`, `stale:${ticket.id}`)
+        this.notify(ticket, `工单「${ticket.title}」的 worker 无响应，已标记 stale，请到 Orca / Claude 会话确认。`, `stale:${ticket.id}`)
         this.log('idle:stale', ticket.id, {})
       }
     }
@@ -1025,18 +1162,17 @@ export class RouterService {
     const assignment = this.store.latestAssignment(ticket.id)
     if (!assignment || assignment.status === 'ended') return false
     if (nowMs - this.lastProgressAt(ticket) < zombieMs) return false
-    if (!assignment.handle || !this.backend.inspect) return true
-    try {
-      const info = (await this.backend.inspect(assignment.handle)) as OrcaTerminalInfo | null
-      if (!info || !info.connected) return true
-      const outputAt = Date.parse(info.lastOutputAt)
-      // 终端还活着但拿不到输出时间：不误判成僵尸。
-      if (!Number.isFinite(outputAt)) return false
-      return nowMs - outputAt >= zombieMs
-    } catch {
-      // Orca 暂时不可用：保持现状，下一轮再看。
-      return false
-    }
+    const backend = this.backendFor(assignment)
+    if (!assignment.handle || !backend.status) return false
+    const status = await this.statusOf(assignment)
+    const verdict = classifyAgentStatus(status)
+    if (verdict === 'unknown') return false
+    if (verdict === 'lost' || verdict === 'transfer') return true
+    if (status?.phase === 'blocked') return false
+    const activity = Date.parse(status?.lastActivityAt ?? '')
+    // 进程还活着但拿不到活动时间：不误判成僵尸。
+    if (!Number.isFinite(activity)) return false
+    return nowMs - activity >= zombieMs
   }
 
   private markZombie(ticket: Ticket): void {
@@ -1167,9 +1303,10 @@ export class RouterService {
     const ticket = this.store.getTicket(ticketId)
     const assignment = this.store.latestAssignment(ticketId)
     if (!assignment) return
+    const backend = this.backendFor(assignment)
     if (assignment.handle) {
       try {
-        await this.backend.stop(assignment.handle, 'workspace-cleanup')
+        await backend.stop(this.refOf(assignment), 'workspace-cleanup')
       } catch (error) {
         this.logger.warn('cleanup:stop-failed', {
           ticketId,
@@ -1179,13 +1316,13 @@ export class RouterService {
       }
     }
     if (!assignment.workdir) return
-    if (!this.backend.removeWorktree) {
+    if (!backend.removeWorkspace) {
       this.log('cleanup:no-remove-capability', ticketId, { workdir: assignment.workdir })
       return
     }
     try {
-      // 不带 --force：脏工作区交给 Orca 拒绝，避免误删未提交改动。
-      await this.backend.removeWorktree(`path:${assignment.workdir}`)
+      // 不带 force：脏工作区交给 provider 拒绝，避免误删未提交改动。
+      await backend.removeWorkspace(this.workspaceRefOf(assignment))
       this.log('cleanup:worktree-removed', ticketId, { workdir: assignment.workdir })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -1195,7 +1332,7 @@ export class RouterService {
           // 工作区没能自动回收时告诉发起人，避免以为代码已经清掉了。
           this.notify(
             ticket,
-            `工单「${ticket.title}」已关闭，但对应的 workspace 未能自动回收：${message}\n请在 Orca 里确认（可能有未提交改动或目录已被占用）。`,
+            `工单「${ticket.title}」已关闭，但对应的 workspace 未能自动回收：${message}\n请在 Orca / git worktree 中确认（可能有未提交改动或目录已被占用）。`,
             `cleanup-skip:${ticketId}`,
           )
         }
@@ -1239,6 +1376,8 @@ export class RouterService {
       ...(reply ? { reply } : {}),
       ackedInputs: state.ackedInputs,
     })
+    for (const id of state.ackedInputs) this.deliveryAttempts.delete(id)
+    if (state.ackedInputs.length > 0) this.deliveryCooldown.delete(ticket.id)
     this.appendEventLog(ticket.id, { kind: 'report', state: state.state, turn: state.turn, at: state.updatedAt })
     this.log('report', ticket.id, {
       state: state.state,
@@ -1340,7 +1479,6 @@ export class RouterService {
    */
   async probeProgress(nowMs: number = Date.parse(this.clock.now())): Promise<void> {
     if (this.progressProbeMs <= 0 || this.probing) return
-    if (!this.backend.read && !this.backend.session) return
     this.probing = true
     try {
       for (const ticket of this.store.listOpenTickets()) {
@@ -1362,6 +1500,8 @@ export class RouterService {
     const assignment = this.store.latestAssignment(ticket.id)
     if (!assignment?.handle || assignment.status === 'ended') return
     if (!this.awaitingWorker(ticket)) return
+    const backend = this.backendFor(assignment)
+    if (!backend.activity && !backend.output) return
 
     const lastProgress = this.lastProgressAt(ticket)
     if (!lastProgress || nowMs - lastProgress < this.progressSilenceMs) return
@@ -1370,14 +1510,13 @@ export class RouterService {
     const samePeriod = record !== null && record.lastProgressAt === lastProgress
     if (samePeriod && nowMs - record.lastPostAt < this.progressRepeatMs) return
 
-    const info = this.backend.inspect
-      ? (await this.backend.inspect(assignment.handle)) as OrcaTerminalInfo | null
-      : null
-    if (info && !info.connected) return
+    const status = await this.statusOf(assignment)
+    if (status && !status.alive) return
+    if (status?.phase === 'blocked') return
 
-    // 首选 Agent 自己的结构化会话记录；没有（非 Claude / 文件未落盘）再退回终端屏幕。
-    const snapshot = assignment.workdir
-      ? await this.backend.session?.(assignment.workdir, { maxEvents: 40 })
+    // 首选 Agent 自己的结构化会话记录；没有（非 Claude / 文件未落盘）再退回输出尾部。
+    const snapshot = assignment.workdir && backend.activity
+      ? await backend.activity({ ref: this.refOf(assignment), opts: { maxEvents: 40 } })
       : null
     let snippet: string
     let source: 'session' | 'terminal'
@@ -1387,18 +1526,18 @@ export class RouterService {
       source = 'session'
       lastActivityAt = Date.parse(snapshot.at)
     } else {
-      if (!this.backend.read) return
-      const output = await this.backend.read(assignment.handle, { limit: 60 })
+      if (!backend.output) return
+      const output = await backend.output(this.refOf(assignment), { limit: 60 })
       if (!output || output.status !== 'running') return
       snippet = extractTerminalSnippet(output.lines)
       source = 'terminal'
-      lastActivityAt = info?.lastOutputAt ? Date.parse(info.lastOutputAt) : Number.NaN
+      lastActivityAt = status?.lastActivityAt ? Date.parse(status.lastActivityAt) : Number.NaN
     }
 
     const snippetHash = snippetFingerprint(snippet)
     const unchanged = samePeriod && record.snippetHash === snippetHash
     const count = samePeriod ? record.count + 1 : 1
-    const lastOutputAt = info?.lastOutputAt ? Date.parse(info.lastOutputAt) : Number.NaN
+    const lastOutputAt = status?.lastActivityAt ? Date.parse(status.lastActivityAt) : Number.NaN
 
     const text = formatProbeMessage(ticket, {
       nowMs,
@@ -1474,28 +1613,43 @@ export class RouterService {
       let prNumber = ticket.prNumber
       let prUrl = ticket.prUrl
 
-      // 双保险之一：Orca worktree 自带的 linkedPR / linkedGitLabMR。
-      if (!prNumber && this.backend.inspectWorktree) {
+      // 双保险之一：provider 直接给出的 PR 线索（Orca linkedPR），以及实际工作分支。
+      let branch = ''
+      if (!prNumber) {
         const assignment = this.store.latestAssignment(ticket.id)
-        // 派工已结束或 worktree 被删时 Orca 会返回 selector_not_found，静默跳过，不要每 5 秒刷错误。
+        // 派工已结束或 worktree 被删时 provider 会返回 not-found，静默跳过，不要每 5 秒刷错误。
         if (assignment?.workdir && assignment.status !== 'ended') {
-          try {
-            const worktree = (await this.backend.inspectWorktree(`path:${assignment.workdir}`)) as Record<string, any> | null
-            const linked = worktree?.linkedPR ?? worktree?.linkedGitLabMR ?? worktree?.worktree?.linkedPR
-            const number = Number(linked?.number ?? linked?.iid ?? 0)
-            if (number > 0) {
-              prNumber = number
-              prUrl = String(linked.url ?? linked.webUrl ?? prUrl)
-              this.engine.updatePr(ticket.id, { number: prNumber, url: prUrl, state: 'open' })
-              this.log('pr:linked', ticket.id, { number: prNumber, source: 'orca' })
+          const backend = this.backendFor(assignment)
+          if (backend.inspectWorkspace) {
+            try {
+              const workspace = await backend.inspectWorkspace(this.workspaceRefOf(assignment))
+              branch = workspace?.branch ?? ''
+              const linked = workspace?.linkedPr
+              if (linked && linked.number > 0) {
+                prNumber = linked.number
+                prUrl = linked.url || prUrl
+                this.engine.updatePr(ticket.id, { number: prNumber, url: prUrl, state: 'open' })
+                this.log('pr:linked', ticket.id, { number: prNumber, source: 'provider' })
+              }
+            } catch {
+              // worktree 不在了：等 gh 兜底或人工处理
             }
-          } catch {
-            // worktree 不在了：等 gh 兜底或人工处理
           }
         }
       }
 
-      // 双保险之二：gh pr view。
+      // 双保险之二：按实际工作分支反查 PR（没有 linkedPR 的后端）。
+      if (!prNumber && branch && repo) {
+        const found = await this.prTracker.findByBranch(repo, branch)
+        if (found) {
+          prNumber = found.number
+          prUrl = found.url || prUrl
+          this.engine.updatePr(ticket.id, { number: prNumber, url: prUrl, state: found.state })
+          this.log('pr:linked', ticket.id, { number: prNumber, source: 'branch' })
+        }
+      }
+
+      // 双保险之三：gh pr view。
       if (!prNumber || !repo) continue
       const info = await this.prTracker.view(repo, prNumber)
       if (!info) continue
@@ -1518,23 +1672,21 @@ export class RouterService {
   async recover(): Promise<void> {
     for (const ticket of this.store.listOpenTickets()) {
       const assignment = this.store.latestAssignment(ticket.id)
-      if (assignment && assignment.status !== 'ended' && assignment.handle && this.backend.inspect) {
-        let info: { connected?: boolean; orphaned?: boolean } | null
-        try {
-          info = (await this.backend.inspect(assignment.handle)) as { connected?: boolean; orphaned?: boolean } | null
-        } catch {
-          // Orca 暂时不可用：保持现状，不要误判成会话丢失。
+      const backend = assignment ? this.backendFor(assignment) : null
+      if (assignment && assignment.status !== 'ended' && assignment.handle && backend?.status) {
+        const status = await this.statusOf(assignment)
+        const verdict = classifyAgentStatus(status)
+        if (verdict === 'unknown') continue
+        if (verdict === 'lost') {
+          this.handleLostWorker(ticket, 'recover')
           continue
         }
-        // 实测 CLI 创建的终端可能 orphaned=true 但依然 connected/writable；
-        // 只有 connected=false 才说明终端真的没了。
-        if (info && info.connected) {
-          if (info.orphaned) this.logger.warn('recover:orphaned-but-alive', { ticketId: ticket.id, handle: assignment.handle })
-          else this.log('recover:reuse', ticket.id, { handle: assignment.handle })
+        if (verdict === 'transfer') {
+          this.engine.setAttention(ticket.id, 'worker 已退出且无法自动恢复，请人工确认')
+          this.notify(ticket, `工单「${ticket.title}」的 worker 已退出且无法自动恢复，已转人工处理。`, `recover:transfer:${ticket.id}`)
           continue
         }
-        // 会话没了就不再偷偷重开一个没有上下文的新 worker，直接转人工。
-        this.handleLostWorker(ticket, 'recover')
+        this.log('recover:reuse', ticket.id, { handle: assignment.handle, phase: status?.phase })
         continue
       }
       if (ticket.stage !== 'closed' && (!assignment || assignment.status === 'ended')) {
@@ -1553,15 +1705,13 @@ export class RouterService {
 
   // ---------- 内部 ----------
 
-  /** 只把「终端确实不存在」判为丢失；Orca 短暂不可用不误杀。 */
-  private async workerGone(handle: string): Promise<boolean> {
-    if (!this.backend.inspect) return false
-    try {
-      const info = (await this.backend.inspect(handle)) as { connected?: boolean } | null
-      return info === null || info.connected === false
-    } catch {
-      return false
-    }
+  /** 只把「确认丢失/不可恢复」判为 gone；查询失败不误杀。 */
+  private async workerGone(assignment: Assignment): Promise<boolean> {
+    const backend = this.backendFor(assignment)
+    if (!backend.status) return false
+    const status = await this.statusOf(assignment)
+    const verdict = classifyAgentStatus(status)
+    return verdict === 'lost' || verdict === 'transfer'
   }
 
   /**
@@ -1632,10 +1782,7 @@ export class RouterService {
 export interface CreateServiceDeps {
   config: AppConfig
   runner: CommandRunner
-  backend: WorkerBackend & {
-    inspect?: (handle: string) => Promise<unknown | null>
-    removeWorktree?: (selector: string) => Promise<void>
-  }
+  backend: WorkerBackend
   prTracker: GhTracker
   sender: FeishuOutbound
   logger: Logger
@@ -1685,15 +1832,27 @@ export function splitMessage(text: string, limit = 3500): string[] {
 
 export interface LaunchErrorDetail {
   reason: string
-  /** Orca 包装成通用文案时保留在 `error.data.cause` 里的底层原因。 */
+  /** provider 包装成通用文案时保留的底层原因。 */
   cause?: string
   /** 启动结果未知时的重试句柄。 */
   operationId?: string
   code?: number
-  orcaCode?: string
+  /** provider 自己的错误码（如 Orca 的 agent_session_operation_unknown）。 */
+  providerCode?: string
   args?: string
   stdout?: string
   stderr?: string
+}
+
+interface ProviderFailureDetail {
+  orcaMessage?: string
+  orcaCause?: string
+  orcaOperationId?: string
+  orcaCode?: string
+  code?: number
+  args?: string
+  stdoutTail?: string
+  stderrTail?: string
 }
 
 /**
@@ -1702,14 +1861,29 @@ export interface LaunchErrorDetail {
  * 只取 stderr 会得到没有信息量的 `code=1`。
  */
 export function describeLaunchError(error: unknown): LaunchErrorDetail {
-  if (error instanceof OrcaCommandError) {
-    const detail = error.detail
+  if (error instanceof WorkerBackendError) {
+    const detail = error.detail ?? {}
     return {
-      reason: detail.orcaMessage ?? error.message,
+      reason: error.reason,
+      ...(error.cause ? { cause: error.cause } : {}),
+      ...(typeof detail.operationId === 'string' ? { operationId: detail.operationId } : {}),
+      ...(typeof detail.code === 'number' ? { code: detail.code } : {}),
+      ...(typeof detail.providerCode === 'string' ? { providerCode: detail.providerCode } : {}),
+      ...(typeof detail.args === 'string' ? { args: detail.args } : {}),
+      ...(typeof detail.stdout === 'string' ? { stdout: detail.stdout } : {}),
+      ...(typeof detail.stderr === 'string' ? { stderr: detail.stderr } : {}),
+    }
+  }
+  // OrcaCommandError 等旧实现：结构匹配，不 import 具体类。
+  const legacy = error as { message?: unknown; detail?: ProviderFailureDetail } | null
+  if (legacy && typeof legacy === 'object' && legacy.detail && typeof legacy.detail === 'object') {
+    const detail = legacy.detail
+    return {
+      reason: detail.orcaMessage ?? (error instanceof Error ? error.message : String(error)),
       ...(detail.orcaCause ? { cause: detail.orcaCause } : {}),
       ...(detail.orcaOperationId ? { operationId: detail.orcaOperationId } : {}),
-      code: detail.code,
-      ...(detail.orcaCode ? { orcaCode: detail.orcaCode } : {}),
+      ...(typeof detail.code === 'number' ? { code: detail.code } : {}),
+      ...(detail.orcaCode ? { providerCode: detail.orcaCode } : {}),
       ...(detail.args ? { args: detail.args } : {}),
       ...(detail.stdoutTail ? { stdout: detail.stdoutTail } : {}),
       ...(detail.stderrTail ? { stderr: detail.stderrTail } : {}),

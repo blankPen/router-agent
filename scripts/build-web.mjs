@@ -28,6 +28,7 @@ copyFileSync(join(root, 'src', 'web', 'app.css'), join(distWeb, 'app.css'))
 const assets = [
   'src/worker/spec/prompt-mode.md',
   'src/worker/spec/agent-mode.md',
+  'src/worker/spec/contract.md',
   'src/router/prompts/orchestrator.md',
   'src/router/prompts/admission.md',
   'src/router/prompts/conversation.md',
