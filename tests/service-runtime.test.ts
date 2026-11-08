@@ -168,6 +168,15 @@ describe('运行时机制', () => {
     return { ticketId: ticket.id, handle: assignment.handle, assignmentId: assignment.id }
   }
 
+  it('accepted 未 ack 时按退避，不每秒重投', async () => {
+    const { ticketId } = await launchOne()
+    engine.deliverInput(ticketId, { kind: 'followup', text: '第一件事' })
+    await service.runOnce()
+    const afterFirst = backend.delivered.length
+    await service.runOnce()
+    expect(backend.delivered.length).toBe(afterFirst)
+  })
+
   it('有新输入时，把未 ack 的旧输入一并重投（去重靠 id）', async () => {
     const { ticketId, handle } = await launchOne()
     const first = engine.deliverInput(ticketId, { kind: 'followup', text: '第一件事' })

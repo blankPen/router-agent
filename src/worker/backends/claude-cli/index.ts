@@ -20,6 +20,7 @@ import {
   type WorkerBackend,
   type WorkerContext,
   type WorkerRef,
+  type ToolPolicy,
   type WorkspaceInfo,
   type WorkspaceRef,
 } from '../../port.js'
@@ -156,6 +157,7 @@ export class ClaudeCliBackend implements WorkerBackend {
 
     try {
       const prompt = `Read ${briefPath} and execute the ticket. Report via ra report.`
+      const allowedTools = ctx.tools ? allowedToolsFrom(ctx.tools) : this.allowedTools
       const res = await this.runClaude(
         [
           '--bg',
@@ -164,7 +166,7 @@ export class ClaudeCliBackend implements WorkerBackend {
           '--add-dir', dir,
           ...(this.permissionMode ? ['--permission-mode', this.permissionMode] : []),
           ...(this.model ? ['--model', this.model] : []),
-          ...(this.allowedTools ? ['--allowedTools', this.allowedTools] : []),
+          ...(allowedTools ? ['--allowedTools', allowedTools] : []),
           // --allowedTools 是 variadic；必须用 -- 把 prompt 与工具列表分开。
           '--',
           prompt,
@@ -209,14 +211,29 @@ export class ClaudeCliBackend implements WorkerBackend {
     const inputIds = inputs.map(input => input.id)
     if (inputs.length === 0) return { status: 'accepted', inputIds }
     const meta = this.readMeta(ref.ticketId)
-    const sessionId = ref.sessionId ?? meta?.sessionId
-    if (!sessionId) {
-      return { status: 'rejected', inputIds, reason: 'claude:session-id-missing', retryable: false }
-    }
     const record = await this.findAgent(ref.handle)
-    if (record && (record.state === 'working' || record.state === 'blocked')) {
+    if (record === null) {
+      // agents 查询失败：无法判断当前会话是否在跑，排队等下一轮，绝不盲目 resume。
+      return { status: 'queued', inputIds, reason: 'claude:agents-unavailable' }
+    }
+    if (!record) {
+      return { status: 'rejected', inputIds, reason: 'claude:session-not-found', retryable: false }
+    }
+    const sessionId = ref.sessionId ?? meta?.sessionId ?? record.sessionId
+    if (!sessionId) {
+      return { status: 'rejected', inputIds, reason: 'claude:session-id-missing', retryable: true, retryAfterMs: 30_000 }
+    }
+    // 启动时可能没来得及捕获 sessionId；后续拿到就回填，避免追问永久失败。
+    if (meta && !meta.sessionId && record.sessionId) {
+      meta.sessionId = record.sessionId
+      this.writeMeta(ref.ticketId, meta)
+    }
+    if (record.state === 'working' || record.state === 'blocked') {
       // 当前轮还没结束；不做 resume（会 fork 副本），等状态变成 done/stopped。
       return { status: 'queued', inputIds, reason: `claude:${record.state}` }
+    }
+    if (record.state !== 'done' && record.state !== 'stopped') {
+      return { status: 'queued', inputIds, reason: `claude:${record.state ?? 'unknown'}` }
     }
     if (opts.redeliver !== true && meta?.lastHandedOffInputId === inputs.at(-1)?.id && meta?.lastHandedOffAttempt === (opts.attempt ?? 1)) {
       return { status: 'accepted', inputIds }
@@ -247,7 +264,7 @@ export class ClaudeCliBackend implements WorkerBackend {
   async stop(ref: WorkerRef, _reason: string): Promise<void> {
     const res = await this.claude.run(['stop', ref.handle], { cwd: ref.workdir ?? this.home, env: this.env })
     // 会话已经不存在时 stop 可能失败；stop 必须幂等，这里不抛错。
-    if (res.code !== 0 && !/not found|no such|unknown/i.test(`${res.stderr}${res.stdout}`)) {
+    if (res.code !== 0 && !/not found|no such|unknown|no job matching/i.test(`${res.stderr}${res.stdout}`)) {
       throw new WorkerBackendError('agent:gone', `claude stop 失败: ${res.stderr || res.stdout}`, {
         cause: res.stderr || res.stdout,
         detail: { handle: ref.handle },
@@ -264,6 +281,11 @@ export class ClaudeCliBackend implements WorkerBackend {
     const record = await this.findAgent(ref.handle)
     if (record === null) return null // 查询失败，无法判断
     if (!record) return { alive: false, phase: 'lost', acceptingInput: false, detail: { source: 'claude' } }
+    const meta = this.readMeta(ref.ticketId)
+    if (meta && !meta.sessionId && record.sessionId) {
+      meta.sessionId = record.sessionId
+      this.writeMeta(ref.ticketId, meta)
+    }
     const lastActivityAt = await this.lastActivityAt(ref, record)
     const base = {
       ...(lastActivityAt ? { lastActivityAt } : {}),
@@ -307,6 +329,12 @@ export class ClaudeCliBackend implements WorkerBackend {
 
   async removeWorkspace(ref: WorkspaceRef): Promise<void> {
     await this.gitProvider.remove(ref.workdir)
+  }
+
+  /** 本地路径仓库的 PR 跟踪需要 owner/repo；从 origin 推导。 */
+  async repoSlug(ref: WorkerRef): Promise<string | null> {
+    if (!ref.workdir) return null
+    return this.gitProvider.remoteRepo(ref.workdir)
   }
 
   async doctor(): Promise<DiagnosticCheck[]> {
@@ -413,6 +441,19 @@ function stripAnsi(text: string): string {
 
 function safeSegment(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 120) || 'input'
+}
+
+/** 把中立 ToolPolicy 映射成 Claude 的 allowedTools 列表。 */
+export function allowedToolsFrom(tools: ToolPolicy): string {
+  const file = tools.fileAccess === 'read-only'
+    ? ['Read', 'Glob', 'Grep']
+    : ['Read', 'Write', 'Edit', 'Glob', 'Grep']
+  const shell = tools.shell === 'deny'
+    ? []
+    : tools.shell === 'allow'
+      ? ['Bash']
+      : (tools.shellAllow ?? []).map(command => `Bash(${command}:*)`)
+  return [...file, ...shell].join(',')
 }
 
 function buildEnv(overrides?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {

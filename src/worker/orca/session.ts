@@ -8,9 +8,9 @@ export function defaultClaudeProjectsDir(): string {
   return join(homedir(), '.claude', 'projects')
 }
 
-/** Claude Code 把 cwd 里的路径分隔符替换成 `-` 作为项目目录名。 */
+/** Claude Code 把 cwd 里所有非字母数字字符替换成 `-` 作为项目目录名。 */
 export function claudeProjectSlug(workdir: string): string {
-  return workdir.replace(/[\\/]+/g, '-')
+  return workdir.replace(/[^a-zA-Z0-9]/g, '-')
 }
 
 export interface ReadSessionOptions {

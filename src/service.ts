@@ -908,7 +908,8 @@ export class RouterService {
       if (pending.length === 0 && unacked.length === 0) continue
       const nowMs = Date.parse(this.clock.now())
       const cooldownUntil = this.deliveryCooldown.get(ticket.id) ?? 0
-      if (Number.isFinite(nowMs) && cooldownUntil > nowMs) continue
+      // 有新输入时立即投递；只有「纯粹等 ack」才走退避。
+      if (pending.length === 0 && Number.isFinite(nowMs) && cooldownUntil > nowMs) continue
       // 没有活着的 worker：新输入视为「重试派工」信号。
       // 派工失败后工单会转人工，用户在该话题里回复即可重新拉起 worker。
       if (!assignment || assignment.status === 'ended' || !assignment.handle) {
@@ -948,7 +949,7 @@ export class RouterService {
           this.logger.warn('input:rejected', { ticketId: ticket.id, reason: receipt.reason })
           continue
         }
-        this.deliveryCooldown.delete(ticket.id)
+        this.deliveryCooldown.set(ticket.id, nowMs + Math.min(30_000 * 2 ** Math.max(0, attempt - 1), 10 * 60_000))
         this.store.markInputsDelivered(ticket.id, this.clock.now())
         this.log('input:delivered', ticket.id, {
           count: batch.length,
@@ -1047,22 +1048,33 @@ export class RouterService {
       const lastActivity = Date.parse(status?.lastActivityAt ?? '')
       if (!Number.isFinite(lastActivity) || nowMs - lastActivity <= this.idleAfterMs) continue
 
-      if (!current.nudgedAt && backend.nudge) {
-        await backend.nudge(this.refOf(assignment))
-        current.nudgedAt = nowMs
-        this.log('idle:nudge', ticket.id, { handle: assignment.handle })
+      if (!current.nudgedAt) {
+        if (backend.nudge) {
+          await backend.nudge(this.refOf(assignment))
+          current.nudgedAt = nowMs
+          this.log('idle:nudge', ticket.id, { handle: assignment.handle })
+        } else if (nowMs - lastActivity > this.idleAfterMs + this.staleAfterMs) {
+          // 没有唤醒能力的后端（Claude/Codex）：直接按活动时间判 stale。
+          this.markIdleStale(ticket, nowMs)
+        }
         continue
       }
 
-      if (!current.stale && current.nudgedAt && nowMs - current.nudgedAt > this.staleAfterMs) {
-        current.stale = true
-        // 标记为僵尸：闲置治理只转人工，不再提醒关单、不自动关闭。
-        this.store.setCursor(zombieCursorKey(ticket.id), String(nowMs), this.clock.now())
-        this.engine.setAttention(ticket.id, 'worker 无响应：长时间没有新的 state.json 上报，已标记 stale，请人工确认')
-        this.notify(ticket, `工单「${ticket.title}」的 worker 无响应，已标记 stale，请到 Orca / Claude 会话确认。`, `stale:${ticket.id}`)
-        this.log('idle:stale', ticket.id, {})
+      if (!current.stale && nowMs - current.nudgedAt > this.staleAfterMs) {
+        this.markIdleStale(ticket, nowMs)
       }
     }
+  }
+
+  private markIdleStale(ticket: Ticket, nowMs: number): void {
+    const state = this.idle.get(ticket.id)
+    if (state?.stale) return
+    if (state) state.stale = true
+    // 标记为僵尸：闲置治理只转人工，不再提醒关单、不自动关闭。
+    this.store.setCursor(zombieCursorKey(ticket.id), String(nowMs), this.clock.now())
+    this.engine.setAttention(ticket.id, 'worker 无响应：长时间没有新的 state.json 上报，已标记 stale，请人工确认')
+    this.notify(ticket, `工单「${ticket.title}」的 worker 无响应，已标记 stale，请到 Orca / Claude 会话确认。`, `stale:${ticket.id}`)
+    this.log('idle:stale', ticket.id, {})
   }
 
   // ---------- 闲置工单治理 ----------
@@ -1609,7 +1621,7 @@ export class RouterService {
   async trackPullRequests(): Promise<void> {
     for (const ticket of this.store.listOpenTickets()) {
       // 每张工单自带仓库，不再有全局 repo 兜底。
-      const repo = ticket.repo
+      let repo = ticket.repo
       let prNumber = ticket.prNumber
       let prUrl = ticket.prUrl
 
@@ -1620,6 +1632,11 @@ export class RouterService {
         // 派工已结束或 worktree 被删时 provider 会返回 not-found，静默跳过，不要每 5 秒刷错误。
         if (assignment?.workdir && assignment.status !== 'ended') {
           const backend = this.backendFor(assignment)
+          // 本地路径仓库先解析成 owner/repo，否则 gh --repo 会失败。
+          if ((repo.startsWith('/') || repo.startsWith('path:')) && backend.repoSlug) {
+            const slug = await backend.repoSlug(this.refOf(assignment)).catch(() => null)
+            if (slug) repo = slug
+          }
           if (backend.inspectWorkspace) {
             try {
               const workspace = await backend.inspectWorkspace(this.workspaceRefOf(assignment))

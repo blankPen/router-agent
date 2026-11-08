@@ -4,9 +4,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { CommandResult, CommandRunner } from '../../src/infra/process.js'
-import { ClaudeCliBackend } from '../../src/worker/backends/claude-cli/index.js'
+import { ClaudeCliBackend, allowedToolsFrom } from '../../src/worker/backends/claude-cli/index.js'
 import { WorkerBackendError, type WorkerContext, type WorkerRef } from '../../src/worker/port.js'
 import { claudeProjectSlug } from '../../src/worker/orca/session.js'
+import { parseGitHubRepo } from '../../src/worker/workspaces/git-worktree.js'
 
 interface Call {
   argv: string[]
@@ -27,6 +28,7 @@ function scripted(handler: (argv: string[], opts?: Call['opts']) => CommandResul
 function gitRunner(): CommandRunner & { calls: Call[] } {
   return scripted(argv => {
     if (argv[0] === 'check-ref-format') return { code: 0, stdout: '', stderr: '' }
+    if (argv[0] === 'show-ref') return { code: 1, stdout: '', stderr: '' }
     if (argv[0] === 'worktree' && argv[1] === 'add') return { code: 0, stdout: '', stderr: '' }
     if (argv[0] === 'rev-parse') return { code: 0, stdout: 'ra/tk-1-demo\n', stderr: '' }
     if (argv[0] === 'worktree' && argv[1] === 'remove') return { code: 0, stdout: '', stderr: '' }
@@ -59,6 +61,27 @@ function ref(home: string, over: Partial<WorkerRef> = {}): WorkerRef {
 }
 
 describe('ClaudeCliBackend', () => {
+  it('claudeProjectSlug 把非字母数字都替换成短横线', () => {
+    expect(claudeProjectSlug('/Users/admin/.trove')).toBe('-Users-admin--trove')
+    expect(claudeProjectSlug('/tmp/中文 repo_1')).toBe('-tmp----repo-1')
+  })
+
+  it('parseGitHubRepo 支持 ssh / https 两种 origin', () => {
+    expect(parseGitHubRepo('git@github.com:acme/web.git')).toBe('acme/web')
+    expect(parseGitHubRepo('https://github.com/acme/web.git')).toBe('acme/web')
+    expect(parseGitHubRepo('https://gitlab.com/acme/web.git')).toBeNull()
+  })
+
+  it('allowedToolsFrom 把 ToolPolicy 映射成命令级白名单', () => {
+    const readOnly = allowedToolsFrom({ fileAccess: 'read-only', shell: 'deny', allowNetwork: false })
+    expect(readOnly).not.toContain('Write')
+    expect(readOnly).not.toContain('Bash')
+    const rw = allowedToolsFrom({ fileAccess: 'read-write', shell: 'allowlist', shellAllow: ['ra report', 'pnpm'], allowNetwork: false })
+    expect(rw).toContain('Write')
+    expect(rw).toContain('Bash(ra report:*)')
+    expect(rw).toContain('Bash(pnpm:*)')
+  })
+
   it('start 用 claude --bg 启动并写 meta/brief', async () => {
     const home = mkdtempSync(join(tmpdir(), 'ra-claude-'))
     const git = gitRunner()
@@ -105,12 +128,12 @@ describe('ClaudeCliBackend', () => {
       return { code: 0, stdout: '', stderr: '' }
     })
     const backend = new ClaudeCliBackend({ claude, git, home, workersDir: join(home, 'workers') })
-    // 先写 meta，模拟 start 过
+    // 先写 meta，模拟 start 时没来得及捕获 sessionId
     mkdirSync(join(home, 'workers', 'tk-1'), { recursive: true })
     writeFileSync(join(home, 'workers', 'tk-1', 'meta.json'), JSON.stringify({
       ticketId: 'tk-1', assignmentId: 'as-1', backend: 'claude-cli', handle: 'e46aaf7e',
       workdir: join(home, 'worktrees', 'ra-tk-1-demo'), repo: '/tmp/repo', branch: 'main',
-      workBranch: 'ra/tk-1-demo', sessionId: 's1', status: 'running',
+      workBranch: 'ra/tk-1-demo', status: 'running',
     }))
     const receipt = await backend.deliver(ref(home), [{ id: 'in_2', kind: 'followup', text: '补测试' }], { attempt: 1 })
     expect(receipt.status).toBe('accepted')
@@ -137,6 +160,37 @@ describe('ClaudeCliBackend', () => {
       workBranch: 'ra/tk-1-demo', sessionId: 's1', status: 'running',
     }))
     await expect(backend.deliver(ref(home), [{ id: 'in_3', kind: 'followup', text: '继续' }])).rejects.toBeInstanceOf(WorkerBackendError)
+  })
+
+  it('agents 查询失败时 queued，不盲目 resume', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-claude-'))
+    const claude = scripted(argv => {
+      if (argv[0] === 'agents') return { code: 1, stdout: '', stderr: 'temporary failure' }
+      return { code: 0, stdout: '', stderr: '' }
+    })
+    const backend = new ClaudeCliBackend({ claude, git: gitRunner(), home, workersDir: join(home, 'workers') })
+    const receipt = await backend.deliver(ref(home, { sessionId: 's1' }), [{ id: 'in_q', kind: 'followup', text: '继续' }])
+    expect(receipt.status).toBe('queued')
+    expect(claude.calls.some(call => call.argv.includes('--resume'))).toBe(false)
+  })
+
+  it('会话已不存在时 rejected，不盲目 resume', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-claude-'))
+    const claude = scripted(argv => {
+      if (argv[0] === 'agents') return { code: 0, stdout: '[]', stderr: '' }
+      return { code: 0, stdout: '', stderr: '' }
+    })
+    const backend = new ClaudeCliBackend({ claude, git: gitRunner(), home, workersDir: join(home, 'workers') })
+    const receipt = await backend.deliver(ref(home, { sessionId: 's1' }), [{ id: 'in_l', kind: 'followup', text: '继续' }])
+    expect(receipt.status).toBe('rejected')
+    expect(claude.calls.some(call => call.argv.includes('--resume'))).toBe(false)
+  })
+
+  it('stop 对不存在的会话幂等', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-claude-'))
+    const claude = scripted(() => ({ code: 1, stdout: "No job matching 'gone'. Run `claude agents` to list running sessions.", stderr: '' }))
+    const backend = new ClaudeCliBackend({ claude, git: gitRunner(), home, workersDir: join(home, 'workers') })
+    await expect(backend.stop(ref(home, { handle: 'gone' }), 'test')).resolves.toBeUndefined()
   })
 
   it('status 映射 working / blocked / done / lost', async () => {

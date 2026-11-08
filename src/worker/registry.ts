@@ -64,9 +64,8 @@ export function createBackends(config: AppConfig, deps: BackendDeps): BackendReg
     workersDir: deps.workersDir,
     home: deps.home,
     ...(deps.claudeProjectsDir ? { claudeProjectsDir: deps.claudeProjectsDir } : {}),
+    // 只允许非安全参数；allowedTools / permissionMode / sandbox 由 worker.tools 与内置基线决定。
     ...(typeof claudeOptions.model === 'string' ? { model: claudeOptions.model } : {}),
-    ...(typeof claudeOptions.permissionMode === 'string' ? { permissionMode: claudeOptions.permissionMode } : {}),
-    ...(typeof claudeOptions.allowedTools === 'string' ? { allowedTools: claudeOptions.allowedTools } : {}),
     ...(deps.env ? { env: deps.env } : {}),
   }))
 

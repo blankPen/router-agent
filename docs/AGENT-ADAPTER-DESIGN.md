@@ -3,7 +3,7 @@
 > 目标：让 router-agent 从「Orca + Claude Code 单一路径」演进为「可插拔 Agent Runtime」。
 > 新增 Claude Code CLI、Codex CLI 等后端时，只实现适配器，不改 Router 内核。
 >
-> 版本：v1.8（设计定稿 + 一期 P0–P3 实施记录；Claude Code CLI 已接入）
+> 版本：v1.9（设计定稿 + 一期 P0–P3 实施 + 实现代码评审修复；Claude Code CLI 已接入）
 > 仓库基线：`main` @ `5f90fa6`
 > 编写：ra worker（tk-15）
 
@@ -1331,6 +1331,22 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
 
 ---
 
+### Round 8 · 实现代码评审
+
+- 评审对象：一期实现 diff（WorkerBackend v2 / Registry / Claude CLI / GitWorktree / service 路由）。
+- 发现并修复：
+  1. accepted 未 ack 的输入仍会每 tick 重投 → accepted 后按 30s/60s/120s…（上限 10min）退避；新输入到达时立即投递；
+  2. `sessionId` 只在 start 的 2–4s 窗口捕获 → deliver/status 从 `agents --json` 回填，不再把缺 sessionId 当永久 lost；
+  3. `claudeProjectSlug` 只替换斜杠 → 改为所有非字母数字替换成 `-`，与 Claude 真实目录规则一致；
+  4. 本地路径仓库的 PR 追踪把绝对路径传给 `gh --repo` → 新增 `repoSlug()`，从 `git remote get-url origin` 解析 owner/repo；
+  5. `worker.tools` 未接线 → Claude adapter 由 `ToolPolicy` 生成 `allowedTools`；`backend.options` 禁止覆盖安全参数；
+  6. `agents` 查询失败/会话缺失时仍 resume → 分别返回 queued/rejected，只有 done/stopped 才 resume；
+  7. 失联后重派工撞同名分支 → `GitWorktreeProvider` 自动加数字后缀；
+  8. Claude 无 nudge 导致 stale 不可达 → 无 nudge 时按 `lastActivityAt + idleAfterMs + staleAfterMs` 直接判 stale；
+  9. `claude stop` 对不存在会话文案不匹配 → 加入 `No job matching` 幂等判断；
+  10. 补测：slug、GitWorktreeProvider、sessionId 回填、queued/rejected、stop 幂等、accepted 退避。
+- 结论：一期实现可交付；未完成项仍按第 17 节记录。
+
 ## 17. 一期实施记录（P0–P3）
 
 已落地：
@@ -1348,7 +1364,7 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
 验证：
 
 - `pnpm typecheck` 通过；
-- `pnpm test`：421 passed / 5 skipped；
+- `pnpm test`：431 passed / 5 skipped；
 - `pnpm build` 通过。
 
 未在本期完成（按计划留到二期或后续加固）：

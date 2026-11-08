@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 import type { CommandRunner } from '../../infra/process.js'
 import { WorkerBackendError, type WorkspaceInfo, type WorkspaceProvider, type WorkspaceRequest, type Workspace } from '../port.js'
@@ -25,12 +26,31 @@ export class GitWorktreeProvider implements WorkspaceProvider {
   async create(req: WorkspaceRequest): Promise<Workspace> {
     const repoPath = this.repoPathOf(req.repo)
     const base = req.baseBranch.trim()
-    const branch = req.workBranch.trim()
+    const requestedBranch = req.workBranch.trim()
     if (!base) throw new WorkerBackendError('workspace:missing-branch', '起始分支为空，拒绝创建 worktree')
-    if (!branch) throw new WorkerBackendError('workspace:missing-branch', '工作分支为空，拒绝创建 worktree')
+    if (!requestedBranch) throw new WorkerBackendError('workspace:missing-branch', '工作分支为空，拒绝创建 worktree')
     await this.assertBranch(base, repoPath)
+    const requestedWorkdir = this.assertWorkdir(req.workdir)
+
+    // 同名分支/目录已存在时加数字后缀，避免失联后重新派工永远撞冲突。
+    let branch = requestedBranch
+    let workdir = requestedWorkdir
+    let free = false
+    for (let i = 1; i <= 20; i += 1) {
+      const exists = await this.branchExists(repoPath, branch)
+      if (!exists && !existsSync(workdir)) {
+        free = true
+        break
+      }
+      branch = `${requestedBranch}-${i + 1}`
+      workdir = `${requestedWorkdir}-${i + 1}`
+    }
+    if (!free) {
+      throw new WorkerBackendError('workspace:create-failed', `分支/目录已被占用，无法创建工作区: ${requestedBranch}`, {
+        detail: { workdir: requestedWorkdir, branch: requestedBranch },
+      })
+    }
     await this.assertBranch(branch, repoPath)
-    const workdir = this.assertWorkdir(req.workdir)
     const res = await this.git.run(['worktree', 'add', '-b', branch, '--', workdir, base], { cwd: repoPath })
     if (res.code !== 0) {
       throw new WorkerBackendError('workspace:create-failed', `git worktree add 失败: ${res.stderr || res.stdout}`, {
@@ -87,6 +107,19 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     return res.code === 0 ? res.stdout.trim() : null
   }
 
+  /** 从 worktree 的 origin 解析 GitHub owner/repo；解析失败返回 null。 */
+  async remoteRepo(workdir: string): Promise<string | null> {
+    const path = this.assertWorkdir(workdir)
+    const res = await this.git.run(['remote', 'get-url', 'origin'], { cwd: path })
+    if (res.code !== 0) return null
+    return parseGitHubRepo(res.stdout.trim())
+  }
+
+  private async branchExists(repoPath: string, branch: string): Promise<boolean> {
+    const res = await this.git.run(['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: repoPath })
+    return res.code === 0
+  }
+
   private async assertBranch(branch: string, repoPath: string): Promise<void> {
     if (branch.startsWith('-')) {
       throw new WorkerBackendError('workspace:missing-branch', `非法分支名: ${branch}`)
@@ -114,4 +147,13 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     }
     return workdir
   }
+}
+
+/** 解析 GitHub remote：支持 git@github.com:o/r.git 与 https://github.com/o/r.git。 */
+export function parseGitHubRepo(remote: string): string | null {
+  const ssh = remote.match(/^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?$/)
+  if (ssh) return `${ssh[1]}/${ssh[2]}`
+  const https = remote.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/)
+  if (https) return `${https[1]}/${https[2]}`
+  return null
 }

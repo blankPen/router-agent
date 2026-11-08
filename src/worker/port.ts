@@ -255,6 +255,8 @@ export interface WorkerBackend {
   removeWorkspace?(ref: WorkspaceRef): Promise<void>
   /** 可选：仓库发现（doctor / init）。 */
   listRepos?(): Promise<RepoDescriptor[]>
+  /** 可选：把本地仓库路径解析成 GitHub owner/repo，供 PR 跟踪。 */
+  repoSlug?(ref: WorkerRef): Promise<string | null>
   /** 可选：启动前自检。 */
   doctor?(): Promise<DiagnosticCheck[]>
   /** 兼容保留：当前 Router 未调用。 */

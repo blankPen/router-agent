@@ -377,6 +377,18 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
     unlistedNotAddressed: pickAdmission(admissionDoc.unlistedNotAddressed, base.policy.admission.unlistedNotAddressed, ['inferred', 'ignore']) as never,
   }
 
+  // 安全参数只由 worker.tools 与 adapter 内置基线决定，不允许 backend.options 放宽。
+  if (doc.backend?.options && typeof doc.backend.options === 'object') {
+    const forbidden = new Set(['allowedTools', 'permissionMode', 'sandbox', 'shellAllow', 'allowNetwork', 'fileAccess'])
+    for (const [id, options] of Object.entries(doc.backend.options as Record<string, unknown>)) {
+      if (!options || typeof options !== 'object') continue
+      const bad = Object.keys(options as Record<string, unknown>).filter(key => forbidden.has(key))
+      if (bad.length > 0) {
+        throw new Error(`backend.options.${id} 不允许覆盖安全参数: ${bad.join(', ')}`)
+      }
+    }
+  }
+
   return {
     home,
     projects: parseProjects(doc.projects),
