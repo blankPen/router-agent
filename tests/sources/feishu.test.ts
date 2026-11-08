@@ -130,6 +130,17 @@ describe('飞书事件归一化', () => {
     expect(normalizeFeishuEvent(evt({ message_type: 'post', content: '有文字的富文本' }), cfg)!.mediaOnly).toBe(false)
   })
 
+  it('图片消息在 raw 里记下 messageType 和 image_key，供入库前下载转文本', () => {
+    const image = normalizeFeishuEvent(evt({ message_type: 'image', content: '![Image](img_v3_abc)' }), cfg)!
+    expect(image.raw).toMatchObject({ messageType: 'image', imageKeys: ['img_v3_abc'] })
+    // 预渲染成 [图片]、拿不到 key 时也保留 messageType，后续走 mget 回查
+    expect(normalizeFeishuEvent(evt({ message_type: 'image', content: '[图片]' }), cfg)!.raw).toMatchObject({ messageType: 'image' })
+    const post = normalizeFeishuEvent(evt({ message_type: 'post', content: '看下 ![Image](img_v3_post)' }), cfg)!
+    expect(post.raw).toMatchObject({ messageType: 'post', imageKeys: ['img_v3_post'] })
+    // 纯文本消息不带这些字段，避免把正文里的字面量当图片
+    expect(normalizeFeishuEvent(evt({ content: '![Image](img_v3_fake)' }), cfg)!.raw).toEqual({})
+  })
+
   it('被丢弃的消息带上原因，便于日志追踪', () => {
     expect(normalizeFeishuEventDetailed(evt({ chat_id: 'oc_stranger' }), cfg)).toEqual({ dropped: 'chat:not-monitored', chatId: 'oc_stranger' })
     expect(normalizeFeishuEventDetailed(evt({ chat_type: 'p2p', chat_id: 'oc_dm' }), { ...cfg, directMessages: false })).toMatchObject({ dropped: 'dm:disabled' })
@@ -306,7 +317,7 @@ describe('引用消息', () => {
         }],
       },
     }))!
-    expect(quoted).toEqual({ id: 'om_parent', text: '@皮皮虾 看下这个项目有什么可优化的么', author: '阿振(Pz)' })
+    expect(quoted).toEqual({ id: 'om_parent', text: '@皮皮虾 看下这个项目有什么可优化的么', author: '阿振(Pz)', images: [] })
   })
 
   it('attach 把引用正文拼到消息前面，并写回 raw', async () => {
@@ -320,6 +331,18 @@ describe('引用消息', () => {
     expect(runner.calls[0]).toEqual(quotedMessageCommand('om_parent'))
     expect(t.text).toBe('[引用 阿振的消息] 看下最近改了什么\n\n@router-agent')
     expect((t.raw as Record<string, any>).quote.text).toBe('看下最近改了什么')
+  })
+
+  it('引用的是纯图片消息时记录 image_key，交给图片转文本链路', async () => {
+    const runner = new RecordingRunner()
+    runner.response = JSON.stringify({
+      data: { messages: [{ message_id: 'om_parent', msg_type: 'image', content: '{"image_key":"img_v3_quote"}', sender: { name: '阿振' } }] },
+    })
+    const base = normalizeFeishuEvent(evt({ parent_id: 'om_parent', content: '照这个改' }), cfg)!
+    const t = await attachQuotedMessage(base, runner as never)
+
+    expect(t.text).toBe('照这个改')
+    expect((t.raw as Record<string, any>).quoteImages).toEqual([{ key: 'img_v3_quote', messageId: 'om_parent' }])
   })
 
   it('回查失败时保持原消息，不阻塞入库', async () => {

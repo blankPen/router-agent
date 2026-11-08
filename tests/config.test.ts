@@ -27,6 +27,22 @@ describe('全局状态目录与配置', () => {
     expect(cfg.backend.default).toBe('orca')
   })
 
+  it('图片转文本默认开启，可配置关闭与阈值', () => {
+    expect(loadConfig(home()).feishu.images).toEqual({ enabled: true, maxChars: 2_000, timeoutMs: 60_000 })
+
+    const dir = home()
+    ensureHome(dir)
+    const { writeFileSync } = require('node:fs') as typeof import('node:fs')
+    writeFileSync(join(dir, 'config.yaml'), [
+      'feishu:',
+      '  images:',
+      '    enabled: false',
+      '    maxChars: 500',
+      '    timeoutMs: 30000',
+    ].join('\n'))
+    expect(loadConfig(dir).feishu.images).toEqual({ enabled: false, maxChars: 500, timeoutMs: 30_000 })
+  })
+
   it('读取用户配置并覆盖默认值', () => {
     const dir = home()
     ensureHome(dir)
@@ -123,6 +139,7 @@ describe('全局状态目录与配置', () => {
     cfg.feishu.larkHome = '/tmp/lark-home'
     cfg.feishu.appId = 'cli_dedicated'
     cfg.feishu.reaction = 'THUMBSUP'
+    cfg.feishu.images = { enabled: false, maxChars: 800, timeoutMs: 15_000 }
     cfg.policy.acceptMode = 'observe'
     cfg.progress.syncMs = 30_000
     cfg.progress.probeMs = 90_000
@@ -138,6 +155,7 @@ describe('全局状态目录与配置', () => {
     expect(loaded.feishu.larkHome).toBe('/tmp/lark-home')
     expect(loaded.feishu.appId).toBe('cli_dedicated')
     expect(loaded.feishu.reaction).toBe('THUMBSUP')
+    expect(loaded.feishu.images).toEqual({ enabled: false, maxChars: 800, timeoutMs: 15_000 })
     expect(loaded.policy.acceptMode).toBe('observe')
     expect(loaded.progress.syncMs).toBe(30_000)
     expect(loaded.progress.probeMs).toBe(90_000)

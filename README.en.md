@@ -129,7 +129,7 @@ Key constraints:
 - Group messages follow the config: `mode: all` receives everything and replies without a mention; `mode: mention` only receives `@bot`.
 - Direct messages have their own switch; bot messages, system messages and interactive cards never enter the domain.
 - A non-empty per-chat `allowed` list means only those people can trigger work in that chat; an outsider mentioning the bot is silently ignored.
-- An image / file with no text **does not open a ticket**; the bot replies "I can't read attachments — please describe it in text", without spending a model call.
+- Image messages are downloaded by `image_key`, transcribed to text (including images inside quoted messages and rich-text posts), and then go through the same assessment. If transcription fails, the message falls back to the attachment notice. Other attachments (files, audio) are not downloaded or read multimodally.
 - History backfill is incremental per chat cursor; the first sighting of a chat only records a baseline, so old messages aren't treated as new requests.
 
 ### Decide: gate first, Pi second
@@ -243,7 +243,8 @@ The Router doesn't chat; it only speaks when necessary:
 | Mentioned in a group with a real request | A single **thread** message: "Ticket 'title' (id) started. Progress will be updated in this thread." No extra normal-message "I created the ticket" ack |
 | Un-mentioned group message | Pi triage; casual chat is **completely silent** (no noise) |
 | Direct message | Pi triage; casual chat gets a polite Pi reply (normal message) |
-| Image / file only (no text) | **No ticket**: replies "I can't read attachments — please describe it in text" |
+| Image only (no text) | Downloads `image_key`, transcribes it to text, then assesses; only replies "I can't read attachments — please describe it in text" when transcription fails |
+| File / audio / other attachment only | **No ticket**: replies "I can't read attachments — please describe it in text" |
 | System messages (chat created / member added / renamed) | Dropped immediately |
 | Interactive card messages | Dropped (the `content` is raw card JSON, not a request) |
 | Triage didn't finish (`unavailable`) | If it was addressing the bot, Pi asks a follow-up question |
@@ -310,6 +311,10 @@ feishu:
   bots: []             # bots allowed to produce inferred candidates
   botOpenIds: []       # the bot's own open_id / app_id
   botNames: []         # the bot's display names
+  images:              # image messages: download image_key, transcribe, then assess
+    enabled: true
+    maxChars: 2000     # max characters per transcribed image
+    timeoutMs: 60000   # per-image transcription timeout (ms)
 
 policy:
   acceptMode: auto     # off / observe / auto
@@ -419,6 +424,17 @@ Also, the old global `repo` config has been removed (`ra` no longer reads it). M
 The model config automatically reuses the `llm` section of `~/.trove/config.json` (`baseUrl` / `model` / `apiKey`). You can also add an `llm:` section to this file, or override with `RA_LLM_BASE_URL` / `RA_LLM_API_KEY` / `RA_LLM_MODEL`.
 
 Precedence: **environment variables > `config.yaml` > `.trove`**.
+
+Image transcription reuses the same model by default. If the main model is text-only, point the image path at a vision model (it does not affect assessment):
+
+```yaml
+llm:
+  imageModel: qwen3-vl-plus
+  imageBaseUrl: https://dashscope.aliyuncs.com/compatible-mode/v1
+  imageApiKey: sk-xxx
+```
+
+`RA_LLM_IMAGE_MODEL` / `RA_LLM_IMAGE_BASE_URL` / `RA_LLM_IMAGE_API_KEY` override these. Set `feishu.images.enabled: false` to turn image transcription off.
 
 ### Worker spec injection
 
@@ -547,7 +563,8 @@ src/cli/      ra commands
 - No auto-merge; PRs are tracked and reported, not merged.
 - The GitHub source is only used for PR state tracking; it does not consume issues or comments.
 - Reporting goes through `ra report`; `state.json` is only the fallback when the service is unreachable.
-- Images / files are only recognized as "this is an attachment message"; they are not downloaded or read multimodally. Describe the content in text when it matters.
+- Images are downloaded and transcribed by a multimodal model; files / audio and other attachments are only recognized as "this is an attachment message".
+- Image transcription requires a model with image input. If the main model is text-only, configure a vision model via `llm.imageModel`, otherwise images fall back to the attachment notice.
 - History backfill is incremental per chat cursor: the first sighting of a chat only records a baseline (the newest message time), so old messages aren't treated as new requests.
 - Measured Orca behavior: `lastOutputAt` is a millisecond number, and CLI-created terminals may report `orphaned=true` while still usable. The adapter normalizes the former and only treats `connected=false` as dead.
 - `workerSpec.mode: agent` depends on whether the claude launched by Orca loads the global `~/.claude/agents/`; that premise is not yet verified, so the verified `prompt` mode is the default.

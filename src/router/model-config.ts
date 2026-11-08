@@ -51,8 +51,7 @@ export function resolvePiModelConfig(opts: ResolveModelOptions = {}): PiModelCon
 function readYamlModel(path: string): Partial<PiModelConfig> {
   if (!existsSync(path)) return {}
   try {
-    const doc = parseYaml(readFileSync(path, 'utf8')) as Record<string, any> | null
-    const llm = doc?.llm
+    const llm = readYamlLlm(path)
     if (!llm) return {}
     return {
       ...(llm.baseUrl ? { baseUrl: String(llm.baseUrl) } : {}),
@@ -62,6 +61,51 @@ function readYamlModel(path: string): Partial<PiModelConfig> {
     }
   } catch {
     return {}
+  }
+}
+
+function readYamlLlm(path: string): Record<string, any> | null {
+  if (!existsSync(path)) return null
+  try {
+    const doc = parseYaml(readFileSync(path, 'utf8')) as Record<string, any> | null
+    return (doc?.llm as Record<string, any> | undefined) ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 图片转文字用的模型配置。
+ *
+ * 默认复用研判模型；如果主模型不支持多模态，可以在 `llm` 段单独指定：
+ *
+ * ```yaml
+ * llm:
+ *   model: deepseek-v4-flash
+ *   imageModel: qwen3-vl-plus
+ *   imageBaseUrl: https://dashscope.aliyuncs.com/compatible-mode/v1
+ *   imageApiKey: sk-xxx
+ * ```
+ *
+ * 环境变量 `RA_LLM_IMAGE_MODEL` / `RA_LLM_IMAGE_BASE_URL` / `RA_LLM_IMAGE_API_KEY` 优先级更高。
+ */
+export function resolveImageModelConfig(opts: ResolveModelOptions = {}): PiModelConfig {
+  const base = resolvePiModelConfig(opts)
+  const env = opts.env ?? process.env
+  const userHome = opts.home ?? homedir()
+  const raHome = env.RA_HOME ?? join(userHome, '.router-agent')
+  const configPath = opts.configPath ?? join(raHome, 'config.yaml')
+  const llm = readYamlLlm(configPath)
+
+  const model = env.RA_LLM_IMAGE_MODEL || (llm?.imageModel ? String(llm.imageModel) : '')
+  const baseUrl = env.RA_LLM_IMAGE_BASE_URL || (llm?.imageBaseUrl ? String(llm.imageBaseUrl) : '')
+  const apiKey = env.RA_LLM_IMAGE_API_KEY || (llm?.imageApiKey ? String(llm.imageApiKey) : '')
+
+  return {
+    ...base,
+    ...(model ? { model } : {}),
+    ...(baseUrl ? { baseUrl } : {}),
+    ...(apiKey ? { apiKey } : {}),
   }
 }
 

@@ -12,16 +12,19 @@ import { Engine } from '../core/engine.js'
 import { OrcaAdapter } from '../worker/orca/index.js'
 import { GitHubTracker } from '../sources/github.js'
 import { FeishuConsumer, FeishuSender, attachQuotedMessage, normalizeFeishuEventDetailed } from '../sources/feishu.js'
+import { attachImageText } from '../sources/feishu-image.js'
 import { backfillChats } from '../sources/feishu-backfill.js'
 import { ChatDirectory } from '../sources/feishu-directory.js'
 import { createLarkRunner, larkEnv, parseAppId } from '../sources/lark.js'
+import { createVisionTranscriber, type ImageTranscriber } from '../infra/vision.js'
+import type { Trigger } from '../core/model.js'
 import { runInitWizard } from './init.js'
 import { formatChecks, runDoctor } from './doctor.js'
 import { simulate } from './simulate.js'
 import { runReport, readContentArg, type ReportOptions } from './report.js'
 import type { Prompter } from './prompts.js'
 import { realRunner, type CommandRunner } from '../infra/process.js'
-import { resolvePiModelConfig } from '../router/model-config.js'
+import { resolveImageModelConfig, resolvePiModelConfig } from '../router/model-config.js'
 import { createDecisionEngine } from '../router/engine-factory.js'
 import type { DecisionAudit } from '../router/decision-engine.js'
 import { RouterService, createEffectsSender, type Logger } from '../service.js'
@@ -650,6 +653,24 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   const sender = new FeishuSender(larkRunner)
   const prTracker = new GitHubTracker(ghRunner)
   const model = resolvePiModelConfig({ configPath: join(home, 'config.yaml') })
+  // 图片转文本：默认复用研判模型；主模型不支持多模态时可在 llm.imageModel 单独指定。
+  // 配置解析失败不阻塞启动，图片退回「纯附件」处理。
+  let imageTranscriber: ImageTranscriber | null = null
+  if (config.feishu.images.enabled) {
+    try {
+      imageTranscriber = createVisionTranscriber(
+        resolveImageModelConfig({ configPath: join(home, 'config.yaml') }),
+        { timeoutMs: config.feishu.images.timeoutMs, maxChars: config.feishu.images.maxChars },
+      )
+    } catch (error) {
+      logger.warn('feishu:image-vision-disabled', { message: error instanceof Error ? error.message : String(error) })
+    }
+  }
+  const withImageText = (trigger: Trigger): Promise<Trigger> => attachImageText(trigger, {
+    runner: larkRunner,
+    transcriber: imageTranscriber,
+    logger,
+  })
   const decisionEngine = createDecisionEngine({ config, store, model, engine })
   const auditPath = join(home, 'logs', 'decisions.jsonl')
   const onDecisionAudit = (audit: DecisionAudit): void => {
@@ -725,9 +746,12 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
         },
       })
       if (result.baselined.length > 0) logger.info('backfill:baseline', { chats: result.baselined })
-      // 补拉同样要带上被引用消息的正文，否则引用消息进研判时只剩一句空 @。
+      // 补拉同样要带上被引用消息的正文，否则引用消息进研判时只剩一句空 @；
+      // 图片消息随后下载 image_key 并转成文本。
       return Promise.all(
-        result.triggers.map(async t => attachQuotedMessage({ ...t, chatName: directory.nameOf(t.chatId) }, larkRunner)),
+        result.triggers.map(async t =>
+          withImageText(await attachQuotedMessage({ ...t, chatName: directory.nameOf(t.chatId) }, larkRunner)),
+        ),
       )
     },
   })
@@ -770,19 +794,29 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
           })
           return
         }
-        // 引用消息要先回查被引用正文，异步补齐后再入库。
+        // 引用消息要先回查被引用正文，异步补齐后再入库；图片消息再下载 image_key 转文本。
+        const base = result.trigger
+        const willReply = base.addressed !== 'none' || replyAlwaysChats.has(base.chatId)
+        const react = (messageId: string): void => {
+          void reactTo(messageId)
+            .catch(error => logger.warn('feishu:reaction-failed', { message: error instanceof Error ? error.message : String(error) }))
+        }
+        // 图片要下载 + 识别，可能耗时较久；先加回执表情，避免用户以为机器人没收到。
+        const rawBase = base.raw as Record<string, unknown> | undefined
+        const needsImageWork = Boolean(base.mediaOnly) || Array.isArray(rawBase?.imageKeys)
+        if (config.feishu.reaction && willReply && needsImageWork && !store.getReaction(base.externalId)) react(base.externalId)
         void (async () => {
-          const trigger = await attachQuotedMessage(result.trigger!, larkRunner)
+          const quoted = await attachQuotedMessage(base, larkRunner)
+          const trigger = await withImageText(quoted)
           const stored = engine.ingest(trigger)
           if (!stored) return
-          const quoted = Boolean((trigger.raw as Record<string, unknown> | undefined)?.quote)
-          logger.info('trigger:ingested', { id: trigger.id, chat: trigger.chatId, addressed: trigger.addressed, quoted })
+          const raw = trigger.raw as Record<string, unknown> | undefined
+          const hasQuote = Boolean(raw?.quote)
+          const imageCount = Array.isArray(raw?.images) ? raw.images.length : 0
+          logger.info('trigger:ingested', { id: trigger.id, chat: trigger.chatId, addressed: trigger.addressed, quoted: hasQuote, images: imageCount })
           // 只对「会被回复」的消息加回执表情：@、私聊，或 mode=all 的全量接收群。
-          const willReply = trigger.addressed !== 'none' || replyAlwaysChats.has(trigger.chatId)
-          if (config.feishu.reaction && willReply) {
-            void reactTo(trigger.externalId)
-              .catch(error => logger.warn('feishu:reaction-failed', { message: error instanceof Error ? error.message : String(error) }))
-          }
+          // 纯附件在入库前已经加过，这里跳过避免重复。
+          if (config.feishu.reaction && willReply && !needsImageWork) react(trigger.externalId)
         })().catch(error => logger.warn('trigger:ingest-failed', { message: error instanceof Error ? error.message : String(error) }))
       },
       onReady: () => logger.info('feishu:ready', {}),
