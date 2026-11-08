@@ -3,7 +3,7 @@
 > 目标：让 router-agent 从「Orca + Claude Code 单一路径」演进为「可插拔 Agent Runtime」。
 > 新增 Claude Code CLI、Codex CLI 等后端时，只实现适配器，不改 Router 内核。
 >
-> 版本：v1.6（3 个独立视角评审 + 2 轮独立复核 + 1 轮 Claude CLI 实测修订后的定稿草案）
+> 版本：v1.7（3 个独立视角评审 + 2 轮独立复核 + Claude CLI 实测修订 + 一期范围调整）
 > 仓库基线：`main` @ `5f90fa6`
 > 编写：ra worker（tk-15）
 
@@ -17,6 +17,7 @@
 4. **报告协议是跨后端不变量**：`ra report` + `state.json` 兜底已经与后端无关，必须保留，并作为新后端接入的硬性验收项（Agent 必须能执行 shell 命令）。
 5. **迁移必须零行为回归**：Orca 路径先做「等价包装」，用同一套契约测试与现有测试兜住，再逐个引入新后端；任何阶段都可独立 revert。
 6. **多后端共存靠 `assignment.backendId` 路由**，不是全局单后端；`config.backend.default` 只决定新工单，旧工单永远回到自己创建时的后端。
+7. **一期范围锁定**：P0–P3，即 Orca 等价拆解 + Claude Code CLI 后端；Codex CLI 与旧路径清理放二期（P4–P5）。
 
 ---
 
@@ -818,6 +819,15 @@ OrcaBackend (id='orca')
 
 **结论**：不需要因为「追问」强制上 SDK 或 ACP。一期用 `--bg` + `--resume`，把「追问在当前轮结束后生效」作为明确语义；只有未来要求「轮内实时打断/插话」时，才评估 `stream-json` 或 SDK/ACP。
 
+**「追问在当轮结束后生效」是什么意思**：
+
+- **一轮** = Claude 的一次完整回复周期（可能包含多次工具调用），不是整张工单；
+- 后台会话在 `working` 时没有安全的「插话」接口：`--bg --resume` 会 fork 副本，`attach` 是交互式接管，不适合 Router 自动操作。所以 Router 把追问存进 `inputs`，等当前轮 `done`（或显式 `claude stop`）后，再用 `--bg --resume` 送给同一个会话；
+- 这和你直接在 Claude Code 终端里「它正在干活时先打一句话」的体验一致：那句话不会立刻打断当前轮，而是排在当前轮之后执行；区别是 Router 会持久化、可重试、可审计；
+- 例子：10:00 开工 → 10:01 用户在飞书追问「顺便把测试补上」→ 10:05 当前轮结束 → Router 自动 `claude --bg --resume <sessionId> "顺便把测试补上"`，同一个会话继续；
+- 如果用户要求**立刻打断**：Router 先 `claude stop <id>`（会话保留），再带追问 resume；代价是当前轮未完成的工作可能被中断；
+- 如果必须「边干边插话」：需要 `claude -p --input-format stream-json` 或 SDK/ACP；一期不采用，按上面的回合制语义实现。
+
 **工作区**：`GitWorktreeProvider`
 ```bash
 git worktree add -b <workBranch> -- <workdir> <baseBranch>
@@ -1066,6 +1076,9 @@ export function createBackends(config: AppConfig, deps: BackendDeps): BackendReg
 
 ## 13. 实施计划（可分阶段合并）
 
+> **交付节奏**：一期 = P0 + P1 + P2 + P3，**Claude Code CLI 后端随一期一起交付**；二期 = P4 + P5（Codex CLI 与旧路径清理）。
+> 每一阶段仍保持独立可合并、可 revert；P3 不拆到二期。
+
 ### P0 · 契约先行（不改行为，可独立合并）
 
 - 新增 `src/worker/port.ts` 的中立模型与 `WorkerBackend` v2（含 `WorkerRef / StartResult / DeliveryReceipt / AgentStatus | null`）；
@@ -1091,13 +1104,13 @@ export function createBackends(config: AppConfig, deps: BackendDeps): BackendReg
 
 - `loadConfig` 真正解析 `backend.default / backend.options`（当前写死）；启动期校验 default 已注册，未知值 fail-fast；
 - `BackendRegistry` 按 id 取后端；已有 assignment 的生命周期操作按 `assignment.backendId` 路由；launch/relaunch 用 `registry.default()` 或 effect 显式 backendId；
-- `ra serve` 用注册表；`backend.default` 只决定新工单；P2 只注册 `orca`，配置其他值直接启动失败；
+- `ra serve` 用注册表；`backend.default` 只决定新工单；P2 只注册 `orca`，配置其他值直接启动失败；P3 在同一期追加 `claude-cli`；
 - doctor/init 改为 backend 自检/仓库发现；
 - 加 `ra serve` 单实例锁 + 工单 launch lease + repo 级 worktree 串行化。
 - **验收**：旧 Orca 工单与手工绑定继续工作；未知 backend 明确报错；单实例测试通过。
 - **回滚**：注册表只注册 `orca`，`backend.default=orca`。
 
-### P3 · Claude Code CLI 后端
+### P3 · Claude Code CLI 后端（一期必须交付）
 
 - **前置安全项**：`ra report` 支持 `--port` / `RA_PORT`；`ra doc` 走 Router 代理（或使用只读最小 `RA_HOME`），避免 Agent 依赖完整 `config.yaml`；
 - `GitWorktreeProvider`（含 `--`、分支校验、路径约束、失败回滚）；
@@ -1108,7 +1121,15 @@ export function createBackends(config: AppConfig, deps: BackendDeps): BackendReg
 - **风险**：权限/认证/模型额度；`blocked` 权限提示；CLI 版本字段变化。
 - **回滚**：不注册 `claude-cli`；默认仍 `orca`。
 
-### P4 · Codex CLI 后端
+**一期总验收（P0–P3 一起）**：
+- Orca 路径行为不变，现有测试全绿；
+- `backend.default` 可在 `orca` / `claude-cli` 间切换，旧工单按 `assignment.backendId` 走原后端；
+- Claude 临时仓库完整链路跑通：接单 → 改文件 → `ra report` → PR → 闭环；
+- 追问在当轮结束后自动送达；`blocked` 能转人工；Router 重启后能找回 done/stopped 会话；
+- `ra doctor` 能同时检查 Orca 与 Claude CLI 的可执行文件、认证与仓库可见性；
+- 安全项：env allowlist、`ra report` 免 config、prompt 走文件、无裸 `Bash`。
+
+### P4 · Codex CLI 后端（二期）
 
 - `CodexCliRuntime`（`codex exec --json` + `codex exec resume`，stdin 传 prompt，沙箱/网络默认保守）；
 - `CodexSessionActivity`（sessionId + cwd 双条件，候选文件有界）；
@@ -1117,7 +1138,7 @@ export function createBackends(config: AppConfig, deps: BackendDeps): BackendReg
 - **风险**：事件格式随版本变化；沙箱策略导致命令失败。
 - **回滚**：不注册 `codex-cli`；默认仍 `orca`。
 
-### P5 · 清理与文档
+### P5 · 清理与文档（二期）
 
 - 删除旧 `OrcaAdapter` 兼容层与死代码 `relaunchAgent`；
 - 列出并修正所有旧路径 importer：`src/service.ts`、`src/router/api.ts`、`src/cli/index.ts`、`tests/**`；
@@ -1206,10 +1227,10 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
 
 ### 15.3 开放问题（需要产品/架构确认）
 
-1. 追问语义接受「当前轮结束后生效」吗？还是必须支持轮内实时插话（后者需要 `claude -p --input-format stream-json` 或 SDK/ACP）？
-2. 用户是否需要在飞书里感知「当前工单跑在哪个 Agent 后端」？
-3. Claude/Codex 的模型额度与 Router 的 Pi 额度是否分开计费/限额？
-4. 是否要把 Orca 降级为「可选后端」，默认改为 Claude CLI？本方案不建议一期改默认值。
+1. 追问语义默认按「当轮结束后生效」设计（与 Claude Code TUI 的输入排队一致）；是否接受？若必须轮内实时插话，需要 `stream-json` 或 SDK/ACP。
+2. 一期 Claude CLI 已纳入交付，但默认后端是否仍保持 Orca？是否先在某个项目/群绑定上试切 Claude？
+3. 用户是否需要在飞书里感知「当前工单跑在哪个 Agent 后端」？
+4. Claude/Codex 的模型额度与 Router 的 Pi 额度是否分开计费/限额？
 
 ---
 
@@ -1294,6 +1315,16 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
   4. `deliver()` 在 `working/blocked` 只排队，`done/stopped` 才 resume；`--resume` 产生新 id 视为错误；
   5. 明确追问语义为「当前轮结束后生效」，并把「轮内实时插话」列为开放问题。
 - 结论：一期不需要 SDK/ACP；`--bg` 方案更贴合现有 Router 的「回合制工单」模型，且保留 agent view 的人工接管能力。
+
+### Round 7 · 一期范围确认
+
+- 反馈：追问「当轮结束后生效」需要更直白的解释；一期把 Claude CLI 一起实现。
+- 修正：
+  1. 在 9.1 增加追问语义小节与时间线例子，明确「一轮 = 一次完整回复周期，不是整张工单」，并与 Claude Code TUI 的输入排队类比；
+  2. 第 13 节明确「一期 = P0–P3（含 Claude Code CLI）」，P4/P5 为二期；
+  3. 增加「一期总验收」清单，覆盖 Orca 回归、Claude 链路、追问、重启恢复、安全项；
+  4. 开放问题改为「是否接受当轮结束语义」与「默认后端是否仍为 Orca」。
+- 结论：一期范围锁定为 Orca 等价拆解 + Claude CLI 可用；Codex 与清理放二期。
 
 ---
 
