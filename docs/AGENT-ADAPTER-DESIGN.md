@@ -3,7 +3,7 @@
 > 目标：让 router-agent 从「Orca + Claude Code 单一路径」演进为「可插拔 Agent Runtime」。
 > 新增 Claude Code CLI、Codex CLI 等后端时，只实现适配器，不改 Router 内核。
 >
-> 版本：v1.5（接口完整性 / 可实施性 / 安全运维 3 个独立视角评审 + 2 轮独立复核与一致性校验后的定稿草案）
+> 版本：v1.6（3 个独立视角评审 + 2 轮独立复核 + 1 轮 Claude CLI 实测修订后的定稿草案）
 > 仓库基线：`main` @ `5f90fa6`
 > 编写：ra worker（tk-15）
 
@@ -265,7 +265,7 @@ export interface LaunchRequest {
   options?: Record<string, unknown>
 }
 
-export type AgentPhase = 'starting' | 'running' | 'exited' | 'lost' | 'unknown'
+export type AgentPhase = 'starting' | 'running' | 'blocked' | 'exited' | 'lost' | 'unknown'
 
 export interface AgentStatus {
   /** 进程/会话是否仍可继续。 */
@@ -383,7 +383,7 @@ export interface BackendCapabilities {
     output: boolean
     /** 能读 Agent 自己的结构化会话记录。 */
     activity: boolean
-    /** 支持非 TTY 的结构化输入投递（headless resume）；TTY 注入也算支持。 */
+    /** 支持非 TTY 的结构化输入投递（Claude `--bg --resume` / Codex resume）；TTY 注入也算支持。 */
     structuredInput: boolean
     /** 支持显式唤醒信号（status?），headless 后端通常为 false。 */
     nudge: boolean
@@ -433,6 +433,7 @@ export interface WorkerBackend {
 |-|-|-|
 | `null` | 后端暂时无法判断（provider 不可用 / 查询失败 / 没有 status 能力） | 不判死、不判僵尸；下一轮再看 |
 | `phase: 'unknown'` | 已查询但结果不确定（如 Orca orphaned 且不可写） | 同 `null`，但日志保留 provider 细节 |
+| `phase: 'blocked'` | 进程活着，但卡在权限/用户输入（Claude `state=blocked, waitingFor=permission prompt`） | 置 attention、通知人；不自动 resume（会 fork 副本） |
 | `phase: 'lost'` | 已确认会话/进程不存在 | 走 `handleLostWorker`，转人工 |
 | `alive: false` + `phase: 'exited'` | 进程已退出；是否可 resume 看 `acceptingInput` | 可 resume 则保留，否则转人工 |
 | `alive: true` | 进程/会话仍可用 | 正常 idle/active 判定 |
@@ -537,10 +538,10 @@ export interface ProcessSpawner {
 |-|-|-|-|
 | 工作区创建 | Orca worktree | `git worktree add` | `git worktree add` |
 | 工作区回收 | Orca worktree rm | `git worktree remove` | `git worktree remove` |
-| Agent 启动 | `orca worktree create --agent claude` | `claude -p ...` | `codex exec ...` |
-| 输入投递 | `orca terminal send` | 运行中排队；结束后 `claude -p --resume <session>` | 结束后 `codex exec resume <session> <prompt>` |
-| 结构化活性 | terminal list | 子进程 PID + 会话文件 | 子进程 PID + rollout 文件 |
-| 进程退出信息 | terminal list 的 connected/orphaned | 子进程 exit code + signal | 子进程 exit code + signal |
+| Agent 启动 | `orca worktree create --agent claude` | `claude --bg ...` | `codex exec ...` |
+| 输入投递 | `orca terminal send` | working/blocked 排队；done/stopped 后 `claude --bg --resume <sessionId>`（不带 flags） | 结束后 `codex exec resume <session> <prompt>` |
+| 结构化活性 | terminal list | `claude agents --json --all`（state/status/waitingFor） | 子进程 PID + rollout 文件 |
+| 进程退出信息 | terminal list 的 connected/orphaned | `state=done/stopped`（无 exitCode） | 子进程 exit code + signal |
 | 显式唤醒 | `terminal send status?` | 不支持（会起新一轮模型调用） | 不支持 |
 | 投递回执 | terminal send 成功即 accepted | `accepted / queued / rejected` | `accepted / queued / rejected` |
 | 输出尾部 | terminal read --screen | 捕获 stdout / stream-json 日志 | 捕获 stdout / `--json` 日志 |
@@ -549,7 +550,7 @@ export interface ProcessSpawner {
 | 仓库发现 | `orca repo list` | 配置文件 / `git` 目录 | 配置文件 / `git` 目录 |
 | 工具策略 | Agent 规范 + Orca 启动参数 | `--allowedTools` / `--permission-mode` | `-s workspace-write` / 配置覆盖 |
 
-> Claude / Codex 的 CLI 事实已在本机核实：Claude Code `2.1.318` 支持 `-p/--print`、`--output-format stream-json`、`--resume <session-id>`、`--session-id <uuid>`、`--permission-mode`、`--permission-prompts`；Codex `0.166.0` 支持 `codex exec --json`、`-C <dir>`、`--output-last-message`、`codex exec resume <session-id> <prompt>`。
+> Claude / Codex 的 CLI 事实已在本机实测：Claude Code `2.1.318` 的 `claude --bg`、`claude agents --json --all`、`claude --bg --resume <session-id>`、`claude stop/attach/logs` 均可用于后台会话管理；`--bg --resume` 不带新 flags 且会话处于 `done/stopped` 时继续同一 id，否则 fork 新 id。Codex `0.166.0` 支持 `codex exec --json`、`-C <dir>`、`--output-last-message`、`codex exec resume <session-id> <prompt>`。完整实测记录见附录 C。
 
 ### 6.2 降级规则（Router 侧）
 
@@ -572,8 +573,8 @@ export interface ProcessSpawner {
 | 后端形态 | 唤醒策略 |
 |-|-|
 | 常驻 TTY（Orca） | `backend.nudge(ref)`；Orca 内部执行 `orca terminal send status?`，不产生 Input 行、不参与 ack |
-| headless 且进程仍 running | **不唤醒**；只根据 `status.lastActivityAt` 判 idle/stale |
-| headless 且进程已退出、可 resume | 仅在 `acceptingInput=true` 且用户有新输入时 resume；不主动发 `status?` |
+| Claude/Codex 仍在运行（`working` / 子进程存活） | **不唤醒**；只根据 `status.lastActivityAt` 判 idle/stale |
+| Claude `done/stopped`、Codex 进程已退出且可 resume | 仅在 `acceptingInput=true` 且用户有新输入时 resume；不主动发 `status?` |
 | 无 `liveStatus` / 无 `nudge` | 不做唤醒，交给上报心跳与闲置治理 |
 
 实现位置：`checkIdle()` 先读 `backend.status?.()` 与 `capabilities.agent.nudge`；只有 Orca 这类常驻 TTY 后端才调用 `nudge()`。`deliver()` 只接收业务输入，必须带 `in_` 前缀；`status?` 不再走 `deliver`。
@@ -589,6 +590,7 @@ function classifyAgentStatus(s: AgentStatus | null): AgentVerdict {
   if (!s) return 'unknown'
   if (s.phase === 'lost') return 'lost'
   if (s.phase === 'exited') return s.acceptingInput ? 'keep' : 'transfer'
+  if (s.phase === 'blocked') return 'keep' // 活着但等人/权限；由 Router 置 attention，不自动 resume
   if (s.phase === 'unknown') return 'unknown'
   return 'keep' // starting / running
 }
@@ -603,6 +605,8 @@ function classifyAgentStatus(s: AgentStatus | null): AgentVerdict {
 | `deliverPendingInputs` | 正常投递 | `handleLostWorker` | 不投递，`setAttention` | 按退避重试，不判死 |
 
 > `transfer` 与 `lost` 的区别：`lost` 是「确定没了」，直接转人工并结束 assignment；`transfer` 是「进程退出了但会话可能还在，需要人决定是否重来」，只置 attention，不自动结束。P1 用同一组测试覆盖四种 verdict。
+>
+> `blocked` 是 `keep` 的特例：进程活着但卡在权限/输入。`checkIdle` 不 `nudge`，`probe` 不当作停滞，Router 置 attention 并通知一次；用户可 `claude attach <id>` 人工处理，或由 Router `stop` 后带新输入 `--resume`（会保留会话）。
 
 **状态来源映射（各 adapter 必须遵守）**：
 
@@ -632,7 +636,7 @@ function classifyAgentStatus(s: AgentStatus | null): AgentVerdict {
 
 ### D2：`handle` 保持不透明字符串，但必须配合 `ticketId/workdir/sessionId` 可还原
 
-**决策**：`assignments.handle` 继续存字符串；Orca 存 terminal handle，Claude/Codex 存 sessionId。所有生命周期方法接收 `WorkerRef { handle, ticketId, workdir?, sessionId? }`，后端据此定位自己的 `~/.router-agent/workers/<ticketId>/meta.json`。
+**决策**：`assignments.handle` 继续存字符串；Orca 存 terminal handle，Claude 存 `claude --bg` 打印的 short id（UUID 型 `sessionId` 写 meta），Codex 存 sessionId。所有生命周期方法接收 `WorkerRef { handle, ticketId, workdir?, sessionId? }`，后端据此定位自己的 `~/.router-agent/workers/<ticketId>/meta.json`。
 
 **理由**：不改表结构、不改 API、不破坏现有数据；`ticketId` 是 meta 目录的稳定键，`workdir` 是工作区定位键，`sessionId` 是会话定位键。
 
@@ -653,7 +657,7 @@ function classifyAgentStatus(s: AgentStatus | null): AgentVerdict {
 
 ### D4：输入投递语义统一为「至少一次 + ack + 幂等」，不统一传输方式
 
-**决策**：`deliver(ref, inputs, opts)` 返回 `DeliveryReceipt { accepted | queued | rejected }`；语义是「这些输入已被后端接收」，但最终完成仍以 Agent 的 `ra report --ack` 为准。TTY 注入（Orca）和 headless resume（Claude/Codex）都是合法实现。
+**决策**：`deliver(ref, inputs, opts)` 返回 `DeliveryReceipt { accepted | queued | rejected }`；语义是「这些输入已被后端接收」，但最终完成仍以 Agent 的 `ra report --ack` 为准。Orca 的 TTY 注入、Claude 的 `--bg --resume`、Codex 的 `exec resume` 都是合法实现。
 
 **理由**：不同 CLI 的输入模型不同；强行统一成 TTY 会把新后端逼回伪终端方案，强行统一成 headless 又会改变 Orca 已验证的交互体验。
 
@@ -802,6 +806,18 @@ OrcaBackend (id='orca')
 
 ### 9.1 Claude Code CLI Adapter
 
+**先回答追问能力**：Claude Code CLI **可以在 CLI 层实现追问**，但有三条路径，语义不同：
+
+1. **`claude --bg` + `claude agents` 会话管理（推荐，也是本次实测采用的方案）**
+   - 首轮：`claude --bg "<任务描述>"` 起后台会话，打印 short id；
+   - 追问：本轮结束后 `claude --bg --resume <sessionId> "<追问>"`，**不能带新的 flags**（会 fork 副本），会话 id 不变；
+   - 当前会话还在 `working` / `blocked` 时执行 `--bg --resume` 会**新建一个副本**（新 id），因此 Router 必须等 `state=done/stopped` 再追投，或先 `claude stop` 再 resume；
+   - `claude agents` 是 agent view，`claude agents --json --all` 是给脚本用的结构化视图；`claude attach` 可以人工接管/复原会话。
+2. **`claude -p --input-format stream-json --output-format stream-json`**：`--print` 模式支持实时流式输入，能在一轮进行中追加消息；但 Router 要自己持有长驻进程、解析 JSON 事件，复杂度高，且失去 agent view。
+3. **Claude Agent SDK / ACP**：程序化控制最完整，但引入额外依赖与协议，同样失去 CLI 的 agent view；一期不需要。
+
+**结论**：不需要因为「追问」强制上 SDK 或 ACP。一期用 `--bg` + `--resume`，把「追问在当前轮结束后生效」作为明确语义；只有未来要求「轮内实时打断/插话」时，才评估 `stream-json` 或 SDK/ACP。
+
 **工作区**：`GitWorktreeProvider`
 ```bash
 git worktree add -b <workBranch> -- <workdir> <baseBranch>
@@ -810,43 +826,47 @@ git worktree remove -- <workdir>
 ```
 
 **启动（首轮）**：
+- worker 契约写入 `~/.router-agent/workers/<ticketId>/brief.md`，prompt 只指向文件，避免 argv / `ps` 泄露整段手册；
+- 启动：
 ```bash
-# 契约正文通过 stdin 传入，避免出现在 argv / ps / 失败日志里
-claude -p - \
-  --session-id <uuid> \
-  --output-format stream-json \
+claude --bg --name <ticketId>-<slug> \
   --permission-mode acceptEdits \
-  --allowedTools "Read Write Edit Glob Grep Bash(ra report:*) Bash(ra doc:*) Bash(git:*) Bash(gh:*)"
+  --model <model> \
+  "Read <briefPath> and execute the ticket. Report via ra report."
 ```
-在 `<workdir>` 下由 `ProcessSpawner` 拉起，`env` 使用显式 allowlist，stdout 落到 `~/.router-agent/workers/<ticket>/agent.log`（0600、10 MB 轮转）。
+- `--bg` 打印 short id（实测如 `e46aaf7e`），adapter 解析后作为 `handle`；
+- adapter 读取 `claude agents --json --all` 中该 id 的 `sessionId`（UUID）、`pid`、`startedAt`、`state`、`status`、`waitingFor`，写入 meta v2（9.4）；
+- `env` 使用显式 allowlist；**不需要 `ProcessSpawner`**，进程生命周期由 Claude 自己的后台管理负责。
+
+**状态**：`claude agents --json --all` 过滤 `kind=background` 且 `id=handle`：
+
+| Claude 字段 | `AgentStatus` |
+|-|-|
+| `state=working, status=busy` | `phase='running', alive=true, acceptingInput=false` |
+| `state=blocked, status=waiting, waitingFor='permission prompt'` | `phase='blocked', alive=true, acceptingInput=true`；Router 置 attention，不自动 resume |
+| `state=done` / `state=stopped` | `phase='exited', acceptingInput=true`（可 resume） |
+| 查询成功但 id 不存在 | `phase='lost', alive=false` |
+| 查询命令失败 / 超时 | `null` |
+
+`startedAt` 是毫秒时间戳，转 ISO；`lastActivityAt` 取 session JSONL 的 mtime 或最后一条事件时间。`claude logs` 是 TUI 渲染（含 ANSI/spinner），只作为最后兜底并清洗，不用于状态判定。
 
 **追问投递**：
-- 当前进程还在跑：`deliver` 返回 `queued`，输入落 `inputs` 表，等本轮结束后投递；
-- 进程已退出且 `acceptingInput=true`：`claude -p --resume <sessionId> -`，输入走 stdin；
-- 同一 `sessionId` 单飞；按 `input.id` 幂等，已在 meta 记录的 `lastHandedOffInputId` 不重复投递；
-- 投递成功后由 Agent 自己 `ra report --ack in_xxx`。
+- `working` / `blocked`：`deliver` 返回 `queued`，输入留在 `inputs` 表；`blocked` 额外置 attention（权限/人工），等状态变成 `done/stopped` 再投；
+- `done/stopped`：`claude --bg --resume <sessionId> "<short input>"`，**不带任何 flags**；输入正文写临时文件，prompt 只指向文件；
+- 需要打断当前轮：先 `claude stop <id>`（会话保留），再按上一步 resume；会丢弃当前轮进行中的输出，需在话题里说明；
+- 同一 `sessionId` 单飞；按 `(input.id, attempt)` 去重；如果 `--resume` 意外产生新 id（fork），adapter 必须报错并记日志，禁止静默切换 handle。
 
-**状态**：
-- 子进程存活 → `phase=running`；
-- 进程退出且 `~/.claude/projects/<slug>/<sessionId>.jsonl` 存在且 `exitCode=0` → `phase=exited, acceptingInput=true`；
-- 进程退出但 `exitCode!=0`，且 grace 窗口内没有新 report/ack → 转人工，不进入可 resume 的 idle；
-- 会话文件与会话进程都无 → `phase=lost, alive=false`。
+**活动**：`ClaudeSessionActivity` 按 `sessionId` 精确匹配 `~/.claude/projects/<slug>/<sessionId>.jsonl`；找不到再退最新文件，但多候选且无法匹配时返回 `null`。
 
-**活动**：复用 `ClaudeSessionActivity`（现 `src/worker/orca/session.ts`），先按 `sessionId` 精确匹配文件名/内容，找不到再退最新文件；同一 workdir 有多候选且无法匹配时返回 `null` 并记日志，禁止猜最新。
-
-**进程管理（所有 headless 后端共用）**：
-- adapter 在 `~/.router-agent/workers/<ticketId>/meta.json` 写 `pid / startedAt / sessionId / logPath / lastHandedOffInputId / status`；写 meta 用临时文件 + rename 原子替换，先写 `status=starting, pid=0` 再 spawn；
-- 子进程用独立进程组（`detached: true`），停止时先 `SIGTERM` 整个进程组，5s 后 `SIGKILL`；`stop()` 必须幂等；进程退出时写 `exit.json`（code/signal/at）；
-- `agent.log` 有大小上界（例如 10 MB，超出轮转为 `.1`），权限 0600，避免长任务把磁盘写满或泄露；
-- `status()` 用 9.4 的 `ProcessIdentity { pid, startedAt, argv, cwd }` 做四重校验，任一不匹配即视为丢失，避免 PID 复用误判；
-- Router 重启后：进程身份匹配 → reattach；进程已退出但会话文件在 → `exited`（可 resume）；两者都无 → `lost`；
-- 默认 wall-clock 超时 2h、输出停滞超时 15min；超时先 `SIGTERM` 进程组，宽限后 `SIGKILL`，记 `agent:timeout`；
-- 同一 `sessionId` 的 `deliver/stop/status` 在 adapter 内加进程内互斥，禁止并发 resume。
+**停止 / 清理 / 人工接管**：
+- `stop` → `claude stop <id>`（保留会话，支持再次 resume）；
+- 清理 → 先 `claude stop`，再用 `GitWorktreeProvider` 删除 worktree；**不要用 `claude rm` 清理 Router 管理的 worktree**（它会连带删除它认为属于该会话的 worktree，对非 Claude 创建的 worktree 行为不明确）；删除会话记录如需使用 `claude rm`，必须限定 `cwd` 且单独显式执行；
+- `claude attach <id>` 是人工入口：用户可在 agent view 里恢复、接管、回答权限提示，Router 不代劳。
 
 **风险**：
-- headless 模式的权限提示：必须显式配置 `--permission-mode` / `--permission-prompts`；默认不跳过权限。
-- `--resume` 与 `--session-id` 的组合行为要以实际 CLI 为准；实现前跑一轮 spike。
-- 长任务可能需要 `--max-budget-usd` 或超时；由 adapter 配置暴露。
+- `state=blocked` 是权限/人工输入卡点；headless 场景默认用 `acceptEdits` + 命令级 `allowedTools` 尽量不触发，但无法完全避免；
+- `--bg --resume` 在不满足条件时会 fork 副本；adapter 必须把“新 id”当错误而不是成功；
+- `cli` 版本升级可能改变 `agents --json` 字段；解析器要按版本容错，失败返回 `null`；
 - Claude 没有 OS 级文件沙箱：`fileAccess` 只是约定；需要强制隔离时用 macOS `sandbox-exec` 或容器，一期不做，但必须在 doctor 里提示风险。
 
 ### 9.2 Codex CLI Adapter
@@ -908,7 +928,7 @@ export interface WorkerMetaV2 {
   branch: string
   /** 实际工作分支（可能被 provider 加后缀）；D9 用它做 gh pr list --head。 */
   workBranch: string
-  /** headless 后端：进程身份，用于重启后校验与 stop。Orca 无独立进程，留空。 */
+  /** Claude/Codex 等非 Orca 后端：进程身份，用于重启后校验与 stop。Orca 无独立进程，留空。 */
   process?: ProcessIdentity
   sessionId?: string
   logPath?: string
@@ -923,7 +943,8 @@ export interface WorkerMetaV2 {
 
 **写入时机（逐后端）**：
 - **Orca**：`worktree create` 返回后写一次（现状不变）；`branch`=起始分支，`workBranch`=实际分支；没有 `process`/`sessionId`；
-- **Claude/Codex**：spawn 前原子写 `{ status:'starting', process:{pid:0,...} }`，spawn 后补 `pid/startedAt/argv/cwd/sessionId/logPath`；进程退出后写 `exit.json` 并更新 `status='exited'`；
+- **Claude**：调用 `claude --bg` 前写 `status='starting'`；拿到 short id 后查 `agents --json --all`，补 `sessionId/pid/startedAt`；`process.argv` 记录启动命令（不含 brief 正文）；`state=blocked/done/stopped` 只更新 meta 的 `status`，不写 `exit.json`；
+- **Codex**：spawn 前原子写 `{ status:'starting', process:{pid:0,...} }`，spawn 后补 `pid/startedAt/argv/cwd/sessionId/logPath`；进程退出后写 `exit.json` 并更新 `status='exited'`；
 - `meta.json` 用临时文件 + rename 原子替换；找不到 meta 时 `status()` 返回 `null`，不能默认存活，也不能直接判 lost；
 - **字段歧义消除**：`branch` 永远是起始分支，`workBranch` 永远是实际工作分支；D9 / PR 兜底只读 `workBranch`。
 
@@ -1080,11 +1101,11 @@ export function createBackends(config: AppConfig, deps: BackendDeps): BackendReg
 
 - **前置安全项**：`ra report` 支持 `--port` / `RA_PORT`；`ra doc` 走 Router 代理（或使用只读最小 `RA_HOME`），避免 Agent 依赖完整 `config.yaml`；
 - `GitWorktreeProvider`（含 `--`、分支校验、路径约束、失败回滚）；
-- `ClaudeCliRuntime`（headless + resume，stdin 传 prompt，env allowlist，单飞 + 幂等）；
-- `ClaudeSessionActivity` 复用，按 sessionId 精确定位；
-- 先做「单轮 + 追问 resume」，不做常驻 TTY。
-- **验收**：在临时仓库跑通「接单 → 改文件 → `ra report` → PR → 闭环」；`ra doctor` 通过；launch 失败无残留；重复 tick 只 resume 一次。
-- **风险**：权限/认证/模型额度；需要 spike 验证 `--resume` 与 `--session-id` 行为。
+- `ClaudeCliRuntime`：`claude --bg` 启动、`claude agents --json --all` 读状态、`claude --bg --resume` 追问、`claude stop` 停止；brief 写文件，env allowlist，单飞 + 按 `(input.id, attempt)` 幂等；
+- `ClaudeSessionActivity` 复用，按 sessionId 精确定位；`claude logs` 仅作兜底且必须清洗 ANSI；
+- 明确语义：追问在当前轮结束后生效；`blocked` 置 attention 等人工，不自动 resume；不实现轮内实时插话。
+- **验收**：在临时仓库跑通「接单 → 改文件 → `ra report` → PR → 闭环」；`ra doctor` 通过；launch 失败无残留；重复 tick 只投递一次；`--resume` 产生新 id 时明确报错；Router 重启后能从 `agents --json --all` 找回 done/stopped 会话。
+- **风险**：权限/认证/模型额度；`blocked` 权限提示；CLI 版本字段变化。
 - **回滚**：不注册 `claude-cli`；默认仍 `orca`。
 
 ### P4 · Codex CLI 后端
@@ -1161,8 +1182,8 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
 | Agent 可读真实 `HOME`（git/gh 需要） | `~/.router-agent/config.yaml`、`~/.ssh` 对 Agent 可见 | `ra report` 用 `--port`/`RA_PORT` 脱离 config；`ra doc` 走 Router 代理；后续 OS 沙箱/独立用户 |
 | Bash 前缀白名单可被拼接绕过 | `ra report; rm` 之类命令仍可能执行 | 明确「白名单≠沙箱」；关键场景用 `sandbox-exec`/容器；doctor 提示风险 |
 | prompt 走 argv | `ps` / 失败日志泄露整段工单 | stdin 或临时文件传参；`summarizeArgs` 位置参数只记长度 |
-| headless 追问语义与 TTY 不一致 | 用户追问延迟到下一轮 | 端口语义允许「排队 + resume」，在话题里说明 |
-| 未 ack 的输入被每 tick 重投 | headless 下变成 resume 风暴、烧 token | 按 input.id 幂等 + 单飞 + 指数退避 + 上限转人工 |
+| Claude 追问在当前轮结束后才生效 | 用户追问延迟 | 端口语义允许「排队 + resume」，在话题里说明；需要轮内插话时再评估 stream-json / SDK |
+| 未 ack 的输入被每 tick 重投 | Claude 下反复 `--bg --resume`，可能 fork 副本、烧 token | 按 `(input.id, attempt)` 幂等 + 单飞 + 指数退避 + 上限转人工 |
 | 会话文件格式随版本变化 | 巡检摘要失效或读错会话 | 解析器版本容错 + sessionId 精确匹配 + 读不到退回 output |
 | Orca 行为回归 | 现有用户路径受损 | 等价包装 + 契约测试 + 分阶段 revert |
 | 新后端没有 `linkedPR` | PR 闭环退化 | 补 `gh pr list --head` + 本地仓库 remote 推导 |
@@ -1172,18 +1193,20 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
 
 ### 15.2 待实测（实现前必须做）
 
-1. Claude Code：`--session-id` + `--resume` 在 `-p` 模式下能否稳定续会话；`stream-json` 事件里 session id 的位置。
-2. Claude Code：`-p -` 从 stdin 读 prompt 的实际行为；`--permission-mode acceptEdits` + 命令级 `Bash(ra report:*)` 在无 TTY 时是否按预期放行/拒绝。
+1. Claude Code：`claude --bg --resume <sessionId>` 在 `blocked`（权限提示）状态下是否也 fork 副本；如果是，确认「blocked 只能人工 attach 或先 stop」的降级策略。
+2. Claude Code：`acceptEdits` + 命令级 `Bash(ra report:*)` 在后台会话中是否按预期放行/拒绝；`blocked` 的常见触发条件与提示文案。
 3. Codex：`codex exec resume <session> --json -` 是否存在并支持 stdin；`--json` 事件里 session id 的位置。
 4. Codex：`-s workspace-write` 下 `git push` / `gh` 是否可用；网络关闭配置键的确切名称。
 5. 两个 CLI 在 worktree 目录内的 `ra` 可见性（PATH / nvm / fnm），以及 env allowlist 下认证变量是否足够。
 6. 会话文件在并发多工单时的定位准确性（sessionId + cwd 双条件，同 workdir 多会话）。
-7. 子进程退出码/信号在 detached 进程组下的捕获方式；Router 重启后 PID + startedAt + 命令行校验的可靠性。
+7. Codex 子进程退出码/信号在 detached 进程组下的捕获方式；Router 重启后 PID + startedAt + argv + cwd 校验的可靠性。
 8. 同一工单重复 launch / 重复 deliver 时，git worktree 与 session 的单飞锁行为。
+9. Claude `claude agents --json --all` 字段在版本升级中的稳定性；`state` 是否还有 `working/done/blocked/stopped` 之外的值。
+10. `claude logs` 的 ANSI 清洗与 TUI 噪音过滤效果；是否只作为最后兜底。
 
 ### 15.3 开放问题（需要产品/架构确认）
 
-1. 新后端是否需要「一个工单一个常驻 TUI」，还是「一轮一进程 + resume」可接受？
+1. 追问语义接受「当前轮结束后生效」吗？还是必须支持轮内实时插话（后者需要 `claude -p --input-format stream-json` 或 SDK/ACP）？
 2. 用户是否需要在飞书里感知「当前工单跑在哪个 Agent 后端」？
 3. Claude/Codex 的模型额度与 Router 的 Pi 额度是否分开计费/限额？
 4. 是否要把 Orca 降级为「可选后端」，默认改为 Claude CLI？本方案不建议一期改默认值。
@@ -1260,6 +1283,18 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
   8. 过宽的 `ra` 通配与 `backend.options` 可绕过安全基线 → 收敛到 `ra report` / `ra doc`，安全参数只由 `worker.tools` 与内置基线生成，options 只放模型/超时/并发。
 - 结论：接口、状态、迁移、安全四条线已闭环；可以进入人工评审，开发从 P0 开始。
 
+### Round 6 · 用户反馈：Claude CLI 追问与 agent view
+
+- 反馈：建议用 `claude agents` 的 agent view 驱动、`claude --bg "任务描述"` 追问；并质疑 Claude Code CLI 是否根本无法追问、是否必须用 ACP / SDK。
+- 实测（附录 C）：CLI **可以**追问，但有条件——会话 `done/stopped` 且 `--bg --resume` **不带新 flags** 时继续同一 id；`working/blocked` 或带 flags 会 fork 新 id。轮内实时追投需要 `-p --input-format stream-json` 或 SDK/ACP。
+- 设计修正：
+  1. 9.1 从「自建 headless spawn + resume」改为「`claude --bg` + `claude agents --json --all` + `claude stop`」，不再需要 Claude 的 `ProcessSpawner`；
+  2. `AgentPhase` 增加 `blocked`（权限/人工卡点）；`blocked` 置 attention，不自动 resume；
+  3. `status()` 必须用 `agents --json --all`，否则 `done/stopped` 会话查不到；
+  4. `deliver()` 在 `working/blocked` 只排队，`done/stopped` 才 resume；`--resume` 产生新 id 视为错误；
+  5. 明确追问语义为「当前轮结束后生效」，并把「轮内实时插话」列为开放问题。
+- 结论：一期不需要 SDK/ACP；`--bg` 方案更贴合现有 Router 的「回合制工单」模型，且保留 agent view 的人工接管能力。
+
 ---
 
 ## 附录 A · 现状证据索引
@@ -1306,3 +1341,34 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
 - [ ] 注册表按 `assignment.backendId` 路由；旧工单不被新默认后端接管。
 - [ ] 通过 `tests/worker/contract.test.ts` 全套契约测试 + 安全/生命周期回归。
 - [ ] 在临时仓库跑通完整链路并留验证记录。
+
+## 附录 C · Claude Code CLI 后台会话实测（2026-11-08）
+
+环境：Claude Code `2.1.318`，macOS。
+
+### C.1 命令与字段
+
+- 启动：`claude --bg --name <name> --permission-mode plan --model haiku "<prompt>"`，输出 `backgrounded · <short-id> · <name>`。
+- 列表：`claude agents --json --all` 返回数组，元素字段为 `id / pid / cwd / kind / startedAt / sessionId / name / state / status / waitingFor`。
+- 观察到的状态组合：
+  - `state=working, status=busy`：运行中；
+  - `state=done, status=idle`：完成；
+  - `state=blocked, status=waiting, waitingFor='permission prompt'`：等权限；
+  - `state=stopped`：`claude stop` 之后，仅在 `--all` 中可见。
+- `claude logs <id>`：原始 TUI 输出，含 ANSI、spinner、状态栏；不适合直接做结构化进度，需清洗且只作兜底。
+- `claude stop <id>`：停止但保留会话；`claude attach <id>` 可恢复/接管；`claude rm <id>` 删除会话及其 worktree（对非 Claude 创建的 worktree 行为不明确，Router 清理不要依赖它）。
+
+### C.2 追问行为（关键）
+
+- 会话 `done` 且**不带新 flags**：`claude --bg --resume <sessionId> "<prompt>"` → 继续同一 id，输出 `woke session <id> with its saved options`。
+- **带新 flags**：`claude --bg --resume <sessionId> --model ... "<prompt>"` → `started a copy as <new-id>`，不是原会话。
+- 会话 `working` 或 `blocked`：`claude --bg --resume` → `started a copy as <new-id>`，不会把输入插进正在运行的会话。
+- 结论：**Claude Code CLI 可以做追问**，但只在「本轮结束 / 已 stop」且「不带新 flags」时保持同一会话；轮内实时追投需要 `claude -p --input-format stream-json`（CLI 自带）或 Claude Agent SDK / ACP。一期推荐 `--bg` 方案，把「追问在下一轮生效」作为明确语义。
+
+### C.3 对适配器的影响
+
+- `handle` 用 short id，`sessionId` 从 `agents --json --all` 补全并写 meta；
+- `status()` 必须用 `--json --all`（`done/stopped` 会话不在默认 `--json` 里）；
+- `deliver()` 在 `working/blocked` 只排队，绝不 resume；`blocked` 置 attention；
+- `stop()` 用 `claude stop`；清理 worktree 用 GitWorktreeProvider，不用 `claude rm`；
+- 不需要 `ProcessSpawner`；Claude 自己的后台管理承担进程生命周期。
