@@ -329,6 +329,11 @@ feishu:
 policy:
   acceptMode: auto     # off / observe / auto
   maxWorkers: 4
+  # 准入表：按「名单内外 × 是否 @」逐格配置，默认值如下（含义见「准入规则」）
+  admission:
+    listedNotAddressed: inferred    # 名单内、未 @：inferred | ignore
+    unlistedAddressed: inferred     # 名单外、@bot：explicit | inferred | ignore
+    unlistedNotAddressed: ignore    # 名单外、未 @：inferred | ignore
 
 # 研判层：Pi 单引擎；超时、token 预算与独立配置目录
 router:
@@ -378,8 +383,22 @@ retention:
 workerSpec:
   mode: prompt         # prompt | agent
 
+# Worker 工具策略：安全基线，backend.options 不允许覆盖这些字段
+worker:
+  tools:
+    fileAccess: read-write   # read-only = 只给 Read / Glob / Grep
+    shell: allowlist         # deny=不给 shell | allowlist=只放行 shellAllow | allow=任意 shell
+    shellAllow: [ra report, ra doc, git, gh, pnpm, npm, npx, node, yarn, bun,
+                 python, python3, pytest, cargo, go, make, mvn, gradle]
+    allowNetwork: false      # 预留字段：当前只解析，未用于收窄网络
+
 backend:
-  default: orca
+  default: orca            # orca | claude-cli（claude-cli 对 projects 的本地路径有要求，见「已知限制」）
+  # 后端专属的非安全参数：目前只有 claude-cli.model（映射成 claude --model）。
+  # 写 allowedTools / permissionMode / sandbox / shellAllow / allowNetwork / fileAccess 会直接启动失败。
+  # options:
+  #   claude-cli:
+  #     model: claude-sonnet-5-5
 
 # 项目清单：开单前必须确认「哪个项目 + 哪个起始分支」
 projects: []
@@ -398,8 +417,49 @@ server:
 ra config set policy.acceptMode observe   # 先观察，不开工
 ra config set policy.maxWorkers 2
 ra config set workerSpec.mode agent
-ra config --edit                          # 直接编辑整份配置
+ra config edit                            # 用 $EDITOR 编辑整份配置（不是 --edit）
 ```
+
+### 逐项修改（`ra config set`）
+
+`ra config set <点路径> <值>` 覆盖常用标量配置；路径未知或值非法会直接报「未知配置项或非法值」：
+
+| 点路径 | 取值 |
+|-|-|
+| `policy.acceptMode` | `off` / `observe` / `auto` |
+| `policy.maxWorkers` | 1–64 |
+| `policy.admission.listedNotAddressed` / `unlistedAddressed` / `unlistedNotAddressed` | 见「准入规则」 |
+| `router.timeoutMs` / `router.tokenBudget` / `router.agentDir` | 毫秒（1s–600s） / token（0=不限） / Pi 配置目录 |
+| `progress.syncMs` / `probeMs` / `silenceMs` / `repeatMs` | 毫秒；前两项 0 = 关闭 |
+| `retention.enabled` / `idleHours` / `closeGraceHours` / `zombieHours` / `sweepMinutes` | 见「闲置工单治理」 |
+| `workerSpec.mode` | `prompt` / `agent` |
+| `backend.default` | `orca` / `claude-cli` |
+| `server.port` | 1–65535 |
+| `feishu.larkHome` / `appId` / `reaction` / `directMessages` / `allowed` / `bots` / `botOpenIds` / `botNames` | 字符串、布尔或逗号分隔列表 |
+| `feishu.chats` | 逗号分隔 chat_id；已有条目的 mode / 绑定 / sync 保留，新条目默认 `all` |
+| `llm.baseUrl` / `llm.model` / `llm.apiKey` | 模型连接信息 |
+
+群与项目这类复合结构用专用写法，一次完成「登记 + 绑定」：
+
+| 写法 | 例子 | 说明 |
+|-|-|-|
+| `project.<名>` | `ra config set project.router-agent "name:dsh/router-agent@main"` | `@` 后可带默认起始分支 |
+| `chatBinding.<chatId>` | `ra config set chatBinding.oc_xxx "router-agent@main"` | 绑定群的项目与起始分支 |
+| `chatMode.<chatId>` | `ra config set chatMode.oc_xxx mention` | `all` / `mention` |
+| `chatSync.<chatId>` | `ra config set chatSync.oc_xxx true` | 启动时补拉该群历史 |
+| `chatAllow.<chatId>` | `ra config set chatAllow.oc_xxx ou_a,ou_b` | 空值 = 沿用全局 `feishu.allowed` |
+
+`router.session.*`、`router.persona.*`、`feishu.images.*` 不在 `config set` 的白名单里，用 `ra config edit` 或 Web 面板改；`worker.tools.*` 与 `backend.options.*` 面板不提供，只能 `ra config edit` 直接改文件。
+
+### 环境变量
+
+| 变量 | 作用 |
+|-|-|
+| `RA_HOME` | 状态目录，等价于全局选项 `--home`；默认 `~/.router-agent` |
+| `RA_PORT` | `ra report` 的上报端口，覆盖 `server.port` |
+| `RA_LARK_HOME` | 覆盖 `feishu.larkHome` |
+| `RA_LLM_BASE_URL` / `RA_LLM_API_KEY` / `RA_LLM_MODEL` | 覆盖研判模型连接信息（优先级最高） |
+| `RA_LLM_IMAGE_BASE_URL` / `RA_LLM_IMAGE_API_KEY` / `RA_LLM_IMAGE_MODEL` | 覆盖图片转写模型 |
 
 ### 专属机器人（推荐）
 
@@ -456,6 +516,21 @@ llm:
 
 也可以用 `RA_LLM_IMAGE_MODEL` / `RA_LLM_IMAGE_BASE_URL` / `RA_LLM_IMAGE_API_KEY` 覆盖。`feishu.images.enabled: false` 可关闭图片转文本（回到「只回一句请补充文字」的行为）。
 
+`llm.temperature` 只影响图片转写（默认 `0.1`），不参与研判。
+
+### Worker 工具策略
+
+`worker.tools` 是派给 worker 的工具基线（默认读写 + 白名单 shell）：
+
+| 字段 | 取值 | 说明 |
+|-|-|-|
+| `fileAccess` | `read-only` / `read-write` | 只读时只给 `Read` / `Glob` / `Grep`，读写再加 `Write` / `Edit` |
+| `shell` | `deny` / `allowlist` / `allow` | `allowlist` 时按 `shellAllow` 的命令前缀放行（如 `git` 放行 `git ...`） |
+| `shellAllow` | 命令前缀数组 | 仅在 `shell: allowlist` 时生效 |
+| `allowNetwork` | `true` / `false` | 预留字段：当前只解析，未用于收窄网络 |
+
+它只对 `backend.default: claude-cli` 生效（映射成 Claude 的 `allowedTools`）；`orca` 后端里 worker 的权限由 Orca 启动的 Claude Code 自身决定。安全字段只能由这里和 adapter 内置基线决定，`backend.options` 写了同名键会直接启动失败。
+
 ### Worker 规范注入
 
 `workerSpec.mode` 有两种：
@@ -479,7 +554,7 @@ llm:
 | `ra tickets [--stage]` | 列出工单 |
 | `ra ticket <id>` | 工单详情（状态 / 派工 / 上报 / 输入） |
 | `ra logs` | 最近 50 行日志 |
-| `ra config` | 查看配置；`config set <key> <value>` 改单项（含 `project.<名>` / `chatBinding.<群>` / `progress.syncMs` / `progress.probeMs`）；`config --edit` 编辑全文 |
+| `ra config` | 查看配置；`config set <key> <value>` 改单项（含 `project.<名>` / `chatBinding.<群>` / `chatMode.<群>` / `chatSync.<群>` / `chatAllow.<群>` / `progress.syncMs` / `progress.probeMs`）；`config edit` 编辑全文 |
 
 全局选项 `--home <dir>` 可切换状态目录（测试与多实例用）。
 
@@ -492,7 +567,15 @@ llm:
 | 名单外、@bot | 只回复说明 | 研判但不开工 | 研判通过开单 |
 | 名单外、未 @ | 忽略 | 忽略 | 忽略 |
 
-准入表可在 `config.yaml` 的 `policy.admission` 里逐格调整。
+准入表在 `config.yaml` 的 `policy.admission` 里逐格调整：
+
+| 配置项 | 对应场景 | 可取值 | 默认 |
+|-|-|-|-|
+| `policy.admission.listedNotAddressed` | 名单内、未 @ | `inferred` / `ignore` | `inferred` |
+| `policy.admission.unlistedAddressed` | 名单外、@bot | `explicit` / `inferred` / `ignore` | `inferred` |
+| `policy.admission.unlistedNotAddressed` | 名单外、未 @ | `inferred` / `ignore` | `ignore` |
+
+`inferred` 进入研判（再由 `acceptMode` 决定 observe 时是否真的开工），`explicit` 直接按显式请求开单，`ignore` 直接丢弃。这三项属于 `policy.*`：Web 面板保存后立即生效；`ra config set` 写的是文件，重启服务后生效。
 
 ## 工单编号与分支命名
 
@@ -579,7 +662,7 @@ ra report \
 ## 开发
 
 ```bash
-pnpm test        # 341 个测试通过（5 个默认跳过，其中包含真实 Pi 验证）
+pnpm test        # 466 个测试通过（5 个默认跳过，其中包含真实 Pi 验证）
 pnpm typecheck
 pnpm build       # tsc + esbuild（Web 面板与 Markdown 资产）
 pnpm check       # typecheck + test

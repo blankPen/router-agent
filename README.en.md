@@ -319,6 +319,11 @@ feishu:
 policy:
   acceptMode: auto     # off / observe / auto
   maxWorkers: 4
+  # Admission table: one cell per "listed/unlisted × addressed/not"; values below are the defaults
+  admission:
+    listedNotAddressed: inferred    # listed, no @: inferred | ignore
+    unlistedAddressed: inferred     # unlisted, @bot: explicit | inferred | ignore
+    unlistedNotAddressed: ignore    # unlisted, no @: inferred | ignore
 
 # Triage layer: Pi only; timeout, token budget and an isolated config dir
 router:
@@ -357,11 +362,33 @@ progress:
   silenceMs: 600000    # how long without a new report / input counts as quiet
   repeatMs: 900000     # minimum gap between probe messages in the same quiet period
 
+# Idle ticket governance: remind first, then auto-close and reclaim the workspace
+retention:
+  enabled: true
+  idleHours: 24        # no progress for this long triggers a close reminder
+  closeGraceHours: 6   # auto-close if no reply this long after the reminder
+  zombieHours: 6       # running but silent (no report / output) for this long counts as a zombie
+  sweepMinutes: 5      # sweep interval (minutes)
+
 workerSpec:
   mode: prompt         # prompt | agent
 
+# Worker tool policy: the security baseline; backend.options may not override these fields
+worker:
+  tools:
+    fileAccess: read-write   # read-only = Read / Glob / Grep only
+    shell: allowlist         # deny=no shell | allowlist=only shellAllow prefixes | allow=any shell
+    shellAllow: [ra report, ra doc, git, gh, pnpm, npm, npx, node, yarn, bun,
+                 python, python3, pytest, cargo, go, make, mvn, gradle]
+    allowNetwork: false      # reserved: parsed but not used to restrict networking yet
+
 backend:
-  default: orca
+  default: orca            # orca | claude-cli (claude-cli has local-path requirements, see Known limitations)
+  # Backend-specific non-security options: only claude-cli.model today (mapped to claude --model).
+  # allowedTools / permissionMode / sandbox / shellAllow / allowNetwork / fileAccess make startup fail.
+  # options:
+  #   claude-cli:
+  #     model: claude-sonnet-5-5
 
 # Projects: "which project + which base branch" must be confirmed before dispatch
 projects: []
@@ -380,8 +407,49 @@ Everyday changes don't need the full file:
 ra config set policy.acceptMode observe   # observe first, don't start work
 ra config set policy.maxWorkers 2
 ra config set workerSpec.mode agent
-ra config --edit                          # edit the whole file
+ra config edit                            # opens $EDITOR on the whole file (not --edit)
 ```
+
+### Changing a single key (`ra config set`)
+
+`ra config set <dotted path> <value>` covers the common scalar settings; an unknown path or an illegal value prints "unknown config key or illegal value":
+
+| Path | Value |
+|-|-|
+| `policy.acceptMode` | `off` / `observe` / `auto` |
+| `policy.maxWorkers` | 1–64 |
+| `policy.admission.listedNotAddressed` / `unlistedAddressed` / `unlistedNotAddressed` | see "Admission rules" |
+| `router.timeoutMs` / `router.tokenBudget` / `router.agentDir` | ms (1s–600s) / tokens (0 = unlimited) / Pi config dir |
+| `progress.syncMs` / `probeMs` / `silenceMs` / `repeatMs` | ms; the first two accept 0 = off |
+| `retention.enabled` / `idleHours` / `closeGraceHours` / `zombieHours` / `sweepMinutes` | see the `retention` block above |
+| `workerSpec.mode` | `prompt` / `agent` |
+| `backend.default` | `orca` / `claude-cli` |
+| `server.port` | 1–65535 |
+| `feishu.larkHome` / `appId` / `reaction` / `directMessages` / `allowed` / `bots` / `botOpenIds` / `botNames` | string, boolean or comma-separated list |
+| `feishu.chats` | comma-separated chat_ids; existing entries keep mode / bindings / sync, new ones default to `all` |
+| `llm.baseUrl` / `llm.model` / `llm.apiKey` | model connection info |
+
+Chats and projects are composite, so they get dedicated forms that register and bind in one call:
+
+| Form | Example | Notes |
+|-|-|-|
+| `project.<name>` | `ra config set project.router-agent "name:dsh/router-agent@main"` | `@` may carry the default base branch |
+| `chatBinding.<chatId>` | `ra config set chatBinding.oc_xxx "router-agent@main"` | binds the chat's project and base branch |
+| `chatMode.<chatId>` | `ra config set chatMode.oc_xxx mention` | `all` / `mention` |
+| `chatSync.<chatId>` | `ra config set chatSync.oc_xxx true` | backfill this chat's history on startup |
+| `chatAllow.<chatId>` | `ra config set chatAllow.oc_xxx ou_a,ou_b` | empty = use the global `feishu.allowed` |
+
+`router.session.*`, `router.persona.*` and `feishu.images.*` are not in the `config set` allowlist — use `ra config edit` or the web dashboard; `worker.tools.*` and `backend.options.*` are not exposed in the dashboard and need `ra config edit`.
+
+### Environment variables
+
+| Variable | Effect |
+|-|-|
+| `RA_HOME` | state directory, same as the global `--home` option; defaults to `~/.router-agent` |
+| `RA_PORT` | port `ra report` posts to, overriding `server.port` |
+| `RA_LARK_HOME` | overrides `feishu.larkHome` |
+| `RA_LLM_BASE_URL` / `RA_LLM_API_KEY` / `RA_LLM_MODEL` | override the triage model (highest precedence) |
+| `RA_LLM_IMAGE_BASE_URL` / `RA_LLM_IMAGE_API_KEY` / `RA_LLM_IMAGE_MODEL` | override the image-transcription model |
 
 ### Dedicated bot (recommended)
 
@@ -436,6 +504,21 @@ llm:
 
 `RA_LLM_IMAGE_MODEL` / `RA_LLM_IMAGE_BASE_URL` / `RA_LLM_IMAGE_API_KEY` override these. Set `feishu.images.enabled: false` to turn image transcription off.
 
+`llm.temperature` only affects image transcription (default `0.1`); triage ignores it.
+
+### Worker tool policy
+
+`worker.tools` is the tool baseline handed to the worker (read/write plus an allowlisted shell):
+
+| Field | Values | Notes |
+|-|-|-|
+| `fileAccess` | `read-only` / `read-write` | read-only grants `Read` / `Glob` / `Grep` only; read-write adds `Write` / `Edit` |
+| `shell` | `deny` / `allowlist` / `allow` | with `allowlist`, prefixes in `shellAllow` are allowed (e.g. `git` allows `git ...`) |
+| `shellAllow` | prefix array | only used when `shell: allowlist` |
+| `allowNetwork` | `true` / `false` | reserved: parsed but not used to restrict networking yet |
+
+It only applies to `backend.default: claude-cli` (mapped to Claude's `allowedTools`); with the `orca` backend the worker's permissions come from the Claude Code launched inside Orca. Security fields are decided here and by the adapter's built-in baseline only — the same keys under `backend.options` make startup fail.
+
 ### Worker spec injection
 
 `workerSpec.mode` has two values:
@@ -459,7 +542,7 @@ Neither mode modifies the project's own `CLAUDE.md`.
 | `ra tickets [--stage]` | List tickets |
 | `ra ticket <id>` | Ticket details (stage / assignment / reports / inputs) |
 | `ra logs` | Last 50 log lines |
-| `ra config` | View config; `config set <key> <value>` changes one key (including `project.<name>` / `chatBinding.<chat>` / `progress.syncMs` / `progress.probeMs`); `config --edit` edits the whole file |
+| `ra config` | View config; `config set <key> <value>` changes one key (including `project.<name>` / `chatBinding.<chat>` / `chatMode.<chat>` / `chatSync.<chat>` / `chatAllow.<chat>` / `progress.syncMs` / `progress.probeMs`); `config edit` edits the whole file |
 
 The global option `--home <dir>` switches the state directory (for tests and multiple instances).
 
@@ -472,7 +555,15 @@ The global option `--home <dir>` switches the state directory (for tests and mul
 | Off the list, @bot | Reply only | Triage but no ticket | Ticket if triage accepts |
 | Off the list, no @ | Ignore | Ignore | Ignore |
 
-The table can be tuned cell by cell under `policy.admission` in `config.yaml`.
+The table is tuned cell by cell under `policy.admission` in `config.yaml`:
+
+| Key | Scenario | Values | Default |
+|-|-|-|-|
+| `policy.admission.listedNotAddressed` | listed, no @ | `inferred` / `ignore` | `inferred` |
+| `policy.admission.unlistedAddressed` | unlisted, @bot | `explicit` / `inferred` / `ignore` | `inferred` |
+| `policy.admission.unlistedNotAddressed` | unlisted, no @ | `inferred` / `ignore` | `ignore` |
+
+`inferred` goes to triage (then `acceptMode` decides whether `observe` actually starts work), `explicit` opens a ticket straight away, `ignore` drops it. These are `policy.*` keys: saving in the web dashboard applies immediately; `ra config set` only writes the file, so restart the service to pick it up.
 
 ## Ticket numbering and branch naming
 
@@ -538,7 +629,7 @@ States:
 ## Development
 
 ```bash
-pnpm test        # 341 tests pass (5 skipped by default, including the live Pi check; covers the Pi triage / reply path)
+pnpm test        # 466 tests pass (5 skipped by default, including the live Pi check; covers the Pi triage / reply path)
 pnpm typecheck
 pnpm build       # tsc + esbuild (web dashboard and Markdown assets)
 pnpm check       # typecheck + test
