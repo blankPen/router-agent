@@ -127,7 +127,9 @@ class FlakyRuntime extends FakeRuntime {
 
 class FakePrTracker {
   states = new Map<number, 'open' | 'merged' | 'closed'>()
-  async view(_repo: string, number: number) {
+  calls: { repo: string; number: number; hint?: { url?: string; cwd?: string } }[] = []
+  async view(repo: string, number: number, hint: { url?: string; cwd?: string } = {}) {
+    this.calls.push({ repo, number, hint })
     const state = this.states.get(number)
     return state ? { number, url: `https://github.com/o/r/pull/${number}`, state, title: 't', branch: 'b' } : null
   }
@@ -432,6 +434,24 @@ describe('RouterService 编排', () => {
     prTracker.states.set(13, 'open')
     await service.trackPullRequests()
     expect(store.getTicket(ticket.id)?.stage).toBe('review')
+  })
+
+  it('PR 跟踪带上 PR 链接与 workdir，避免项目名无法映射成 owner/name', async () => {
+    engine.ingest(makeTrigger())
+    await service.runOnce()
+    const ticket = store.listTickets()[0]!
+    const assignment = store.latestAssignment(ticket.id)!
+    service.onWorkerState({
+      ticketId: ticket.id, assignmentId: assignment.id, turn: 1, state: 'ready', summary: 'PR 已开',
+      prNumber: 12, prUrl: 'https://github.com/o/r/pull/12', ackedInputs: [], updatedAt: '2026-11-06T10:01:00.000Z',
+    })
+
+    await service.trackPullRequests()
+
+    const call = prTracker.calls.at(-1)!
+    expect(call.repo).toBe('acme/web')
+    expect(call.number).toBe(12)
+    expect(call.hint).toEqual({ url: 'https://github.com/o/r/pull/12', cwd: `/tmp/${ticket.id}` })
   })
 
   it('worker 上报 blocked 时通知发起人并登记待答问题', async () => {

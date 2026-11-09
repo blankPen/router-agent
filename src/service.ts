@@ -28,7 +28,8 @@ export interface Logger {
 }
 
 export interface PrTracker {
-  view(repo: string, number: number): Promise<{ number: number; url: string; state: 'open' | 'merged' | 'closed'; title: string; branch: string } | null>
+  /** hint 用于把项目名/path 选择器解析成真实仓库：优先 PR 链接，其次 workdir。 */
+  view(repo: string, number: number, hint?: { url?: string; cwd?: string }): Promise<{ number: number; url: string; state: 'open' | 'merged' | 'closed'; title: string; branch: string } | null>
   findByBranch(repo: string, branch: string): Promise<{ number: number; url: string; state: 'open' | 'merged' | 'closed'; title: string; branch: string } | null>
 }
 
@@ -1621,14 +1622,15 @@ export class RouterService {
   async trackPullRequests(): Promise<void> {
     for (const ticket of this.store.listOpenTickets()) {
       // 每张工单自带仓库，不再有全局 repo 兜底。
-      let repo = ticket.repo
+let repo = ticket.repo
+      // 派工信息在下面多处要用（workdir 兜底、PR 查询提示），提前取一次。
+      const assignment = this.store.latestAssignment(ticket.id)
       let prNumber = ticket.prNumber
       let prUrl = ticket.prUrl
 
       // 双保险之一：provider 直接给出的 PR 线索（Orca linkedPR），以及实际工作分支。
       let branch = ''
       if (!prNumber) {
-        const assignment = this.store.latestAssignment(ticket.id)
         // 派工已结束或 worktree 被删时 provider 会返回 not-found，静默跳过，不要每 5 秒刷错误。
         if (assignment?.workdir && assignment.status !== 'ended') {
           const runtime = this.runtimeFor(assignment)
@@ -1668,7 +1670,10 @@ export class RouterService {
 
       // 双保险之三：gh pr view。
       if (!prNumber || !repo) continue
-      const info = await this.prTracker.view(repo, prNumber)
+      // repo 可能只是项目名或 path 选择器，不是 gh 要的 owner/name：
+      // 把工单已有的 PR 链接和 workdir 一起传下去，避免状态永远停在 open。
+      const hint = { ...(prUrl ? { url: prUrl } : {}), ...(assignment?.workdir ? { cwd: assignment.workdir } : {}) }
+      const info = await this.prTracker.view(repo, prNumber, hint)
       if (!info) continue
 
       const before = ticket.prState
