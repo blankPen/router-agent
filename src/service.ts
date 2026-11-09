@@ -1,5 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { appendFileSync, existsSync, mkdirSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import type { Clock, Engine } from './core/engine.js'
 import type { Assignment, Report, Ticket, Trigger } from './core/model.js'
@@ -16,6 +15,7 @@ import { classifyAgentStatus } from './worker/status.js'
 import { RuntimeRegistry } from './worker/registry.js'
 import { normalizeRuntimeId, ORCA_RUNTIME_ID } from './worker/runtimes/catalog.js'
 import { buildNeutralContract, buildWorkerPrompt } from './worker/spec/index.js'
+import { migrateLegacySoul } from './specs/index.js'
 import { workBranch } from './worker/naming.js'
 import { buildResumeHint } from './worker/resume.js'
 import { latestClaudeSessionId } from './worker/orca/session.js'
@@ -496,19 +496,22 @@ export class RouterService {
       sweepMinutes: 5,
     }
     this.decisionEngine = opts.decisionEngine
-    const soul = loadSoul(opts.config)
+    // 旧版「自定义人格文件路径」迁移到内置规范存储；原文件保留，失败不阻断启动。
+    const migration = migrateLegacySoul(opts.config.home)
+    if (migration.error) this.logger.warn('spec:migration-failed', { message: migration.error })
+    else if (migration.imported) this.logger.info('spec:migrated', { source: migration.source, spec: 'router.soul' })
     this.loop = new AgentLoop({
       engine: opts.engine,
       decisionEngine: opts.decisionEngine,
       clock: this.clock,
       logger: this.logger,
+      home: opts.config.home,
       batchWindowMs: opts.agentLoopOptions?.batchWindowMs ?? 8000,
       dispatch: dispatchSettingsOf(opts.config),
       replyAlwaysChats: replyAlwaysChatsOf(opts.config),
       sessionsEnabled: opts.config.router.session.enabled,
       sessionKeyScope: opts.config.router.session.keyScope,
       persona: opts.config.router.persona,
-      ...(soul ? { soul } : {}),
       ...(opts.onDecisionAudit ? { onAudit: opts.onDecisionAudit } : {}),
     })
     this.poller = opts.poller ?? new ReportPoller({
@@ -788,6 +791,7 @@ export class RouterService {
           branch: ticket.branch,
           workBranch: branchName,
           workdir: '',
+          home: this.config.home,
         })
       : buildNeutralContract({
           ticketId: ticket.id,
@@ -800,6 +804,7 @@ export class RouterService {
           statePath,
           eventsPath,
           attachments: ticket.attachments ?? [],
+          home: this.config.home,
         })
     const ctx: WorkerContext = {
       ticket,
@@ -1950,16 +1955,4 @@ function reasonKey(reason: string): string {
     hash = (hash * 31 + reason.charCodeAt(i)) >>> 0
   }
   return hash.toString(36)
-}
-
-/** 读取自定义 soul；没配置或读取失败时返回 undefined，由 AgentLoop 用内置 prompts/soul.md。 */
-function loadSoul(config: AppConfig): string | undefined {
-  const file = config.router.persona.soulFile.trim()
-  if (!file) return undefined
-  const path = file.startsWith('~') ? join(homedir(), file.slice(1)) : file
-  try {
-    return readFileSync(path, 'utf8')
-  } catch {
-    return undefined
-  }
 }

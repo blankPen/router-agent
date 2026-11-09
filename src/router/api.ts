@@ -13,6 +13,7 @@ import { noopLogger, errorMessage, type Logger } from '../infra/logger.js'
 import type { WorkerStateFile } from '../worker/report-poller.js'
 import type { ResumeHint } from '../worker/port.js'
 import { readLogs } from './log-tail.js'
+import { getSpec, listSpecs, resetSpec, saveSpec, SpecError } from '../specs/index.js'
 
 export interface ApiServerOptions {
   engine: Engine
@@ -279,6 +280,44 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       }))
     }
 
+    // 规范 markdown：列表 / 读取 / 保存 / 恢复默认。内容落在 `<home>/specs/`，不再配置外部路径。
+    if (path === '/api/specs' && req.method === 'GET') {
+      return respond(res, 200, { specs: listSpecs(config.home) })
+    }
+
+    const specDetail = path.match(/^\/api\/specs\/([^/]+)$/)
+    if (specDetail) {
+      const id = decodeURIComponent(specDetail[1]!)
+      if (req.method === 'GET') {
+        const spec = getSpec(config.home, id)
+        if (!spec) return respond(res, 404, { error: 'spec-not-found', message: `未知规范：${id}` })
+        return respond(res, 200, { spec })
+      }
+      if (req.method === 'PUT' || req.method === 'POST') {
+        const body = await readJson(req)
+        try {
+          const spec = saveSpec(config.home, id, body.content)
+          onEvent({ event: 'api:spec', spec: id, action: 'save' })
+          return respond(res, 200, { ok: true, spec })
+        } catch (error) {
+          return respondSpecError(res, error)
+        }
+      }
+      return respond(res, 405, { error: 'method-not-allowed' })
+    }
+
+    const specReset = path.match(/^\/api\/specs\/([^/]+)\/reset$/)
+    if (specReset && req.method === 'POST') {
+      const id = decodeURIComponent(specReset[1]!)
+      try {
+        const spec = resetSpec(config.home, id)
+        onEvent({ event: 'api:spec', spec: id, action: 'reset' })
+        return respond(res, 200, { ok: true, spec })
+      } catch (error) {
+        return respondSpecError(res, error)
+      }
+    }
+
     // 项目登记：本地目录选择 / Git 探测 / Git 地址 clone / Orca 仓库登记。
     if (path === '/api/projects/pick-directory' && req.method === 'POST') {
       if (!opts.projectSetup) return respond(res, 404, { error: 'project-setup-not-available' })
@@ -465,6 +504,15 @@ function respond(res: ServerResponse, status: number, body: unknown, after?: () 
 function respondProjectSetupError(res: ServerResponse, error: unknown): void {
   if (error instanceof ProjectSetupError) {
     respond(res, 400, { error: error.code, message: error.message, ...(error.detail ?? {}) })
+    return
+  }
+  throw error
+}
+
+/** 规范存储的可预期失败：未知规范 404，其余（空内容 / 过大 / 无状态目录）400。 */
+function respondSpecError(res: ServerResponse, error: unknown): void {
+  if (error instanceof SpecError) {
+    respond(res, error.code === 'unknown-spec' ? 404 : 400, { error: error.code, message: error.message })
     return
   }
   throw error

@@ -19,10 +19,12 @@ import {
 import { getJson, saveConfigPatch, sendJson, type ConfigBundle, type ConfigDoc } from './api.js'
 import { Icon, LogoMark } from './icons.js'
 import { RuntimeCards, type RuntimeNotice } from './runtime-cards.js'
+import { SpecsEditor } from './specs-editor.js'
 import {
   mergeRuntimeChoices,
   runtimeStatusLabel,
 } from './runtime-model.js'
+import { hashForTab, tabFromHash, type Tab } from './tabs.js'
 import { ACP_RUNTIME_ID, ORCA_RUNTIME_ID, normalizeRuntimeId } from '../../worker/runtimes/catalog.js'
 
 // ---------------------------------------------------------------------------
@@ -197,8 +199,6 @@ const LOG_POLL_MS = 2_000
 // 应用外壳
 // ---------------------------------------------------------------------------
 
-type Tab = 'setup' | 'tickets' | 'logs' | 'config' | 'sources'
-
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
@@ -206,7 +206,8 @@ function sleep(ms: number): Promise<void> {
 type RestartPhase = 'idle' | 'restarting' | 'done' | 'error'
 
 function App(): JSX.Element {
-  const [tab, setTab] = useState<Tab>('tickets')
+  // `ra start` 会带 #setup 打开面板；刷新时也从 hash 恢复当前页签。
+  const [tab, setTab] = useState<Tab>(() => tabFromHash(window.location.hash) ?? 'tickets')
   const [status, setStatus] = useState<ServiceStatus | null>(null)
   const [restartPhase, setRestartPhase] = useState<RestartPhase>('idle')
   const [restartError, setRestartError] = useState<string | null>(null)
@@ -224,6 +225,18 @@ function App(): JSX.Element {
     if (dirtyRef.current && !confirm('有未保存的配置修改，切换页面后将丢失，继续？')) return
     dirtyRef.current = false
     setTab(next)
+    // 让地址栏与当前页签保持同步：刷新页面或分享链接时能回到同一页。
+    window.history.replaceState(null, '', hashForTab(next))
+  }, [tab])
+
+  // 外部直接改 hash（例如再次执行 ra start）时切到对应页签。
+  useEffect(() => {
+    const sync = (): void => {
+      const next = tabFromHash(window.location.hash)
+      if (next && next !== tab) setTab(next)
+    }
+    window.addEventListener('hashchange', sync)
+    return () => window.removeEventListener('hashchange', sync)
   }, [tab])
 
   useEffect(() => {
@@ -758,6 +771,12 @@ function MetaItem({ label, value, href, mono, wide, title }: {
 
 const CUSTOM_SECTIONS: SectionDef[] = [
   {
+    id: 'specs',
+    title: '规范文件',
+    description: 'Router 与 Worker 的提示词规范统一存放在内置存储里，可直接查看、编辑、保存或恢复默认；不再需要指定外部文件路径。',
+    fields: [],
+  },
+  {
     id: 'projects',
     title: '项目与群绑定',
     description: '维护可派工的项目，以及每个群绑定到哪个项目 / 分支。项目清单按 Worker 后端隔离；支持添加本地项目或从 Git 地址 clone。',
@@ -1021,12 +1040,16 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
                     <p>{section.description}</p>
                   </div>
                   <div className="settings-badges">
-                    {section.hot
-                      ? <span className="badge hot">立即生效</span>
-                      : <span className="badge cold">重启生效</span>}
+                    {section.id === 'specs'
+                      ? <span className="badge cold">保存后按项生效</span>
+                      : section.hot
+                        ? <span className="badge hot">立即生效</span>
+                        : <span className="badge cold">重启生效</span>}
                     {dirty && <span className="badge dirty">已修改</span>}
                   </div>
                 </header>
+
+                {section.id === 'specs' && <SpecsEditor />}
 
                 {section.id === 'projects' && (
                   <>

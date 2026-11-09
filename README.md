@@ -70,10 +70,12 @@ ra init                 # 交互式引导：仓库 → 机器人 → 群 → 授
 **3 · 启动**
 
 ```bash
-ra start                # 后台常驻
+ra start                # 后台常驻，就绪后自动打开 Web 初始化页
 ra status
-ra web                  # 打开面板
+ra web                  # 之后想再打开面板
 ```
+
+`ra start` 等服务就绪后会用默认浏览器打开面板的「初始化」页，把启动必需项一次配完：Worker 运行时（含 ACP 扩展一键安装）、项目、飞书接入、监控群与绑定。保存后按页面提示重启服务即可。远程机器或没有图形界面时用 `ra start --no-open`，只打印面板地址。
 
 **4 · 自检与模拟**
 
@@ -162,7 +164,7 @@ Router 不再「逐条失忆」：同一个群里的每个人各有一个落盘�
 - **空闲回收**：30 分钟无消息只释放内存，文件保留，下一条消息重新打开；
 - **自动压缩**：用 Pi 原生 compaction，`contextTokens > contextWindow - reserveTokens` 时保留最近约 20k tokens，把更早的消息总结成结构化摘要；
 - **`/new`**：整条消息精确匹配，只重置发送者自己的 session；旧文件保留 7 天后由清理任务删除；
-- **人格**：`router.persona.soulFile` 可配置 soul；只改语气，不改工具白名单和权限判定。
+- **人格与规范**：Router 的 soul、执行规范与 Worker 规范统一存放在 `~/.router-agent/specs/`，可在 Web 面板「配置 → 规范文件」直接查看、编辑、保存或恢复默认；人格只改语气，不改工具白名单和权限判定。
 
 确定性回复（寒暄短路、附件提示、关闭话题提示等）也会写进 session，保证下一轮模型知道「刚才发生过什么」。
 
@@ -302,7 +304,7 @@ worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态�
 
 #### Web 面板
 
-`ra web` 打开的面板分五块：
+`ra start` 自动打开、`ra web` 也可随时打开的面板分五块：
 
 - **初始化**：只放启动必需项——LLM Provider、运行时、项目、飞书接入、群与绑定，顶部有完成度清单；LLM Provider 放在第一位，可直接填 Base URL / 模型 / API Key（密钥只写入 `config.yaml`，保存后不回显），留空则继续复用 `.trove` 或环境变量。运行时用卡片平铺展示（带对应品牌 Logo），每张卡会检测 CLI / 版本 / ACP 依赖 / 登录状态。安装拆成两个按钮：**安装 CLI** 跳转该 Agent 的官方安装文档，**安装 ACP 扩展** 由 ra 把 npm 适配包装到 `~/.router-agent/runtimes`（没有可安装扩展时不显示）；另有真实握手试启动。配好后保存并按提示重启服务即可。
 - **工单**：按阶段分组 + 计数、关键字搜索（标题 / 工单号 / 仓库 / PR）、自动刷新开关与手动刷新；详情页有阶段、派工、PR、授权范围、上报时间线（含完整回复与 `humanAction`）、投递记录，可直接投递 follow-up 或停止工单。
@@ -379,7 +381,6 @@ router:
   # 人格：只影响语气与表达，不影响工具权限
   persona:
     name: "阿罗"
-    soulFile: ""           # 空=内置 prompts/soul.md
     style: friendly        # friendly | concise | professional
     language: zh-CN
 
@@ -574,6 +575,8 @@ llm:
 
 两种模式都不改项目自己的 `CLAUDE.md`。
 
+这些规范 markdown 统一存放在状态目录的 `specs/` 下，可在 Web 面板「配置 → 规范文件」直接编辑或恢复默认。`agent` 模式的全局规范文件仍由 `ra init` 写入，修改 Worker 手册后重新执行一次 `ra init` 即可同步。
+
 ### ACP Runtime（可选）
 
 任何实现了 [Agent Client Protocol](https://agentclientprotocol.com) 的 Agent，都可以用同一套 `AcpRuntime` 接入，不需要为每家写适配器。ra 启动后会自动探测本机可用的 ACP Agent，Web 面板「配置 → 派工与服务 → Worker 运行时」里可以直接选择；未安装 / 版本不兼容 / 未登录的项会置灰并显示原因。
@@ -632,10 +635,10 @@ runtime:
 | `ra init` | 交互式初始化（`--yes` 跳过提问） |
 | `ra doctor` | 启动前自检：配置 / Orca / 飞书 / 模型 / 端口（`--json` 机器可读） |
 | `ra simulate` | 本地模拟一条消息，验证 Gate + Pi 研判，不派工（`--infer` 走 Pi 研判，`--dry-run` 不落库） |
-| `ra start [--foreground]` | 启动常驻服务（默认后台） |
+| `ra start [--foreground]` | 启动常驻服务（默认后台），就绪后自动打开 Web 初始化页；`--no-open` 只打印地址 |
 | `ra stop` | 停止服务 |
 | `ra status` | 服务状态 + 工单概览 |
-| `ra web` | 打开 Web 面板 |
+| `ra web` | 重新打开 Web 面板 |
 | `ra tickets [--stage]` | 列出工单 |
 | `ra ticket <id>` | 工单详情（状态 / 派工 / 上报 / 输入） |
 | `ra logs` | 最近 50 行日志 |

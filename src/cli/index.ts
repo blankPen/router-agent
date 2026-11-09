@@ -1,6 +1,6 @@
 import { appendFileSync, closeSync, mkdirSync, existsSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync, unlinkSync } from 'node:fs'
 import { createServer } from 'node:net'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { createRequire } from 'node:module'
@@ -56,6 +56,8 @@ export interface CliIo {
   larkFor?: (home?: string) => CommandRunner
   /** 交互式接管终端的 lark-cli 命令（新建应用、用户授权）。 */
   stream?: (argv: string[], env: NodeJS.ProcessEnv) => Promise<number>
+  /** 打开浏览器（测试注入点）；返回是否成功发起，默认按平台调用 open / xdg-open / start。 */
+  openUrl?: (url: string) => boolean
 }
 
 export async function runCli(argv: string[], output: CliIo): Promise<number> {
@@ -194,9 +196,10 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
       setCode(await cmdDoc(homeOf(opts, output), opts, output))
     })
 
-  withHome(program.command('start').description('启动常驻 Router 服务（默认后台）'))
+  withHome(program.command('start').description('启动常驻 Router 服务（默认后台），就绪后自动打开 Web 初始化页'))
     .option('--foreground', '前台运行，便于调试')
-    .action(async (opts: { home?: string; foreground?: boolean }) => {
+    .option('--no-open', '不自动打开浏览器，只打印 Web 面板地址')
+    .action(async (opts: { home?: string; foreground?: boolean; open?: boolean }) => {
       setCode(await cmdStart(homeOf(opts, output), opts, output))
     })
 
@@ -433,7 +436,7 @@ async function cmdInit(home: string, opts: { yes?: boolean; agentsDir?: string }
 
   const agentsDir = opts.agentsDir ?? join(homedir(), '.claude', 'agents')
   mkdirSync(agentsDir, { recursive: true })
-  writeFileSync(join(agentsDir, 'router-agent-worker.md'), agentSpecDocument(), 'utf8')
+  writeFileSync(join(agentsDir, 'router-agent-worker.md'), agentSpecDocument(home), 'utf8')
   output.stdout('')
   output.stdout(`状态目录: ${home}`)
   output.stdout(`worker 全局规范: ${join(agentsDir, 'router-agent-worker.md')}`)
@@ -657,25 +660,24 @@ function cmdWeb(home: string, output: CliIo): number {
   const config = loadConfig(home)
   const url = `http://127.0.0.1:${config.server.port}/`
   output.stdout(`Web 面板: ${url}`)
-  if (process.platform === 'darwin') {
-    try {
-      spawn('open', [url], { detached: true, stdio: 'ignore' }).unref()
-    } catch {
-      // 打不开浏览器不影响打印地址
-    }
-  }
+  openPanel(url, output)
   return 0
 }
 
-async function cmdStart(home: string, opts: { foreground?: boolean }, output: CliIo): Promise<number> {
+async function cmdStart(home: string, opts: { foreground?: boolean; open?: boolean }, output: CliIo): Promise<number> {
   ensureHome(home)
+  const config = loadConfig(home, output.env as NodeJS.ProcessEnv)
+  // 直接落到「初始化」页：ra start 之后要配的运行时 / 项目 / 飞书 / 群都在这里。
+  const panelUrl = `http://127.0.0.1:${config.server.port}/#setup`
+  const shouldOpen = opts.open !== false
   const pid = readPid(home)
   if (pid && alive(pid)) {
     output.stdout(`服务已在运行 (pid ${pid})`)
+    output.stdout(`Web 面板: ${panelUrl}`)
+    if (shouldOpen) await openPanelWhenReady(panelUrl, output)
     return 0
   }
   // 默认 ACP 运行时不可用时给个提示，但不阻止启动：用户需要进 Web 面板安装。
-  const config = loadConfig(home, output.env as NodeJS.ProcessEnv)
   const defaultId = normalizeRuntimeId(config.runtime.default)
   if (defaultId.startsWith('acp-')) {
     let snapshot = readDetectionSnapshot(home)
@@ -689,7 +691,11 @@ async function cmdStart(home: string, opts: { foreground?: boolean }, output: Cl
       output.stdout('服务仍会启动；可在 Web 面板安装后重启。')
     }
   }
-  if (opts.foreground) return cmdServe(home, output)
+  if (opts.foreground) {
+    // 前台模式会一直阻塞到退出，就绪探测并行跑，不拖慢启动。
+    if (shouldOpen) void openPanelWhenReady(panelUrl, output)
+    return cmdServe(home, output)
+  }
 
   const entry = fileURLToPath(new URL('./main.js', import.meta.url))
   const child = spawn(process.execPath, [entry, 'serve', '--home', home], {
@@ -701,7 +707,52 @@ async function cmdStart(home: string, opts: { foreground?: boolean }, output: Cl
   writeFileSync(join(home, 'router-agent.pid'), String(child.pid ?? ''), 'utf8')
   output.stdout(`Router 服务已启动 (pid ${child.pid})`)
   output.stdout(`日志: ${join(home, 'logs', 'router-agent.log')}`)
+  output.stdout(`Web 面板: ${panelUrl}`)
+  if (shouldOpen) await openPanelWhenReady(panelUrl, output)
   return 0
+}
+
+/** 服务就绪探测与浏览器打开：给服务 10 秒，避免刚启动时开出 404 白页。 */
+const PANEL_READY_TIMEOUT_MS = 10_000
+
+async function panelReady(url: string): Promise<boolean> {
+  try {
+    const res = await fetch(new URL('api/status', url), { signal: AbortSignal.timeout(1_000) })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+async function openPanelWhenReady(url: string, output: CliIo, timeoutMs = PANEL_READY_TIMEOUT_MS): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await panelReady(url)) {
+      openPanel(url, output)
+      return
+    }
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 200))
+  }
+  output.stdout(`Web 面板暂未就绪，请稍后手动打开: ${url}`)
+  output.stdout('启动失败时用 ra logs 查看原因。')
+}
+
+/** 用默认浏览器打开 URL；打不开时保留地址让人手动访问。 */
+function openPanel(url: string, output: CliIo): void {
+  const open = output.openUrl ?? openInBrowser
+  if (open(url)) output.stdout('已在浏览器打开 Web 面板')
+  else output.stdout(`未能自动打开浏览器，请手动访问: ${url}`)
+}
+
+function openInBrowser(url: string): boolean {
+  const command = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open'
+  const args = process.platform === 'win32' ? ['/c', 'start', '', url] : [url]
+  try {
+    const result = spawnSync(command, args, { stdio: 'ignore', timeout: 5_000 })
+    return !result.error && result.status === 0
+  } catch {
+    return false
+  }
 }
 
 function cmdStop(home: string, output: CliIo): number {

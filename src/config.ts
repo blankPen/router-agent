@@ -106,8 +106,6 @@ export interface SessionSettings {
 /** Router 的人格配置；只影响语气与表达，不影响工具权限。 */
 export interface PersonaSettings {
   name: string
-  /** 自定义 soul 文件；空表示用内置 prompts/soul.md。 */
-  soulFile: string
   style: 'friendly' | 'concise' | 'professional'
   language: string
 }
@@ -261,7 +259,6 @@ export function defaultConfig(): AppConfig {
       },
       persona: {
         name: '阿罗',
-        soulFile: '',
         style: 'friendly',
         language: 'zh-CN',
       },
@@ -337,7 +334,6 @@ router:
   # 人格：只影响语气与表达，不影响工具权限
   persona:
     name: "阿罗"
-    soulFile: ""           # 空=内置 prompts/soul.md
     style: friendly        # friendly | concise | professional
     language: zh-CN
 
@@ -591,7 +587,6 @@ function parseRouter(value: unknown, base: RouterSettings): RouterSettings {
     },
     persona: {
       name: stringOr(personaDoc.name, base.persona.name),
-      soulFile: stringOr(personaDoc.soulFile, base.persona.soulFile),
       style: pickPersonaStyle(personaDoc.style, base.persona.style),
       language: stringOr(personaDoc.language, base.persona.language),
     },
@@ -796,7 +791,6 @@ export function writeConfig(home: string, config: AppConfig): void {
       },
       persona: {
         ...config.router.persona,
-        ...(config.router.persona.soulFile ? { soulFile: config.router.persona.soulFile } : {}),
       },
     },
     progress: {
@@ -1030,7 +1024,6 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
   'router.session.compaction.reserveTokens': intValue(1_024, 1_000_000),
   'router.session.compaction.keepRecentTokens': intValue(1_024, 1_000_000),
   'router.persona.name': stringValue,
-  'router.persona.soulFile': stringValue,
   'router.persona.style': enumValue(['friendly', 'concise', 'professional']),
   'router.persona.language': stringValue,
 

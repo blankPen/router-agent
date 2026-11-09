@@ -1,11 +1,10 @@
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
 import type { Store } from '../store/db.js'
 import type { Clock, Engine } from '../core/engine.js'
 import { gate, type Policy } from '../core/policy.js'
 import type { SourceKind, Strength, Ticket, Trigger } from '../core/model.js'
 import { noopLogger, errorMessage, type Logger } from '../infra/logger.js'
 import { activeDraft, resolveDispatch, type DispatchMissing, type DispatchSettings } from './dispatch.js'
+import { readRouterPrompt } from '../specs/index.js'
 import type { SessionKeyParts } from './session-registry.js'
 import type {
   DecisionAudit,
@@ -34,7 +33,9 @@ export interface AgentLoopOptions {
   sessionsEnabled?: boolean
   /** 会话粒度：user=群+人；thread=群+话题+人。 */
   sessionKeyScope?: 'user' | 'thread'
-  /** 人格文案；不传则读内置 prompts/soul.md。 */
+  /** 状态目录；传入后规范 markdown 优先读 `<home>/specs/` 下的覆盖文件。 */
+  home?: string
+  /** 人格文案；不传则读内置 prompts/soul.md（或 `<home>/specs/router/soul.md`）。 */
   soul?: string
   /** 人格配置（名字 / 语气 / 语言），只影响 system prompt 的设定段。 */
   persona?: { name: string; style: string; language: string }
@@ -135,6 +136,7 @@ export class AgentLoop {
   /** 会话模式使用的统一 system prompt（人格 + 职责 + 准入 + 回复 + 策略）。 */
   private unifiedSystemPrompt: string
   private soul: string
+  private home?: string
   private persona?: { name: string; style: string; language: string }
   /** 可替换：测试与模拟可以直接注入假引擎。 */
   decisionEngine: DecisionEngine
@@ -147,15 +149,16 @@ export class AgentLoop {
     this.clock = opts.clock ?? { now: () => new Date().toISOString() }
     this.batchWindowMs = opts.batchWindowMs ?? 8000
     this.source = opts.source
-    this.systemPrompt = opts.systemPrompt ?? buildSystemPrompt(opts.engine.policy())
-    this.conversationPrompt = readPrompt('conversation.md')
+    this.home = opts.home
+    this.systemPrompt = opts.systemPrompt ?? buildSystemPrompt(opts.engine.policy(), this.home)
+    this.conversationPrompt = readPrompt('conversation.md', this.home)
     this.dispatch = opts.dispatch
     this.replyAlwaysChats = new Set(opts.replyAlwaysChats ?? [])
     this.sessionsEnabled = opts.sessionsEnabled === true
     this.sessionKeyScope = opts.sessionKeyScope ?? 'user'
-    this.soul = opts.soul ?? readPrompt('soul.md')
+    this.soul = opts.soul ?? readPrompt('soul.md', this.home)
     this.persona = opts.persona
-    this.unifiedSystemPrompt = buildUnifiedSystemPrompt(opts.engine.policy(), this.soul, this.persona)
+    this.unifiedSystemPrompt = buildUnifiedSystemPrompt(opts.engine.policy(), this.soul, this.persona, this.home)
     this.decisionEngine = opts.decisionEngine
     this.onAudit = opts.onAudit
     this.logger = opts.logger ?? noopLogger
@@ -163,8 +166,8 @@ export class AgentLoop {
 
   setPolicy(policy: Policy): void {
     this.engine.updatePolicy(policy)
-    this.systemPrompt = buildSystemPrompt(policy)
-    this.unifiedSystemPrompt = buildUnifiedSystemPrompt(policy, this.soul, this.persona)
+    this.systemPrompt = buildSystemPrompt(policy, this.home)
+    this.unifiedSystemPrompt = buildUnifiedSystemPrompt(policy, this.soul, this.persona, this.home)
   }
 
   async tick(): Promise<TickResult> {
@@ -830,8 +833,8 @@ export class AgentLoop {
   }
 }
 
-export function buildSystemPrompt(policy: Policy): string {
-  return [readPrompt('orchestrator.md'), readPrompt('admission.md'), policySection(policy)].join('\n\n---\n\n')
+export function buildSystemPrompt(policy: Policy, home?: string): string {
+  return [readPrompt('orchestrator.md', home), readPrompt('admission.md', home), policySection(policy)].join('\n\n---\n\n')
 }
 
 /** 会话模式：人格 + 职责 + 准入 + 回复规则 + 策略，一次注入后由 session 复用。 */
@@ -839,6 +842,7 @@ export function buildUnifiedSystemPrompt(
   policy: Policy,
   soul: string,
   persona?: { name: string; style: string; language: string },
+  home?: string,
 ): string {
   const header = persona
     ? `# 人格设定\n- 名字：${persona.name}\n- 语气：${persona.style}\n- 语言：${persona.language}`
@@ -846,9 +850,9 @@ export function buildUnifiedSystemPrompt(
   return [
     header,
     soul,
-    readPrompt('orchestrator.md'),
-    readPrompt('admission.md'),
-    readPrompt('conversation.md'),
+    readPrompt('orchestrator.md', home),
+    readPrompt('admission.md', home),
+    readPrompt('conversation.md', home),
     policySection(policy),
   ].filter(Boolean).join('\n\n---\n\n')
 }
@@ -879,8 +883,8 @@ function policySection(policy: Policy): string {
 - 准入表：名单内未 @ → ${policy.admission.listedNotAddressed}；名单外 @ → ${policy.admission.unlistedAddressed}；名单外未 @ → ${policy.admission.unlistedNotAddressed}`
 }
 
-function readPrompt(file: string): string {
-  return readFileSync(fileURLToPath(new URL(`./prompts/${file}`, import.meta.url)), 'utf8')
+function readPrompt(file: string, home?: string): string {
+  return readRouterPrompt(home, file)
 }
 
 /** 追问话术的 reason：告诉模型缺什么、为什么问。 */

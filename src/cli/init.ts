@@ -113,7 +113,7 @@ export async function runInitWizard(deps: InitDeps): Promise<AppConfig> {
     out(`⚠ 仍缺少必填项：${missing.join(' / ')}`)
     out('   用 `ra config set` 补齐，然后 `ra start`。')
   } else {
-    out('下一步：ra start（先用 observe 观察？ra config set policy.acceptMode observe）')
+    out('下一步：ra start（启动后会打开 Web 初始化页；想先观察可 ra config set policy.acceptMode observe）')
   }
   return config
 }
