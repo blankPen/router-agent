@@ -3,7 +3,6 @@ import { createServer } from 'node:net'
 import { spawn, spawnSync } from 'node:child_process'
 import { join, resolve } from 'node:path'
 import { homedir } from 'node:os'
-import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { Command, CommanderError } from 'commander'
 import { ensureHome, loadConfig, policyOf, projectsForRuntime, replyAlwaysChatsOf, setConfigValue, writeConfig } from '../config.js'
@@ -25,6 +24,7 @@ import type { Trigger } from '../core/model.js'
 import { runInitWizard } from './init.js'
 import { formatChecks, runDoctor } from './doctor.js'
 import { cmdRuntimeCheck, cmdRuntimeInstall, cmdRuntimeList, cmdRuntimeLogin, cmdRuntimeUninstall } from './runtime.js'
+import { PACKAGE_NAME, PACKAGE_VERSION, UpdateService, runNpmUpgrade } from '../update/index.js'
 import { simulate } from './simulate.js'
 import { runReport, readContentArg, type ReportOptions } from './report.js'
 import type { Prompter } from './prompts.js'
@@ -40,11 +40,8 @@ import { createApiServer } from '../router/api.js'
 import { ProjectSetup } from '../router/project-setup.js'
 import { agentSpecDocument } from '../worker/spec/index.js'
 
-// 版本号以 package.json 为唯一来源，避免发版后 `ra -v` 与实际包版本漂移。
-// src/cli 与 dist/cli 到包根的相对路径一致，因此两种运行形态都能解析到同一个 package.json。
-const pkg = createRequire(import.meta.url)('../../package.json') as { version: string }
-
-export const VERSION: string = pkg.version
+// 版本号以 package.json 为唯一来源（见 src/update/index.ts），`ra -v` 与更新检查共用同一个值。
+export const VERSION: string = PACKAGE_VERSION
 
 export interface CliIo {
   stdout(line: string): void
@@ -58,6 +55,8 @@ export interface CliIo {
   git?: CommandRunner
   /** 已绑定固定 lark-cli profile 的 runner（测试注入点）。 */
   lark?: CommandRunner
+  /** npm 命令（测试注入点）；默认用系统 npm。 */
+  npm?: CommandRunner
   /** 交互式接管终端的 lark-cli 命令（新建应用、用户授权）。 */
   stream?: (argv: string[], env: NodeJS.ProcessEnv) => Promise<number>
   /** 打开浏览器（测试注入点）；返回是否成功发起，默认按平台调用 open / xdg-open / start。 */
@@ -165,6 +164,17 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
           output.stderr(`未知操作 runtime ${action}；可用：list / check / install / uninstall / login`)
           setCode(2)
       }
+    })
+
+  withHome(program.command('update')
+    .description('检查并升级到 npm 最新版（默认升级后自动重启服务）'))
+    .option('--check', '只检查是否有新版本，不安装')
+    .option('--json', '以 JSON 输出检查 / 升级结果')
+    .option('--no-restart', '升级成功后不自动重启服务')
+    .option('--registry <url>', 'npm registry（默认读 RA_NPM_REGISTRY / npm_config_registry）')
+    .option('--force', '源码 / 本地 link 运行时仍执行 npm 全局安装')
+    .action(async (opts: { home?: string; check?: boolean; json?: boolean; restart?: boolean; registry?: string; force?: boolean }) => {
+      setCode(await cmdUpdate(homeOf(opts, output), opts, output))
     })
 
   withHome(program.command('simulate').description('本地模拟一条消息，验证 Gate + 研判（不派工）'))
@@ -556,6 +566,7 @@ async function cmdTicketStop(home: string, ticketId: string, output: CliIo): Pro
 
 function cmdStatus(home: string, output: CliIo): number {
   const pid = readPid(home)
+  output.stdout(`版本：v${PACKAGE_VERSION}`)
   output.stdout(!pid || !alive(pid) ? 'Router 服务：未运行' : `Router 服务：运行中 (pid ${pid})`)
   const store = openStore(home)
   try {
@@ -658,6 +669,118 @@ export function followFile(path: string, output: (line: string) => void, interva
     }
   }, intervalMs)
   return () => clearInterval(timer)
+}
+
+async function cmdUpdate(
+  home: string,
+  opts: { check?: boolean; json?: boolean; restart?: boolean; registry?: string; force?: boolean },
+  output: CliIo,
+): Promise<number> {
+  ensureHome(home)
+  // --json 时日志只落文件：stdout 必须只留一行可解析的 JSON。
+  const logger = createLogger(home, output, !opts.json)
+  const service = new UpdateService({
+    current: PACKAGE_VERSION,
+    registry: opts.registry,
+    logger,
+    runUpgrade: ({ version }) => runNpmUpgrade({
+      version,
+      runner: output.npm,
+      env: { ...process.env, ...output.env },
+    }),
+  })
+
+  const snapshot = opts.check ? await service.check(true) : await service.upgrade({ force: opts.force })
+
+  if (opts.json) {
+    output.stdout(JSON.stringify(snapshot))
+    return snapshot.phase === 'failed' || snapshot.error === 'check-failed' ? 1 : 0
+  }
+
+  if (snapshot.error === 'check-failed') {
+    output.stderr(snapshot.message ?? '检查更新失败')
+    return 1
+  }
+
+  output.stdout(`当前版本：v${snapshot.current}`)
+  if (opts.check) {
+    if (!snapshot.latest) {
+      output.stderr('未能获取 npm 上的最新版本')
+      return 1
+    }
+    output.stdout(`最新版本：v${snapshot.latest}`)
+    if (snapshot.hasUpdate) {
+      output.stdout(`发现新版本 v${snapshot.latest}；运行 ra update 升级（npm install -g ${PACKAGE_NAME}@latest + 自动重启）`)
+    } else {
+      output.stdout('已是最新版本')
+    }
+    return 0
+  }
+
+  if (snapshot.phase === 'failed') {
+    output.stderr(snapshot.message ?? '更新失败')
+    return 1
+  }
+  if (snapshot.phase !== 'updated') {
+    output.stdout(snapshot.message ?? '已是最新版本')
+    return 0
+  }
+
+  output.stdout(snapshot.message ?? `已更新到 v${snapshot.installedVersion}`)
+  const pid = readPid(home)
+  if (opts.restart === false) {
+    output.stdout('已按 --no-restart 跳过重启；新版本在下次 ra start 后生效。')
+    return 0
+  }
+  if (!pid || !alive(pid)) {
+    output.stdout('服务未运行，无需重启；下次启动即为新版本。')
+    return 0
+  }
+
+  output.stdout(`正在重启服务 (pid ${pid})…`)
+  try {
+    process.kill(pid, 'SIGTERM')
+  } catch (error) {
+    // 进程可能刚好退出：继续等待 / 拉起流程即可，但把原因留在日志里。
+    logger.warn('update:service-stop-failed', { pid, message: errorMessage(error) })
+  }
+  const exited = await waitForExit(pid, 10_000)
+  if (!exited) {
+    logger.error('update:restart-failed', { pid, reason: 'stop-timeout' })
+    output.stderr(`服务未在 10 秒内退出，请手动执行 ra stop && ra start`)
+    return 1
+  }
+  // 旧进程正常退出时会清 pid / 锁；兜底再清一次，避免新进程被判「已在运行」。
+  cleanupPid(home)
+  try {
+    const entry = fileURLToPath(new URL('./main.js', import.meta.url))
+    // 全局安装后路径不变，新进程从磁盘加载的就是刚装好的版本。
+    const child = spawn(process.execPath, [entry, 'serve', '--home', home], {
+      detached: true,
+      stdio: 'ignore',
+      env: { ...process.env, RA_HOME: home },
+    })
+    child.unref()
+    writeFileSync(join(home, 'router-agent.pid'), String(child.pid ?? ''), 'utf8')
+    logger.info('update:service-restarted', { pid: child.pid })
+    output.stdout(`服务已重启 (pid ${child.pid})`)
+    return 0
+  } catch (error) {
+    const message = errorMessage(error)
+    logger.error('update:restart-failed', { pid, message })
+    output.stderr(`服务重启失败：${message}；请手动执行 ra start`)
+    return 1
+  }
+}
+
+/** 等旧服务退出；每 100ms 探一次，超时返回 false。 */
+async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (!alive(pid)) return true
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 100))
+  }
+  return !alive(pid)
 }
 
 function cmdWeb(home: string, output: CliIo): number {
@@ -783,6 +906,21 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   ensureHome(home)
   // 运行时探测在后台跑：先读缓存，API 立即可用，探测完成后刷新。
   const runtimeAdmin = new AcpRuntimeAdmin({ home, env: process.env, config })
+  // 版本检查也放后台：启动不被 registry 网络拖慢，面板打开时读缓存。
+  const updateService = new UpdateService({ current: PACKAGE_VERSION, logger })
+  // 重启函数在 service / consumer 就绪后才赋值；更新工具只把重启排进 timer，
+  // 等本轮研判结束、回复进入 outbox 后再真正重启。
+  let requestRestart: (() => Promise<void>) | null = null
+  let updateRestartTimer: ReturnType<typeof setTimeout> | null = null
+  const scheduleUpdateRestart = (delayMs = 2_000): void => {
+    if (updateRestartTimer) return
+    logger.info('update:restart-scheduled', { delayMs })
+    updateRestartTimer = setTimeout(() => {
+      updateRestartTimer = null
+      void requestRestart?.()
+    }, delayMs)
+    updateRestartTimer.unref()
+  }
   // 单实例锁：目录创建是原子的，避免两个 ra serve 同时跑循环。
   const lockDir = join(home, 'router-agent.lock')
   const acquireLock = (): boolean => {
@@ -882,7 +1020,16 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     logger,
   })
   // 没有模型配置时不装配研判引擎，RouterService 整体跳过，只保留 Web / 配置 API。
-  const decisionEngine = model ? createDecisionEngine({ config, store, model, engine }) : null
+  const decisionEngine = model
+    ? createDecisionEngine({
+        config,
+        store,
+        model,
+        engine,
+        updater: updateService,
+        scheduleRestart: scheduleUpdateRestart,
+      })
+    : null
   const auditPath = join(home, 'logs', 'decisions.jsonl')
   const onDecisionAudit = (audit: DecisionAudit): void => {
     try {
@@ -953,12 +1100,12 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
 
   const webRoot = fileURLToPath(new URL('../web', import.meta.url))
   // onRestart 需要在 api 创建时注入，真正的重启函数在 service/consumer 就绪后再赋值。
-  let requestRestart: (() => Promise<void>) | null = null
   const api = await createApiServer({
     engine,
     store,
     config,
     runtimeAdmin,
+    update: updateService,
     feishuBot: new FeishuBotAdmin({ lark: larkRunner }),
     projectSetup: new ProjectSetup({ home, git: gitRunner, orca: orcaRunner }),
     // Web-only 模式没有 RouterService，工作区清理端点按「不支持」返回。
@@ -989,6 +1136,10 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     },
   })
   logger.info('api:listening', { port: config.server.port })
+  // 首查走后台，失败只进日志；之后每 6 小时刷新一次，面板读到的是缓存结果。
+  void updateService.check(true)
+  const updateTimer = setInterval(() => { void updateService.check(true) }, 6 * 60 * 60 * 1_000)
+  updateTimer.unref()
 
   const consumer = service && config.feishu.chats.length > 0
     ? new FeishuConsumer({
@@ -1070,6 +1221,12 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   const stopRuntime = (): void => {
     consumer?.stop()
     if (chatTimer) clearInterval(chatTimer)
+    clearInterval(updateTimer)
+    if (updateRestartTimer) {
+      // 手动 ra stop 时不留下「服务已停但几秒后又被拉起」的隐患。
+      clearTimeout(updateRestartTimer)
+      updateRestartTimer = null
+    }
     service?.stop()
     store.close()
   }
@@ -1121,7 +1278,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   })
 }
 
-function createLogger(home: string, output: CliIo): Logger {
+function createLogger(home: string, output: CliIo, echo = true): Logger {
   const path = join(home, 'logs', 'router-agent.log')
   const write = (level: string, message: string, extra?: Record<string, unknown>): void => {
     const line = JSON.stringify({ at: new Date().toISOString(), level, message, ...(extra ?? {}) })
@@ -1130,7 +1287,7 @@ function createLogger(home: string, output: CliIo): Logger {
     } catch {
       // 日志失败不影响主流程
     }
-    output.stdout(line)
+    if (echo) output.stdout(line)
   }
   return {
     info: (message, extra) => write('info', message, extra),

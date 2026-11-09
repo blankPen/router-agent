@@ -56,7 +56,7 @@ npm install -g router-agent   # install globally from npm, then use `ra` directl
 ra --help                     # verify the command is available
 ```
 
-Upgrading is the same: `npm install -g router-agent@latest`.
+Upgrading is one command: `ra update` checks npm for the latest version, runs the global install, and restarts the running service automatically. Use `ra update --check` to only check. It is equivalent to `npm install -g router-agent@latest` followed by `ra stop && ra start`.
 
 <details>
 <summary>Run from source or contribute?</summary>
@@ -231,6 +231,7 @@ Every field, the `ra config set` allowlist, environment variables, model / Feish
 | `ra tickets [--stage]` | List tickets |
 | `ra ticket <id>` | Ticket details (stage / assignment / reports / inputs) |
 | `ra logs` | Last 50 log lines |
+| `ra update [--check]` | Check and upgrade to the latest npm version: runs `npm install -g router-agent@latest` and restarts the running service; `--no-restart` installs only, `--registry` picks a registry, `--force` installs globally even from a source / linked checkout, `--json` for machines |
 | `ra runtime [list]` | Probe local ACP agents: status / version / source (`--json` for machines) |
 | `ra runtime install <id>` | Install an ACP adapter into `~/.router-agent/runtimes/<agent>` |
 | `ra runtime uninstall <id>` | Remove an ra-managed ACP adapter |

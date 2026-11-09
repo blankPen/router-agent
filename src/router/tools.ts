@@ -2,6 +2,13 @@ import type { Store } from '../store/db.js'
 import type { Decision, Stage, Strength, Ticket } from '../core/model.js'
 import type { Clock, Engine } from '../core/engine.js'
 import type { DecisionProposal } from './decision-engine.js'
+import type { UpdateSnapshot } from '../update/index.js'
+
+/** router_update 只需要更新服务的检查与安装能力；重启由服务层安排。 */
+export interface UpdateToolPort {
+  check(force?: boolean): Promise<UpdateSnapshot>
+  upgrade(options?: { force?: boolean }): Promise<UpdateSnapshot>
+}
 
 export interface RouterToolboxDeps {
   store: Store
@@ -11,6 +18,10 @@ export interface RouterToolboxDeps {
    */
   engine?: Engine
   clock?: Clock
+  /** 版本检查 / 升级；传入后才会暴露 router_update（simulate 等只读场景不传）。 */
+  updater?: UpdateToolPort
+  /** 安装成功后安排重启；由 Pi 在一轮研判结束时触发，确保本轮回复已进入 outbox。 */
+  scheduleRestart?: () => void
 }
 
 /** 一次工具调用的上下文：只有用户明确对 Router 说话时才允许变更工单。 */
@@ -34,11 +45,22 @@ export class RouterToolbox {
   private store: Store
   private engine?: Engine
   private clock: Clock
+  private updater?: UpdateToolPort
+  private scheduleRestart?: () => void
+  /** 工具内只登记意图，等本轮研判结束再真正安排重启。 */
+  private restartPending = false
 
   constructor(deps: RouterToolboxDeps) {
     this.store = deps.store
     this.engine = deps.engine
     this.clock = deps.clock ?? { now: () => new Date().toISOString() }
+    this.updater = deps.updater
+    this.scheduleRestart = deps.scheduleRestart
+  }
+
+  /** 没有更新能力时（ra simulate / 测试）不向模型暴露 router_update。 */
+  canUpdate(): boolean {
+    return Boolean(this.updater)
   }
 
   read(args: Record<string, unknown>): unknown {
@@ -220,6 +242,45 @@ export class RouterToolbox {
       workdir: assignment.workdir,
       queued: this.queueCleanup(ticket),
     }
+  }
+
+  /**
+   * 检查或安装 npm 最新版。安装成功只登记重启意图，由 Pi 在本轮结束后触发，
+   * 避免进程先重启、用户却收不到「已更新」的回复。
+   */
+  async update(args: Record<string, unknown>, ctx: ToolContext): Promise<unknown> {
+    if (!ctx.canMutate) return { error: 'permission:not-authorized', hint: '更新服务要求发送人在准入名单内，且消息是 @ 机器人或私聊' }
+    if (!this.updater) return { error: 'operator:unavailable' }
+
+    const checkOnly = args.check === true
+    const snapshot = checkOnly ? await this.updater.check(true) : await this.updater.upgrade()
+    const summary = {
+      current: snapshot.current,
+      latest: snapshot.latest,
+      installedVersion: snapshot.installedVersion,
+      hasUpdate: snapshot.hasUpdate,
+      message: snapshot.message,
+    }
+    if (snapshot.error === 'check-failed') return { error: 'update:check-failed', ...summary }
+    if (snapshot.phase === 'failed') return { error: snapshot.error ?? 'update:failed', ...summary }
+    if (checkOnly) return { checked: true, ...summary }
+    if (snapshot.phase !== 'updated') return { updated: false, restarting: false, ...summary }
+
+    const willRestart = Boolean(this.scheduleRestart)
+    if (willRestart) this.restartPending = true
+    return {
+      updated: true,
+      restarting: willRestart,
+      ...summary,
+      ...(willRestart ? { note: '新版本已安装，服务会在本轮回复后自动重启。' } : {}),
+    }
+  }
+
+  /** Pi 在一轮研判结束时调用：把安装成功后的重启意图真正交给服务层。 */
+  flushRestartRequest(): void {
+    if (!this.restartPending) return
+    this.restartPending = false
+    this.scheduleRestart?.()
   }
 
   /** 解析并校验 router_decide 的参数，只返回提案，不触碰 Engine。 */

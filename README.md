@@ -56,7 +56,7 @@ npm install -g router-agent   # 从 npm 全局安装，装完直接用 ra
 ra --help                     # 确认命令可用
 ```
 
-升级到最新版同样是 `npm install -g router-agent@latest`。
+升级到最新版用 `ra update`：检查 npm 上的最新版、执行 `npm install -g`，服务在跑时自动重启；只想看有没有新版用 `ra update --check`。等价于手动 `npm install -g router-agent@latest` 后 `ra stop && ra start`。
 
 <details>
 <summary>需要从源码运行或参与开发？</summary>
@@ -231,6 +231,7 @@ ra config edit                                   # 用 $EDITOR 编辑全文
 | `ra tickets [--stage]` | 列出工单 |
 | `ra ticket <id>` | 工单详情（状态 / 派工 / 上报 / 输入） |
 | `ra logs` | 最近 50 行日志 |
+| `ra update [--check]` | 检查并升级到 npm 最新版：默认执行 `npm install -g router-agent@latest`，服务在跑时自动重启；`--no-restart` 只安装、`--registry` 指定源、`--force` 在源码 / link 运行时仍装全局版、`--json` 机器可读 |
 | `ra runtime [list]` | 探测本机 ACP Agent：状态、版本、来源；`--json` 机器可读 |
 | `ra runtime install <id>` | 按需安装 ACP 适配器到 `~/.router-agent/runtimes/<agent>` |
 | `ra runtime uninstall <id>` | 卸载 ra 托管的 ACP 适配器 |

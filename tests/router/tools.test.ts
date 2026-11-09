@@ -187,3 +187,102 @@ describe('RouterToolbox 清理工具', () => {
     expect(removed.workdir).toBe('/tmp/ra-worktree')
   })
 })
+
+describe('RouterToolbox 版本更新工具', () => {
+  function snapshot(over: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      current: '0.3.0',
+      latest: '0.4.0',
+      installedVersion: null,
+      hasUpdate: true,
+      checkedAt: '2026-11-09T10:00:00.000Z',
+      phase: 'idle',
+      error: null,
+      message: null,
+      ...over,
+    }
+  }
+
+  function updater(handler: { check?: () => Record<string, unknown>; upgrade?: () => Record<string, unknown> } = {}) {
+    const calls = { check: 0, upgrade: 0 }
+    return {
+      calls,
+      port: {
+        check: async () => {
+          calls.check += 1
+          return (handler.check?.() ?? snapshot()) as never
+        },
+        upgrade: async () => {
+          calls.upgrade += 1
+          return (handler.upgrade?.() ?? snapshot({ phase: 'updated', installedVersion: '0.4.0', hasUpdate: false })) as never
+        },
+      },
+    }
+  }
+
+  it('没有更新能力时不暴露 router_update，调用返回 unavailable', async () => {
+    const { toolbox } = setup()
+    expect(toolbox.canUpdate()).toBe(false)
+    expect(await toolbox.update({}, { canMutate: true })).toEqual({ error: 'operator:unavailable' })
+  })
+
+  it('更新是写操作，未授权时直接拒绝且不访问 npm', async () => {
+    const { store, engine } = setup()
+    const fake = updater()
+    const toolbox = new RouterToolbox({ store, engine, updater: fake.port })
+    expect(toolbox.canUpdate()).toBe(true)
+
+    const refused = await toolbox.update({}, { canMutate: false }) as { error: string }
+    expect(refused.error).toBe('permission:not-authorized')
+    expect(fake.calls).toEqual({ check: 0, upgrade: 0 })
+  })
+
+  it('check=true 只检查版本，不安装也不重启', async () => {
+    const { store, engine } = setup()
+    const fake = updater()
+    let restarts = 0
+    const toolbox = new RouterToolbox({ store, engine, updater: fake.port, scheduleRestart: () => { restarts += 1 } })
+
+    const result = await toolbox.update({ check: true }, { canMutate: true }) as { checked: boolean; hasUpdate: boolean }
+    expect(result).toMatchObject({ checked: true, hasUpdate: true })
+    expect(fake.calls).toEqual({ check: 1, upgrade: 0 })
+    toolbox.flushRestartRequest()
+    expect(restarts).toBe(0)
+  })
+
+  it('安装成功后只登记重启，等本轮结束再触发', async () => {
+    const { store, engine } = setup()
+    const fake = updater()
+    let restarts = 0
+    const toolbox = new RouterToolbox({ store, engine, updater: fake.port, scheduleRestart: () => { restarts += 1 } })
+
+    const result = await toolbox.update({}, { canMutate: true }) as {
+      updated: boolean
+      restarting: boolean
+      installedVersion: string
+    }
+    expect(result).toMatchObject({ updated: true, restarting: true, installedVersion: '0.4.0' })
+    expect(fake.calls.upgrade).toBe(1)
+    // 工具执行期间不重启，确保 Pi 还能把结果回复给用户。
+    expect(restarts).toBe(0)
+
+    toolbox.flushRestartRequest()
+    toolbox.flushRestartRequest()
+    expect(restarts).toBe(1)
+  })
+
+  it('安装失败返回错误，不安排重启', async () => {
+    const { store, engine } = setup()
+    const fake = updater({
+      upgrade: () => snapshot({ phase: 'failed', error: 'install-failed', message: 'npm ERR! code EACCES' }),
+    })
+    let restarts = 0
+    const toolbox = new RouterToolbox({ store, engine, updater: fake.port, scheduleRestart: () => { restarts += 1 } })
+
+    const result = await toolbox.update({}, { canMutate: true }) as { error: string; message: string }
+    expect(result.error).toBe('install-failed')
+    expect(result.message).toContain('EACCES')
+    toolbox.flushRestartRequest()
+    expect(restarts).toBe(0)
+  })
+})
