@@ -125,27 +125,71 @@ export function Icon({ name, size = 16, className }: { name: IconName; size?: nu
   )
 }
 
+// 六条辐条按顺时针排列：上、右、右下、下、左下、左。
+// 每条辐条都从外圈节点指向中心，信号脉冲因此天然是「由外向内汇入」。
+const LOGO_SPOKES = [
+  'M360 168V289.5',
+  'M565 357.5L429.5 358.4',
+  'M502 494L409.9 406.9',
+  'M359 553L360 428.5',
+  'M217 494L309 406.7',
+  'M154 357.5L290.5 358.4',
+] as const
+
+// 外圈节点与辐条同序，便于用同一个延迟数组驱动「节点闪烁 → 脉冲出发」。
+const LOGO_NODES = [
+  { cx: 360, cy: 168 },
+  { cx: 565, cy: 357.5 },
+  { cx: 502, cy: 494 },
+  { cx: 359, cy: 553 },
+  { cx: 217, cy: 494 },
+  { cx: 154, cy: 357.5 },
+] as const
+
+// 相邻信号错开 120ms，一圈扫过 600ms；时长与 app.css 中的动画关键帧对齐。
+const LOGO_SIGNAL_STEP_MS = 120
+
 // 品牌标识：与 docs/assets/router-agent-logo.svg 保持一致的矢量图形。
+// 动效分三层：外圈节点闪烁 → 绿色脉冲沿辐条汇入 → 中心节点应和。
 export function LogoMark({ size = 34 }: { size?: number }): JSX.Element {
   return (
-    <svg width={size} height={size} viewBox="0 0 720 720" fill="none" aria-hidden="true">
+    <svg
+      className="logo-mark"
+      width={size}
+      height={size}
+      viewBox="0 0 720 720"
+      fill="none"
+      aria-hidden="true"
+    >
       <rect width="720" height="720" fill="#000000" />
-      <g stroke="#FFFFFF" strokeWidth="16">
-        <path d="M360 168V289.5" />
-        <path d="M359 553L360 428.5" />
-        <path d="M154 357.5L290.5 358.4" />
-        <path d="M565 357.5L429.5 358.4" />
-        <path d="M217 494L309 406.7" />
-        <path d="M502 494L409.9 406.9" />
+      <g className="logo-spokes" stroke="#FFFFFF" strokeWidth="16">
+        {LOGO_SPOKES.map(d => <path key={d} d={d} />)}
       </g>
-      <g fill="#FFFFFF">
-        <circle cx="360" cy="359" r="61.5" />
-        <circle cx="360" cy="168" r="36" />
-        <circle cx="359" cy="553" r="36" />
-        <circle cx="154" cy="357.5" r="36" />
-        <circle cx="565" cy="357.5" r="36" />
-        <circle cx="217" cy="494" r="36" />
-        <circle cx="502" cy="494" r="36" />
+      {/* 脉冲沿用辐条路径，pathLength 归一化后六条线共用同一套 dash 关键帧。
+          画在节点之下：脉冲从节点边缘露出，而不是压在白色节点上。 */}
+      <g className="logo-signals" fill="none" strokeWidth="24" strokeLinecap="round">
+        {LOGO_SPOKES.map((d, index) => (
+          <path
+            key={d}
+            className="logo-signal"
+            d={d}
+            pathLength={100}
+            style={{ animationDelay: `${index * LOGO_SIGNAL_STEP_MS}ms` }}
+          />
+        ))}
+      </g>
+      <g className="logo-nodes" fill="#FFFFFF">
+        <circle className="logo-hub" cx="360" cy="359" r="61.5" />
+        {LOGO_NODES.map((node, index) => (
+          <circle
+            key={`${node.cx}-${node.cy}`}
+            className="logo-node"
+            cx={node.cx}
+            cy={node.cy}
+            r="36"
+            style={{ animationDelay: `${index * LOGO_SIGNAL_STEP_MS}ms` }}
+          />
+        ))}
       </g>
     </svg>
   )
