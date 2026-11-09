@@ -753,7 +753,7 @@ const CUSTOM_SECTIONS: SectionDef[] = [
   {
     id: 'projects',
     title: '项目与群绑定',
-    description: '维护可派工的项目，以及每个群绑定到哪个项目 / 分支。项目清单按 Worker 后端隔离。',
+    description: '维护可派工的项目，以及每个群绑定到哪个项目 / 分支。项目清单按 Worker 后端隔离；支持添加本地项目或从 Git 地址 clone。',
     fields: [],
   },
 ]
@@ -1352,7 +1352,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
         <header className="settings-head">
           <div>
             <h2>2. 登记项目</h2>
-            <p>当前运行时：<strong>{runtimeLabel}</strong>。至少登记一个项目，群绑定才能选；非 orca 运行时填本地仓库绝对路径。</p>
+            <p>当前运行时：<strong>{runtimeLabel}</strong>。至少登记一个项目，群绑定才能选；可以选本机已有目录，也可以填 Git 地址自动 clone。</p>
           </div>
           <div className="settings-badges">
             {projectReady ? <span className="badge hot">已完成</span> : <span className="badge cold">未完成</span>}
@@ -1554,6 +1554,37 @@ function control(field: FieldDef, value: unknown, onChange: (value: unknown) => 
   )
 }
 
+interface ProjectInspectionView {
+  path: string
+  name: string
+  isGit: boolean
+  branch: string
+  detached: boolean
+  remoteUrl: string
+  error?: string
+  repo?: string
+  reused?: boolean
+  orca?: { registered: boolean; repo: string; displayName: string; error?: string }
+}
+
+interface ProjectDialogState {
+  mode: 'local' | 'git'
+  url: string
+  path: string
+  busy: boolean
+  info: ProjectInspectionView | null
+  name: string
+  defaultBranch: string
+  error: string | null
+  notice: string | null
+  /** Orca 登记失败时先提示，再点一次「仍然添加」才落配置。 */
+  force: boolean
+}
+
+function dialogError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 function ProjectsEditor({ runtimeId, projects, error, onChange }: {
   runtimeId: string
   projects: ProjectDraft[]
@@ -1561,9 +1592,160 @@ function ProjectsEditor({ runtimeId, projects, error, onChange }: {
   onChange: (value: ProjectDraft[]) => void
 }): JSX.Element {
   const isOrca = runtimeId === ORCA_RUNTIME_ID
+  const [dialog, setDialog] = useState<ProjectDialogState | null>(null)
   const update = (index: number, patch: Partial<ProjectDraft>): void => {
     onChange(projects.map((project, i) => (i === index ? { ...project, ...patch } : project)))
   }
+
+  const baseDialog = (mode: 'local' | 'git', busy = false): ProjectDialogState => ({
+    mode,
+    url: '',
+    path: '',
+    busy,
+    info: null,
+    name: '',
+    defaultBranch: '',
+    error: null,
+    notice: null,
+    force: false,
+  })
+
+  const inspectPath = async (target: string): Promise<void> => {
+    const path = target.trim()
+    if (!path) {
+      setDialog(current => (current ? { ...current, error: '请先选择或填写本地目录' } : current))
+      return
+    }
+    setDialog(current => (current ? { ...current, busy: true, error: null, notice: null, info: null } : current))
+    try {
+      const info = await sendJson<ProjectInspectionView>('/api/projects/inspect', 'POST', { path })
+      setDialog(current => (current
+        ? {
+          ...current,
+          busy: false,
+          info,
+          path: info.path,
+          name: info.name,
+          defaultBranch: info.branch,
+          error: info.isGit ? null : (info.error ?? '该目录不是 Git 仓库'),
+          force: false,
+        }
+        : current))
+    } catch (failure) {
+      setDialog(current => (current ? { ...current, busy: false, info: null, error: dialogError(failure) } : current))
+    }
+  }
+
+  /** 「添加本地项目」：先弹系统目录选择框，选中后自动识别 Git 与分支。 */
+  const startLocal = async (): Promise<void> => {
+    const initial = baseDialog('local', true)
+    setDialog(initial)
+    try {
+      const picked = await sendJson<{ canceled: boolean; path: string }>('/api/projects/pick-directory', 'POST', {})
+      if (picked.canceled || !picked.path) {
+        setDialog(null)
+        return
+      }
+      setDialog({ ...initial, path: picked.path, busy: false })
+      await inspectPath(picked.path)
+    } catch (failure) {
+      setDialog({
+        ...initial,
+        busy: false,
+        error: `无法打开目录选择框：${dialogError(failure)}。可以直接填写绝对路径后点「识别」。`,
+      })
+    }
+  }
+
+  const pickIntoDialog = async (): Promise<void> => {
+    setDialog(current => (current ? { ...current, busy: true, error: null, notice: null } : current))
+    try {
+      const picked = await sendJson<{ canceled: boolean; path: string }>('/api/projects/pick-directory', 'POST', {})
+      if (picked.canceled || !picked.path) {
+        setDialog(current => (current ? { ...current, busy: false } : current))
+        return
+      }
+      await inspectPath(picked.path)
+    } catch (failure) {
+      setDialog(current => (current
+        ? { ...current, busy: false, error: `无法打开目录选择框：${dialogError(failure)}。可以直接填写绝对路径。` }
+        : current))
+    }
+  }
+
+  const cloneGit = async (): Promise<void> => {
+    if (!dialog) return
+    const url = dialog.url.trim()
+    if (!url) {
+      setDialog({ ...dialog, error: '请填写 Git 地址' })
+      return
+    }
+    setDialog({ ...dialog, busy: true, error: null, notice: null, info: null, force: false })
+    try {
+      const info = await sendJson<ProjectInspectionView>('/api/projects/clone', 'POST', { url, runtimeId })
+      const orcaFailed = info.orca && !info.orca.registered
+      setDialog(current => (current
+        ? {
+          ...current,
+          busy: false,
+          info,
+          path: info.path,
+          name: info.name,
+          defaultBranch: info.branch,
+          error: info.isGit ? null : (info.error ?? '该目录不是 Git 仓库'),
+          notice: orcaFailed ? `已 clone 到 ${info.path}，但登记到 Orca 失败：${info.orca?.error ?? '未知原因'}` : null,
+        }
+        : current))
+    } catch (failure) {
+      setDialog(current => (current ? { ...current, busy: false, error: dialogError(failure) } : current))
+    }
+  }
+
+  const addFromDialog = async (): Promise<void> => {
+    if (!dialog || !dialog.info) return
+    const name = dialog.name.trim()
+    if (!name) {
+      setDialog({ ...dialog, error: '请填写项目名' })
+      return
+    }
+    if (!dialog.info.isGit) {
+      setDialog({ ...dialog, error: '该目录不是 Git 仓库，无法创建 worktree' })
+      return
+    }
+    if (projects.some(project => project.name === name)) {
+      setDialog({ ...dialog, error: `项目名已存在：${name}` })
+      return
+    }
+
+    let repo = dialog.info.repo ?? dialog.info.path
+    if (dialog.mode === 'local') {
+      setDialog({ ...dialog, busy: true, error: null })
+      try {
+        const prepared = await sendJson<ProjectInspectionView>('/api/projects/register', 'POST', { path: dialog.info.path, runtimeId })
+        repo = prepared.repo ?? prepared.path
+        if (prepared.orca && !prepared.orca.registered && !dialog.force) {
+          setDialog(current => (current
+            ? {
+              ...current,
+              busy: false,
+              force: true,
+              notice: `登记到 Orca 失败：${prepared.orca?.error ?? '未知原因'}。仍可先加入项目清单，开工前需要在 Orca 里补登记。`,
+            }
+            : current))
+          return
+        }
+      } catch (failure) {
+        setDialog(current => (current ? { ...current, busy: false, error: dialogError(failure) } : current))
+        return
+      }
+    }
+
+    onChange([...projects, { name, repo, defaultBranch: dialog.defaultBranch.trim() }])
+    setDialog(null)
+  }
+
+  const canAdd = Boolean(dialog?.info?.isGit && dialog.name.trim())
+
   return (
     <div className="editor">
       {projects.length === 0 && <p className="editor-empty">该运行时还没有项目。没有项目时开单会先追问仓库。</p>}
@@ -1590,9 +1772,129 @@ function ProjectsEditor({ runtimeId, projects, error, onChange }: {
         </div>
       ))}
       {error && <p className="field-error">{error}</p>}
-      <button className="btn add" onClick={() => onChange([...projects, { name: '', repo: '', defaultBranch: '' }])}>
-        <Icon name="plus" size={13} />添加项目
-      </button>
+      <div className="project-add-actions">
+        <button className="btn add" onClick={() => void startLocal()}>
+          <Icon name="folder" size={13} />添加本地项目
+        </button>
+        <button className="btn add" onClick={() => setDialog(baseDialog('git'))}>
+          <Icon name="git" size={13} />添加 Git 项目
+        </button>
+      </div>
+
+      {dialog && (
+        <div className="modal-layer">
+          <button className="modal-backdrop" aria-label="关闭" onClick={() => { if (!dialog.busy) setDialog(null) }} />
+          <div className="modal" role="dialog" aria-modal="true" aria-label={dialog.mode === 'local' ? '添加本地项目' : '添加 Git 项目'}>
+            <header className="modal-head">
+              <div>
+                <h3>{dialog.mode === 'local' ? '添加本地项目' : '添加 Git 项目'}</h3>
+                <p>
+                  {dialog.mode === 'local'
+                    ? '选择本机已有目录，自动识别是否为 Git 仓库以及当前分支。'
+                    : `填写 ssh 或 http(s) 地址，自动 clone 到 RA_HOME/repos 下${isOrca ? '，并用 orca repo add 登记' : ''}。`}
+                </p>
+              </div>
+              <button className="icon-btn" title="关闭" onClick={() => setDialog(null)} disabled={dialog.busy}>
+                <Icon name="close" size={14} />
+              </button>
+            </header>
+            <div className="modal-body">
+              {dialog.mode === 'local' ? (
+                <label className="modal-field">
+                  <span>本地目录</span>
+                  <div className="modal-inline">
+                    <input
+                      value={dialog.path}
+                      placeholder="/Users/me/project"
+                      onChange={event => setDialog(current => (current
+                        ? { ...current, path: event.target.value, info: null, error: null, notice: null, force: false }
+                        : current))}
+                    />
+                    <button className="btn tiny" onClick={() => void pickIntoDialog()} disabled={dialog.busy}>
+                      <Icon name="folder" size={12} />选择目录…
+                    </button>
+                    <button
+                      className="btn tiny"
+                      onClick={() => void inspectPath(dialog.path)}
+                      disabled={dialog.busy || !dialog.path.trim()}
+                    >
+                      识别
+                    </button>
+                  </div>
+                </label>
+              ) : (
+                <label className="modal-field">
+                  <span>Git 地址</span>
+                  <input
+                    value={dialog.url}
+                    placeholder="git@gitlab.example.com:group/repo.git 或 https://gitlab.example.com/group/repo.git"
+                    onChange={event => setDialog(current => (current
+                      ? { ...current, url: event.target.value, info: null, error: null, notice: null, force: false }
+                      : current))}
+                  />
+                </label>
+              )}
+
+              {dialog.busy && <p className="modal-hint"><Icon name="refresh" size={13} className="spin" />正在处理…</p>}
+
+              {dialog.info && (
+                <div className={`project-detect ${dialog.info.isGit ? 'ok' : 'bad'}`}>
+                  <div><span>目录</span><code>{dialog.info.path}</code></div>
+                  <div><span>Git</span><strong>{dialog.info.isGit ? '是' : '否'}</strong></div>
+                  {dialog.info.isGit && (
+                    <div><span>当前分支</span><strong>{dialog.info.detached ? '游离 HEAD' : dialog.info.branch || '未知'}</strong></div>
+                  )}
+                  {dialog.info.remoteUrl && <div><span>origin</span><code>{dialog.info.remoteUrl}</code></div>}
+                  {dialog.info.reused && <div><span>目录</span><strong>已存在同远程仓库，直接复用</strong></div>}
+                  {dialog.info.orca && (
+                    <div>
+                      <span>Orca</span>
+                      <strong>{dialog.info.orca.registered ? `已登记为 ${dialog.info.orca.displayName}` : '登记失败'}</strong>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {dialog.info?.isGit && (
+                <div className="modal-grid">
+                  <label className="modal-field">
+                    <span>项目名</span>
+                    <input
+                      value={dialog.name}
+                      placeholder="router-agent"
+                      onChange={event => setDialog(current => (current ? { ...current, name: event.target.value, error: null } : current))}
+                    />
+                  </label>
+                  <label className="modal-field">
+                    <span>默认起始分支</span>
+                    <input
+                      value={dialog.defaultBranch}
+                      placeholder="main"
+                      onChange={event => setDialog(current => (current ? { ...current, defaultBranch: event.target.value } : current))}
+                    />
+                  </label>
+                </div>
+              )}
+
+              {dialog.error && <p className="modal-error">{dialog.error}</p>}
+              {dialog.notice && <p className="modal-notice">{dialog.notice}</p>}
+            </div>
+            <footer className="modal-foot">
+              <button className="btn tiny" onClick={() => setDialog(null)} disabled={dialog.busy}>取消</button>
+              {dialog.mode === 'git' && !dialog.info && (
+                <button className="btn primary" onClick={() => void cloneGit()} disabled={dialog.busy || !dialog.url.trim()}>
+                  {dialog.busy ? '克隆中…' : '克隆并识别'}
+                </button>
+              )}
+              {canAdd && (
+                <button className="btn primary" onClick={() => void addFromDialog()} disabled={dialog.busy}>
+                  {dialog.busy ? '处理中…' : dialog.force ? '仍然添加' : '添加项目'}
+                </button>
+              )}
+            </footer>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

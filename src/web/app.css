@@ -1016,6 +1016,84 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 .editor-row .select-wrap select { height: var(--control-height); }
 .editor > .field-error { margin: 4px 0 8px; }
 .editor > .btn.add { margin-top: 8px; }
+.project-add-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.project-add-actions .btn.add { margin-top: 0; }
+
+/* 项目登记弹窗 */
+.modal-layer { position: fixed; inset: 0; z-index: 70; display: grid; place-items: center; padding: 24px; }
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: rgba(0, 0, 0, 0.42);
+  cursor: default;
+}
+.modal {
+  position: relative;
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sheet);
+  box-shadow: var(--shadow-md);
+  animation: ra-modal-in 0.18s ease;
+}
+@keyframes ra-modal-in {
+  from { transform: translateY(8px) scale(0.99); opacity: 0.6; }
+  to { transform: none; opacity: 1; }
+}
+.modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px 20px 12px;
+  border-bottom: 1px solid var(--rule);
+}
+.modal-head h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.modal-head p { margin: 4px 0 0; font-size: 12px; color: var(--muted); line-height: 1.5; }
+.modal-body { display: flex; flex-direction: column; gap: 12px; padding: 16px 20px; overflow: auto; }
+.modal-field { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted); }
+.modal-field > span { font-weight: 500; }
+.modal-field input {
+  height: var(--control-height);
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+.modal-field input:focus { border-color: var(--accent); }
+.modal-inline { display: flex; gap: 8px; }
+.modal-inline input { flex: 1; min-width: 0; }
+.modal-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.modal-hint { display: flex; align-items: center; gap: 7px; margin: 0; font-size: 12px; color: var(--muted); }
+.modal-error, .modal-notice { margin: 0; padding: 8px 10px; border-radius: var(--radius-control); font-size: 12px; line-height: 1.5; }
+.modal-error { background: var(--danger-soft); color: var(--danger); }
+.modal-notice { background: var(--warn-soft); color: var(--warn); }
+.modal-foot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 12px 20px 18px; border-top: 1px solid var(--rule); }
+.project-detect {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--raised);
+  font-size: 12px;
+}
+.project-detect > div { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 8px; align-items: baseline; }
+.project-detect span { color: var(--muted); }
+.project-detect code { word-break: break-all; color: var(--text); }
+.project-detect.ok { border-color: color-mix(in srgb, var(--positive) 35%, var(--border)); }
+.project-detect.bad { border-color: color-mix(in srgb, var(--danger) 35%, var(--border)); }
 
 /* 保存浮层 */
 .save-dock {
@@ -1428,4 +1506,7 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
   .detail-head { flex-direction: column; }
   .save-dock { flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
   .save-buttons { margin-left: 0; width: 100%; justify-content: flex-end; }
+  .modal-layer { padding: 12px; }
+  .modal-grid { grid-template-columns: 1fr; }
+  .modal-inline { flex-wrap: wrap; }
 }
