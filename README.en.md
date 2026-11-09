@@ -679,7 +679,7 @@ States:
 | POST | `/api/tickets/:id/stop` | Stop a ticket |
 | POST | `/api/tickets/:id/assignment` | Bind an assignment manually |
 | GET | `/api/workspaces` | Ticket page "Clean workspaces": existing ticket worktrees grouped by runtime |
-| POST | `/api/workspaces/cleanup` | Reclaim leftover worktrees of closed tickets per runtime (`{ runtimeId }`; dirty ones are skipped with a reason) |
+| POST | `/api/workspaces/cleanup` | Batch-clean workspaces (`{ ticketIds }` per ticket, or `{ runtimeId }` for everything cleanable in that runtime; dirty worktrees are skipped with a reason) |
 | POST | `/api/reports` | Worker state and reply reports (the `ra report` entry) |
 | GET / PUT | `/api/policy` | Read / write policy |
 | GET | `/api/sources/feishu/chats` | Feishu source configuration |
@@ -692,7 +692,7 @@ States:
 ## Development
 
 ```bash
-pnpm test        # 612 tests pass (4 skipped by default, including the live Pi / service checks)
+pnpm test        # 616 tests pass (4 skipped by default, including the live Pi / service checks)
 pnpm typecheck
 pnpm build       # tsc + esbuild (web dashboard and Markdown assets)
 pnpm check       # typecheck + test

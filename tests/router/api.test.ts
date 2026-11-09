@@ -404,7 +404,7 @@ describe('HTTP 管理 API', () => {
       engine, store, config,
       workspaceAdmin: {
         list: async () => overview,
-        cleanup: async runtimeId => ({ runtimeId, removed: [], skipped: [] }),
+        cleanup: async () => ({ removed: [], skipped: [] }),
       },
     })
     try {
@@ -420,42 +420,56 @@ describe('HTTP 管理 API', () => {
     expect(unsupported.json.error).toBe('workspace-admin-not-supported')
   })
 
-  it('POST /api/workspaces/cleanup 按运行时调用清理并回传结果', async () => {
-    const calls: string[] = []
+  it('POST /api/workspaces/cleanup 按勾选的工单批量清理并回传结果', async () => {
+    const calls: unknown[] = []
     const extra = await createApiServer({
       engine, store, config,
       onEvent: event => events.push(event),
       workspaceAdmin: {
         list: async () => ({ runtimes: [], cleanableCount: 0 }),
-        cleanup: async runtimeId => {
-          calls.push(runtimeId)
-          return { runtimeId, removed: [{ ticketId, workdir: '/tmp/wt' }], skipped: [] }
+        cleanup: async request => {
+          calls.push(request)
+          return { removed: [{ ticketId, workdir: '/tmp/wt' }], skipped: [] }
         },
       },
     })
     try {
-      const res = await call(extra, 'POST', '/api/workspaces/cleanup', { runtimeId: 'orca' })
+      const res = await call(extra, 'POST', '/api/workspaces/cleanup', { ticketIds: [ticketId, ticketId, ' '] })
       expect(res.status).toBe(200)
-      expect(calls).toEqual(['orca'])
-      expect(res.json).toEqual({ runtimeId: 'orca', removed: [{ ticketId, workdir: '/tmp/wt' }], skipped: [] })
-      expect(events.some(event => event.event === 'api:workspace-cleanup' && event.runtimeId === 'orca')).toBe(true)
+      // 去重并丢掉空值。
+      expect(calls).toEqual([{ ticketIds: [ticketId] }])
+      expect(res.json).toEqual({ removed: [{ ticketId, workdir: '/tmp/wt' }], skipped: [] })
+      expect(events.some(event => event.event === 'api:workspace-cleanup' && event.requested === 1)).toBe(true)
     } finally {
       await extra.close()
     }
   })
 
-  it('POST /api/workspaces/cleanup 缺 runtimeId 或清理失败返回 400', async () => {
+  it('POST /api/workspaces/cleanup 支持按运行时清理，缺选择或清理失败返回 400', async () => {
+    const calls: unknown[] = []
     const extra = await createApiServer({
       engine, store, config,
       workspaceAdmin: {
         list: async () => ({ runtimes: [], cleanableCount: 0 }),
-        cleanup: async () => { throw new Error('未知的 Worker 运行时: nope') },
+        cleanup: async request => {
+          calls.push(request)
+          if (request.runtimeId === 'nope') throw new Error('未知的 Worker 运行时: nope')
+          return { removed: [], skipped: [] }
+        },
       },
     })
     try {
+      const runtime = await call(extra, 'POST', '/api/workspaces/cleanup', { runtimeId: 'orca' })
+      expect(runtime.status).toBe(200)
+      expect(calls).toEqual([{ runtimeId: 'orca' }])
+
       const missing = await call(extra, 'POST', '/api/workspaces/cleanup', {})
       expect(missing.status).toBe(400)
-      expect(missing.json.error).toBe('runtime-required')
+      expect(missing.json.error).toBe('selection-required')
+
+      const invalid = await call(extra, 'POST', '/api/workspaces/cleanup', { ticketIds: ticketId })
+      expect(invalid.status).toBe(400)
+      expect(invalid.json.error).toBe('ticket-ids-invalid')
 
       const failed = await call(extra, 'POST', '/api/workspaces/cleanup', { runtimeId: 'nope' })
       expect(failed.status).toBe(400)

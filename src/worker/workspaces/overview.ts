@@ -51,16 +51,24 @@ export interface WorkspaceSkipView extends WorkspaceRemovalView {
 }
 
 export interface WorkspaceCleanupResultView {
-  runtimeId: string
   removed: WorkspaceRemovalView[]
   skipped: WorkspaceSkipView[]
+}
+
+/** 面板勾选后提交的清理请求：优先按工单；只传 runtimeId 时清理该运行时下全部可清理项。 */
+export interface WorkspaceCleanupRequest {
+  ticketIds?: string[]
+  runtimeId?: string
 }
 
 /** HTTP API 依赖的面板端口；由 RouterService 实现。 */
 export interface WorkspaceAdminPort {
   list(): Promise<WorkspaceOverviewView>
-  /** 只清理该运行时下已关闭工单的遗留工作区；脏目录由 provider 拒绝。 */
-  cleanup(runtimeId: string): Promise<WorkspaceCleanupResultView>
+  /**
+   * 按工单逐个清理：每个工单由它自己的运行时决定怎么回收
+   * （Orca 关 worktree、Claude Code 删 agent view、ACP 直接删 worktree）。
+   */
+  cleanup(request: WorkspaceCleanupRequest): Promise<WorkspaceCleanupResultView>
 }
 
 /** 运行时短名：目录里的长 label（`orca · Orca worktree + 终端`）只取第一段。 */

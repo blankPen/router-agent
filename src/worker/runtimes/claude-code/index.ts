@@ -1,10 +1,11 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { CommandRunner } from '../../../infra/process.js'
 import { GitWorktreeProvider } from '../../workspaces/git-worktree.js'
 import { readClaudeSession } from '../../orca/session.js'
 import { workBranch, worktreeName } from '../../naming.js'
+import { normalizeRuntimeId } from '../catalog.js'
 import {
   WorkerRuntimeError,
   type ActivityQuery,
@@ -326,7 +327,38 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
   }
 
   async removeWorkspace(ref: WorkspaceRef): Promise<void> {
-    await this.gitProvider.remove(ref.workdir)
+    // Claude Code 的清理分两步：先从 agent view 删掉后台会话（`claude rm`），
+    // 再删 worktree 目录。会话已经不存在时按幂等处理，不挡目录回收。
+    const meta = this.readMeta(ref.ticketId)
+    const metaRuntime = meta?.runtime ? normalizeRuntimeId(meta.runtime) : ''
+    const handle = meta && (!metaRuntime || metaRuntime === this.id) ? meta.handle : ''
+    let agentError = ''
+    if (handle) {
+      const res = await this.claude.run(['rm', handle], { cwd: ref.workdir || this.home, env: this.env })
+      if (res.code !== 0 && !/not found|no such|unknown|no job matching/i.test(`${res.stderr}${res.stdout}`)) {
+        agentError = `${res.stderr || res.stdout}`.trim()
+      }
+    }
+    // `claude rm` 在部分版本里会连带删掉它认为属于该会话的 worktree。
+    if (existsSync(ref.workdir)) {
+      try {
+        await this.gitProvider.remove(ref.workdir)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        throw new WorkerRuntimeError('workspace:remove-failed', agentError
+          ? `claude agents 视图清理失败（${agentError}），worktree 删除也失败: ${message}`
+          : message, {
+          cause: message,
+          detail: { workdir: ref.workdir, ...(agentError ? { agentError } : {}) },
+        })
+      }
+    }
+    if (agentError) {
+      throw new WorkerRuntimeError('workspace:remove-failed', `claude agents 视图清理失败: ${agentError}`, {
+        cause: agentError,
+        detail: { workdir: ref.workdir, handle },
+      })
+    }
   }
 
   /** 本地路径仓库的 PR 跟踪需要 owner/repo；从 origin 推导。 */

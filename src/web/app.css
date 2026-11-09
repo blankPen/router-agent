@@ -1158,7 +1158,14 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
   background: var(--surface);
 }
 .ws-item-cleanable { border-color: color-mix(in srgb, var(--positive) 35%, var(--border)); }
-.ws-item-main { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; min-width: 0; }
+.ws-item-main { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; min-width: 0; cursor: pointer; }
+.ws-item-main.disabled { cursor: default; }
+.ws-item-main input[type="checkbox"] { align-self: center; }
+.ws-select-all { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+.ws-select-all.disabled { cursor: default; opacity: 0.55; }
+.ws-foot { justify-content: flex-end; }
+.ws-selected { margin-right: auto; font-size: 12px; color: var(--muted); }
+.ws-selected strong { color: var(--text); }
 .ws-ticket { font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ws-ticket-id { color: var(--muted); }
 .ws-state { margin-left: auto; font-size: 11px; }

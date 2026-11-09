@@ -21,6 +21,7 @@ import { buildResumeHint } from './worker/resume.js'
 import { latestClaudeSessionId } from './worker/orca/session.js'
 import {
   workspaceRuntimeLabel,
+  type WorkspaceCleanupRequest,
   type WorkspaceCleanupResultView,
   type WorkspaceEntryView,
   type WorkspaceOverviewView,
@@ -702,37 +703,58 @@ export class RouterService {
   }
 
   /**
-   * 按运行时批量回收已关闭工单的遗留工作区。
+   * 按勾选的工单批量回收工作区；每个工单交给它自己的运行时处理：
+   * Orca 关终端 + 移除 worktree，Claude Code 删 agent view + 删 worktree，ACP 直接删 worktree。
    *
    * 不传 force：脏工作区交给 provider 拒绝，返回的 skipped 里带原因给面板展示。
    */
-  async cleanupWorkspaces(runtimeId: string): Promise<WorkspaceCleanupResultView> {
-    const id = normalizeRuntimeId(String(runtimeId ?? '').trim())
-    if (!id || !this.runtimes.has(id)) {
-      throw new WorkerRuntimeError('runtime:unknown', `未知的 Worker 运行时: ${runtimeId || '(空)'}`)
-    }
-    const runtime = this.runtimes.get(id)
-    const group = this.listWorkspaces().runtimes.find(item => item.runtimeId === id)
-    const targets = group?.entries.filter(entry => entry.cleanable) ?? []
-    const result: WorkspaceCleanupResultView = { runtimeId: id, removed: [], skipped: [] }
-    if (!runtime.removeWorkspace) {
-      for (const entry of targets) {
-        result.skipped.push({ ticketId: entry.ticketId, workdir: entry.workdir, reason: '该运行时不支持自动回收工作区' })
+  async cleanupWorkspaces(request: WorkspaceCleanupRequest): Promise<WorkspaceCleanupResultView> {
+    const overview = this.listWorkspaces()
+    const result: WorkspaceCleanupResultView = { removed: [], skipped: [] }
+    const ticketIds = [...new Set((request.ticketIds ?? []).map(String).filter(Boolean))]
+    let targets: WorkspaceEntryView[] = []
+
+    if (ticketIds.length > 0) {
+      const byTicket = new Map(overview.runtimes.flatMap(group => group.entries).map(entry => [entry.ticketId, entry]))
+      for (const ticketId of ticketIds) {
+        const entry = byTicket.get(ticketId)
+        if (!entry) {
+          result.skipped.push({ ticketId, workdir: '', reason: '没有找到仍在磁盘上的工作区' })
+          continue
+        }
+        if (!entry.cleanable) {
+          result.skipped.push({ ticketId, workdir: entry.workdir, reason: entry.reason ?? '当前不可清理' })
+          continue
+        }
+        targets.push(entry)
       }
-      return result
+    } else if (request.runtimeId?.trim()) {
+      const id = normalizeRuntimeId(request.runtimeId.trim())
+      if (!this.runtimes.has(id)) {
+        throw new WorkerRuntimeError('runtime:unknown', `未知的 Worker 运行时: ${request.runtimeId}`)
+      }
+      targets = (overview.runtimes.find(group => group.runtimeId === id)?.entries ?? []).filter(entry => entry.cleanable)
+    } else {
+      throw new Error('请至少勾选一个工单，或指定要清理的运行时')
     }
 
     for (const entry of targets) {
       const assignment = this.store.getAssignment(entry.assignmentId)
       if (!assignment?.workdir) continue
+      const runtimeId = normalizeRuntimeId(assignment.runtimeId)
+      const runtime = this.runtimes.has(runtimeId) ? this.runtimes.get(runtimeId) : null
+      if (!runtime?.removeWorkspace) {
+        result.skipped.push({ ticketId: entry.ticketId, workdir: entry.workdir, reason: '该运行时不支持自动回收工作区' })
+        continue
+      }
       try {
-        // 先关终端再删目录；终端早已不存在时 stop 失败不影响后续回收。
+        // 先关终端 / 停会话再删目录；早已不存在时 stop 失败不影响后续回收。
         if (assignment.handle) {
           try {
             await runtime.stop(this.refOf(assignment), 'workspace-cleanup')
           } catch (error) {
             this.logger.warn('workspace:bulk-stop-failed', {
-              runtimeId: id,
+              runtimeId,
               ticketId: entry.ticketId,
               handle: assignment.handle,
               message: error instanceof Error ? error.message : String(error),
@@ -741,12 +763,12 @@ export class RouterService {
         }
         await runtime.removeWorkspace(this.workspaceRefOf(assignment))
         result.removed.push({ ticketId: entry.ticketId, workdir: entry.workdir })
-        this.log('workspace:bulk-removed', entry.ticketId, { runtimeId: id, workdir: entry.workdir })
+        this.log('workspace:bulk-removed', entry.ticketId, { runtimeId, workdir: entry.workdir })
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error)
         result.skipped.push({ ticketId: entry.ticketId, workdir: entry.workdir, reason })
         this.logger.warn('workspace:bulk-skip', {
-          runtimeId: id,
+          runtimeId,
           ticketId: entry.ticketId,
           workdir: entry.workdir,
           reason,
@@ -754,7 +776,7 @@ export class RouterService {
       }
     }
     this.logger.info('workspace:bulk-cleanup', {
-      runtimeId: id,
+      requested: ticketIds.length,
       removed: result.removed.length,
       skipped: result.skipped.length,
     })

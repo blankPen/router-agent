@@ -169,13 +169,25 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
     if (path === '/api/workspaces/cleanup' && req.method === 'POST') {
       if (!opts.workspaceAdmin) return respond(res, 501, { error: 'workspace-admin-not-supported' })
       const body = await readJson(req)
+      if (body.ticketIds !== undefined && !Array.isArray(body.ticketIds)) {
+        return respond(res, 400, { error: 'ticket-ids-invalid', message: 'ticketIds 必须是工单号数组' })
+      }
+      const ticketIds = Array.isArray(body.ticketIds)
+        ? [...new Set(body.ticketIds.map(id => String(id).trim()).filter(Boolean))]
+        : []
       const runtimeId = typeof body.runtimeId === 'string' ? body.runtimeId.trim() : ''
-      if (!runtimeId) return respond(res, 400, { error: 'runtime-required', message: '请指定要清理的运行时' })
+      if (ticketIds.length === 0 && !runtimeId) {
+        return respond(res, 400, { error: 'selection-required', message: '请至少勾选一个工单，或指定要清理的运行时' })
+      }
       try {
-        const result = await opts.workspaceAdmin.cleanup(runtimeId)
+        const result = await opts.workspaceAdmin.cleanup({
+          ...(ticketIds.length > 0 ? { ticketIds } : {}),
+          ...(runtimeId ? { runtimeId } : {}),
+        })
         onEvent({
           event: 'api:workspace-cleanup',
-          runtimeId: result.runtimeId,
+          requested: ticketIds.length,
+          runtimeId,
           removed: result.removed.length,
           skipped: result.skipped.length,
         })

@@ -943,7 +943,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     projectSetup: new ProjectSetup({ home, git: gitRunner, orca: orcaRunner }),
     workspaceAdmin: {
       list: async () => service.listWorkspaces(),
-      cleanup: runtimeId => service.cleanupWorkspaces(runtimeId),
+      cleanup: request => service.cleanupWorkspaces(request),
     },
     port: config.server.port,
     webRoot: existsSync(webRoot) ? webRoot : undefined,

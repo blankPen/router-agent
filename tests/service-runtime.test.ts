@@ -652,8 +652,7 @@ describe('运行时机制', () => {
     engine.closeTicket(dirty.id, 'test')
     runtime.removeErrors.set(dirtyDir, 'git worktree remove 失败: contains modified or untracked files')
 
-    const result = await service.cleanupWorkspaces('orca')
-    expect(result.runtimeId).toBe('orca')
+    const result = await service.cleanupWorkspaces({ runtimeId: 'orca' })
     expect(result.removed).toEqual([{ ticketId: done.id, workdir: okDir }])
     expect(result.skipped).toHaveLength(1)
     expect(result.skipped[0]).toMatchObject({ ticketId: dirty.id, workdir: dirtyDir })
@@ -665,6 +664,42 @@ describe('运行时机制', () => {
     // 已回收的目录不再出现；脏目录仍在清单里，等人工处理后可以再点一次。
     const after = service.listWorkspaces().runtimes[0]!
     expect(after.entries.map(entry => entry.ticketId).sort()).toEqual([active.id, dirty.id].sort())
+  })
+
+  it('批量清理：只清理勾选的工单，未勾选的不动', async () => {
+    const firstDir = mkdtempSync(join(tmpdir(), 'ra-ws-first-'))
+    const secondDir = mkdtempSync(join(tmpdir(), 'ra-ws-second-'))
+    const keepDir = mkdtempSync(join(tmpdir(), 'ra-ws-keep-'))
+
+    const first = makeTicket('first')
+    engine.startAssignment(first.id, { runtimeId: 'orca', handle: 'h-first', workdir: firstDir })
+    engine.closeTicket(first.id, 'test')
+    const second = makeTicket('second')
+    engine.startAssignment(second.id, { runtimeId: 'orca', handle: 'h-second', workdir: secondDir })
+    engine.closeTicket(second.id, 'test')
+    const keep = makeTicket('keep')
+    engine.startAssignment(keep.id, { runtimeId: 'orca', handle: 'h-keep', workdir: keepDir })
+    engine.closeTicket(keep.id, 'test')
+
+    const result = await service.cleanupWorkspaces({ ticketIds: [first.id, second.id] })
+    expect(result.removed.map(item => item.ticketId).sort()).toEqual([first.id, second.id].sort())
+    expect(result.skipped).toEqual([])
+    expect(existsSync(firstDir)).toBe(false)
+    expect(existsSync(secondDir)).toBe(false)
+    expect(existsSync(keepDir)).toBe(true)
+  })
+
+  it('批量清理：勾选不可清理的工单会跳过并说明原因', async () => {
+    const openDir = mkdtempSync(join(tmpdir(), 'ra-ws-pick-open-'))
+    const open = makeTicket('pick-open')
+    engine.startAssignment(open.id, { runtimeId: 'orca', handle: 'h-pick-open', workdir: openDir })
+
+    const result = await service.cleanupWorkspaces({ ticketIds: [open.id, 'tk-missing'] })
+    expect(result.removed).toEqual([])
+    expect(result.skipped).toHaveLength(2)
+    expect(result.skipped.find(item => item.ticketId === open.id)?.reason).toContain('未关闭')
+    expect(result.skipped.find(item => item.ticketId === 'tk-missing')?.reason).toContain('没有找到')
+    expect(existsSync(openDir)).toBe(true)
   })
 
   it('批量清理：目录被在办工单占用时不算可清理', async () => {
@@ -679,13 +714,15 @@ describe('运行时机制', () => {
     expect(entry.cleanable).toBe(false)
     expect(entry.reason).toContain('占用')
 
-    const result = await service.cleanupWorkspaces('orca')
+    const result = await service.cleanupWorkspaces({ ticketIds: [closed.id] })
     expect(result.removed).toEqual([])
+    expect(result.skipped[0]?.reason).toContain('占用')
     expect(existsSync(sharedDir)).toBe(true)
   })
 
-  it('批量清理：未知运行时直接拒绝', async () => {
-    await expect(service.cleanupWorkspaces('nope')).rejects.toThrow(/未知的 Worker 运行时/)
+  it('批量清理：未知运行时或空请求直接拒绝', async () => {
+    await expect(service.cleanupWorkspaces({ runtimeId: 'nope' })).rejects.toThrow(/未知的 Worker 运行时/)
+    await expect(service.cleanupWorkspaces({})).rejects.toThrow(/至少勾选一个工单/)
   })
 
 })
