@@ -179,7 +179,7 @@ async function sendJson<T>(path: string, method: string, body: unknown): Promise
 
 type IconName =
   | 'inbox' | 'sliders' | 'radio' | 'search' | 'refresh' | 'copy' | 'external'
-  | 'stop' | 'alert' | 'plus' | 'trash' | 'branch' | 'terminal' | 'clock' | 'check' | 'chevron'
+  | 'stop' | 'alert' | 'plus' | 'trash' | 'branch' | 'terminal' | 'clock' | 'check' | 'chevron' | 'close'
 
 function Icon({ name, size = 16, className }: { name: IconName; size?: number; className?: string }): JSX.Element {
   const paths: Record<IconName, JSX.Element> = {
@@ -261,6 +261,7 @@ function Icon({ name, size = 16, className }: { name: IconName; size?: number; c
     ),
     check: <path d="m4 12 5 5L20 6" />,
     chevron: <path d="m9 6 6 6-6 6" />,
+    close: <path d="M18 6 6 18M6 6l12 12" />,
   }
   return (
     <svg
@@ -489,6 +490,26 @@ function TicketsView(): JSX.Element {
     loadDetail(selected)
   }, [selected, loadDetail])
 
+  const closeDrawer = useCallback((): void => {
+    setSelected(null)
+    setDetail(null)
+    setDetailError(null)
+  }, [])
+
+  useEffect(() => {
+    if (!selected) return
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') closeDrawer()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      document.body.style.overflow = previousOverflow
+    }
+  }, [selected, closeDrawer])
+
   const counts = useMemo(() => {
     const map = new Map<string, number>()
     for (const ticket of tickets) map.set(ticket.stage, (map.get(ticket.stage) ?? 0) + 1)
@@ -507,10 +528,9 @@ function TicketsView(): JSX.Element {
     })
   }, [tickets, keyword, stage])
 
-  const grouped = STAGE_ORDER
+  const columns = STAGE_ORDER
     .filter(item => stage === 'all' || item === stage)
     .map(item => ({ stage: item, items: filtered.filter(ticket => ticket.stage === item) }))
-    .filter(group => group.items.length > 0)
 
   const refresh = (): void => {
     load()
@@ -571,23 +591,17 @@ function TicketsView(): JSX.Element {
         </div>
       </div>
 
-      <div className="split">
-        <section className="ticket-list">
-          {grouped.length === 0 && (
-            <div className="empty-state">
-              <Icon name="inbox" size={22} />
-              <p>没有匹配的工单</p>
-              <small>调整筛选条件，或等待新的消息进来。</small>
-            </div>
-          )}
-          {grouped.map(group => (
-            <div key={group.stage} className="ticket-group">
-              <div className="group-head">
-                <span className={`group-dot stage-${group.stage}`} />
-                <span>{STAGE_LABEL[group.stage] ?? group.stage}</span>
-                <span className="group-count">{group.items.length}</span>
-              </div>
-              {group.items.map(ticket => (
+      <div className="board" role="list" aria-label="工单看板">
+        {columns.map(column => (
+          <section key={column.stage} className={`board-col stage-${column.stage}`} role="listitem">
+            <header className="board-col-head">
+              <span className="group-dot" />
+              <span>{STAGE_LABEL[column.stage] ?? column.stage}</span>
+              <span className="board-col-count">{column.items.length}</span>
+            </header>
+            <div className="board-col-body">
+              {column.items.length === 0 && <div className="board-empty">无任务</div>}
+              {column.items.map(ticket => (
                 <button
                   key={ticket.id}
                   className={`ticket-card ${selected === ticket.id ? 'selected' : ''}`}
@@ -600,38 +614,53 @@ function TicketsView(): JSX.Element {
                       <span className="mono">{ticket.id}</span>
                       {ticket.repo && <><span className="meta-sep">·</span><Icon name="branch" size={12} />{ticket.repo}@{ticket.branch || '?'}</>}
                     </span>
-                  </span>
-                  <span className="ticket-side">
-                    <span className="ticket-time">{humanizeTime(ticket.updatedAt)}</span>
-                    {ticket.prState !== 'none' && <span className={`pr-badge pr-${ticket.prState}`}>{PR_STATE_LABEL[ticket.prState] ?? ticket.prState}</span>}
+                    <span className="ticket-foot">
+                      <span className="ticket-time">{humanizeTime(ticket.updatedAt)}</span>
+                      {ticket.prState !== 'none' && <span className={`pr-badge pr-${ticket.prState}`}>{PR_STATE_LABEL[ticket.prState] ?? ticket.prState}</span>}
+                    </span>
                   </span>
                 </button>
               ))}
             </div>
-          ))}
-        </section>
-
-        <section className="detail-pane">
-          {!selected && (
-            <div className="empty-state tall">
-              <Icon name="inbox" size={26} />
-              <p>选择一张工单</p>
-              <small>左侧工单会按阶段分组，点开即可查看进展、投递 follow-up 或停止执行。</small>
-            </div>
-          )}
-          {selected && detailError && <div className="banner danger"><Icon name="alert" />加载详情失败：{detailError}</div>}
-          {selected && detail && (
-            <TicketDetailView
-              detail={detail}
-              onChanged={() => {
-                load()
-                if (selected) loadDetail(selected)
-              }}
-            />
-          )}
-          {selected && !detail && !detailError && <div className="empty-state tall"><p>正在加载…</p></div>}
-        </section>
+          </section>
+        ))}
       </div>
+
+      {selected && (
+        <div className="drawer-layer">
+          <button className="drawer-backdrop" aria-label="关闭工单详情" onClick={closeDrawer} />
+          <aside className="drawer" role="dialog" aria-modal="true" aria-label="工单详情">
+            <div className="drawer-bar">
+              <span className="drawer-bar-title">工单详情</span>
+              <button className="icon-btn" title="关闭" aria-label="关闭" onClick={closeDrawer} autoFocus>
+                <Icon name="close" size={16} />
+              </button>
+            </div>
+            <div className="drawer-scroll">
+              {detailError && <div className="banner danger"><Icon name="alert" />加载详情失败：{detailError}</div>}
+              {!detailError && !detail && <div className="empty-state"><p>正在加载…</p></div>}
+              {detail && (
+                <TicketDetailView
+                  detail={detail}
+                  onChanged={() => {
+                    load()
+                    if (selected) loadDetail(selected)
+                  }}
+                />
+              )}
+            </div>
+            {detail && detail.ticket.stage !== 'closed' && (
+              <FollowupComposer
+                ticketId={detail.ticket.id}
+                onSent={() => {
+                  load()
+                  if (selected) loadDetail(selected)
+                }}
+              />
+            )}
+          </aside>
+        </div>
+      )}
     </>
   )
 }
@@ -641,8 +670,6 @@ function StagePill({ stage }: { stage: string }): JSX.Element {
 }
 
 function TicketDetailView({ detail, onChanged }: { detail: TicketDetail; onChanged: () => void }): JSX.Element {
-  const [text, setText] = useState('')
-  const [busy, setBusy] = useState(false)
   const [copied, setCopied] = useState('')
   const { ticket } = detail
   const open = ticket.stage !== 'closed'
@@ -654,21 +681,6 @@ function TicketDetailView({ detail, onChanged }: { detail: TicketDetail; onChang
       setTimeout(() => setCopied(''), 1500)
     } catch {
       setCopied('复制失败')
-    }
-  }
-
-  const sendInput = async (event: FormEvent): Promise<void> => {
-    event.preventDefault()
-    if (!text.trim() || busy) return
-    setBusy(true)
-    try {
-      await sendJson(`/api/tickets/${ticket.id}/input`, 'POST', { kind: 'followup', text })
-      setText('')
-      onChanged()
-    } catch (error) {
-      alert(error instanceof Error ? error.message : String(error))
-    } finally {
-      setBusy(false)
     }
   }
 
@@ -799,21 +811,41 @@ function TicketDetailView({ detail, onChanged }: { detail: TicketDetail; onChang
           </ul>
         )}
       </section>
-
-      {open && (
-        <form onSubmit={sendInput} className="composer">
-          <Icon name="terminal" size={15} />
-          <input
-            value={text}
-            onChange={event => setText(event.target.value)}
-            placeholder="给 worker 投递 follow-up，例如「顺便补一下测试」"
-          />
-          <button type="submit" className="btn primary" disabled={busy || !text.trim()}>
-            {busy ? '投递中…' : '投递'}
-          </button>
-        </form>
-      )}
     </article>
+  )
+}
+
+function FollowupComposer({ ticketId, onSent }: { ticketId: string; onSent: () => void }): JSX.Element {
+  const [text, setText] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const send = async (event: FormEvent): Promise<void> => {
+    event.preventDefault()
+    if (!text.trim() || busy) return
+    setBusy(true)
+    try {
+      await sendJson(`/api/tickets/${ticketId}/input`, 'POST', { kind: 'followup', text })
+      setText('')
+      onSent()
+    } catch (error) {
+      alert(error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <form onSubmit={send} className="composer drawer-composer">
+      <Icon name="terminal" size={15} />
+      <input
+        value={text}
+        onChange={event => setText(event.target.value)}
+        placeholder="给 worker 投递 follow-up，例如「顺便补一下测试」"
+      />
+      <button type="submit" className="btn primary" disabled={busy || !text.trim()}>
+        {busy ? '投递中…' : '投递'}
+      </button>
+    </form>
   )
 }
 
