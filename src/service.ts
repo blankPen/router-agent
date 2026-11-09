@@ -33,15 +33,16 @@ import { preview } from './core/events.js'
 import { shouldSendAsText } from './sources/feishu.js'
 import type { CommandRunner } from './infra/process.js'
 import { noopLogger, type Logger } from './infra/logger.js'
-import type { GitHubTracker as GhTracker } from './sources/github.js'
+import type { PrInfo } from './sources/github.js'
 
 // Logger 的实现放在 infra/logger.ts；这里保留 re-export，兼容既有 import。
 export type { Logger } from './infra/logger.js'
 
 export interface PrTracker {
-  /** hint 用于把项目名/path 选择器解析成真实仓库：优先 PR 链接，其次 workdir。 */
-  view(repo: string, number: number, hint?: { url?: string; cwd?: string }): Promise<{ number: number; url: string; state: 'open' | 'merged' | 'closed'; title: string; branch: string } | null>
-  findByBranch(repo: string, branch: string): Promise<{ number: number; url: string; state: 'open' | 'merged' | 'closed'; title: string; branch: string } | null>
+  /** hint 用于把项目名/path 选择器解析成真实仓库：优先 PR/MR 链接，其次 workdir。 */
+  view(repo: string, number: number, hint?: { url?: string; cwd?: string }): Promise<PrInfo | null>
+  /** 按工作分支反查；GitLab 需要 workdir 让 glab 从 git remote 推断项目。 */
+  findByBranch(repo: string, branch: string, hint?: { cwd?: string }): Promise<PrInfo | null>
 }
 
 export interface OutboundSender {
@@ -1884,9 +1885,11 @@ let repo = ticket.repo
         }
       }
 
-      // 双保险之二：按实际工作分支反查 PR（没有 linkedPR 的运行时）。
+      // 双保险之二：按实际工作分支反查 PR/MR（没有 linkedPR 的运行时）。
       if (!prNumber && branch && repo) {
-        const found = await this.prTracker.findByBranch(repo, branch)
+        const found = await this.prTracker.findByBranch(repo, branch, {
+          ...(assignment?.workdir ? { cwd: assignment.workdir } : {}),
+        })
         if (found) {
           prNumber = found.number
           prUrl = found.url || prUrl
@@ -1895,13 +1898,16 @@ let repo = ticket.repo
         }
       }
 
-      // 双保险之三：gh pr view。
+      // 双保险之三：gh / glab 查询。
       if (!prNumber || !repo) continue
       // repo 可能只是项目名或 path 选择器，不是 gh 要的 owner/name：
       // 把工单已有的 PR 链接和 workdir 一起传下去，避免状态永远停在 open。
       const hint = { ...(prUrl ? { url: prUrl } : {}), ...(assignment?.workdir ? { cwd: assignment.workdir } : {}) }
       const info = await this.prTracker.view(repo, prNumber, hint)
-      if (!info) continue
+      if (!info) {
+        this.warnPrTrackMiss(ticket, prNumber, repo)
+        continue
+      }
 
       const before = ticket.prState
       const updated = this.engine.updatePr(ticket.id, { number: info.number, url: info.url || ticket.prUrl, state: info.state })
@@ -1914,6 +1920,20 @@ let repo = ticket.repo
         this.notify(closed, `工单「${closed.title}」的 PR ${info.url} ${label}，工单闭环。`, `pr:${ticket.id}:${info.state}`)
       }
     }
+  }
+
+  /** 同一工单 + PR 只记一次查询失败，避免 5 秒轮询刷屏；状态恢复后清不掉也无妨。 */
+  private warnPrTrackMiss(ticket: Ticket, prNumber: number, repo: string): void {
+    const key = `pr:track-missed:${ticket.id}:${prNumber}`
+    const now = this.clock.now()
+    if (this.store.getCursor(key) !== null) return
+    this.store.setCursor(key, now, now)
+    this.logger.warn('pr:track-failed', {
+      ticketId: ticket.id,
+      prNumber,
+      repo,
+      message: 'PR/MR 状态查询无结果，工单会停在当前状态',
+    })
   }
 
   // ---------- 重启对账 ----------
@@ -2050,7 +2070,7 @@ export interface CreateServiceDeps {
   config: AppConfig
   runner: CommandRunner
   runtime: WorkerRuntime
-  prTracker: GhTracker
+  prTracker: PrTracker
   sender: FeishuOutbound
   logger: Logger
 }

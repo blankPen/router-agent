@@ -131,7 +131,7 @@ For a real acceptance run, mention the bot in a chat with a small request, then 
 ## How it works
 
 ```text
-Sources (Feishu / GitHub)
+Sources (Feishu / GitHub / GitLab)
         │ Trigger
         ▼
 Router (AgentLoop + DecisionEngine(Pi) + HTTP API + Web)
@@ -392,7 +392,8 @@ The Router doesn't chat; it only speaks when necessary:
 | `outbox:sent` / `outbox:failed` | Outbox | `key` `text` / `error` | Outbound notification result |
 | `api:input` / `api:stop` / `api:policy` | HTTP API | — | Dashboard / CLI actions |
 | `idle:nudge` / `idle:stale` | Service | — | Idle nudge and stale marking |
-| `pr:linked` / `pr:state` | Service | — | PR tracking |
+| `pr:linked` / `pr:state` | Service | — | PR / MR tracking |
+| `pr:track-failed` | Service | `ticketId` `prNumber` `repo` `message` | No PR / MR state returned; logged once per ticket + PR |
 | `recover:*` | Service | — | Restart reconciliation |
 
 Additional events covering messages, config, and exceptions (same `at` / `level` / `message` + business fields format):
@@ -445,9 +446,10 @@ Fields are marked with their activation scope: **policy** (`acceptMode` / `maxWo
 
 ### PR closure
 
-- After dispatch, the Router tracks the PR state for that branch (`pr:linked` / `pr:state`).
-- A ticket cannot close while its PR is still open.
-- When the PR is merged or closed, the ticket becomes `closed` and Feishu gets one closure notification.
+- After dispatch, the Router tracks the PR / MR state for that branch (`pr:linked` / `pr:state`).
+- The platform is detected from the worktree's `git remote`: `github.com` uses `gh`, other hosts are treated as GitLab and use `glab` (install and sign in locally). GitLab MRs are never handed to `gh`.
+- A ticket cannot close while its PR / MR is still open.
+- When the PR / MR is merged or closed, the ticket becomes `closed` and Feishu gets one closure notification.
 - No auto-merge: merging is always a human decision.
 
 ## Configuration
@@ -843,7 +845,7 @@ Source layout:
 src/core/     domain core (model / stage / policy / engine / effects)
 src/store/    SQLite (node:sqlite)
 src/worker/   WorkerRuntime port, OrcaRuntime / ClaudeCodeRuntime / AcpRuntime, state.json polling, worker handbook
-src/sources/  Feishu events, GitHub PR tracking
+src/sources/  Feishu events, GitHub/GitLab PR/MR tracking
 src/router/   AgentLoop, tool contracts, prompts, HTTP API
 src/web/      React dashboard
 src/cli/      ra commands

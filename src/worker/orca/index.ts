@@ -190,6 +190,15 @@ export function parseCreateResult(stdout: string): { handle: string; workdir?: s
   }
 }
 
+/** Orca 的 linkedPR / linkedGitLabMR 状态归一化；GitLab 用 opened/locked 表示未关闭。 */
+function normalizeLinkedState(state: unknown): 'open' | 'merged' | 'closed' | undefined {
+  const value = String(state ?? '').trim().toLowerCase()
+  if (value === 'merged') return 'merged'
+  if (value === 'closed') return 'closed'
+  if (value === 'open' || value === 'opened' || value === 'locked') return 'open'
+  return undefined
+}
+
 export class OrcaRuntime implements WorkerRuntime {
   readonly id = 'orca'
   readonly capabilities = {
@@ -322,6 +331,7 @@ export class OrcaRuntime implements WorkerRuntime {
       | { number?: number; iid?: number; url?: string; webUrl?: string; state?: string }
       | undefined
     const branch = String(worktree.branch ?? (worktree.worktree as Record<string, any> | undefined)?.branch ?? '').replace(/^refs\/heads\//, '')
+    const linkedState = normalizeLinkedState(linked?.state)
     return {
       workdir: String(worktree.path ?? (worktree.worktree as Record<string, any> | undefined)?.path ?? ref.workdir),
       branch,
@@ -330,7 +340,7 @@ export class OrcaRuntime implements WorkerRuntime {
             linkedPr: {
               number: Number(linked.number ?? linked.iid),
               url: String(linked.url ?? linked.webUrl ?? ''),
-              ...(linked.state === 'open' || linked.state === 'merged' || linked.state === 'closed' ? { state: linked.state } : {}),
+              ...(linkedState ? { state: linkedState } : {}),
             },
           }
         : {}),

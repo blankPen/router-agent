@@ -14,6 +14,8 @@ import { AcpRuntimeAdmin } from '../worker/runtimes/acp/admin.js'
 import { readDetectionSnapshot } from '../worker/runtimes/acp/detect.js'
 import { WORKER_RUNTIME_IDS, normalizeRuntimeId } from '../worker/runtimes/catalog.js'
 import { GitHubTracker } from '../sources/github.js'
+import { GitLabTracker } from '../sources/gitlab.js'
+import { ForgeTracker } from '../sources/forge-tracker.js'
 import { FeishuConsumer, FeishuSender, attachQuotedMessage, normalizeFeishuEventDetailed } from '../sources/feishu.js'
 import { attachImageText } from '../sources/feishu-image.js'
 import { ChatDirectory } from '../sources/feishu-directory.js'
@@ -841,6 +843,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   const gitRunner = output.git ?? realRunner('git')
   const larkRunner = output.lark ?? createLarkRunner()
   const ghRunner = realRunner('gh')
+  const glabRunner = realRunner('glab')
   const runtimes = createRuntimes(config, {
     home,
     workersDir: join(home, 'workers'),
@@ -851,7 +854,11 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   })
   const runtime = runtimes.default()
   const sender = new FeishuSender(larkRunner, logger)
-  const prTracker = new GitHubTracker(ghRunner)
+  const prTracker = new ForgeTracker({
+    github: new GitHubTracker(ghRunner),
+    gitlab: new GitLabTracker(glabRunner),
+    git: gitRunner,
+  })
   let model: PiModelConfig | null = null
   try {
     model = resolvePiModelConfig({ configPath: join(home, 'config.yaml') })

@@ -131,7 +131,7 @@ ra tickets                                             # 模拟产生的工单�
 ## 它怎么工作
 
 ```text
-Sources（飞书 / GitHub）
+Sources（飞书 / GitHub / GitLab）
         │ Trigger
         ▼
 Router（AgentLoop + DecisionEngine(Pi) + HTTP API + Web）
@@ -392,7 +392,8 @@ Router 不做对话，只在必要时说话：
 | `outbox:sent` / `outbox:failed` | Outbox | `key` `text` / `error` | 对外通知结果 |
 | `api:input` / `api:stop` / `api:policy` / `api:config` | HTTP API | — | 面板 / CLI 的操作 |
 | `idle:nudge` / `idle:stale` | Service | — | 空闲唤醒与失联标记 |
-| `pr:linked` / `pr:state` | Service | — | PR 跟踪 |
+| `pr:linked` / `pr:state` | Service | — | PR / MR 跟踪 |
+| `pr:track-failed` | Service | `ticketId` `prNumber` `repo` `message` | PR / MR 状态查询无结果；同一工单 + PR 只记一次 |
 | `recover:*` | Service | — | 重启对账 |
 
 消息、配置与异常三类关键链路的补充事件（都遵循同一套 `at` / `level` / `message` + 业务字段格式）：
@@ -449,9 +450,10 @@ worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态�
 
 ### PR 闭环
 
-- 派工成功后 Router 跟踪该分支的 PR 状态（`pr:linked` / `pr:state`）。
-- PR 仍处于 open 时禁止结束工单。
-- PR 合并或关闭后，工单变 `closed`，飞书收到一次闭环通知。
+- 派工成功后 Router 跟踪该分支的 PR / MR 状态（`pr:linked` / `pr:state`）。
+- 平台按 worktree 的 `git remote` 自动识别：`github.com` 走 `gh`，其它主机按 GitLab 走 `glab`（需本机安装并完成登录）；GitLab MR 不会交给 `gh`。
+- PR / MR 仍处于 open 时禁止结束工单。
+- PR / MR 合并或关闭后，工单变 `closed`，飞书收到一次闭环通知。
 - 不做自动合并：合并与否由人决定。
 
 ## 配置
