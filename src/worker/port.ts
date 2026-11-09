@@ -253,6 +253,8 @@ export interface WorkerRuntime {
 
   /** 可选：显式唤醒/探活；只有 capabilities.agent.nudge=true 时才实现。 */
   nudge?(ref: WorkerRef): Promise<void>
+  /** 可选：进程重启后把仍可恢复的会话接回来；接不回返回 false，不算丢失。 */
+  reattach?(ref: WorkerRef): Promise<boolean>
   /** 可选：结构化活性；返回 null 表示「无法判断」，不是「已丢失」。 */
   status?(ref: WorkerRef): Promise<AgentStatus | null>
   /** 可选：输出尾部；没有则巡检跳过这一路。 */

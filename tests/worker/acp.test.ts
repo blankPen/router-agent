@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -186,6 +186,33 @@ describe('AcpRuntime', () => {
       await snapshotWith(rt, home, started.handle, '恢复后继续')
     } finally {
       await rt.stop({ handle: '', ticketId: 'tk-1', workdir: join(home, 'worktrees', 'ra-tk-1-demo') }, 'cleanup')
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('重启后 reattach 直接接回会话，status 用活动日志时间而不是启动时间', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-acp-reattach-'))
+    const rt = runtimeFor(home)
+    const started = await rt.start(context(home))
+    await snapshotWith(rt, home, started.handle, '收到：# 工单')
+    await waitIdle(rt, home, started.handle)
+    const meta = JSON.parse(readFileSync(join(home, 'workers', 'tk-1', 'meta.json'), 'utf8')) as { startedAt: string }
+    await rt.stop(ref(home, started.handle), 'simulate-restart')
+
+    // 新实例模拟 ra 进程重启：内存会话为空，只剩磁盘上的 meta 与活动日志。
+    const restarted = runtimeFor(home)
+    try {
+      const before = await restarted.status(ref(home, started.handle))
+      expect(before?.alive).toBe(false)
+      expect(before?.acceptingInput).toBe(true)
+      expect(Date.parse(before!.lastActivityAt!)).toBeGreaterThan(Date.parse(meta.startedAt))
+
+      expect(await restarted.reattach(ref(home, started.handle))).toBe(true)
+      const after = await restarted.status(ref(home, started.handle))
+      expect(after?.alive).toBe(true)
+      expect(after?.acceptingInput).toBe(true)
+    } finally {
+      await restarted.stop({ handle: '', ticketId: 'tk-1', workdir: join(home, 'worktrees', 'ra-tk-1-demo') }, 'cleanup')
       rmSync(home, { recursive: true, force: true })
     }
   })

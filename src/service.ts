@@ -946,24 +946,26 @@ export class RouterService {
         // 用 input.id（而不是 assignmentId:seq）作为投递 id：worker 会原样写进 acked_inputs。
         const runtime = this.runtimeFor(assignment)
         const lastId = batch.at(-1)?.id
-        const attempt = lastId ? (this.deliveryAttempts.get(lastId) ?? 0) + 1 : 1
-        if (lastId) this.deliveryAttempts.set(lastId, attempt)
-        if (attempt > 5) {
-          this.engine.setAttention(ticket.id, `输入 ${lastId ?? ''} 已重投 ${attempt - 1} 次仍未 ack，请人工确认`)
+        const prevAttempt = lastId ? (this.deliveryAttempts.get(lastId) ?? 0) : 0
+        if (prevAttempt >= 5) {
+          this.engine.setAttention(ticket.id, `输入 ${lastId ?? ''} 已重投 ${prevAttempt} 次仍未 ack，请人工确认`)
           this.deliveryCooldown.set(ticket.id, nowMs + 10 * 60_000)
-          this.logger.warn('input:redeliver-giveup', { ticketId: ticket.id, inputId: lastId, attempt })
+          this.logger.warn('input:redeliver-giveup', { ticketId: ticket.id, inputId: lastId, attempt: prevAttempt + 1 })
           continue
         }
+        const attempt = prevAttempt + 1
         const receipt = await runtime.deliver(
           this.refOf(assignment),
           batch.map(input => ({ id: input.id, kind: input.kind, text: input.text })),
           { attempt, redeliver: attempt > 1 },
         )
         if (receipt.status === 'queued') {
+          // worker 只是忙，不算一次失败的投递尝试；否则长回合会被误判 giveup。
           this.deliveryCooldown.set(ticket.id, nowMs + 30_000)
           this.log('input:queued', ticket.id, { count: batch.length, reason: receipt.reason ?? 'runtime-busy' })
           continue
         }
+        if (lastId) this.deliveryAttempts.set(lastId, attempt)
         if (receipt.status === 'rejected') {
           if (receipt.retryable === false) {
             this.handleLostWorker(ticket, `input-rejected:${receipt.reason}`)
@@ -1728,6 +1730,13 @@ let repo = ticket.repo
           this.engine.setAttention(ticket.id, 'worker 已退出且无法自动恢复，请人工确认')
           this.notify(ticket, `工单「${ticket.title}」的 worker 已退出且无法自动恢复，已转人工处理。`, `recover:transfer:${ticket.id}`)
           continue
+        }
+        // ACP 等运行时的会话只存在内存里，重启后先接回；接不回才沿用 idle/stale 兜底。
+        if (status?.phase === 'exited' && status.acceptingInput && runtime?.reattach) {
+          const attached = await runtime.reattach(this.refOf(assignment)).catch(() => false)
+          // 连接已恢复，重启前留下的 stale 提示不再成立；真闲置会在下一个巡检周期重新判。
+          if (attached) this.engine.clearAttention(ticket.id)
+          this.log('recover:reattach', ticket.id, { attached })
         }
         this.log('recover:reuse', ticket.id, { handle: assignment.handle, phase: status?.phase })
         continue

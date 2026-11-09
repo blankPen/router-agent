@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { realRunner, type CommandRunner } from '../../../infra/process.js'
 import { GitWorktreeProvider } from '../../workspaces/git-worktree.js'
@@ -23,6 +23,7 @@ import {
   type WorkspaceProvider,
   type WorkspaceRef,
 } from '../../port.js'
+import { latestActivityAt } from '../../status.js'
 import { AcpConnection, AcpProtocolError } from './protocol.js'
 import { decidePermission, type AcpPermissionOption, type AcpToolCallInfo } from './permissions.js'
 
@@ -315,20 +316,30 @@ export class AcpRuntime implements WorkerRuntime {
     }
   }
 
+  /** 重启对账用：把磁盘上仍可 load 的会话直接接回来，失败返回 false 交给上层兜底。 */
+  async reattach(ref: WorkerRef): Promise<boolean> {
+    const session = this.sessions.get(ref.ticketId)
+    if (session?.connection.alive) return true
+    if (session) this.dropSession(session)
+    return (await this.revive(this.readMeta(ref.ticketId))) !== null
+  }
+
   async status(ref: WorkerRef): Promise<AgentStatus | null> {
     const session = this.sessions.get(ref.ticketId)
     const meta = this.readMeta(ref.ticketId)
     if (!session) {
       if (!meta) return null
+      // 重启后内存会话已丢，用活动日志的落盘时间估算最后活动，别拿启动时间冒充。
+      const lastActivityAt = this.lastEventAtFromFile(ref.ticketId) ?? meta.startedAt
       return {
         alive: false,
         phase: 'exited',
         acceptingInput: meta.loadSession === true && Boolean(meta.sessionId),
-        ...(meta.startedAt ? { lastActivityAt: meta.startedAt } : {}),
+        ...(lastActivityAt ? { lastActivityAt } : {}),
         ...(meta.lastError ? { detail: { source: this.id, error: meta.lastError } } : { detail: { source: this.id, status: meta.status } }),
       }
     }
-    const lastActivityAt = session.lastEventAt ?? session.promptStartedAt ?? meta?.startedAt
+    const lastActivityAt = latestActivityAt(session.lastEventAt, session.promptStartedAt) ?? meta?.startedAt
     if (!session.connection.alive) {
       return {
         alive: false,
@@ -539,6 +550,8 @@ export class AcpRuntime implements WorkerRuntime {
       meta.status = 'running'
       if (connection.pid !== undefined) meta.pid = connection.pid
       this.writeMeta(meta.ticketId, meta)
+      // 重连本身算一次活动，避免用重启前的 startedAt 立即判 idle。
+      session.lastEventAt = new Date().toISOString()
       return session
     } catch (error) {
       if (session) this.dropSession(session)
@@ -636,6 +649,15 @@ export class AcpRuntime implements WorkerRuntime {
       return events
     } catch {
       return []
+    }
+  }
+
+  /** 活动日志的最后落盘时间；文件不存在时返回 undefined。 */
+  private lastEventAtFromFile(ticketId: string): string | undefined {
+    try {
+      return statSync(join(this.workersDir, ticketId, `${CHANNEL}-events.jsonl`)).mtime.toISOString()
+    } catch {
+      return undefined
     }
   }
 
