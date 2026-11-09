@@ -7,7 +7,7 @@ import { EffectsProcessor } from './core/effects.js';
 import { preview } from './core/events.js';
 const noopLogger = { info: () => { }, warn: () => { }, error: () => { } };
 /**
- * 服务编排：把 AgentLoop、上报轮询、Effects、PR 跟踪与 WorkerBackend 接在一起。
+ * 服务编排：把 AgentLoop、上报轮询、Effects、PR 跟踪与 WorkerRuntime 接在一起。
  * 本身不持有终端状态；重启后靠 recover() 与 Orca 对账。
  */
 export class RouterService {
@@ -15,7 +15,7 @@ export class RouterService {
     engine;
     loop;
     config;
-    backend;
+    runtime;
     clock;
     logger;
     poller;
@@ -33,7 +33,7 @@ export class RouterService {
         this.store = opts.store;
         this.engine = opts.engine;
         this.config = opts.config;
-        this.backend = opts.backend;
+        this.runtime = opts.runtime;
         this.clock = opts.clock ?? { now: () => new Date().toISOString() };
         this.logger = opts.logger ?? noopLogger;
         this.prTracker = opts.prTracker;
@@ -68,7 +68,7 @@ export class RouterService {
             const assignment = this.store.latestAssignment(ticketId);
             if (!assignment?.handle)
                 return;
-            await this.backend.stop(assignment.handle, 'ticket-stopped');
+            await this.runtime.stop(assignment.handle, 'ticket-stopped');
             this.log('worker:stopped', ticketId, { handle: assignment.handle });
         });
         effects.register('launch-worker', async (payload) => {
@@ -159,13 +159,13 @@ export class RouterService {
     }
     async launch(ticket) {
         const assignment = this.engine.startAssignment(ticket.id, {
-            backendId: this.backend.id,
+            runtimeId: this.runtime.id,
             handle: '',
             workdir: '',
         });
         const ctx = { ticket, assignment, workdir: '' };
         try {
-            const { handle, workdir } = await this.backend.start(ctx);
+            const { handle, workdir } = await this.runtime.start(ctx);
             const updated = { ...assignment, handle, workdir: workdir ?? '' };
             this.store.updateAssignment(updated);
             this.engine.refreshStage(ticket.id);
@@ -193,7 +193,7 @@ export class RouterService {
             const batch = [...unacked, ...pending];
             try {
                 // 用 input.id（而不是 assignmentId:seq）作为投递 id：worker 会原样写进 acked_inputs。
-                await this.backend.deliver(assignment.handle, batch.map(input => ({ id: input.id, kind: input.kind, text: input.text })));
+                await this.runtime.deliver(assignment.handle, batch.map(input => ({ id: input.id, kind: input.kind, text: input.text })));
                 this.store.markInputsDelivered(ticket.id, this.clock.now());
                 this.log('input:delivered', ticket.id, {
                     count: batch.length,
@@ -217,7 +217,7 @@ export class RouterService {
      * 长时间无输出 → 主动发 `status?` 唤醒；仍然无响应 → 标 stale 并通知人。
      */
     async checkIdle(nowMs = Date.parse(this.clock.now())) {
-        if (!this.backend.inspect)
+        if (!this.runtime.inspect)
             return;
         for (const ticket of this.store.listOpenTickets()) {
             if (ticket.stage !== 'running' && ticket.stage !== 'assigned')
@@ -227,7 +227,7 @@ export class RouterService {
                 continue;
             let info;
             try {
-                info = (await this.backend.inspect(assignment.handle));
+                info = (await this.runtime.inspect(assignment.handle));
             }
             catch {
                 // Orca 暂时不可用，下一轮再看。
@@ -251,7 +251,7 @@ export class RouterService {
             if (verdict !== 'idle')
                 continue;
             if (!current.nudgedAt) {
-                await this.backend.deliver(assignment.handle, [{ id: `${assignment.id}:status-check`, kind: 'retry', text: 'status?' }]);
+                await this.runtime.deliver(assignment.handle, [{ id: `${assignment.id}:status-check`, kind: 'retry', text: 'status?' }]);
                 current.nudgedAt = nowMs;
                 this.log('idle:nudge', ticket.id, { handle: assignment.handle });
                 continue;
@@ -335,12 +335,12 @@ export class RouterService {
             let prNumber = ticket.prNumber;
             let prUrl = ticket.prUrl;
             // 双保险之一：Orca worktree 自带的 linkedPR / linkedGitLabMR。
-            if (!prNumber && this.backend.inspectWorktree) {
+            if (!prNumber && this.runtime.inspectWorktree) {
                 const assignment = this.store.latestAssignment(ticket.id);
                 // 派工已结束或 worktree 被删时 Orca 会返回 selector_not_found，静默跳过，不要每 5 秒刷错误。
                 if (assignment?.workdir && assignment.status !== 'ended') {
                     try {
-                        const worktree = (await this.backend.inspectWorktree(`path:${assignment.workdir}`));
+                        const worktree = (await this.runtime.inspectWorktree(`path:${assignment.workdir}`));
                         const linked = worktree?.linkedPR ?? worktree?.linkedGitLabMR ?? worktree?.worktree?.linkedPR;
                         const number = Number(linked?.number ?? linked?.iid ?? 0);
                         if (number > 0) {
@@ -377,10 +377,10 @@ export class RouterService {
     async recover() {
         for (const ticket of this.store.listOpenTickets()) {
             const assignment = this.store.latestAssignment(ticket.id);
-            if (assignment && assignment.status !== 'ended' && assignment.handle && this.backend.inspect) {
+            if (assignment && assignment.status !== 'ended' && assignment.handle && this.runtime.inspect) {
                 let info;
                 try {
-                    info = (await this.backend.inspect(assignment.handle));
+                    info = (await this.runtime.inspect(assignment.handle));
                 }
                 catch {
                     // Orca 暂时不可用：保持现状，不要误判成会话丢失。
@@ -416,10 +416,10 @@ export class RouterService {
     // ---------- 内部 ----------
     /** 只把「终端确实不存在」判为丢失；Orca 短暂不可用不误杀。 */
     async workerGone(handle) {
-        if (!this.backend.inspect)
+        if (!this.runtime.inspect)
             return false;
         try {
-            const info = (await this.backend.inspect(handle));
+            const info = (await this.runtime.inspect(handle));
             return info === null || info.connected === false;
         }
         catch {

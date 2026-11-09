@@ -65,7 +65,7 @@ describe('HTTP 管理 API', () => {
     })
     const outcome = engine.decide({ triggerId: 't1', decision: 'accept', strength: 'explicit', reason: 'ok', title: '改登录超时' })
     ticketId = outcome.ticket!.id
-    assignmentId = engine.startAssignment(ticketId, { backendId: 'orca', handle: 'h1', workdir: '/tmp/wt' }).id
+    assignmentId = engine.startAssignment(ticketId, { runtimeId: 'orca', handle: 'h1', workdir: '/tmp/wt' }).id
   })
 
   afterEach(async () => {
@@ -212,11 +212,11 @@ describe('HTTP 管理 API', () => {
     expect(res.json.chats).toEqual([chatEntry('oc_dev')])
   })
 
-  it('GET /api/status 汇总活跃工单与后端状态', async () => {
+  it('GET /api/status 汇总活跃工单与运行时状态', async () => {
     const res = await call(server, 'GET', '/api/status')
     expect(res.json.stage).toBe('running')
     expect(res.json.tickets.open).toBe(1)
-    expect(res.json.backend).toBe('orca')
+    expect(res.json.runtime).toBe('orca')
   })
 
   it('POST /api/reports 把 ra report 的载荷转成 WorkerStateFile', async () => {

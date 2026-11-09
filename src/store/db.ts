@@ -224,7 +224,7 @@ CREATE INDEX IF NOT EXISTS idx_chat_session_resets_key ON chat_session_resets (s
 CREATE TABLE IF NOT EXISTS assignments (
   id TEXT PRIMARY KEY,
   ticket_id TEXT NOT NULL,
-  backend_id TEXT NOT NULL,
+  runtime_id TEXT NOT NULL,
   handle TEXT NOT NULL,
   workdir TEXT NOT NULL,
   status TEXT NOT NULL,
@@ -342,6 +342,12 @@ export class Store {
 
   /** 旧库补列：SQLite 的 CREATE TABLE IF NOT EXISTS 不会加新列。 */
   private migrate(): void {
+    // 历史列名 backend_id 一次性改名为 runtime_id；迁移后不再引用旧名。
+    const assignmentColumns = this.db.prepare('PRAGMA table_info(assignments)').all() as Row[]
+    if (assignmentColumns.some(column => column.name === 'backend_id')
+      && !assignmentColumns.some(column => column.name === 'runtime_id')) {
+      this.db.exec('ALTER TABLE assignments RENAME COLUMN backend_id TO runtime_id')
+    }
     const columns = this.db.prepare('PRAGMA table_info(outbox)').all() as Row[]
     if (!columns.some(column => column.name === 'origin_message_id')) {
       this.db.exec('ALTER TABLE outbox ADD COLUMN origin_message_id TEXT')
@@ -663,9 +669,9 @@ export class Store {
   // ---------- Assignment / Report / Input ----------
 
   insertAssignment(a: Assignment): void {
-    this.db.prepare(`INSERT INTO assignments (id, ticket_id, backend_id, handle, workdir, status, started_at, ended_at)
+    this.db.prepare(`INSERT INTO assignments (id, ticket_id, runtime_id, handle, workdir, status, started_at, ended_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(a.id, a.ticketId, a.backendId, a.handle, a.workdir, a.status, a.startedAt, a.endedAt ?? null)
+      .run(a.id, a.ticketId, a.runtimeId, a.handle, a.workdir, a.status, a.startedAt, a.endedAt ?? null)
   }
 
   updateAssignment(a: Assignment): void {
@@ -969,7 +975,7 @@ function assignmentFromRow(row: Row): Assignment {
   return {
     id: String(row.id),
     ticketId: String(row.ticket_id),
-    backendId: String(row.backend_id),
+    runtimeId: String(row.runtime_id),
     handle: String(row.handle),
     workdir: String(row.workdir),
     status: row.status as Assignment['status'],

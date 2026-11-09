@@ -23,7 +23,7 @@ function runningAssignment(over: Partial<Assignment> = {}): Assignment {
   return {
     id: 'as1',
     ticketId: 'tk1',
-    backendId: 'orca',
+    runtimeId: 'orca',
     handle: 'term-1',
     workdir: '/tmp/wt',
     status: 'running',

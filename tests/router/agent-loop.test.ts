@@ -359,7 +359,7 @@ describe('Router 常驻 Agent Loop', () => {
     engine.ingest(trigger({ id: 't0', externalId: 'e0' }))
     await loop.tick()
     const ticket = engine.store.listTickets()[0]!
-    engine.startAssignment(ticket.id, { backendId: 'orca', handle: 'h', workdir: '/tmp/wt' })
+    engine.startAssignment(ticket.id, { runtimeId: 'orca', handle: 'h', workdir: '/tmp/wt' })
 
     engine.ingest(trigger({ id: 't1', externalId: 'e1', addressed: 'none', text: '顺便把超时改成 60 秒' }))
     const result = await loop.tick()

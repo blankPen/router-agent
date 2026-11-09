@@ -175,7 +175,7 @@ describe('RouterToolbox 清理工具', () => {
 
   it('router_workspace_remove 只允许已关闭工单，并排队回收', () => {
     const { toolbox, store, engine, ticket } = setup()
-    engine.startAssignment(ticket.id, { backendId: 'orca', handle: 'term_1', workdir: '/tmp/ra-worktree' })
+    engine.startAssignment(ticket.id, { runtimeId: 'orca', handle: 'term_1', workdir: '/tmp/ra-worktree' })
 
     const refused = toolbox.removeWorkspace({ ticket_id: ticket.id }, { canMutate: true }) as { error?: string }
     expect(refused.error).toBe('ticket:not-closed')

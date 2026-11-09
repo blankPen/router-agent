@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { mkdtempSync, mkdirSync, readFileSync, existsSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { OrcaAdapter, OrcaCommandError, parseCreateResult, summarizeArgs } from '../../src/worker/orca/index.js'
+import { OrcaRuntime, OrcaCommandError, parseCreateResult, summarizeArgs } from '../../src/worker/orca/index.js'
 import { claudeProjectSlug, describeToolInfo, describeToolUse } from '../../src/worker/orca/session.js'
 import { worktreeCreate, terminalSend, terminalClose, terminalList, terminalRead, worktreeRemove, agentLaunch } from '../../src/worker/orca/commands.js'
 import type { CommandRunner, CommandResult } from '../../src/worker/orca/commands.js'
@@ -38,7 +38,7 @@ const ticket: Ticket = {
 const assignment: Assignment = {
   id: 'as_1',
   ticketId: 'tk_1',
-  backendId: 'orca',
+  runtimeId: 'orca',
   handle: '',
   workdir: '',
   status: 'pending',
@@ -97,7 +97,7 @@ describe('Orca 返回解析', () => {
   })
 })
 
-describe('OrcaAdapter', () => {
+describe('OrcaRuntime', () => {
   it('命令失败时保留 stdout 里的 Orca 错误体，而不是只留下 code=1', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'ra-workers-'))
     const runner = new FakeRunner([{
@@ -115,7 +115,7 @@ describe('OrcaAdapter', () => {
       }),
       stderr: '',
     }])
-    const adapter = new OrcaAdapter({ runner, workersDir: dir, spec: 'prompt' })
+    const adapter = new OrcaRuntime({ runner, workersDir: dir, spec: 'prompt' })
 
     const error = await adapter.start({ ticket, assignment, workdir: '/tmp/wt' }).catch(item => item)
     expect(error).toBeInstanceOf(OrcaCommandError)
@@ -140,7 +140,7 @@ describe('OrcaAdapter', () => {
   it('stdout 不是 JSON 时回退到 stdout 尾部，仍能定位命令参数', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'ra-workers-'))
     const runner = new FakeRunner([{ code: 2, stdout: 'fatal: not a git repository', stderr: '' }])
-    const adapter = new OrcaAdapter({ runner, workersDir: dir, spec: 'prompt' })
+    const adapter = new OrcaRuntime({ runner, workersDir: dir, spec: 'prompt' })
     const error = await adapter.start({ ticket, assignment, workdir: '/tmp/wt' }).catch(item => item)
     expect(error).toBeInstanceOf(OrcaCommandError)
     expect(error.message).toContain('fatal: not a git repository')
@@ -158,7 +158,7 @@ describe('OrcaAdapter', () => {
     const runner = new FakeRunner([
       { code: 0, stdout: JSON.stringify({ ok: true, result: { launch: { outcome: { handle: 'term-9' } }, worktree: { path: '/tmp/wt-9' } } }), stderr: '' },
     ])
-    const adapter = new OrcaAdapter({ runner, workersDir: dir, spec: 'prompt' })
+    const adapter = new OrcaRuntime({ runner, workersDir: dir, spec: 'prompt' })
     const { handle, workdir } = await adapter.start({ ticket, assignment, workdir: '/tmp/wt-9' })
 
     expect(handle).toBe('term-9')
@@ -178,7 +178,7 @@ describe('OrcaAdapter', () => {
   it('prompt 模式把 worker 手册与 Mandate 一起拼进启动 prompt', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'ra-workers-'))
     const runner = new FakeRunner([{ code: 0, stdout: JSON.stringify({ ok: true, result: { launch: { outcome: { handle: 'H' } } } }), stderr: '' }])
-    const adapter = new OrcaAdapter({ runner, workersDir: dir, spec: 'prompt' })
+    const adapter = new OrcaRuntime({ runner, workersDir: dir, spec: 'prompt' })
     await adapter.start({ ticket, assignment, workdir: '/tmp/wt' })
     const argv = runner.calls[0]!.argv
     const prompt = argv[argv.indexOf('--prompt') + 1]!
@@ -189,7 +189,7 @@ describe('OrcaAdapter', () => {
 
   it('deliver 逐条发送输入文本，并带上可回写的输入 id', async () => {
     const runner = new FakeRunner()
-    const adapter = new OrcaAdapter({ runner, workersDir: '/tmp', spec: 'prompt' })
+    const adapter = new OrcaRuntime({ runner, workersDir: '/tmp', spec: 'prompt' })
     await adapter.deliver('term-1', [
       { id: 'in_1', kind: 'followup', text: '第一件事' },
       { id: 'in_2', kind: 'ci', text: 'CI 失败了' },
@@ -202,7 +202,7 @@ describe('OrcaAdapter', () => {
 
   it('registerContext 把上下文拼成一段发送', async () => {
     const runner = new FakeRunner()
-    const adapter = new OrcaAdapter({ runner, workersDir: '/tmp', spec: 'prompt' })
+    const adapter = new OrcaRuntime({ runner, workersDir: '/tmp', spec: 'prompt' })
     await adapter.registerContext('term-1', [
       { kind: 'env', key: 'RA_STATE', value: '/tmp/state.json' },
       { kind: 'dir', path: '/tmp/repo' },
@@ -214,7 +214,7 @@ describe('OrcaAdapter', () => {
 
   it('stop 关闭终端', async () => {
     const runner = new FakeRunner()
-    const adapter = new OrcaAdapter({ runner, workersDir: '/tmp', spec: 'prompt' })
+    const adapter = new OrcaRuntime({ runner, workersDir: '/tmp', spec: 'prompt' })
     await adapter.stop('term-1', '人工停止')
     expect(runner.calls[0]!.argv).toEqual(terminalClose('term-1'))
   })
@@ -225,7 +225,7 @@ describe('OrcaAdapter', () => {
       stdout: JSON.stringify({ ok: true, result: { terminals: [{ handle: 'term-1', connected: true, writable: true, orphaned: false, lastOutputAt: 1793897105303, worktreePath: '/tmp/wt', branch: 'ra/tk_1' }] } }),
       stderr: '',
     }])
-    const adapter = new OrcaAdapter({ runner, workersDir: '/tmp', spec: 'prompt' })
+    const adapter = new OrcaRuntime({ runner, workersDir: '/tmp', spec: 'prompt' })
     const info = await adapter.inspect('term-1')
     expect(info).toMatchObject({ handle: 'term-1', connected: true, orphaned: false, worktreePath: '/tmp/wt' })
     // Orca 实测返回毫秒数字，必须归一化成 ISO，否则 idle 判定永远失效
@@ -241,7 +241,7 @@ describe('OrcaAdapter', () => {
       }),
       stderr: '',
     }])
-    const adapter = new OrcaAdapter({ runner, workersDir: '/tmp', spec: 'prompt' })
+    const adapter = new OrcaRuntime({ runner, workersDir: '/tmp', spec: 'prompt' })
     const output = await adapter.read('term-1', { limit: 20 })
     expect(runner.calls[0]!.argv).toEqual(terminalRead('term-1', { limit: 20 }))
     expect(output).toEqual({ status: 'running', source: 'screen', lines: ['⏺ 正在改登录超时', '⎿ pnpm test'] })
@@ -252,7 +252,7 @@ describe('OrcaAdapter', () => {
       { code: 0, stdout: JSON.stringify({ ok: true, result: { terminal: { status: 'weird', tail: [] } } }), stderr: '' },
       { code: 0, stdout: JSON.stringify({ ok: true, result: {} }), stderr: '' },
     ])
-    const adapter = new OrcaAdapter({ runner, workersDir: '/tmp', spec: 'prompt' })
+    const adapter = new OrcaRuntime({ runner, workersDir: '/tmp', spec: 'prompt' })
     expect(await adapter.read('term-1')).toEqual({ status: 'unknown', lines: [] })
     expect(await adapter.read('term-1')).toBeNull()
   })
@@ -280,7 +280,7 @@ describe('Claude 会话记录', () => {
       }),
     ].join('\n'))
 
-    const adapter = new OrcaAdapter({ runner: new FakeRunner(), workersDir: '/tmp', spec: 'prompt', claudeProjectsDir: projects })
+    const adapter = new OrcaRuntime({ runner: new FakeRunner(), workersDir: '/tmp', spec: 'prompt', claudeProjectsDir: projects })
     const snapshot = await adapter.session(workdir)
 
     expect(snapshot?.at).toBe('2026-11-06T10:02:00.000Z')
@@ -294,7 +294,7 @@ describe('Claude 会话记录', () => {
 
   it('找不到 workdir 对应的会话目录时返回 null', async () => {
     const projects = mkdtempSync(join(tmpdir(), 'ra-claude-projects-'))
-    const adapter = new OrcaAdapter({ runner: new FakeRunner(), workersDir: '/tmp', spec: 'prompt', claudeProjectsDir: projects })
+    const adapter = new OrcaRuntime({ runner: new FakeRunner(), workersDir: '/tmp', spec: 'prompt', claudeProjectsDir: projects })
     expect(await adapter.session('/tmp/not-there')).toBeNull()
   })
 
@@ -344,7 +344,7 @@ describe('多项目 / 多分支派工', () => {
   it('start 优先用工单自带的 repo/branch，而不是适配器上的全局 repo', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'ra-workers-'))
     const runner = new FakeRunner([{ code: 0, stdout: JSON.stringify({ ok: true, result: { launch: { outcome: { handle: 'H' } } } }), stderr: '' }])
-    const adapter = new OrcaAdapter({ runner, workersDir: dir, spec: 'prompt' })
+    const adapter = new OrcaRuntime({ runner, workersDir: dir, spec: 'prompt' })
     const scoped = { ...ticket, repo: 'name:other/repo', branch: 'release' }
     await adapter.start({ ticket: scoped, assignment, workdir: '/tmp/wt' })
 

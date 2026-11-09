@@ -6,18 +6,18 @@ import { GitWorktreeProvider } from '../../workspaces/git-worktree.js'
 import { readClaudeSession } from '../../orca/session.js'
 import { workBranch, worktreeName } from '../../naming.js'
 import {
-  WorkerBackendError,
+  WorkerRuntimeError,
   type ActivityQuery,
   type AgentOutput,
   type AgentStatus,
-  type BackendCapabilities,
+  type RuntimeCapabilities,
   type DeliverOptions,
   type DeliveryReceipt,
   type DiagnosticCheck,
   type InboundMessage,
   type SessionSnapshot,
   type StartResult,
-  type WorkerBackend,
+  type WorkerRuntime,
   type WorkerContext,
   type WorkerRef,
   type ToolPolicy,
@@ -25,7 +25,7 @@ import {
   type WorkspaceRef,
 } from '../../port.js'
 
-export interface ClaudeCliBackendOptions {
+export interface ClaudeCliRuntimeOptions {
   claude: CommandRunner
   git: CommandRunner
   /** ~/.router-agent/workers */
@@ -59,7 +59,7 @@ interface ClaudeMeta {
   schemaVersion?: number
   ticketId: string
   assignmentId: string
-  backend: string
+  runtime: string
   handle: string
   workdir: string
   repo: string
@@ -74,16 +74,16 @@ interface ClaudeMeta {
 }
 
 /**
- * Claude Code CLI 后端：用 Claude 自己的后台会话管理（agent view）承载工单。
+ * Claude Code CLI 运行时：用 Claude 自己的后台会话管理（agent view）承载工单。
  *
  * - 首轮：claude --bg "<brief 文件路径>"；
  * - 状态：claude agents --json --all；
  * - 追问：会话 done/stopped 后 claude --bg --resume <sessionId>，**不能带新 flags**；
  * - 停止：claude stop <id>（保留会话）。
  */
-export class ClaudeCliBackend implements WorkerBackend {
+export class ClaudeCliRuntime implements WorkerRuntime {
   readonly id = 'claude-cli'
-  readonly capabilities: BackendCapabilities = {
+  readonly capabilities: RuntimeCapabilities = {
     agent: { liveStatus: true, processExit: false, output: true, activity: true, structuredInput: true, nudge: false },
     workspace: { cleanup: true, prLink: false, discovery: false },
   }
@@ -97,7 +97,7 @@ export class ClaudeCliBackend implements WorkerBackend {
   private env: NodeJS.ProcessEnv
   private gitProvider: GitWorktreeProvider
 
-  constructor(opts: ClaudeCliBackendOptions) {
+  constructor(opts: ClaudeCliRuntimeOptions) {
     this.claude = opts.claude
     this.workersDir = opts.workersDir
     this.home = opts.home
@@ -122,8 +122,8 @@ export class ClaudeCliBackend implements WorkerBackend {
     const repo = ticket.repo
     const baseBranch = ticket.branch
     const branch = workBranch(ticket)
-    if (!repo) throw new WorkerBackendError('workspace:missing-repo', '工单没有指定仓库，拒绝创建 worktree')
-    if (!baseBranch) throw new WorkerBackendError('workspace:missing-branch', '工单没有指定起始分支，拒绝创建 worktree')
+    if (!repo) throw new WorkerRuntimeError('workspace:missing-repo', '工单没有指定仓库，拒绝创建 worktree')
+    if (!baseBranch) throw new WorkerRuntimeError('workspace:missing-branch', '工单没有指定起始分支，拒绝创建 worktree')
     const name = worktreeName(ticket)
     const workdir = ctx.workdir || join(this.home, 'worktrees', name)
     const dir = join(this.workersDir, ticket.id)
@@ -138,13 +138,13 @@ export class ClaudeCliBackend implements WorkerBackend {
       name,
       workdir,
     })
-    // 中立的 brief 里 workdir 是「由后端决定」，拿到实际路径后替换掉。
-    writeFileSync(briefPath, (ctx.brief?.contract ?? '').replace('(由后端决定)', workspace.workdir), 'utf8')
+    // 中立的 brief 里 workdir 是「由运行时决定」，拿到实际路径后替换掉。
+    writeFileSync(briefPath, (ctx.brief?.contract ?? '').replace('(由运行时决定)', workspace.workdir), 'utf8')
     const meta: ClaudeMeta = {
       schemaVersion: 2,
       ticketId: ticket.id,
       assignmentId: ctx.assignment.id,
-      backend: this.id,
+      runtime: this.id,
       handle: '',
       workdir: workspace.workdir,
       repo,
@@ -175,7 +175,7 @@ export class ClaudeCliBackend implements WorkerBackend {
       )
       const handle = parseBackgroundId(res.stdout)
       if (!handle) {
-        throw new WorkerBackendError('agent:launch-failed', `claude --bg 没有返回会话 id: ${res.stdout.slice(0, 200)}`)
+        throw new WorkerRuntimeError('agent:launch-failed', `claude --bg 没有返回会话 id: ${res.stdout.slice(0, 200)}`)
       }
       const record = await this.waitForAgent(handle)
       meta.handle = handle
@@ -193,14 +193,14 @@ export class ClaudeCliBackend implements WorkerBackend {
     } catch (error) {
       // launch 半成功：回滚本次新建的 worktree/branch，避免重试冲突。
       await this.bestEffortRollback(workspace.workdir, workspace.branch, repo)
-      if (error instanceof WorkerBackendError) {
-        throw new WorkerBackendError(error.code, error.reason, {
+      if (error instanceof WorkerRuntimeError) {
+        throw new WorkerRuntimeError(error.code, error.reason, {
           retryable: error.retryable,
           cause: error.cause,
           detail: { ...error.detail, workdir: workspace.workdir, branch: workspace.branch },
         })
       }
-      throw new WorkerBackendError('agent:launch-failed', error instanceof Error ? error.message : String(error), {
+      throw new WorkerRuntimeError('agent:launch-failed', error instanceof Error ? error.message : String(error), {
         cause: error instanceof Error ? error.stack : undefined,
         detail: { workdir: workspace.workdir, branch: workspace.branch },
       })
@@ -246,11 +246,11 @@ export class ClaudeCliBackend implements WorkerBackend {
     const prompt = `Read ${inputPath} and continue the ticket. This is a Router follow-up; report via ra report.`
     const res = await this.runClaude(['--bg', '--resume', sessionId, '--', prompt], meta?.workdir ?? ref.workdir ?? process.cwd())
     if (/started a copy as/i.test(res.stdout)) {
-      throw new WorkerBackendError('agent:launch-failed', `claude --resume 产生了副本，拒绝切换会话: ${res.stdout.slice(0, 200)}`)
+      throw new WorkerRuntimeError('agent:launch-failed', `claude --resume 产生了副本，拒绝切换会话: ${res.stdout.slice(0, 200)}`)
     }
     const newId = parseBackgroundId(res.stdout)
     if (newId && newId !== ref.handle) {
-      throw new WorkerBackendError('agent:launch-failed', `claude --resume 返回了新会话 ${newId}，原会话 ${ref.handle} 未被继续`)
+      throw new WorkerRuntimeError('agent:launch-failed', `claude --resume 返回了新会话 ${newId}，原会话 ${ref.handle} 未被继续`)
     }
     if (meta) {
       meta.lastHandedOffInputId = inputs.at(-1)?.id
@@ -265,7 +265,7 @@ export class ClaudeCliBackend implements WorkerBackend {
     const res = await this.claude.run(['stop', ref.handle], { cwd: ref.workdir ?? this.home, env: this.env })
     // 会话已经不存在时 stop 可能失败；stop 必须幂等，这里不抛错。
     if (res.code !== 0 && !/not found|no such|unknown|no job matching/i.test(`${res.stderr}${res.stdout}`)) {
-      throw new WorkerBackendError('agent:gone', `claude stop 失败: ${res.stderr || res.stdout}`, {
+      throw new WorkerRuntimeError('agent:gone', `claude stop 失败: ${res.stderr || res.stdout}`, {
         cause: res.stderr || res.stdout,
         detail: { handle: ref.handle },
       })
@@ -395,7 +395,7 @@ export class ClaudeCliBackend implements WorkerBackend {
   private async runClaude(argv: string[], cwd: string) {
     const res = await this.claude.run(argv, { cwd, env: this.env })
     if (res.code !== 0) {
-      throw new WorkerBackendError('agent:launch-failed', `claude 命令失败: ${res.stderr || res.stdout}`, {
+      throw new WorkerRuntimeError('agent:launch-failed', `claude 命令失败: ${res.stderr || res.stdout}`, {
         cause: res.stderr || res.stdout,
         detail: { argv: argv.map(arg => (arg.length > 120 ? `<${arg.length} chars>` : arg)) },
       })

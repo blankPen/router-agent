@@ -12,7 +12,7 @@ import { resolvePiModelConfig } from '../src/router/model-config.js'
 import { RouterToolbox } from '../src/router/tools.js'
 import { defaultConfig, loadConfig, policyOf, chatEntry } from '../src/config.js'
 import { createApiServer } from '../src/router/api.js'
-import { OrcaAdapter } from '../src/worker/orca/index.js'
+import { OrcaRuntime } from '../src/worker/orca/index.js'
 import { realRunner } from '../src/infra/process.js'
 import { backfillChats, historyCursorKey } from '../src/sources/feishu-backfill.js'
 import type { FeishuConfig } from '../src/sources/feishu.js'
@@ -69,7 +69,7 @@ describe.runIf(LIVE)('真实环境验证', () => {
 
     const status = await get('/api/status')
     expect(status.status).toBe(200)
-    expect(JSON.parse(status.body).backend).toBe('orca')
+    expect(JSON.parse(status.body).runtime).toBe('orca')
 
     const index = await get('/')
     expect(index.status).toBe(200)
@@ -85,7 +85,7 @@ describe.runIf(LIVE)('真实环境验证', () => {
   })
 
   it('Orca CLI 真实返回能被适配层解析', async () => {
-    const adapter = new OrcaAdapter({
+    const adapter = new OrcaRuntime({
       runner: realRunner('orca'),
       workersDir: mkdtempSync(join(tmpdir(), 'ra-live-orca-')),
       spec: 'prompt',

@@ -8,7 +8,7 @@ import { RouterService, extractTerminalSnippet, extractSessionSnippet, formatPro
 import { defaultConfig, policyOf, type AppConfig, chatEntry } from '../src/config.js'
 import { DEFAULT_ADMISSION } from '../src/core/policy.js'
 import type {
-  WorkerBackend,
+  WorkerRuntime,
   WorkerContext,
   SessionEvent,
   WorkerRef,
@@ -52,7 +52,7 @@ function acceptEngine(): DecisionEngine {
   }
 }
 
-class FakeBackend implements WorkerBackend {
+class FakeRuntime implements WorkerRuntime {
   readonly id = 'orca'
   readonly capabilities = {
     agent: { liveStatus: true, processExit: false, output: true, activity: true, structuredInput: true, nudge: true },
@@ -134,7 +134,7 @@ function trigger(over: Partial<Trigger> = {}): Trigger {
 describe('运行时机制', () => {
   let store: Store
   let engine: Engine
-  let backend: FakeBackend
+  let runtime: FakeRuntime
   let config: AppConfig
   let service: RouterService
   let now: number
@@ -149,9 +149,9 @@ describe('运行时机制', () => {
     config.feishu = { ...config.feishu, chats: [chatEntry('oc_dev')], allowed: ['ou_alice'] }
     let n = 0
     engine = new Engine({ store, policy: policyOf(config), clock: { now: () => new Date(now).toISOString() }, ids: { next: p => `${p}_${++n}` } })
-    backend = new FakeBackend()
+    runtime = new FakeRuntime()
     service = new RouterService({
-      config, store, engine, backend,
+      config, store, engine, runtime,
       decisionEngine: acceptEngine(),
       prTracker: new NullPrTracker(),
       clock: { now: () => new Date(now).toISOString() },
@@ -172,20 +172,20 @@ describe('运行时机制', () => {
     const { ticketId } = await launchOne()
     engine.deliverInput(ticketId, { kind: 'followup', text: '第一件事' })
     await service.runOnce()
-    const afterFirst = backend.delivered.length
+    const afterFirst = runtime.delivered.length
     await service.runOnce()
-    expect(backend.delivered.length).toBe(afterFirst)
+    expect(runtime.delivered.length).toBe(afterFirst)
   })
 
   it('有新输入时，把未 ack 的旧输入一并重投（去重靠 id）', async () => {
     const { ticketId, handle } = await launchOne()
     const first = engine.deliverInput(ticketId, { kind: 'followup', text: '第一件事' })
     await service.runOnce()
-    expect(backend.delivered.map(d => d.text)).toEqual(['第一件事'])
+    expect(runtime.delivered.map(d => d.text)).toEqual(['第一件事'])
 
     const second = engine.deliverInput(ticketId, { kind: 'followup', text: '第二件事' })
     await service.runOnce()
-    const lastTwo = backend.delivered.slice(-2).map(d => d.text)
+    const lastTwo = runtime.delivered.slice(-2).map(d => d.text)
     expect(lastTwo).toEqual(['第一件事', '第二件事'])
     expect(handle).toBeTruthy()
     expect(first.seq).toBe(1)
@@ -202,7 +202,7 @@ describe('运行时机制', () => {
     })
     engine.deliverInput(ticketId, { kind: 'followup', text: '第二件事' })
     await service.runOnce()
-    expect(backend.delivered.slice(-1).map(d => d.text)).toEqual(['第二件事'])
+    expect(runtime.delivered.slice(-1).map(d => d.text)).toEqual(['第二件事'])
   })
 
   it('终端长时间无输出时发 status? 唤醒，仍无响应则标记 stale 并通知', async () => {
@@ -212,10 +212,10 @@ describe('运行时机制', () => {
       ackedInputs: [], updatedAt: new Date(now).toISOString(),
     })
     // 终端最后输出在 10 分钟前
-    backend.handles.set(handle, { lastOutputAt: new Date(now - 10 * 60_000).toISOString() })
+    runtime.handles.set(handle, { lastOutputAt: new Date(now - 10 * 60_000).toISOString() })
 
     await service.checkIdle(now)
-    expect(backend.delivered.some(d => d.text.includes('status?'))).toBe(true)
+    expect(runtime.delivered.some(d => d.text.includes('status?'))).toBe(true)
 
     await service.checkIdle(now + 10 * 60_000)
     expect(store.getAttention(ticketId)?.question).toContain('无响应')
@@ -229,22 +229,22 @@ describe('运行时机制', () => {
       ticketId, assignmentId, turn: 1, state: 'progress', summary: '做到一半', prNumber: 0, prUrl: '',
       ackedInputs: [], updatedAt: new Date(now).toISOString(),
     })
-    backend.handles.set(handle, { lastOutputAt: new Date(now - 10 * 60_000).toISOString() })
+    runtime.handles.set(handle, { lastOutputAt: new Date(now - 10 * 60_000).toISOString() })
     await service.checkIdle(now)
-    const before = backend.delivered.length
+    const before = runtime.delivered.length
 
     service.onWorkerState({
       ticketId, assignmentId, turn: 2, state: 'progress', summary: '又动了', prNumber: 0, prUrl: '',
       ackedInputs: [], updatedAt: new Date(now + 1000).toISOString(),
     })
     await service.checkIdle(now + 2000)
-    expect(backend.delivered.length).toBe(before)
+    expect(runtime.delivered.length).toBe(before)
   })
 
   it('worker 长时间不报进展时，Router 主动读终端并同步到话题', async () => {
     const { ticketId, handle } = await launchOne()
-    backend.screen = ['⏺ 正在修改登录超时配置', '⎿ pnpm test 进行中', '✻ Cascading… (30s)']
-    backend.handles.set(handle, { lastOutputAt: new Date(now + 10 * 60_000).toISOString() })
+    runtime.screen = ['⏺ 正在修改登录超时配置', '⎿ pnpm test 进行中', '✻ Cascading… (30s)']
+    runtime.handles.set(handle, { lastOutputAt: new Date(now + 10 * 60_000).toISOString() })
 
     await service.probeProgress(now + 11 * 60_000)
 
@@ -260,7 +260,7 @@ describe('运行时机制', () => {
 
   it('同一静默期按 repeatMs 限流，避免重复刷屏', async () => {
     await launchOne()
-    backend.screen = ['⏺ 正在跑测试']
+    runtime.screen = ['⏺ 正在跑测试']
 
     await service.probeProgress(now + 11 * 60_000)
     await service.probeProgress(now + 20 * 60_000)
@@ -281,7 +281,7 @@ describe('运行时机制', () => {
 
     now += 1_000
     engine.deliverInput(ticketId, { kind: 'followup', text: '再补一个单测' })
-    backend.screen = ['⏺ 正在补充单测', '✽ Cascading… (12s)']
+    runtime.screen = ['⏺ 正在补充单测', '✽ Cascading… (12s)']
 
     await service.probeProgress(now + 11 * 60_000)
 
@@ -293,8 +293,8 @@ describe('运行时机制', () => {
 
   it('终端已退出时不发巡检消息（交给空闲巡检处理）', async () => {
     await launchOne()
-    backend.readStatus = 'exited'
-    backend.screen = ['⏺ 旧画面']
+    runtime.readStatus = 'exited'
+    runtime.screen = ['⏺ 旧画面']
 
     await service.probeProgress(now + 11 * 60_000)
     expect(store.listOutbox(200).filter(item => item.text.includes('进展巡检'))).toHaveLength(0)
@@ -302,8 +302,8 @@ describe('运行时机制', () => {
 
   it('终端长时间没有新输出时，巡检消息会提示可能卡住', async () => {
     const { handle } = await launchOne()
-    backend.screen = ['⏺ 最后一条输出']
-    backend.handles.set(handle, { lastOutputAt: new Date(now - 20 * 60_000).toISOString() })
+    runtime.screen = ['⏺ 最后一条输出']
+    runtime.handles.set(handle, { lastOutputAt: new Date(now - 20 * 60_000).toISOString() })
 
     await service.probeProgress(now + 21 * 60_000)
 
@@ -314,12 +314,12 @@ describe('运行时机制', () => {
 
   it('优先使用 Agent 会话记录，不再读终端屏幕', async () => {
     await launchOne()
-    backend.screen = ['⏺ 屏幕噪声']
-    backend.sessionEvents = [
+    runtime.screen = ['⏺ 屏幕噪声']
+    runtime.sessionEvents = [
       { at: new Date(now + 5 * 60_000).toISOString(), kind: 'tool', text: 'Edit(service.ts)' },
       { at: new Date(now + 6 * 60_000).toISOString(), kind: 'text', text: '正在补单测' },
     ]
-    backend.sessionAt = new Date(now + 6 * 60_000).toISOString()
+    runtime.sessionAt = new Date(now + 6 * 60_000).toISOString()
 
     await service.probeProgress(now + 11 * 60_000)
 
@@ -332,13 +332,13 @@ describe('运行时机制', () => {
 
   it('会话记录里文本之后的工具调用折叠成动作概要，不逐条回放', async () => {
     await launchOne()
-    backend.sessionEvents = [
+    runtime.sessionEvents = [
       { at: new Date(now + 5 * 60_000).toISOString(), kind: 'text', text: '开始改登录超时' },
       { at: new Date(now + 6 * 60_000).toISOString(), kind: 'tool', text: 'Edit(login.ts)', tool: { name: 'Edit', target: 'login.ts' } },
       { at: new Date(now + 7 * 60_000).toISOString(), kind: 'tool', text: 'Bash：跑测试' },
       { at: new Date(now + 8 * 60_000).toISOString(), kind: 'tool', text: 'TodoWrite' },
     ]
-    backend.sessionAt = new Date(now + 8 * 60_000).toISOString()
+    runtime.sessionAt = new Date(now + 8 * 60_000).toISOString()
 
     await service.probeProgress(now + 11 * 60_000)
 
@@ -351,8 +351,8 @@ describe('运行时机制', () => {
 
   it('会话记录不可用时退回终端屏幕', async () => {
     await launchOne()
-    backend.sessionEvents = null
-    backend.screen = ['⏺ 终端里的进展']
+    runtime.sessionEvents = null
+    runtime.screen = ['⏺ 终端里的进展']
 
     await service.probeProgress(now + 11 * 60_000)
 
@@ -436,7 +436,7 @@ describe('运行时机制', () => {
 
   it('PR 优先取 Orca worktree 的 linkedPR，拿不到才回退 gh', async () => {
     const { ticketId } = await launchOne()
-    backend.linkedPr = { linkedPR: { number: 42, url: 'https://github.com/acme/web/pull/42' } }
+    runtime.linkedPr = { linkedPR: { number: 42, url: 'https://github.com/acme/web/pull/42' } }
     await service.trackPullRequests()
     expect(store.getTicket(ticketId)?.prNumber).toBe(42)
     expect(store.getTicket(ticketId)?.prState).toBe('open')
@@ -446,7 +446,7 @@ describe('运行时机制', () => {
     const { ticketId } = await launchOne()
     const assignment = store.latestAssignment(ticketId)!
     // 模拟实测行为：CLI 创建的终端 orphaned=true，但连接正常
-    backend.status = async () => ({
+    runtime.status = async () => ({
       alive: true,
       phase: 'running',
       acceptingInput: true,
@@ -454,20 +454,20 @@ describe('运行时机制', () => {
       detail: { orphaned: true },
     })
     await service.recover()
-    expect(backend.starts).toHaveLength(1)
+    expect(runtime.starts).toHaveLength(1)
     expect(store.latestAssignment(ticketId)!.id).toBe(assignment.id)
   })
 
   it('worktree 已被删除时 PR 跟踪静默跳过，不抛错也不刷日志', async () => {
     const { ticketId } = await launchOne()
-    backend.inspectWorkspace = async () => { throw new Error('orca:command-failed(worktree show): selector_not_found') }
+    runtime.inspectWorkspace = async () => { throw new Error('orca:command-failed(worktree show): selector_not_found') }
     await expect(service.trackPullRequests()).resolves.toBeUndefined()
     expect(store.getTicket(ticketId)?.prNumber).toBe(0)
   })
 
   it('启动时执行历史补拉，补回来的消息进入领域', async () => {
     service = new RouterService({
-      config, store, engine, backend,
+      config, store, engine, runtime,
       decisionEngine: acceptEngine(),
       prTracker: new NullPrTracker(),
       clock: { now: () => new Date(now).toISOString() },

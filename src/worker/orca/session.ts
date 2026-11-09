@@ -28,7 +28,7 @@ export interface ReadSessionOptions {
  *
  * 优先用 Agent 自己的结构化会话记录，而不是终端渲染屏幕：
  * 这里只有 assistant 文本与工具调用，没有 TUI 状态栏、spinner 和输入回显。
- * 找不到会话（非 Claude 后端 / 文件尚未落盘）时返回 null，调用方退回终端读取。
+ * 找不到会话（非 Claude 运行时 / 文件尚未落盘）时返回 null，调用方退回终端读取。
  */
 export function readClaudeSession(workdir: string, opts: ReadSessionOptions = {}): SessionSnapshot | null {
   if (!workdir) return null

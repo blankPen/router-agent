@@ -106,7 +106,7 @@ export interface DispatchDraft {
 export interface Assignment {
   id: string
   ticketId: string
-  backendId: string
+  runtimeId: string
   handle: string
   workdir: string
   status: 'pending' | 'running' | 'ended'

@@ -1,7 +1,7 @@
 # Agent 工具适配器接口设计方案
 
 > 目标：让 router-agent 从「Orca + Claude Code 单一路径」演进为「可插拔 Agent Runtime」。
-> 新增 Claude Code CLI、Codex CLI 等后端时，只实现适配器，不改 Router 内核。
+> 新增 Claude Code CLI、Codex CLI 等运行时，只实现适配器，不改 Router 内核。
 >
 > 版本：v1.9（设计定稿 + 一期 P0–P3 实施 + 实现代码评审修复；Claude Code CLI 已接入）
 > 仓库基线：`main` @ `5f90fa6`
@@ -11,13 +11,13 @@
 
 ## 0. 结论先行
 
-1. **现状不是「没有抽象」，而是「抽象漏了」**：`WorkerBackend` 端口已经存在，但必选动作只有 `start/deliver/registerContext/stop`，可选动作只有 `read/session`；终端活性、屏幕输出、worktree 回收、PR 线索、仓库发现、会话记录读取全部以 Orca 私有方法/私有类型的形式漏到了 `RouterService`。
-2. **必须补齐的不是一个接口，而是实现层的三层中立构件**：工作区（WorkspaceProvider）、Agent 进程（AgentRuntime）、Agent 活动（ActivitySource）；对内核仍只暴露一个 `WorkerBackend` 公共契约，符合 README 里「WorkerBackend 是唯一扩展点」的承诺。
-3. **能力协商优先于强行统一**：不同 Agent CLI 的能力差异很大（是否有常驻进程、是否支持结构化输入、会话记录在哪）。端口用 `capabilities` 显式声明，Router 按能力降级，禁止用 `as OrcaTerminalInfo` 这种方式假设所有后端都长得像 Orca。
-4. **报告协议是跨后端不变量**：`ra report` + `state.json` 兜底已经与后端无关，必须保留，并作为新后端接入的硬性验收项（Agent 必须能执行 shell 命令）。
-5. **迁移必须零行为回归**：Orca 路径先做「等价包装」，用同一套契约测试与现有测试兜住，再逐个引入新后端；任何阶段都可独立 revert。
-6. **多后端共存靠 `assignment.backendId` 路由**，不是全局单后端；`config.backend.default` 只决定新工单，旧工单永远回到自己创建时的后端。
-7. **一期范围锁定**：P0–P3，即 Orca 等价拆解 + Claude Code CLI 后端；Codex CLI 与旧路径清理放二期（P4–P5）。
+1. **现状不是「没有抽象」，而是「抽象漏了」**：`WorkerRuntime` 端口已经存在，但必选动作只有 `start/deliver/registerContext/stop`，可选动作只有 `read/session`；终端活性、屏幕输出、worktree 回收、PR 线索、仓库发现、会话记录读取全部以 Orca 私有方法/私有类型的形式漏到了 `RouterService`。
+2. **必须补齐的不是一个接口，而是实现层的三层中立构件**：工作区（WorkspaceProvider）、Agent 进程（AgentRuntime）、Agent 活动（ActivitySource）；对内核仍只暴露一个 `WorkerRuntime` 公共契约，符合 README 里「WorkerRuntime 是唯一扩展点」的承诺。
+3. **能力协商优先于强行统一**：不同 Agent CLI 的能力差异很大（是否有常驻进程、是否支持结构化输入、会话记录在哪）。端口用 `capabilities` 显式声明，Router 按能力降级，禁止用 `as OrcaTerminalInfo` 这种方式假设所有运行时都长得像 Orca。
+4. **报告协议是跨运行时不变量**：`ra report` + `state.json` 兜底已经与运行时无关，必须保留，并作为新运行时接入的硬性验收项（Agent 必须能执行 shell 命令）。
+5. **迁移必须零行为回归**：Orca 路径先做「等价包装」，用同一套契约测试与现有测试兜住，再逐个引入新运行时；任何阶段都可独立 revert。
+6. **多运行时共存靠 `assignment.runtimeId` 路由**，不是全局单运行时；`config.runtime.default` 只决定新工单，旧工单永远回到自己创建时的运行时。
+7. **一期范围锁定**：P0–P3，即 Orca 等价拆解 + Claude Code CLI 运行时；Codex CLI 与旧路径清理放二期（P4–P5）。
 
 ---
 
@@ -28,14 +28,14 @@
 当前系统的真实形态是：
 
 ```text
-飞书消息 → Router（Pi 研判）→ Engine → OrcaAdapter
+飞书消息 → Router（Pi 研判）→ Engine → OrcaRuntime
                                             ├── orca worktree create --agent claude
                                             ├── orca terminal send
                                             ├── orca terminal list / read
                                             └── orca worktree rm
 ```
 
-用户希望后续能接入 **Claude Code CLI**、**Codex CLI** 等不同 Agent 工具，只要实现一个适配器接口即可扩展。仓库里已有 `WorkerBackend` 端口，但它只抽象了「派工/投递/停止」，没有抽象「工作区生命周期」「Agent 进程状态」「Agent 活动读取」；同时服务层直接引用了 `OrcaTerminalInfo`、`OrcaCommandError`、`judgeIdle` 等 Orca 概念，导致新后端无法真正落地。
+用户希望后续能接入 **Claude Code CLI**、**Codex CLI** 等不同 Agent 工具，只要实现一个适配器接口即可扩展。仓库里已有 `WorkerRuntime` 端口，但它只抽象了「派工/投递/停止」，没有抽象「工作区生命周期」「Agent 进程状态」「Agent 活动读取」；同时服务层直接引用了 `OrcaTerminalInfo`、`OrcaCommandError`、`judgeIdle` 等 Orca 概念，导致新运行时无法真正落地。
 
 ### 1.2 目标
 
@@ -45,13 +45,13 @@
   3. Agent 活性与活动读取（供巡检、僵尸判定、重启对账）；
   4. 仓库发现与启动自检（供 `ra init` / `ra doctor`）；
   5. 可选的 PR 线索（没有也能靠 `gh` 兜底）。
-- 让 `RouterService`、`Engine`、`Store`、`Outbox`、`Effects` 不再 import 任何后端私有类型。
-- 给出 Orca、Claude Code CLI、Codex CLI 三个后端的具体实现路径与差异矩阵。
+- 让 `RouterService`、`Engine`、`Store`、`Outbox`、`Effects` 不再 import 任何运行时私有类型。
+- 给出 Orca、Claude Code CLI、Codex CLI 三个运行时的具体实现路径与差异矩阵。
 - 给出分阶段实施计划、测试策略和回滚方案。
 
 ### 1.3 非目标
 
-- **不替换 Router 的研判层**（Pi / `DecisionEngine` / `tool-spec.ts`）。研判工具适配器是另一个问题域：它解决的是「同一批 `router_*` 工具如何暴露给不同模型 SDK」，与 Worker 后端无关。本方案只标注边界，不合并设计。
+- **不替换 Router 的研判层**（Pi / `DecisionEngine` / `tool-spec.ts`）。研判工具适配器是另一个问题域：它解决的是「同一批 `router_*` 工具如何暴露给不同模型 SDK」，与 Worker 运行时无关。本方案只标注边界，不合并设计。
 - 不在本方案定稿前改业务实现；本工单只产出设计。
 - 不引入 ACP / MCP 作为一期必须项。端口保持协议无关，未来可以让某个 adapter 内部走 ACP，而不是重做内核。
 - 不改变工单状态机、报告协议、PR 闭环语义。
@@ -74,41 +74,41 @@
 | L6 工作区回收 | `orca worktree show` / `orca worktree rm --worktree path:<dir>` | `commands.ts:65-77`、`index.ts:265-274`、`src/service.ts:1165-1205` | 强耦合，必须抽象 |
 | L7 PR 线索 | `worktree.linkedPR / linkedGitLabMR` | `src/service.ts:1475-1497` | 中耦合，可降级 |
 | L8 仓库发现/自检 | `orca status`、`orca repo list --json`，解析器放在 `sources/lark.ts` | `src/cli/doctor.ts:59-78`、`src/cli/init.ts:124-147`、`src/sources/lark.ts:117-160` | 中耦合，需要抽象 |
-| L9 服务装配 | `new OrcaAdapter(...)` 硬编码；`backend.default` 只接受 `'orca'` | `src/cli/index.ts:642-649`、`src/config.ts:158/300-304/899-901`、`src/router/api.ts:118` | 中耦合，需要注册表 |
+| L9 服务装配 | `new OrcaRuntime(...)` 硬编码；`runtime.default` 只接受 `'orca'` | `src/cli/index.ts:642-649`、`src/config.ts:158/300-304/899-901`、`src/router/api.ts:118` | 中耦合，需要注册表 |
 | L10 Worker 手册 | 手册直接写「你在一个独立的 Orca worktree 里工作」「Claude Code」；agent 模式写入 `~/.claude/agents/` | `src/worker/spec/prompt-mode.md:3`、`src/worker/spec/index.ts:46-56` | 中耦合，需要拆分「任务契约」与「启动方式」 |
-| L11 报告通道 | `ra report` HTTP + `state.json` 兜底，与后端无关 | `src/cli/report.ts`、`src/worker/orca/report-poller.ts:1-154` | 已解耦，保留 |
+| L11 报告通道 | `ra report` HTTP + `state.json` 兜底，与运行时无关 | `src/cli/report.ts`、`src/worker/orca/report-poller.ts:1-154` | 已解耦，保留 |
 | L12 效果队列 | `launch-worker / stop-worker / cleanup-workspace` 只带 `ticketId` | `src/service.ts:536-552` | 已解耦，保留 |
 
 ### 2.2 关键漏抽象点（必须修）
 
-1. **`WorkerBackend` 端口外的私有方法**：`RouterService` 把 `inspect / inspectWorktree / removeWorktree` 通过交叉类型挂在 `backend` 上（`src/service.ts:40-44`、`443-447`；`CreateServiceDeps` 的 `1633-1638` 只含 `inspect/removeWorktree`），端口本身没有声明。
+1. **`WorkerRuntime` 端口外的私有方法**：`RouterService` 把 `inspect / inspectWorktree / removeWorktree` 通过交叉类型挂在 `runtime` 上（`src/service.ts:40-44`、`443-447`；`CreateServiceDeps` 的 `1633-1638` 只含 `inspect/removeWorktree`），端口本身没有声明。
 2. **中立类型泄漏**：`service.ts:14` 直接 import `OrcaTerminalInfo`、`OrcaCommandError`；`checkIdle`/`isZombie`/`recover`/`probeTicket` 全部按 Orca 字段写判断。
 3. **选择器格式泄漏**：`removeWorktree('path:' + workdir)`、`inspectWorktree('path:' + workdir)`，`path:` 是 Orca CLI 的选择器语法。
-4. **「无 inspect」被当成僵尸**：`isZombie()` 在 `!this.backend.inspect` 时直接 `return true`（`service.ts:1028`）。任何没有活性接口的新后端，工单都会在 `zombieHours` 后被误判为僵尸。这必须改成「未知 ≠ 僵尸」。
+4. **「无 inspect」被当成僵尸**：`isZombie()` 在 `!this.runtime.inspect` 时直接 `return true`（`service.ts:1028`）。任何没有活性接口的新运行时，工单都会在 `zombieHours` 后被误判为僵尸。这必须改成「未知 ≠ 僵尸」。
 5. **投递失败可能每秒重试**：`deliverPendingInputs()` 失败后调 `workerGone()`；没有 `inspect` 时它恒返回 `false`（`service.ts:1557-1565`），于是每秒重试。
-6. **PR 发现只剩一半**：`PrTracker.findByBranch()` 已实现（`src/sources/github.ts:79-82`）但从未被 `RouterService` 调用；目前新 PR 主要靠 Orca 的 `linkedPR` 发现。新后端没有这个能力时，Agent 必须自己 `ra report --pr-number`，否则 PR 跟踪不到。
+6. **PR 发现只剩一半**：`PrTracker.findByBranch()` 已实现（`src/sources/github.ts:79-82`）但从未被 `RouterService` 调用；目前新 PR 主要靠 Orca 的 `linkedPR` 发现。新运行时没有这个能力时，Agent 必须自己 `ra report --pr-number`，否则 PR 跟踪不到。
 7. **Agent 与 worktree 绑死**：Orca 的 `worktree create --agent claude` 把「建目录」和「起 Agent」合成一步，导致「工作区端口」和「运行时端口」无法独立实现。
 
 ### 2.3 已经做对、必须保留的部分
 
 - `Engine` 是唯一状态写入口（`src/core/engine.ts`）。
-- `EffectsProcessor` 的 `launch-worker / stop-worker / cleanup-workspace` 只依赖 `ticketId`，后端无关（`src/core/effects.ts`）。
-- `ReportPoller` 轮询 `~/.router-agent/workers/<ticketId>/state.json`，后端无关（`src/worker/orca/report-poller.ts:68-110`）。
-- `ra report` 协议与 CLI（`src/cli/report.ts`）完全后端无关。
-- `Assignment` 已存 `backend_id / handle / workdir`（`src/core/model.ts:106-115`、`src/store/db.ts:227`），天然支持多后端。
+- `EffectsProcessor` 的 `launch-worker / stop-worker / cleanup-workspace` 只依赖 `ticketId`，运行时无关（`src/core/effects.ts`）。
+- `ReportPoller` 轮询 `~/.router-agent/workers/<ticketId>/state.json`，运行时无关（`src/worker/orca/report-poller.ts:68-110`）。
+- `ra report` 协议与 CLI（`src/cli/report.ts`）完全运行时无关。
+- `Assignment` 已存 `runtime_id / handle / workdir`（`src/core/model.ts:106-115`、`src/store/db.ts:227`），天然支持多运行时。
 
 ---
 
 ## 3. 设计原则
 
-1. **端口-适配器**：内核只依赖 `src/worker/port.ts` 中的中立模型；后端实现放 `src/worker/backends/<id>/`。
-2. **能力协商，不做最低公分母**：后端声明能力，Router 按能力降级；缺能力时明确降级，不静默假设。
+1. **端口-适配器**：内核只依赖 `src/worker/port.ts` 中的中立模型；运行时实现放 `src/worker/runtimes/<id>/`。
+2. **能力协商，不做最低公分母**：运行时声明能力，Router 按能力降级；缺能力时明确降级，不静默假设。
 3. **结构化优先，文本兜底**：活性优先读进程/会话元数据，活动优先读 Agent 会话 JSONL；终端屏幕永远是最后兜底，且只用于给人看的摘要。
-4. **重启可还原**：`handle` 必须是后端可持久化、重启后仍能还原上下文的标识（Orca=terminal handle，Claude=sessionId，Codex=sessionId）；禁止只存在内存 map。
-5. **报告协议是硬契约**：任何后端都必须让 Agent 能执行 `ra report`（shell 工具或等价能力），并遵守 `【Router 输入 in_xxx】` 投递格式。
+4. **重启可还原**：`handle` 必须是运行时可持久化、重启后仍能还原上下文的标识（Orca=terminal handle，Claude=sessionId，Codex=sessionId）；禁止只存在内存 map。
+5. **报告协议是硬契约**：任何运行时都必须让 Agent 能执行 `ra report`（shell 工具或等价能力），并遵守 `【Router 输入 in_xxx】` 投递格式。
 6. **零行为回归**：Orca 路径的输出、日志、错误文案、阶段流转保持一致；每阶段都有回滚开关。
 7. **参数数组，不拼 shell**：沿用 `CommandRunner` 的 `spawn(bin, argv)` 模式（`src/infra/process.ts:15-45`），新增长驻进程 spawner 同样禁止 shell 拼接。
-8. **安全默认值**：新后端默认最小权限（工作区可写、网络按需、非交互审批策略显式配置），不默认 `--dangerously-skip-permissions` / `--dangerously-bypass-approvals-and-sandbox`。
+8. **安全默认值**：新运行时默认最小权限（工作区可写、网络按需、非交互审批策略显式配置），不默认 `--dangerously-skip-permissions` / `--dangerously-bypass-approvals-and-sandbox`。
 
 ---
 
@@ -119,10 +119,10 @@
 ```text
 ┌─────────────────────────────────────────────────────────────┐
 │ RouterService / Engine / Store / Outbox / Effects            │
-│ 只依赖：WorkerBackend（组合端口）+ 中立状态模型                │
+│ 只依赖：WorkerRuntime（组合端口）+ 中立状态模型                │
 └───────────────────────────┬─────────────────────────────────┘
                             │
-                  WorkerBackend（唯一扩展点）
+                  WorkerRuntime（唯一扩展点）
                             │
         ┌───────────────────┼────────────────────┐
         │                   │                    │
@@ -136,23 +136,23 @@
 
 ### 4.2 一个公共契约 + 三个内部构件
 
-- **公共契约**：`WorkerBackend`（5.4），实现者只需要实现它。
+- **公共契约**：`WorkerRuntime`（5.4），实现者只需要实现它。
 - **内部构件**（可选、可复用，不进入 `port.ts`）：
   - `WorkspaceProvider`：create / inspect / remove / listRepos；
   - `AgentRuntime`：launch / send / status / stop / output；
   - `ActivitySource`：read。
-- 允许某些后端不完全拆开（例如 Orca 的 create+launch 合并），但**对外语义必须一致**。
+- 允许某些运行时不完全拆开（例如 Orca 的 create+launch 合并），但**对外语义必须一致**。
 
 ### 4.3 目录规划
 
 ```text
 src/worker/
   port.ts                      # 端口与中立模型（唯一契约）
-  registry.ts                  # BackendRegistry / createBackends 注册表
+  registry.ts                  # RuntimeRegistry / createRuntimes 注册表
   status.ts                    # judgeIdle 的中立版本（从 orca/ 上移）
-  report-poller.ts             # 从 orca/ 上移（本来就与后端无关）
+  report-poller.ts             # 从 orca/ 上移（本来就与运行时无关）
   spec/
-    contract.md                # 后端中立的任务契约
+    contract.md                # 运行时中立的任务契约
     claude-agent.md            # Claude 专属的启动说明（agent 模式）
   workspaces/
     git-worktree.ts            # GitWorktreeProvider（Claude/Codex 共用）
@@ -160,8 +160,8 @@ src/worker/
   activity/
     claude-sessions.ts         # 从 orca/session.ts 上移
     codex-sessions.ts          # 新增
-  backends/
-    orca/index.ts              # OrcaBackend（组合内部构件），行为与今天一致
+  runtimes/
+    orca/index.ts              # OrcaRuntime（组合内部构件），行为与今天一致
     claude-cli/index.ts        # Claude Code CLI
     codex-cli/index.ts         # Codex CLI
 ```
@@ -172,8 +172,8 @@ src/worker/
 
 ## 5. 接口定义（草案）
 
-> 公共契约见 5.4；5.1–5.3 是**内部可复用构件**，不要求出现在 `port.ts`，也不要求每个后端都用。
-> 这样既避免「两套互不引用的契约」，又给 Claude/Codex 这类新后端留下清晰的分层实现路径。
+> 公共契约见 5.4；5.1–5.3 是**内部可复用构件**，不要求出现在 `port.ts`，也不要求每个运行时都用。
+> 这样既避免「两套互不引用的契约」，又给 Claude/Codex 这类新运行时留下清晰的分层实现路径。
 
 ### 5.1 内部构件：工作区（不进入公共契约）
 
@@ -229,7 +229,7 @@ export interface WorkspaceProvider {
 ### 5.2 内部构件：Agent 运行时
 
 ```ts
-/** 后端中立的任务契约：只讲“做什么/怎么上报”，不讲某个 CLI 的参数。 */
+/** 运行时中立的任务契约：只讲“做什么/怎么上报”，不讲某个 CLI 的参数。 */
 export interface WorkerBrief {
   ticketId: string
   title: string
@@ -262,7 +262,7 @@ export interface LaunchRequest {
   brief: WorkerBrief
   report: ReportPaths
   tools: ToolPolicy
-  /** 后端私有参数（模型、审批模式等），不进入内核。 */
+  /** 运行时私有参数（模型、审批模式等），不进入内核。 */
   options?: Record<string, unknown>
 }
 
@@ -315,12 +315,12 @@ export interface ActivitySource {
 > **实现者只需要实现这一个接口。** `WorkspaceProvider / AgentRuntime / ActivitySource` 是实现层可复用的内部构件（见 5.1–5.3），**不进入 `port.ts`**；避免出现「两套互不引用」的契约。
 
 ```ts
-/** Router 传给后端的引用：handle 不透明，其余字段让后端能定位自己的 meta/会话。 */
+/** Router 传给运行时的引用：handle 不透明，其余字段让运行时能定位自己的 meta/会话。 */
 export interface WorkerRef {
   handle: string
   ticketId: string
   workdir?: string
-  /** 后端自己的会话 ID（Claude/Codex 用；Orca 可空）。Router 不落库，adapter 可从 meta 读取。 */
+  /** 运行时自己的会话 ID（Claude/Codex 用；Orca 可空）。Router 不落库，adapter 可从 meta 读取。 */
   sessionId?: string
 }
 
@@ -337,7 +337,7 @@ export interface StartResult {
   workdir: string
   /** 实际工作分支（可能被 provider 加后缀）；供 PR 兜底查询。 */
   branch?: string
-  /** 会话 ID；写入 backend 的 meta.json，供 resume/活动定位。 */
+  /** 会话 ID；写入 runtime 的 meta.json，供 resume/活动定位。 */
   sessionId?: string
   workspaceRef?: string
 }
@@ -346,9 +346,9 @@ export interface StartResult {
 export interface WorkerContext {
   ticket: Ticket
   assignment: Assignment
-  /** 预分配目录；为空表示由后端决定。 */
+  /** 预分配目录；为空表示由运行时决定。 */
   workdir: string
-  /** 后端中立的工单契约（工单、授权范围、交付规则、ra report 用法）。 */
+  /** 运行时中立的工单契约（工单、授权范围、交付规则、ra report 用法）。 */
   brief: WorkerBrief
   /** Router 保证目录存在；adapter 不得改写路径。 */
   report: ReportPaths
@@ -374,7 +374,7 @@ export interface DeliverOptions {
   redeliver?: boolean
 }
 
-export interface BackendCapabilities {
+export interface RuntimeCapabilities {
   agent: {
     /** 能给出结构化活性；没有则 Router 不做进程级 idle/zombie 判定。 */
     liveStatus: boolean
@@ -386,7 +386,7 @@ export interface BackendCapabilities {
     activity: boolean
     /** 支持非 TTY 的结构化输入投递（Claude `--bg --resume` / Codex resume）；TTY 注入也算支持。 */
     structuredInput: boolean
-    /** 支持显式唤醒信号（status?），headless 后端通常为 false。 */
+    /** 支持显式唤醒信号（status?），headless 运行时通常为 false。 */
     nudge: boolean
   }
   workspace: {
@@ -399,9 +399,9 @@ export interface BackendCapabilities {
   }
 }
 
-export interface WorkerBackend {
+export interface WorkerRuntime {
   readonly id: string
-  readonly capabilities: BackendCapabilities
+  readonly capabilities: RuntimeCapabilities
 
   start(ctx: WorkerContext): Promise<StartResult>
   deliver(ref: WorkerRef, inputs: InboundMessage[], opts?: DeliverOptions): Promise<DeliveryReceipt>
@@ -423,7 +423,7 @@ export interface WorkerBackend {
   listRepos?(): Promise<RepoDescriptor[]>
   /** 可选：启动前自检。 */
   doctor?(): Promise<DiagnosticCheck[]>
-  /** 兼容保留：当前 Router 未调用，只有 OrcaAdapter 与测试在用；新后端可不实现。 */
+  /** 兼容保留：当前 Router 未调用，只有 OrcaRuntime 与测试在用；新运行时可不实现。 */
   registerContext?(ref: WorkerRef, items: ContextItem[]): Promise<void>
 }
 ```
@@ -432,7 +432,7 @@ export interface WorkerBackend {
 
 | 返回值 | 含义 | Router 处理 |
 |-|-|-|
-| `null` | 后端暂时无法判断（provider 不可用 / 查询失败 / 没有 status 能力） | 不判死、不判僵尸；下一轮再看 |
+| `null` | 运行时暂时无法判断（provider 不可用 / 查询失败 / 没有 status 能力） | 不判死、不判僵尸；下一轮再看 |
 | `phase: 'unknown'` | 已查询但结果不确定（如 Orca orphaned 且不可写） | 同 `null`，但日志保留 provider 细节 |
 | `phase: 'blocked'` | 进程活着，但卡在权限/用户输入（Claude `state=blocked, waitingFor=permission prompt`） | 置 attention、通知人；不自动 resume（会 fork 副本） |
 | `phase: 'lost'` | 已确认会话/进程不存在 | 走 `handleLostWorker`，转人工 |
@@ -447,8 +447,8 @@ export interface WorkerBackend {
   - `tools`：来自 `config.worker.tools`（默认 `shell: 'allowlist'`、`shellAllow` 含 `ra report / ra doc / git / gh` 与常用构建测试命令、`allowNetwork: false`）；
   - `brief`：由 `buildWorkerBrief()` 唯一渲染：
     - Orca 路径调用 `buildOrcaBrief()`，内部**逐字节复用当前 `buildWorkerPrompt()` 的输出**（P0 加 snapshot 测试，防止零行为回归）；
-    - 新后端路径调用 `buildNeutralBrief()`，基于 `spec/contract.md` 渲染工单、授权范围、交付规则与 `ra report` 用法。
-- `OrcaAdapter.start()` 改为消费 `ctx.brief.contract`，不再在 adapter 内部拼 prompt；这是 P0 的范围，不是 P3。
+    - 新运行时路径调用 `buildNeutralBrief()`，基于 `spec/contract.md` 渲染工单、授权范围、交付规则与 `ra report` 用法。
+- `OrcaRuntime.start()` 改为消费 `ctx.brief.contract`，不再在 adapter 内部拼 prompt；这是 P0 的范围，不是 P3。
 - `AppConfig` 新增 `worker.tools`；P0 先给默认值，P2 再接入 `loadConfig` 与 `config set`。
 
 ### 5.5 错误模型与基础设施端口
@@ -463,10 +463,10 @@ export type WorkerErrorCode =
   | 'agent:not-accepting-input'
   | 'agent:gone'
   | 'agent:timeout'
-  | 'backend:unavailable'
-  | 'backend:unknown'
+  | 'runtime:unavailable'
+  | 'runtime:unknown'
 
-export class WorkerBackendError extends Error {
+export class WorkerRuntimeError extends Error {
   constructor(
     code: WorkerErrorCode,
     reason: string,
@@ -523,17 +523,17 @@ export interface ProcessSpawner {
 }
 ```
 
-**环境变量白名单（硬约束）**：Agent 进程只继承 `PATH`、`HOME`、`TMPDIR`、`LANG`、最小 `RA_*`（`RA_HOME` / `RA_PORT`）、后端自身认证变量（如 `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`）。飞书 App Secret、数据库路径、云厂商凭证等一律剥离；`ProcessSpawner.spawn` 的 `env` 必填，实现不得在缺省时回退到 `process.env`。
+**环境变量白名单（硬约束）**：Agent 进程只继承 `PATH`、`HOME`、`TMPDIR`、`LANG`、最小 `RA_*`（`RA_HOME` / `RA_PORT`）、运行时自身认证变量（如 `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`）。飞书 App Secret、数据库路径、云厂商凭证等一律剥离；`ProcessSpawner.spawn` 的 `env` 必填，实现不得在缺省时回退到 `process.env`。
 
 **prompt 传递（硬约束）**：工单契约通过 stdin 或临时文件传给 Agent CLI，不放在 argv/位置参数里，避免 `ps` 与失败日志泄露整段 prompt；`summarizeArgs` 对未知位置参数只记长度。
 
-`OrcaCommandError` 不再被 `RouterService` 引用；`OrcaBackend` 内部把它映射成 `WorkerBackendError`，保留 `orcaCode / operationId / args / stdout / stderr` 到 `detail`，现有 `reportLaunchFailure()` 的诊断字段不丢。
+`OrcaCommandError` 不再被 `RouterService` 引用；`OrcaRuntime` 内部把它映射成 `WorkerRuntimeError`，保留 `orcaCode / operationId / args / stdout / stderr` 到 `detail`，现有 `reportLaunchFailure()` 的诊断字段不丢。
 
 ---
 
 ## 6. 能力矩阵与降级规则
 
-### 6.1 三个后端的能力矩阵
+### 6.1 三个运行时的能力矩阵
 
 | 能力 | Orca（现状） | Claude Code CLI | Codex CLI |
 |-|-|-|-|
@@ -559,7 +559,7 @@ export interface ProcessSpawner {
 |-|-|-|
 | `agent.liveStatus` | 不做进程级 idle 判定；只用上报/输入时间做闲置治理 | 把「无法判断」当成僵尸 |
 | `agent.processExit` | 只按 `lastActivityAt` 判停滞；不区分正常/异常退出 | 把崩溃退出当作可 resume 的 idle |
-| `agent.nudge` | 不主动发 `status?`；只等上报或用户输入 | 对 headless 后端发 `status?` 烧 token |
+| `agent.nudge` | 不主动发 `status?`；只等上报或用户输入 | 对 headless 运行时发 `status?` 烧 token |
 | `agent.structuredInput` | 只用 TTY 注入；进程退出后不再重投 | 对已退出进程反复 resume |
 | `agent.output` | 巡检只走 activity；两者都没有则跳过 | 解析 TUI 文本当状态 |
 | `agent.activity` | 退回 output 摘要 | 假设 Claude 的 JSONL 一定存在 |
@@ -569,16 +569,16 @@ export interface ProcessSpawner {
 
 ### 6.3 巡检唤醒（idle nudge）的差异化
 
-当前 `checkIdle()` 在终端长时间无输出时会发一条 `status?` 唤醒（`src/service.ts:913-918`）。这套语义只对「常驻 TTY」成立；对 headless 后端，发 `status?` 等于再起一轮模型调用，会烧 token。规则：
+当前 `checkIdle()` 在终端长时间无输出时会发一条 `status?` 唤醒（`src/service.ts:913-918`）。这套语义只对「常驻 TTY」成立；对 headless 运行时，发 `status?` 等于再起一轮模型调用，会烧 token。规则：
 
-| 后端形态 | 唤醒策略 |
+| 运行时形态 | 唤醒策略 |
 |-|-|
-| 常驻 TTY（Orca） | `backend.nudge(ref)`；Orca 内部执行 `orca terminal send status?`，不产生 Input 行、不参与 ack |
+| 常驻 TTY（Orca） | `runtime.nudge(ref)`；Orca 内部执行 `orca terminal send status?`，不产生 Input 行、不参与 ack |
 | Claude/Codex 仍在运行（`working` / 子进程存活） | **不唤醒**；只根据 `status.lastActivityAt` 判 idle/stale |
 | Claude `done/stopped`、Codex 进程已退出且可 resume | 仅在 `acceptingInput=true` 且用户有新输入时 resume；不主动发 `status?` |
 | 无 `liveStatus` / 无 `nudge` | 不做唤醒，交给上报心跳与闲置治理 |
 
-实现位置：`checkIdle()` 先读 `backend.status?.()` 与 `capabilities.agent.nudge`；只有 Orca 这类常驻 TTY 后端才调用 `nudge()`。`deliver()` 只接收业务输入，必须带 `in_` 前缀；`status?` 不再走 `deliver`。
+实现位置：`checkIdle()` 先读 `runtime.status?.()` 与 `capabilities.agent.nudge`；只有 Orca 这类常驻 TTY 运行时才调用 `nudge()`。`deliver()` 只接收业务输入，必须带 `in_` 前缀；`status?` 不再走 `deliver`。
 
 ### 6.4 状态分类与处理矩阵
 
@@ -627,9 +627,9 @@ function classifyAgentStatus(s: AgentStatus | null): AgentVerdict {
 
 ## 7. 关键设计决策（ADR）
 
-### D1：对内核只暴露一个 `WorkerBackend`，内部构件是可选的实现手段
+### D1：对内核只暴露一个 `WorkerRuntime`，内部构件是可选的实现手段
 
-**决策**：保留 `WorkerBackend` 作为唯一公共契约；`WorkspaceProvider / AgentRuntime / ActivitySource` 是实现层内部构件，不进入 `port.ts`，不强制每个后端拆成三份。
+**决策**：保留 `WorkerRuntime` 作为唯一公共契约；`WorkspaceProvider / AgentRuntime / ActivitySource` 是实现层内部构件，不进入 `port.ts`，不强制每个运行时拆成三份。
 
 **理由**：Orca 的 `worktree create --agent claude` 把建目录和起 Agent 合并成一步，强行拆开会改变已验证的行为（`--surface terminal`、`--no-parent`、`--setup skip`、失败重试句柄）。对外契约稳定，对内实现自由。
 
@@ -637,7 +637,7 @@ function classifyAgentStatus(s: AgentStatus | null): AgentVerdict {
 
 ### D2：`handle` 保持不透明字符串，但必须配合 `ticketId/workdir/sessionId` 可还原
 
-**决策**：`assignments.handle` 继续存字符串；Orca 存 terminal handle，Claude 存 `claude --bg` 打印的 short id（UUID 型 `sessionId` 写 meta），Codex 存 sessionId。所有生命周期方法接收 `WorkerRef { handle, ticketId, workdir?, sessionId? }`，后端据此定位自己的 `~/.router-agent/workers/<ticketId>/meta.json`。
+**决策**：`assignments.handle` 继续存字符串；Orca 存 terminal handle，Claude 存 `claude --bg` 打印的 short id（UUID 型 `sessionId` 写 meta），Codex 存 sessionId。所有生命周期方法接收 `WorkerRef { handle, ticketId, workdir?, sessionId? }`，运行时据此定位自己的 `~/.router-agent/workers/<ticketId>/meta.json`。
 
 **理由**：不改表结构、不改 API、不破坏现有数据；`ticketId` 是 meta 目录的稳定键，`workdir` 是工作区定位键，`sessionId` 是会话定位键。
 
@@ -652,15 +652,15 @@ function classifyAgentStatus(s: AgentStatus | null): AgentVerdict {
 
 **决策**：`checkIdle`、`isZombie`、`recover`、`workerGone` 只读 `alive / phase / acceptingInput / lastActivityAt`；`connected/orphaned/lastOutputAt` 只保留在 adapter 的 `detail` 里。
 
-**理由**：这是当前最大的泄漏面，也是新后端「看起来实现了但一跑就误判」的根因。
+**理由**：这是当前最大的泄漏面，也是新运行时「看起来实现了但一跑就误判」的根因。
 
 **配套修正**：`isZombie()` 在「无 status 能力 / `status()` 返回 `null`」时返回 `false`，由上报心跳和闲置治理兜底，不再默认判僵尸。
 
 ### D4：输入投递语义统一为「至少一次 + ack + 幂等」，不统一传输方式
 
-**决策**：`deliver(ref, inputs, opts)` 返回 `DeliveryReceipt { accepted | queued | rejected }`；语义是「这些输入已被后端接收」，但最终完成仍以 Agent 的 `ra report --ack` 为准。Orca 的 TTY 注入、Claude 的 `--bg --resume`、Codex 的 `exec resume` 都是合法实现。
+**决策**：`deliver(ref, inputs, opts)` 返回 `DeliveryReceipt { accepted | queued | rejected }`；语义是「这些输入已被运行时接收」，但最终完成仍以 Agent 的 `ra report --ack` 为准。Orca 的 TTY 注入、Claude 的 `--bg --resume`、Codex 的 `exec resume` 都是合法实现。
 
-**理由**：不同 CLI 的输入模型不同；强行统一成 TTY 会把新后端逼回伪终端方案，强行统一成 headless 又会改变 Orca 已验证的交互体验。
+**理由**：不同 CLI 的输入模型不同；强行统一成 TTY 会把新运行时逼回伪终端方案，强行统一成 headless 又会改变 Orca 已验证的交互体验。
 
 **配套约束（并发去重与可靠重投是两件事）**：
 - **并发去重**：adapter 以 `(input.id, attempt)` 为键；同一 attempt 的并发 `deliver` 只 handoff 一次，持久化到 meta 的 `lastHandedOffInputId + attempt`；
@@ -672,15 +672,15 @@ function classifyAgentStatus(s: AgentStatus | null): AgentVerdict {
 
 ### D5：活动读取独立于运行时
 
-**决策**：`ActivitySource` 单独实现，adapter 可组合不同来源（Orca 后端组合 Claude 会话 + 终端输出；Claude CLI 只用 Claude 会话；Codex 只用 Codex rollout）。
+**决策**：`ActivitySource` 单独实现，adapter 可组合不同来源（Orca 运行时组合 Claude 会话 + 终端输出；Claude CLI 只用 Claude 会话；Codex 只用 Codex rollout）。
 
 **理由**：活动格式由 **Agent 产品** 决定，不由 **进程托管方式** 决定。今天 Orca 里跑的也是 Claude Code，所以 `orca/session.ts` 读的是 Claude 的 JSONL；把它留在 Orca 目录下会误导后续实现。
 
-### D6：报告协议是跨后端不变量
+### D6：报告协议是跨运行时不变量
 
-**决策**：`ra report` + `state.json` 兜底保持不变；新后端的 `ToolPolicy` 必须保证 shell 可执行 `ra`，且 `PATH` 在 Agent 启动环境中可见。
+**决策**：`ra report` + `state.json` 兜底保持不变；新运行时的 `ToolPolicy` 必须保证 shell 可执行 `ra`，且 `PATH` 在 Agent 启动环境中可见。
 
-**理由**：这是 Router 唯一能稳定拿到「回合/状态/PR/回复」的通道。如果某个 Agent 工具不能执行 shell，则它不能作为 Worker 后端（只能作为研判层）。
+**理由**：这是 Router 唯一能稳定拿到「回合/状态/PR/回复」的通道。如果某个 Agent 工具不能执行 shell，则它不能作为 Worker 运行时（只能作为研判层）。
 
 ### D7：工作区优先复用 Git，不把 Orca 当通用依赖
 
@@ -688,9 +688,9 @@ function classifyAgentStatus(s: AgentStatus | null): AgentVerdict {
 
 **理由**：这两个 CLI 本身只需要一个 cwd，不需要 Orca 的终端管理；直接依赖 `git` 可以减少一层故障面，也让 Linux 支持更容易。
 
-### D8：配置用注册表，`backend.default` 兼容旧值
+### D8：配置用注册表，`runtime.default` 兼容旧值
 
-**决策**：`backend.default` 从字面量 `'orca'` 放宽为 `string`；新增 `BackendRegistry / createBackends` 注册表，按 `assignment.backendId` 取后端；未知后端报 `backend:unknown`，不静默回退。
+**决策**：`runtime.default` 从字面量 `'orca'` 放宽为 `string`；新增 `RuntimeRegistry / createRuntimes` 注册表，按 `assignment.runtimeId` 取运行时；未知运行时报 `runtime:unknown`，不静默回退。
 
 **理由**：当前配置解析只接受 `'orca'`（`src/config.ts:899-901`），必须放宽；但旧配置要继续可用。
 
@@ -701,7 +701,7 @@ function classifyAgentStatus(s: AgentStatus | null): AgentVerdict {
 2. `inspectWorkspace(...).branch` 拿实际工作分支（provider 可能加后缀）；
 3. `prTracker.findByBranch(repo, branch)`（`gh pr list --head`）。
 
-**理由**：Claude/Codex 后端没有 Orca 的 `linkedPR`；不补这条路径，新后端只能依赖 Worker 自觉上报 PR，闭环会退化。
+**理由**：Claude/Codex 运行时没有 Orca 的 `linkedPR`；不补这条路径，新运行时只能依赖 Worker 自觉上报 PR，闭环会退化。
 
 **约束**：
 - 实际工作分支不从 `workBranch(ticket)` 重算，必须来自 `inspectWorkspace().branch`（adapter 内部从 `meta.workBranch` 读取）；provider 不实现 `inspectWorkspace` 时才退回 `workBranch(ticket)` 并记日志说明可能不精确；
@@ -714,22 +714,22 @@ function classifyAgentStatus(s: AgentStatus | null): AgentVerdict {
 - Claude：`--allowedTools` 用命令级白名单（默认 `Read,Write,Edit,Glob,Grep` + `Bash(ra report:*),Bash(ra doc:*),Bash(git:*),Bash(gh:*)` + 常用构建/测试命令 `pnpm/npm/npx/node/yarn/bun/python/pytest/cargo/go/make/mvn/gradle`，**不放行裸 `Bash`、不放行 `ra config/stop/serve`**）+ `--permission-mode acceptEdits`；`--permission-prompts none` 需显式开启；
 - Codex：`-s workspace-write`（默认）+ 关闭网络；`--dangerously-bypass-approvals-and-sandbox` 仅显式配置。
 
-**安全参数不可被 `backend.options` 覆盖**：`allowedTools / permissionMode / sandbox / shellAllow / allowNetwork` 只由 `worker.tools` 与内置安全基线生成；`backend.options` 只能放模型、超时、并发等非安全参数。`loadConfig` 发现 options 试图放宽安全策略时拒绝启动。
+**安全参数不可被 `runtime.options` 覆盖**：`allowedTools / permissionMode / sandbox / shellAllow / allowNetwork` 只由 `worker.tools` 与内置安全基线生成；`runtime.options` 只能放模型、超时、并发等非安全参数。`loadConfig` 发现 options 试图放宽安全策略时拒绝启动。
 
 **理由**：这是「Agent 工具适配」的真正差异点之一；不抽象会把 Claude 的工具名或 Codex 的沙箱参数写进内核。`fileAccess` 在 Claude 上只是约定（没有 OS 级文件沙箱），必须在文档和 doctor 里明确，不能宣称已强制隔离。
 
-### D11：按 `assignment.backendId` 路由，而不是全局单后端
+### D11：按 `assignment.runtimeId` 路由，而不是全局单运行时
 
-**决策**：`BackendRegistry` 按 id 持有多个 backend；所有生命周期操作先解析 assignment，再用 `registry.get(assignment.backendId)`。`config.backend.default` 只决定新工单用哪个后端。
+**决策**：`RuntimeRegistry` 按 id 持有多个 runtime；所有生命周期操作先解析 assignment，再用 `registry.get(assignment.runtimeId)`。`config.runtime.default` 只决定新工单用哪个运行时。
 
-**理由**：切换默认后端后，旧 Orca 工单的 handle 不能交给 Claude/Codex；同一实例必须允许 Orca 与 Claude 工单共存。
+**理由**：切换默认运行时后，旧 Orca 工单的 handle 不能交给 Claude/Codex；同一实例必须允许 Orca 与 Claude 工单共存。
 
 **约束**：
-- **已有 assignment** 的 `stop/deliver/status/activity/cleanup`：从 `latestAssignment(ticketId).backendId` 反查；
-- **launch / relaunch**（首次派工还没有 assignment）：用 `registry.default()`，或由 effect payload 显式带 `backendId`；`launch-worker` 不适用「从 latestAssignment 反查」；
-- 手工绑定 Assignment 时校验 `backendId` 已注册，不允许写入未知后端；
-- 后端不存在时抛 `backend:unknown`，转人工，不回退到默认后端；
-- `loadConfig` / `ra serve` 启动时校验 `backend.default` 已注册；P2 只注册 `orca`，因此 P2 阶段配置成 `claude-cli` 必须在启动期 fail-fast，而不是等第一张工单派工时才报错。
+- **已有 assignment** 的 `stop/deliver/status/activity/cleanup`：从 `latestAssignment(ticketId).runtimeId` 反查；
+- **launch / relaunch**（首次派工还没有 assignment）：用 `registry.default()`，或由 effect payload 显式带 `runtimeId`；`launch-worker` 不适用「从 latestAssignment 反查」；
+- 手工绑定 Assignment 时校验 `runtimeId` 已注册，不允许写入未知运行时；
+- 运行时不存在时抛 `runtime:unknown`，转人工，不回退到默认运行时；
+- `loadConfig` / `ra serve` 启动时校验 `runtime.default` 已注册；P2 只注册 `orca`，因此 P2 阶段配置成 `claude-cli` 必须在启动期 fail-fast，而不是等第一张工单派工时才报错。
 
 ### D12：默认安全边界：环境变量白名单 + 最小工具权限 + 单实例锁
 
@@ -741,7 +741,7 @@ function classifyAgentStatus(s: AgentStatus | null): AgentVerdict {
 
 **残余风险（必须写进文档与 doctor）**：git/gh 需要真实 `HOME`，因此 Agent 仍可能读到 `~/.router-agent/config.yaml` 里的模型/飞书凭证、`~/.ssh` 等；此外 Bash 前缀白名单不是安全沙箱（`ra report; rm` 这类拼接仍可能绕过），只能降低风险，不能证明隔离。一期只能通过最小权限 + 命令白名单缓解；彻底隔离需要 macOS `sandbox-exec` / 容器 / 独立 OS 用户，列为后续安全加固项。
 
-**理由**：工单内容来自飞书，属于不可信输入；新后端会把「一个工单一个可执行 Agent」变成常态，默认权限必须比 Orca 交互式终端更保守。
+**理由**：工单内容来自飞书，属于不可信输入；新运行时会把「一个工单一个可执行 Agent」变成常态，默认权限必须比 Orca 交互式终端更保守。
 
 ---
 
@@ -750,7 +750,7 @@ function classifyAgentStatus(s: AgentStatus | null): AgentVerdict {
 ### 8.1 拆分方式（行为不变）
 
 ```text
-OrcaBackend (id='orca')
+OrcaRuntime (id='orca')
 ├── OrcaProvisioner                # 内部实现，不强制实现 5.1 的严格 create 语义
 │   ├── createAndLaunch(req)  → orca worktree create --agent claude ...
 │   ├── inspect(ref)          → orca worktree show
@@ -763,13 +763,13 @@ OrcaBackend (id='orca')
     └── read(query) → 先按 sessionId 精确匹配，找不到再退最新文件
 ```
 
-> 说明：Orca 的 `createAndLaunch` 把「建 worktree」和「起 Agent」合成一条命令，因此它**不必**严格实现 `WorkspaceProvider.create()`；`WorkerBackend.start()` 是唯一对外契约。Claude/Codex 等新后端才使用严格的 `GitWorktreeProvider + AgentRuntime` 组合。
+> 说明：Orca 的 `createAndLaunch` 把「建 worktree」和「起 Agent」合成一条命令，因此它**不必**严格实现 `WorkspaceProvider.create()`；`WorkerRuntime.start()` 是唯一对外契约。Claude/Codex 等新运行时才使用严格的 `GitWorktreeProvider + AgentRuntime` 组合。
 
 ### 8.2 行为保持清单
 
 - `worktree create` 参数完全不变：`--repo` 选择器、`--name`、`--base-branch`、`--branch`、`--agent claude`、`--surface terminal`、`--prompt`、`--no-parent`、`--setup skip`、`--json`（`commands.ts:21-36`）。
 - `meta.json` 旧字段全部保留，按 9.4 的 v2 增量扩展（`schemaVersion/process/sessionId/logPath/status/lastHandedOff*`）；Orca 写入时机不变。
-- 失败诊断字段 `orcaCode / operationId / cause / args / stdout / stderr` 不变，只是从 `OrcaCommandError` 转成 `WorkerBackendError.detail`。
+- 失败诊断字段 `orcaCode / operationId / cause / args / stdout / stderr` 不变，只是从 `OrcaCommandError` 转成 `WorkerRuntimeError.detail`。
 - `judgeIdle` 的最终判定由 Router 的 `classifyAgentStatus` + `idleAfterMs` 计算；Orca adapter 只提供 `lastActivityAt / acceptingInput / phase`，不再直接产出 idle/orphaned 结论。
 - `checkIdle` 在 Orca 下仍然只在 `capabilities.agent.liveStatus=true` 时运行。
 
@@ -793,17 +793,17 @@ OrcaBackend (id='orca')
 | `isZombie` 把「无 inspect」当僵尸 | 改为「无 status / null → 不判僵尸」，并统一 6.4 矩阵 |
 | `deliver` 失败每秒重试 | 增加 `delivery-failure:<ticket>` 游标（attempts/lastInputId/nextAt），按 `retryable` 退避；超限转人工 |
 | 投递成功但未 ack 仍每 tick 重投 | 按 `(input.id, attempt)` 去重 + 单飞；Router 退避后带 `attempt+1 / redeliver=true` 串行重投，adapter 必须允许再次 resume |
-| launch 半成功留下 worktree/branch | `start()` 失败时把已创建的 `workdir/branch` 放进 `WorkerBackendError.detail`；Router 落库后入队 cleanup；adapter best-effort 回滚 |
+| launch 半成功留下 worktree/branch | `start()` 失败时把已创建的 `workdir/branch` 放进 `WorkerRuntimeError.detail`；Router 落库后入队 cleanup；adapter best-effort 回滚 |
 | 进程退出但未上报被当作 idle | `status` 区分 `exited` + `exitCode`；非 0 退出在 grace 窗口后转人工，不进入可 resume 的 idle |
 | 崩溃/挂起没有看门狗 | 增加 wall-clock 超时（默认 2h）与输出停滞超时（默认 15min）；`markZombie` 停止已挂起进程，或明确提示人工保留 |
 | `findByBranch` 未使用 | 接进 `trackPullRequests` 的兜底路径（见 D9） |
 | `relaunchAgent` 死代码 | 要么接到「worker 丢失后重开」流程，要么删除 |
-| `OrcaCommandError` 泄漏到 service | 在 adapter 边界映射为 `WorkerBackendError`；`describeLaunchError` 改读中立字段 |
-| 全局单 backend | 按 `assignment.backendId` 从注册表取 backend（见 D11） |
+| `OrcaCommandError` 泄漏到 service | 在 adapter 边界映射为 `WorkerRuntimeError`；`describeLaunchError` 改读中立字段 |
+| 全局单 runtime | 按 `assignment.runtimeId` 从注册表取 runtime（见 D11） |
 
 ---
 
-## 9. 新后端落地方案
+## 9. 新运行时落地方案
 
 ### 9.1 Claude Code CLI Adapter
 
@@ -921,16 +921,16 @@ codex exec resume <sessionId> --json - < input.txt
 - **失败回滚**：`git worktree add` 成功但 Agent 启动失败时，adapter 对本次新建的 worktree/branch 做 best-effort 清理（`git worktree remove --force` + `git branch -D`），失败则把 `workdir/branch` 放进错误 detail，交给 Router 入队 cleanup；
 - **PR 兜底**：本地路径仓库的 `owner/name` 从 `git remote get-url origin` 推导；推导失败则跳过 `gh pr list --repo`，只依赖 Worker 上报。
 
-### 9.4 后端自有元数据：`meta.json` v2
+### 9.4 运行时自有元数据：`meta.json` v2
 
-所有后端共用一个 `~/.router-agent/workers/<ticketId>/meta.json`，但字段语义必须统一。v2 在现有字段上增量扩展，旧字段保留：
+所有运行时共用一个 `~/.router-agent/workers/<ticketId>/meta.json`，但字段语义必须统一。v2 在现有字段上增量扩展，旧字段保留：
 
 ```ts
 export interface WorkerMetaV2 {
   schemaVersion: 2
   ticketId: string
   assignmentId: string
-  backend: string
+  runtime: string
   handle: string
   workdir: string
   statePath: string
@@ -940,7 +940,7 @@ export interface WorkerMetaV2 {
   branch: string
   /** 实际工作分支（可能被 provider 加后缀）；D9 用它做 gh pr list --head。 */
   workBranch: string
-  /** Claude/Codex 等非 Orca 后端：进程身份，用于重启后校验与 stop。Orca 无独立进程，留空。 */
+  /** Claude/Codex 等非 Orca 运行时：进程身份，用于重启后校验与 stop。Orca 无独立进程，留空。 */
   process?: ProcessIdentity
   sessionId?: string
   logPath?: string
@@ -953,7 +953,7 @@ export interface WorkerMetaV2 {
 }
 ```
 
-**写入时机（逐后端）**：
+**写入时机（逐运行时）**：
 - **Orca**：`worktree create` 返回后写一次（现状不变）；`branch`=起始分支，`workBranch`=实际分支；没有 `process`/`sessionId`；
 - **Claude**：调用 `claude --bg` 前写 `status='starting'`；拿到 short id 后查 `agents --json --all`，补 `sessionId/pid/startedAt`；`process.argv` 记录启动命令（不含 brief 正文）；`state=blocked/done/stopped` 只更新 meta 的 `status`，不写 `exit.json`；
 - **Codex**：spawn 前原子写 `{ status:'starting', process:{pid:0,...} }`，spawn 后补 `pid/startedAt/argv/cwd/sessionId/logPath`；进程退出后写 `exit.json` 并更新 `status='exited'`；
@@ -962,7 +962,7 @@ export interface WorkerMetaV2 {
 
 ### 9.5 前端/CLI 展示
 
-`Assignment.backendId` 已存在，`ra ticket` / Web 面板可以显示 `orca / claude-cli / codex-cli`；不需要改状态机。
+`Assignment.runtimeId` 已存在，`ra ticket` / Web 面板可以显示 `orca / claude-cli / codex-cli`；不需要改状态机。
 
 ---
 
@@ -971,9 +971,9 @@ export interface WorkerMetaV2 {
 | 位置 | 现状 | 改造 |
 |-|-|-|
 | `src/service.ts:14` | import `OrcaTerminalInfo / OrcaCommandError` | 删除；只 import `worker/port.js` 中立类型 |
-| `service.ts:40-44 / 443-447 / 1633-1638` | `backend` 交叉类型挂 `inspect/inspectWorktree/removeWorktree` | 删除交叉类型；端口新增 `status/output/activity/inspectWorkspace/removeWorkspace`（今天端口没有声明这些） |
-| `service.ts:488 / 709 / 836 / 1172 / 1521` | 所有操作都用全局 `this.backend` | 已有 assignment 的操作按 `assignment.backendId` 路由；launch/relaunch 用 `registry.default()` 或 effect 显式 backendId（D11） |
-| `service.ts:884-929 checkIdle` | 只认 Orca 终端字段 | 改读 `backend.status?.()`；按 6.3 决定是否 `nudge`；无能力则跳过 |
+| `service.ts:40-44 / 443-447 / 1633-1638` | `runtime` 交叉类型挂 `inspect/inspectWorktree/removeWorktree` | 删除交叉类型；端口新增 `status/output/activity/inspectWorkspace/removeWorkspace`（今天端口没有声明这些） |
+| `service.ts:488 / 709 / 836 / 1172 / 1521` | 所有操作都用全局 `this.runtime` | 已有 assignment 的操作按 `assignment.runtimeId` 路由；launch/relaunch 用 `registry.default()` 或 effect 显式 runtimeId（D11） |
+| `service.ts:884-929 checkIdle` | 只认 Orca 终端字段 | 改读 `runtime.status?.()`；按 6.3 决定是否 `nudge`；无能力则跳过 |
 | `service.ts:1023-1040 isZombie` | 无 inspect 直接判僵尸 | 消费 `classifyAgentStatus`：keep 才按 `lastActivityAt` 判；unknown→false；lost/transfer→true |
 | `service.ts:1165-1205 cleanupWorkspace` | `removeWorktree('path:' + workdir)` | `removeWorkspace({ticketId, workdir})`；`not-found` 视为成功；无能力则通知 |
 | `service.ts:1373-1396 probeTicket` | `inspect` + `session` + `read` | `status` 可选 + `activity(query)` 优先 + `output` 兜底 |
@@ -981,15 +981,15 @@ export interface WorkerMetaV2 {
 | `service.ts:1518-1552 recover` | 依赖 `inspect.connected/orphaned` | 消费 `classifyAgentStatus`；unknown 保持，lost 转人工，transfer 置 attention |
 | `service.ts:1557-1565 workerGone` | 依赖 `inspect` | 消费 `classifyAgentStatus`；unknown→false；lost/transfer→true |
 | `service.ts:819-852 deliverPendingInputs` | 失败/未 ack 每秒重投 | 增加 `delivery-failure` 游标 + 指数退避；`attempt+1/redeliver` 串行重投；按 `DeliveryReceipt` 与 `retryable` 分流 |
-| `service.ts:1686-1719 describeLaunchError` | `instanceof OrcaCommandError`，`LaunchErrorDetail.orcaCode` | 改读 `WorkerBackendError.code/cause/detail`；`orcaCode` 改为中立 `providerCode` |
-| `src/router/api.ts:9 / 118` | import `WorkerStateFile` 旧路径；写死 `backend.default` | 改从 `worker/port.js` 导入；手工绑定校验 backendId 存在 |
+| `service.ts:1686-1719 describeLaunchError` | `instanceof OrcaCommandError`，`LaunchErrorDetail.orcaCode` | 改读 `WorkerRuntimeError.code/cause/detail`；`orcaCode` 改为中立 `providerCode` |
+| `src/router/api.ts:9 / 118` | import `WorkerStateFile` 旧路径；写死 `runtime.default` | 改从 `worker/port.js` 导入；手工绑定校验 runtimeId 存在 |
 | `worker/orca/report-poller.ts:156-176 judgeIdle` | Orca 字段判定 | 上移到 `worker/status.ts`，输入 `AgentStatus`；映射表见 8.2 |
-| `worker/orca/report-poller.ts:68-110 ReportPoller` | 与后端无关但路径在 orca 下 | P0 上移到 `worker/report-poller.ts`，旧路径 re-export |
-| `worker/spec/index.ts:22-36 buildWorkerPrompt` | 在 OrcaAdapter 内拼手册 | 抽出 `buildWorkerBrief`（中立）；**Orca 继续使用现有 `prompt-mode.md` 原文**，保证零行为变化；新后端用 `contract.md` + 自己的启动包装 |
-| `worker/naming.ts` | 注释写 Orca | 改成后端中立说明（逻辑本来就是 git） |
+| `worker/orca/report-poller.ts:68-110 ReportPoller` | 与运行时无关但路径在 orca 下 | P0 上移到 `worker/report-poller.ts`，旧路径 re-export |
+| `worker/spec/index.ts:22-36 buildWorkerPrompt` | 在 OrcaRuntime 内拼手册 | 抽出 `buildWorkerBrief`（中立）；**Orca 继续使用现有 `prompt-mode.md` 原文**，保证零行为变化；新运行时用 `contract.md` + 自己的启动包装 |
+| `worker/naming.ts` | 注释写 Orca | 改成运行时中立说明（逻辑本来就是 git） |
 | `worker/spec/prompt-mode.md` | 写死 Orca / Claude | 拆成 `contract.md`（中立）+ `claude-agent.md`（专属） |
 
-**验收口径**：`grep -rn "Orca\|orca" src/service.ts src/router/api.ts src/core src/store` 应该只剩注释/配置说明；例外只允许 `worker/backends/orca/**` 与 re-export 层。
+**验收口径**：`grep -rn "Orca\|orca" src/service.ts src/router/api.ts src/core src/store` 应该只剩注释/配置说明；例外只允许 `worker/runtimes/orca/**` 与 re-export 层。
 
 ---
 
@@ -998,7 +998,7 @@ export interface WorkerMetaV2 {
 ### 11.1 配置
 
 ```yaml
-backend:
+runtime:
   default: orca            # 兼容旧值；可为 claude-cli / codex-cli（必须已注册，否则启动失败）
   options:                 # 只放非安全参数：模型、超时、并发
     claude-cli:
@@ -1008,7 +1008,7 @@ backend:
       model: gpt-5-codex
       turnTimeoutMs: 7200000
 
-# 中立工具策略：Router 生成，adapter 只映射；安全参数不可被 backend.options 覆盖
+# 中立工具策略：Router 生成，adapter 只映射；安全参数不可被 runtime.options 覆盖
 worker:
   tools:
     fileAccess: read-write
@@ -1017,76 +1017,76 @@ worker:
     allowNetwork: false
 ```
 
-- `src/config.ts` 的 `backend` 从 `{ default: 'orca' }` 放宽为 `{ default: string; options?: Record<string, unknown> }`。
-- `loadConfig` 必须真正解析 `doc.backend.default / doc.backend.options`（当前写死 `{ default: 'orca' }`，见 `config.ts:232/399`）；非法值或未注册值抛 `backend:unknown`，旧配置缺省仍是 `orca`。
-- `config set backend.default claude-cli` 不再被 `value !== 'orca'` 拒绝（`config.ts:899-901`）。
-- `src/router/api.ts:118` 手工绑定 Assignment 时用配置的 backend，并校验 `backendId` 已注册，而不是写死 `'orca'`。
-- `ToolPolicy` 由 `worker.tools` 生成；`allowedTools / permissionMode / sandbox / shellAllow / allowNetwork` 等安全参数只能来自 `worker.tools` 与 adapter 内置安全基线，`backend.options` 不允许覆盖；`loadConfig` 发现放宽尝试直接拒绝。
+- `src/config.ts` 的 `runtime` 从 `{ default: 'orca' }` 放宽为 `{ default: string; options?: Record<string, unknown> }`。
+- `loadConfig` 必须真正解析 `doc.runtime.default / doc.runtime.options`（当前写死 `{ default: 'orca' }`，见 `config.ts:232/399`）；非法值或未注册值抛 `runtime:unknown`，旧配置缺省仍是 `orca`。
+- `config set runtime.default claude-cli` 不再被 `value !== 'orca'` 拒绝（`config.ts:899-901`）。
+- `src/router/api.ts:118` 手工绑定 Assignment 时用配置的 runtime，并校验 `runtimeId` 已注册，而不是写死 `'orca'`。
+- `ToolPolicy` 由 `worker.tools` 生成；`allowedTools / permissionMode / sandbox / shellAllow / allowNetwork` 等安全参数只能来自 `worker.tools` 与 adapter 内置安全基线，`runtime.options` 不允许覆盖；`loadConfig` 发现放宽尝试直接拒绝。
 - `shellAllow` 按命令前缀匹配：`ra report` / `ra doc` 可用，`ra config` / `ra stop` / `ra serve` 不在白名单。
 
 ### 11.2 注册表
 
 ```ts
 // src/worker/registry.ts
-export class BackendRegistry {
+export class RuntimeRegistry {
   constructor(
-    private backends: Map<string, WorkerBackend>,
+    private runtimes: Map<string, WorkerRuntime>,
     private defaultId: string,
   ) {}
-  get(id: string): WorkerBackend {
-    const backend = this.backends.get(id)
-    if (!backend) throw new WorkerBackendError('backend:unknown', `未知 backend: ${id}`)
-    return backend
+  get(id: string): WorkerRuntime {
+    const runtime = this.runtimes.get(id)
+    if (!runtime) throw new WorkerRuntimeError('runtime:unknown', `未知 runtime: ${id}`)
+    return runtime
   }
-  default(): WorkerBackend { return this.get(this.defaultId) }
+  default(): WorkerRuntime { return this.get(this.defaultId) }
 }
 
-// P2 只注册已经存在的后端；新增后端在主 PR 里追加 case，避免单独合并时编译失败。
-export function createBackends(config: AppConfig, deps: BackendDeps): BackendRegistry {
-  const backends = new Map<string, WorkerBackend>()
-  backends.set('orca', new OrcaBackend(deps))
-  // P3: backends.set('claude-cli', new ClaudeCliBackend(deps))
-  // P4: backends.set('codex-cli', new CodexCliBackend(deps))
-  return new BackendRegistry(backends, config.backend.default)
+// P2 只注册已经存在的运行时；新增运行时在主 PR 里追加 case，避免单独合并时编译失败。
+export function createRuntimes(config: AppConfig, deps: RuntimeDeps): RuntimeRegistry {
+  const runtimes = new Map<string, WorkerRuntime>()
+  runtimes.set('orca', new OrcaRuntime(deps))
+  // P3: runtimes.set('claude-cli', new ClaudeCliRuntime(deps))
+  // P4: runtimes.set('codex-cli', new CodexCliRuntime(deps))
+  return new RuntimeRegistry(runtimes, config.runtime.default)
 }
 ```
 
-`BackendDeps` 包含 `commandRunner / processSpawner / workersDir / home / specMode / claudeProjectsDir? / codexHome? / envAllowlist`，便于测试注入。
+`RuntimeDeps` 包含 `commandRunner / processSpawner / workersDir / home / specMode / claudeProjectsDir? / codexHome? / envAllowlist`，便于测试注入。
 
 ### 11.3 doctor / init
 
-- `runDoctor` 的 Orca 检查改成「当前 backend 的自检」：
-  - `backend.doctor?.()` 返回 `DiagnosticCheck[]`；
+- `runDoctor` 的 Orca 检查改成「当前 runtime 的自检」：
+  - `runtime.doctor?.()` 返回 `DiagnosticCheck[]`；
   - Orca 实现：`orca status` + `orca repo list`；
   - Claude/Codex 实现：可执行文件存在、版本、认证状态（`claude --version` / `codex --version`，认证能检测则检测，不能则跳过）。
-- `ra init` 的仓库选择：`backend.listRepos?.()`；无能力时退回手输，不因为 Orca 不在而阻塞。
-- `parseOrcaStatus / parseOrcaRepos` 从 `sources/lark.ts` 移到 `worker/backends/orca/parse.ts`（它们与飞书无关，放 lark.ts 是历史遗留）。
+- `ra init` 的仓库选择：`runtime.listRepos?.()`；无能力时退回手输，不因为 Orca 不在而阻塞。
+- `parseOrcaStatus / parseOrcaRepos` 从 `sources/lark.ts` 移到 `worker/runtimes/orca/parse.ts`（它们与飞书无关，放 lark.ts 是历史遗留）。
 
 ---
 
 ## 12. 兼容性与数据模型
 
-- **数据库**：不改表。`assignments.backend_id / handle / workdir` 足够；`sessionId / process / workBranch / lastHandedOff*` 由 adapter 写在 `~/.router-agent/workers/<ticketId>/meta.json`（v2，见 9.4），Router 通过 `WorkerRef { ticketId, workdir, sessionId? }` 让 adapter 自己读取。实际工作分支从 `meta.workBranch` 或 `inspectWorkspace().branch` 获取，不新增列。若未来某 provider 需要不可推导的 ref，再加 nullable 列 `workspace_ref`（独立迁移，不在本期）。
-- **旧工单**：`backend_id='orca'` 继续工作；所有生命周期操作按 `assignment.backendId` 路由，不会被新默认后端接管。
-- **旧配置**：缺 `backend` 时默认 `orca`；`backend.default: orca` 继续有效；`loadConfig` 必须解析该字段（当前是写死值）。
-- **旧 effect**：`launch-worker / stop-worker / cleanup-workspace` 的 payload 不变；已有 assignment 的 handler 从 latest assignment 反查 backendId，launch 用 `registry.default()`，也可在 payload 追加可选 `backendId` 覆盖。
+- **数据库**：不改表。`assignments.runtime_id / handle / workdir` 足够；`sessionId / process / workBranch / lastHandedOff*` 由 adapter 写在 `~/.router-agent/workers/<ticketId>/meta.json`（v2，见 9.4），Router 通过 `WorkerRef { ticketId, workdir, sessionId? }` 让 adapter 自己读取。实际工作分支从 `meta.workBranch` 或 `inspectWorkspace().branch` 获取，不新增列。若未来某 provider 需要不可推导的 ref，再加 nullable 列 `workspace_ref`（独立迁移，不在本期）。
+- **旧工单**：`runtime_id='orca'` 继续工作；所有生命周期操作按 `assignment.runtimeId` 路由，不会被新默认运行时接管。
+- **旧配置**：缺 `runtime` 时默认 `orca`；`runtime.default: orca` 继续有效；`loadConfig` 必须解析该字段（当前是写死值）。
+- **旧 effect**：`launch-worker / stop-worker / cleanup-workspace` 的 payload 不变；已有 assignment 的 handler 从 latest assignment 反查 runtimeId，launch 用 `registry.default()`，也可在 payload 追加可选 `runtimeId` 覆盖。
 - **报告协议**：完全不变；`state.json` 仍是兜底。
-- **日志/审计**：`launch` 日志继续带 `handle/workdir`；新后端追加 `backendId`，不改变现有字段。
+- **日志/审计**：`launch` 日志继续带 `handle/workdir`；新运行时追加 `runtimeId`，不改变现有字段。
 - **meta 半状态**：`meta.json` 原子写入；找不到 meta 时 `status()` 返回 `null`，不默认存活、也不直接判丢失。
 
 ---
 
 ## 13. 实施计划（可分阶段合并）
 
-> **交付节奏**：一期 = P0 + P1 + P2 + P3，**Claude Code CLI 后端随一期一起交付**；二期 = P4 + P5（Codex CLI 与旧路径清理）。
+> **交付节奏**：一期 = P0 + P1 + P2 + P3，**Claude Code CLI 运行时随一期一起交付**；二期 = P4 + P5（Codex CLI 与旧路径清理）。
 > 每一阶段仍保持独立可合并、可 revert；P3 不拆到二期。
 
 ### P0 · 契约先行（不改行为，可独立合并）
 
-- 新增 `src/worker/port.ts` 的中立模型与 `WorkerBackend` v2（含 `WorkerRef / StartResult / DeliveryReceipt / AgentStatus | null`）；
+- 新增 `src/worker/port.ts` 的中立模型与 `WorkerRuntime` v2（含 `WorkerRef / StartResult / DeliveryReceipt / AgentStatus | null`）；
 - **同时**把 `report-poller.ts` / `judgeIdle` 上移到 `src/worker/`（旧路径 re-export），否则 `service.ts:13` 的旧 import 会让「去 Orca 化」验收失败；
-- `OrcaAdapter` 实现新签名（`status` 包装 `inspect`、`output` 包装 `read`、`activity` 包装 `session`、`inspectWorkspace/removeWorkspace` 包装旧方法）；
-- `RouterService` 改成只依赖端口；`describeLaunchError` 改读 `WorkerBackendError`；`src/router/api.ts` 的旧路径 import 一并修正；
+- `OrcaRuntime` 实现新签名（`status` 包装 `inspect`、`output` 包装 `read`、`activity` 包装 `session`、`inspectWorkspace/removeWorkspace` 包装旧方法）；
+- `RouterService` 改成只依赖端口；`describeLaunchError` 改读 `WorkerRuntimeError`；`src/router/api.ts` 的旧路径 import 一并修正；
 - 新增 `buildWorkerContext()` 与 `buildWorkerBrief()`：report 路径由 `workersDir` 推导，tools 来自 `config.worker.tools`；Orca 走 `buildOrcaBrief()`，输出必须与当前 `buildWorkerPrompt()` 逐字节一致；
 - `AppConfig` 新增 `worker.tools` 默认值（先不接 CLI）；
 - 新增 `tests/worker/contract.test.ts`，先只跑 Orca fake；新增 Orca prompt snapshot 测试。
@@ -1095,7 +1095,7 @@ export function createBackends(config: AppConfig, deps: BackendDeps): BackendReg
 
 ### P1 · 拆 Orca 实现 + 失败模式修复
 
-- Orca 拆成 `OrcaProvisioner / OrcaTerminalRuntime / ClaudeSessionActivity`，`OrcaBackend` 组合；
+- Orca 拆成 `OrcaProvisioner / OrcaTerminalRuntime / ClaudeSessionActivity`，`OrcaRuntime` 组合；
 - 修掉 8.3 表中的问题：`isZombie` 未知误判、投递失败/未 ack 重投、launch 半成功残留、进程退出未上报、`findByBranch` 未接线、`describeLaunchError` 强类型；
 - 实现 Orca `nudge()`（内部 `terminal send status?`），`checkIdle` 不再用 `deliver` 发送控制信号；
 - 重写 `judgeIdle` 单测，按 6.4 的 `classifyAgentStatus` 映射表覆盖。
@@ -1104,15 +1104,15 @@ export function createBackends(config: AppConfig, deps: BackendDeps): BackendReg
 
 ### P2 · 配置、注册表与装配
 
-- `loadConfig` 真正解析 `backend.default / backend.options`（当前写死）；启动期校验 default 已注册，未知值 fail-fast；
-- `BackendRegistry` 按 id 取后端；已有 assignment 的生命周期操作按 `assignment.backendId` 路由；launch/relaunch 用 `registry.default()` 或 effect 显式 backendId；
-- `ra serve` 用注册表；`backend.default` 只决定新工单；P2 只注册 `orca`，配置其他值直接启动失败；P3 在同一期追加 `claude-cli`；
-- doctor/init 改为 backend 自检/仓库发现；
+- `loadConfig` 真正解析 `runtime.default / runtime.options`（当前写死）；启动期校验 default 已注册，未知值 fail-fast；
+- `RuntimeRegistry` 按 id 取运行时；已有 assignment 的生命周期操作按 `assignment.runtimeId` 路由；launch/relaunch 用 `registry.default()` 或 effect 显式 runtimeId；
+- `ra serve` 用注册表；`runtime.default` 只决定新工单；P2 只注册 `orca`，配置其他值直接启动失败；P3 在同一期追加 `claude-cli`；
+- doctor/init 改为 runtime 自检/仓库发现；
 - 加 `ra serve` 单实例锁 + 工单 launch lease + repo 级 worktree 串行化。
-- **验收**：旧 Orca 工单与手工绑定继续工作；未知 backend 明确报错；单实例测试通过。
-- **回滚**：注册表只注册 `orca`，`backend.default=orca`。
+- **验收**：旧 Orca 工单与手工绑定继续工作；未知 runtime 明确报错；单实例测试通过。
+- **回滚**：注册表只注册 `orca`，`runtime.default=orca`。
 
-### P3 · Claude Code CLI 后端（一期必须交付）
+### P3 · Claude Code CLI 运行时（一期必须交付）
 
 - **前置安全项**：`ra report` 支持 `--port` / `RA_PORT`；`ra doc` 走 Router 代理（或使用只读最小 `RA_HOME`），避免 Agent 依赖完整 `config.yaml`；
 - `GitWorktreeProvider`（含 `--`、分支校验、路径约束、失败回滚）；
@@ -1125,13 +1125,13 @@ export function createBackends(config: AppConfig, deps: BackendDeps): BackendReg
 
 **一期总验收（P0–P3 一起）**：
 - Orca 路径行为不变，现有测试全绿；
-- `backend.default` 可在 `orca` / `claude-cli` 间切换，旧工单按 `assignment.backendId` 走原后端；
+- `runtime.default` 可在 `orca` / `claude-cli` 间切换，旧工单按 `assignment.runtimeId` 走原运行时；
 - Claude 临时仓库完整链路跑通：接单 → 改文件 → `ra report` → PR → 闭环；
 - 追问在当轮结束后自动送达；`blocked` 能转人工；Router 重启后能找回 done/stopped 会话；
 - `ra doctor` 能同时检查 Orca 与 Claude CLI 的可执行文件、认证与仓库可见性；
 - 安全项：env allowlist、`ra report` 免 config、prompt 走文件、无裸 `Bash`。
 
-### P4 · Codex CLI 后端（二期）
+### P4 · Codex CLI 运行时（二期）
 
 - `CodexCliRuntime`（`codex exec --json` + `codex exec resume`，stdin 传 prompt，沙箱/网络默认保守）；
 - `CodexSessionActivity`（sessionId + cwd 双条件，候选文件有界）；
@@ -1142,12 +1142,12 @@ export function createBackends(config: AppConfig, deps: BackendDeps): BackendReg
 
 ### P5 · 清理与文档（二期）
 
-- 删除旧 `OrcaAdapter` 兼容层与死代码 `relaunchAgent`；
+- 删除旧 `OrcaRuntime` 兼容层与死代码 `relaunchAgent`；
 - 列出并修正所有旧路径 importer：`src/service.ts`、`src/router/api.ts`、`src/cli/index.ts`、`tests/**`；
 - 同步 `scripts/build-web.mjs` 的 Markdown 资产数组与 `src/worker/spec/index.ts` 的文件名；
-- README 更新「WorkerBackend 是唯一扩展点」的能力矩阵；
+- README 更新「WorkerRuntime 是唯一扩展点」的能力矩阵；
 - 新增 `docs/AGENT-ADAPTER.md`（本设计定稿版）。
-- **验收**：`pnpm typecheck && pnpm build && pnpm test` 全绿；`ra doctor` 三后端可切换。
+- **验收**：`pnpm typecheck && pnpm build && pnpm test` 全绿；`ra doctor` 三运行时可切换。
 
 ---
 
@@ -1155,7 +1155,7 @@ export function createBackends(config: AppConfig, deps: BackendDeps): BackendReg
 
 ### 14.1 契约测试（核心）
 
-新增 `tests/worker/contract.test.ts`，**排入 P0/P1 验收**，对每个 backend 跑同一套用例：
+新增 `tests/worker/contract.test.ts`，**排入 P0/P1 验收**，对每个 runtime 跑同一套用例：
 
 1. `start()` 返回非空 handle + workdir + 可用的 `WorkerRef`；
 2. `deliver()` 返回 `DeliveryReceipt`；输入带 `in_xxx` 前缀；同一 `(input.id, attempt)` 的并发调用只 handoff 一次；`attempt+1 / redeliver=true` 的串行重投必须可达；
@@ -1165,9 +1165,9 @@ export function createBackends(config: AppConfig, deps: BackendDeps): BackendReg
 5. `activity()` 读不到时返回 `null`；同 workdir 两个会话文件时只读目标 sessionId；
 6. `removeWorkspace()` 对不存在目录视为成功；
 7. `start()` 失败后不得残留 worktree/branch（或必须把 workdir 放进错误 detail）；
-8. 所有错误都是 `WorkerBackendError`，`code` 在枚举内。
+8. 所有错误都是 `WorkerRuntimeError`，`code` 在枚举内。
 
-Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 可复用）；Claude/Codex 用 fake `ProcessSpawner` + 临时会话文件。
+Orca 运行时用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 可复用）；Claude/Codex 用 fake `ProcessSpawner` + 临时会话文件。
 
 ### 14.2 回归测试
 
@@ -1176,7 +1176,7 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
   - `isZombie` / `checkIdle` / `recover` / `workerGone` 对 `null` / `lost` / `exited` 的 6.4 矩阵逐项覆盖；
   - `deliver` 抛 `agent:gone` 后转失联；连续 tick 下未 ack 的重投按退避，不每秒执行；
   - `trackPullRequests` 在无 `linkedPr` 时调用 `findByBranch`，本地路径仓库不走 `gh --repo`；
-  - 旧 `backend_id='orca'` 工单与新 `claude-cli` 工单共存时，各走各的后端；
+  - 旧 `runtime_id='orca'` 工单与新 `claude-cli` 工单共存时，各走各的运行时；
   - capability 降级矩阵逐项覆盖；
   - 环境变量 allowlist、prompt 不进 argv、日志脱敏、路径越界拒绝。
 
@@ -1188,7 +1188,7 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
 
 ### 14.4 静态约束
 
-- `tests/architecture.test.ts`（新增）：扫描 `src/service.ts`、`src/router/api.ts`、`src/core/**`，禁止出现 `Orca` / `orca` 类型导入与字段访问（白名单：`worker/backends/orca/**`、re-export 层、注释）。
+- `tests/architecture.test.ts`（新增）：扫描 `src/service.ts`、`src/router/api.ts`、`src/core/**`，禁止出现 `Orca` / `orca` 类型导入与字段访问（白名单：`worker/runtimes/orca/**`、re-export 层、注释）。
 - `pnpm typecheck` + `pnpm build`。
 
 ---
@@ -1209,7 +1209,7 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
 | 未 ack 的输入被每 tick 重投 | Claude 下反复 `--bg --resume`，可能 fork 副本、烧 token | 按 `(input.id, attempt)` 幂等 + 单飞 + 指数退避 + 上限转人工 |
 | 会话文件格式随版本变化 | 巡检摘要失效或读错会话 | 解析器版本容错 + sessionId 精确匹配 + 读不到退回 output |
 | Orca 行为回归 | 现有用户路径受损 | 等价包装 + 契约测试 + 分阶段 revert |
-| 新后端没有 `linkedPR` | PR 闭环退化 | 补 `gh pr list --head` + 本地仓库 remote 推导 |
+| 新运行时没有 `linkedPR` | PR 闭环退化 | 补 `gh pr list --head` + 本地仓库 remote 推导 |
 | Agent 无法执行 `ra` | 无法上报 | 接入前自检 `ra --version`；不支持则不能作为 Worker |
 | 多实例/重复派工 | 重复 worktree、双份进程与 token | `ra serve` 独占锁 + 工单 launch lease + repo 级串行 |
 | 进程崩溃/挂起 | 工单占并发槽、工作区不回收 | exit.json + 非 0 退出转人工 + wall-clock/停滞超时 + markZombie 调 stop |
@@ -1231,8 +1231,8 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
 ### 15.3 开放问题（需要产品/架构确认）
 
 1. 追问语义默认按「当轮结束后生效」设计（与 Claude Code TUI 的输入排队一致）；是否接受？若必须轮内实时插话，需要 `stream-json` 或 SDK/ACP。
-2. 一期 Claude CLI 已纳入交付，但默认后端是否仍保持 Orca？是否先在某个项目/群绑定上试切 Claude？
-3. 用户是否需要在飞书里感知「当前工单跑在哪个 Agent 后端」？
+2. 一期 Claude CLI 已纳入交付，但默认运行时是否仍保持 Orca？是否先在某个项目/群绑定上试切 Claude？
+3. 用户是否需要在飞书里感知「当前工单跑在哪个 Agent 运行时」？
 4. Claude/Codex 的模型额度与 Router 的 Pi 额度是否分开计费/限额？
 
 ---
@@ -1246,7 +1246,7 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
 - 检查点：每个 Orca 触点是否都有端口承接；内核是否还引私有类型；公共契约是否自洽。
 - 发现与修正：
   1. `status/stop` 只收 handle，Claude/Codex 无法定位 pid/meta；`activity` 只收 workdir，丢失 sessionId → 统一改为 `WorkerRef { handle, ticketId, workdir?, sessionId? }` 与 `ActivityQuery`。
-  2. §5 出现「子端口契约」与「扁平 WorkerBackend」两套互不引用的类型 → 子端口降级为内部构件，公共契约只保留 `WorkerBackend`（D1 / 5.4）。
+  2. §5 出现「子端口契约」与「扁平 WorkerRuntime」两套互不引用的类型 → 子端口降级为内部构件，公共契约只保留 `WorkerRuntime`（D1 / 5.4）。
   3. `registerContext` 在草案中消失 → 明确保留为可选兼容方法（当前 Router 未调用）。
   4. `status()` 非空类型与契约测试「返回 null」冲突 → 改为 `AgentStatus | null`，null 表示无法判断（5.4）。
   5. `checkIdle` 的 `status?` 控制信号与「输入必须带 in_ 前缀」冲突 → 新增可选 `nudge()`，业务输入与控制信号分离（D4 / 6.3）。
@@ -1257,15 +1257,15 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
 
 - 检查点：分阶段是否可独立合并；旧数据/旧配置/旧工单是否兼容；测试能否兜住行为等价。
 - 发现与修正：
-  1. 全局单 `backend` 不读 `assignment.backendId`，切换默认后端会让旧 Orca 工单被新后端接管 → 新增 D11 注册表按 assignment 路由。
+  1. 全局单 `runtime` 不读 `assignment.runtimeId`，切换默认运行时会让旧 Orca 工单被新运行时接管 → 新增 D11 注册表按 assignment 路由。
   2. 未 ack 的输入会被每 tick 重投，headless 下变成 resume 风暴 → D4 增加幂等、单飞、指数退避、上限转人工。
   3. P0 验收与范围错位：`report-poller/judgeIdle`、`describeLaunchError`、`api.ts` 旧 import 未纳入 → P0 同步迁移并修正。
   4. `judgeIdle` 既要「语义不变」又要「字段中立」 → 补 Orca 字段到 `AgentStatus` 的映射表（8.2）。
-  5. P2 注册表直接引用 P3/P4 才存在的类，无法单独编译 → P2 只注册 orca，新后端在自己的 PR 追加；回滚改为 revert PR + 默认 orca，不再声称 feature flag。
+  5. P2 注册表直接引用 P3/P4 才存在的类，无法单独编译 → P2 只注册 orca，新运行时在自己的 PR 追加；回滚改为 revert PR + 默认 orca，不再声称 feature flag。
   6. `start.branch` 被丢弃，D9 拿不到实际工作分支 → 改为通过 `inspectWorkspace().branch` 获取，不新增列。
-  7. `loadConfig` 写死 `backend.default` → 明确 P2 解析 `doc.backend.default/options`。
+  7. `loadConfig` 写死 `runtime.default` → 明确 P2 解析 `doc.runtime.default/options`。
   8. 本地路径仓库用 `gh pr list --repo` 会失败 → D9 增加 `git remote get-url origin` 推导。
-- 结论：P0-P2 可在不引入新后端的前提下完成并验证，P3/P4 各自独立可合并。
+- 结论：P0-P2 可在不引入新运行时的前提下完成并验证，P3/P4 各自独立可合并。
 
 ### Round 3 · 安全、运维与边界
 
@@ -1281,7 +1281,7 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
   8. prompt 走 argv、stdout 进日志/巡检 → stdin/临时文件传参 + 统一 redact + stdout/stderr/detail 永不进飞书 + agent.log 0600。
   9. 缺少单实例锁与工单级互斥 → `ra serve` 独占锁 + launch lease + repo 级串行化。
   10. Agent 需要真实 `HOME` 跑 git/gh，仍可能读到 `config.yaml`/`~/.ssh` → `ra report --port` 脱离 config、`ra doc` 走代理；OS 级隔离列为后续加固项，不在「已解决」里含糊带过。
-  11. `backend.options` 可覆盖审批模式，等同绕过安全基线 → 安全参数只由 `worker.tools` 与内置基线生成；options 只放模型/超时/并发，`loadConfig` 拒绝放宽。
+  11. `runtime.options` 可覆盖审批模式，等同绕过安全基线 → 安全参数只由 `worker.tools` 与内置基线生成；options 只放模型/超时/并发，`loadConfig` 拒绝放宽。
 - 结论：默认安全边界可接受；剩余不确定项集中在 CLI 行为，不影响接口定稿。
 
 ### Round 4 · 作者最终一致性复核
@@ -1289,7 +1289,7 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
 - 检查点：接口签名、状态枚举、错误码、配置示例、阶段计划、证据索引是否互相一致。
 - 修正：
   1. 删除 `AgentPhase` 中与 `null` 语义重复的 `unknown`；
-  2. `WorkerErrorCode` 加入 `backend:unknown`，与注册表一致；
+  2. `WorkerErrorCode` 加入 `runtime:unknown`，与注册表一致；
   3. 统一 `DeliveryReceipt`、`WorkerRef`、`ActivityQuery` 的命名；
   4. 把「341 个测试」改为「现有测试全绿」，避免基线数字漂移；
   5. 同步目录规划、附录 A 证据索引与 10/13 节的文件路径。
@@ -1299,12 +1299,12 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
 - 发现与修正：
   1. D4「input.id 幂等」会吞掉串行重投 → 拆成「并发去重（id+attempt）」与「串行重投（attempt+1 / redeliver）」两件事。
   2. `inspect` 命令失败与 `inspect` 返回 null（终端不存在）被混为一谈 → 前者 `null`，后者 `lost`；`AgentPhase` 恢复 `unknown` 表示已查询但不确定；`idle` 从 adapter 移除，由 Router 计算。
-  3. `nudge()` 定义了但 6.3/P1 仍写 `deliver(status?)` → 统一为 `backend.nudge()`，Orca 内部 terminal send，不产生 Input 行。
+  3. `nudge()` 定义了但 6.3/P1 仍写 `deliver(status?)` → 统一为 `runtime.nudge()`，Orca 内部 terminal send，不产生 Input 行。
   4. 6.4 对 `exited && acceptingInput=false` 在 checkIdle/recover 下结论相反 → 抽 `classifyAgentStatus()` 返回 keep/lost/transfer/unknown，四处统一消费。
   5. `brief/report/tools` 没有生产者 → 新增 `buildWorkerContext()` + `buildWorkerBrief()`，Orca 走字节级一致的 `buildOrcaBrief()`，并列进 P0。
-  6. `launch-worker` 首次派工没有 assignment，不能反查 backendId → launch 用 `registry.default()` 或 effect 显式 backendId；P2 启动期校验已注册后端。
-  7. meta 字段集合分散在 3 节且 Orca 没有 pid → 新增 9.4 `WorkerMetaV2`（schemaVersion、process、workBranch、lastHandedOff*）与逐后端写入时机；`ProcessIdentity` 四重校验。
-  8. 过宽的 `ra` 通配与 `backend.options` 可绕过安全基线 → 收敛到 `ra report` / `ra doc`，安全参数只由 `worker.tools` 与内置基线生成，options 只放模型/超时/并发。
+  6. `launch-worker` 首次派工没有 assignment，不能反查 runtimeId → launch 用 `registry.default()` 或 effect 显式 runtimeId；P2 启动期校验已注册运行时。
+  7. meta 字段集合分散在 3 节且 Orca 没有 pid → 新增 9.4 `WorkerMetaV2`（schemaVersion、process、workBranch、lastHandedOff*）与逐运行时写入时机；`ProcessIdentity` 四重校验。
+  8. 过宽的 `ra` 通配与 `runtime.options` 可绕过安全基线 → 收敛到 `ra report` / `ra doc`，安全参数只由 `worker.tools` 与内置基线生成，options 只放模型/超时/并发。
 - 结论：接口、状态、迁移、安全四条线已闭环；可以进入人工评审，开发从 P0 开始。
 
 ### Round 6 · 用户反馈：Claude CLI 追问与 agent view
@@ -1326,20 +1326,20 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
   1. 在 9.1 增加追问语义小节与时间线例子，明确「一轮 = 一次完整回复周期，不是整张工单」，并与 Claude Code TUI 的输入排队类比；
   2. 第 13 节明确「一期 = P0–P3（含 Claude Code CLI）」，P4/P5 为二期；
   3. 增加「一期总验收」清单，覆盖 Orca 回归、Claude 链路、追问、重启恢复、安全项；
-  4. 开放问题改为「是否接受当轮结束语义」与「默认后端是否仍为 Orca」。
+  4. 开放问题改为「是否接受当轮结束语义」与「默认运行时是否仍为 Orca」。
 - 结论：一期范围锁定为 Orca 等价拆解 + Claude CLI 可用；Codex 与清理放二期。
 
 ---
 
 ### Round 8 · 实现代码评审
 
-- 评审对象：一期实现 diff（WorkerBackend v2 / Registry / Claude CLI / GitWorktree / service 路由）。
+- 评审对象：一期实现 diff（WorkerRuntime v2 / Registry / Claude CLI / GitWorktree / service 路由）。
 - 发现并修复：
   1. accepted 未 ack 的输入仍会每 tick 重投 → accepted 后按 30s/60s/120s…（上限 10min）退避；新输入到达时立即投递；
   2. `sessionId` 只在 start 的 2–4s 窗口捕获 → deliver/status 从 `agents --json` 回填，不再把缺 sessionId 当永久 lost；
   3. `claudeProjectSlug` 只替换斜杠 → 改为所有非字母数字替换成 `-`，与 Claude 真实目录规则一致；
   4. 本地路径仓库的 PR 追踪把绝对路径传给 `gh --repo` → 新增 `repoSlug()`，从 `git remote get-url origin` 解析 owner/repo；
-  5. `worker.tools` 未接线 → Claude adapter 由 `ToolPolicy` 生成 `allowedTools`；`backend.options` 禁止覆盖安全参数；
+  5. `worker.tools` 未接线 → Claude adapter 由 `ToolPolicy` 生成 `allowedTools`；`runtime.options` 禁止覆盖安全参数；
   6. `agents` 查询失败/会话缺失时仍 resume → 分别返回 queued/rejected，只有 done/stopped 才 resume；
   7. 失联后重派工撞同名分支 → `GitWorktreeProvider` 自动加数字后缀；
   8. Claude 无 nudge 导致 stale 不可达 → 无 nudge 时按 `lastActivityAt + idleAfterMs + staleAfterMs` 直接判 stale；
@@ -1351,15 +1351,15 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
 
 已落地：
 
-- `src/worker/port.ts`：`WorkerBackend` v2、`WorkerRef / StartResult / DeliveryReceipt / AgentStatus / WorkerBackendError`；
+- `src/worker/port.ts`：`WorkerRuntime` v2、`WorkerRef / StartResult / DeliveryReceipt / AgentStatus / WorkerRuntimeError`；
 - `src/worker/status.ts`：`classifyAgentStatus`，`checkIdle / isZombie / recover / workerGone` 统一消费；
-- `src/worker/registry.ts`：`BackendRegistry`，按 `assignment.backendId` 取后端；默认后端启动期校验；
+- `src/worker/registry.ts`：`RuntimeRegistry`，按 `assignment.runtimeId` 取运行时；默认运行时启动期校验；
 - `src/service.ts`：去 Orca 类型、按 assignment 路由、`buildWorkerContext`、launch 半成功清理、投递 receipt；
 - `src/worker/orca/*`：Orca 适配新契约（status/output/activity/inspectWorkspace/removeWorkspace/nudge）；
-- `src/worker/backends/claude-cli/*`：`claude --bg` + `claude agents --json --all` + `claude --bg --resume`（无 flags）+ `claude stop`；
+- `src/worker/runtimes/claude-cli/*`：`claude --bg` + `claude agents --json --all` + `claude --bg --resume`（无 flags）+ `claude stop`；
 - `src/worker/workspaces/git-worktree.ts`：git worktree、分支/路径校验、失败回滚；
-- 配置：`worker.tools`、`backend.default/options` 解析；`ra init` 在 Claude 后端下问本地路径；
-- `ra report --port` / `RA_PORT`；`ra serve` 单实例锁；doctor 追加当前后端自检。
+- 配置：`worker.tools`、`runtime.default/options` 解析；`ra init` 在 Claude 运行时下问本地路径；
+- `ra report --port` / `RA_PORT`；`ra serve` 单实例锁；doctor 追加当前运行时自检。
 
 验证：
 
@@ -1369,7 +1369,7 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
 
 未在本期完成（按计划留到二期或后续加固）：
 
-- P4 Codex CLI 后端；
+- P4 Codex CLI 运行时；
 - P5 旧路径清理与文档收尾；
 - `ra doc` 的 Router 代理（当前 Claude Worker 仍可直接调用 `ra doc`）；
 - 工单级 launch lease（当前只有进程级单实例锁）；
@@ -1381,8 +1381,8 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
 
 | 主题 | 文件:行 |
 |-|-|
-| WorkerBackend 端口 | `src/worker/port.ts:51-62` |
-| OrcaAdapter | `src/worker/orca/index.ts:174-311` |
+| WorkerRuntime 端口 | `src/worker/port.ts:51-62` |
+| OrcaRuntime | `src/worker/orca/index.ts:174-311` |
 | Orca CLI 参数 | `src/worker/orca/commands.ts:21-81` |
 | Claude 会话解析 | `src/worker/orca/session.ts:7-102` |
 | 终端活性判定 | `src/worker/orca/report-poller.ts:156-176` |
@@ -1394,7 +1394,7 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
 | 重启对账 | `src/service.ts:1518-1552` |
 | 配置写死 orca | `src/config.ts:157-158`、`232`、`399`、`899-901` |
 | CLI 装配 | `src/cli/index.ts:642-649` |
-| 手工绑定写死 backend | `src/router/api.ts:118`、旧路径 import `:9` |
+| 手工绑定写死 runtime | `src/router/api.ts:118`、旧路径 import `:9` |
 | 子进程环境继承 | `src/infra/process.ts:19-23` |
 | 失败诊断强类型 | `src/service.ts:1686-1719`、`1760`、`1774` |
 | 投递未 ack 重投 | `src/service.ts:819-852`、`src/store/db.ts:729-756` |
@@ -1406,19 +1406,19 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
 | 报告协议 | `src/cli/report.ts`、`src/worker/orca/report-poller.ts:1-154` |
 | 效果队列 | `src/service.ts:536-552`、`src/core/effects.ts` |
 
-## 附录 B · 新后端接入 Checklist
+## 附录 B · 新运行时接入 Checklist
 
-- [ ] 实现 `WorkerBackend`，`id` 唯一，`capabilities` 如实声明。
+- [ ] 实现 `WorkerRuntime`，`id` 唯一，`capabilities` 如实声明。
 - [ ] `start()` 返回可持久化 `WorkerRef` 所需的 handle + workdir + branch；失败时把已创建的 workdir/branch 放进错误 detail。
 - [ ] `deliver()` 返回 `DeliveryReceipt`，支持 `【Router 输入 in_xxx】`，按 input.id 幂等、同 session 单飞，最终可被 ack。
 - [ ] `status()` 的 `lastActivityAt` 可用于 idle/zombie 判定；无法判断返回 `null`，确认丢失才返回 `lost`。
 - [ ] `activity()` 按 sessionId + cwd 精确定位；或实现 `output()`；两者至少一个。
 - [ ] `removeWorkspace()` 幂等；不存在视为成功。
 - [ ] `stop()` 幂等，能杀进程组；进程退出写 exit.json。
-- [ ] 错误统一抛 `WorkerBackendError`，`code` 在枚举内，`retryable` 有意义。
+- [ ] 错误统一抛 `WorkerRuntimeError`，`code` 在枚举内，`retryable` 有意义。
 - [ ] Agent 启动环境使用 env allowlist；prompt 走 stdin/临时文件；能执行 `ra report` / `ra doc`（PATH 检查）。
 - [ ] `doctor()` 覆盖可执行文件、认证、仓库可见性、沙箱/权限风险提示。
-- [ ] 注册表按 `assignment.backendId` 路由；旧工单不被新默认后端接管。
+- [ ] 注册表按 `assignment.runtimeId` 路由；旧工单不被新默认运行时接管。
 - [ ] 通过 `tests/worker/contract.test.ts` 全套契约测试 + 安全/生命周期回归。
 - [ ] 在临时仓库跑通完整链路并留验证记录。
 
@@ -1452,3 +1452,33 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
 - `deliver()` 在 `working/blocked` 只排队，绝不 resume；`blocked` 置 attention；
 - `stop()` 用 `claude stop`；清理 worktree 用 GitWorktreeProvider，不用 `claude rm`；
 - 不需要 `ProcessSpawner`；Claude 自己的后台管理承担进程生命周期。
+## 附录 D · ACP Runtime 实现（2026-11-09）
+
+`AcpRuntime`（`src/worker/runtimes/acp/`）是协议层实现：一个客户端同时适配所有实现 ACP 的 Agent。
+
+### D.1 协议与消息
+
+- 传输：Agent 子进程 + stdio JSONL（JSON-RPC 2.0），与 ACP v1 一致。
+- 启动序列：`initialize`（`protocolVersion: 1`、`clientCapabilities`、`clientInfo`）→ `session/new`（`cwd`、`mcpServers: []`）→ `session/prompt`（内容块 `{ type: 'text', text }`）。
+- 追问：同一进程继续 `session/prompt`；进程退出后，若 `agentCapabilities.loadSession=true`，重启 Agent 并 `session/load { sessionId, cwd, mcpServers }`，历史重放期间的 `session/update` 被抑制，避免活动重复。
+- 活动：`session/update` 的 `agent_message_chunk` 落为文本事件，`tool_call` 落为工具事件；`tool_call_update / plan / usage_update` 只更新状态，不重复落库。
+- 停止：先发 `session/cancel` 通知，再关闭子进程；`stop()` 幂等。
+
+### D.2 权限与能力
+
+- `session/request_permission` 由客户端应答：按 `worker.tools` 选择 `allow_*` / `reject_*` 选项；没有匹配选项时回 `cancelled`，绝不挂起。
+- 映射：读/搜索/思考放行；编辑/移动/删除看 `fileAccess`；执行看 `shell`（allowlist 按命令前缀）；网络看 `allowNetwork`；未知工具按只读拒绝。
+- 客户端不实现 `fs/*` 与 `terminal/*` 代理：`initialize` 声明不支持，相关反向请求返回 `-32601`，Agent 需使用自己的文件与命令工具。
+- `capabilities`：`liveStatus/processExit/activity/structuredInput = true`，`output = false`，`nudge = false`；工作区走 `GitWorktreeProvider`，`cleanup = true`。
+
+### D.3 已知限制
+
+- Claude Code 与 Codex 需要外部 ACP 适配器（`claude-agent-acp` / `codex-acp`），不是原生 ACP；适配器版本需与上游 CLI 对齐。
+- `session/load` 的支持程度因 Agent 而异；不支持时追问会以 `acp:agent-gone` 拒绝，需要人工重派。
+- Agent 必须预先完成认证；`session/new` 返回 `-32000 auth_required` 时以 `agent:launch-failed` 上报，并在 detail 里带认证方法。
+- 远程 ACP（HTTP/WebSocket）仍是 draft，当前只支持本地 stdio。
+
+### D.4 验证记录
+
+- 单测：`tests/worker/acp.test.ts` 用 `tests/fixtures/fake-acp-agent.mjs` 覆盖握手、首轮、追问、忙碌排队、权限放行/拒绝、进程退出后 `session/load` 恢复。
+- 真实 Agent：本机 `opencode 2.1.4` 的 `opencode acp` 完成 `initialize` 与 `session/new`；`session/prompt` 因上游模型不可用返回错误（协议链路正常，环境缺模型配置）。

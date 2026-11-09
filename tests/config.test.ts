@@ -1,4 +1,4 @@
-import { mkdtempSync, existsSync, readFileSync } from 'node:fs'
+import { mkdtempSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -18,13 +18,19 @@ describe('全局状态目录与配置', () => {
     expect(text).toContain('workerSpec')
   })
 
-  it('没有配置时使用默认值：auto + 并发 4 + prompt 模式 + orca 后端', () => {
+  it('没有配置时使用默认值：auto + 并发 4 + prompt 模式 + orca 运行时', () => {
     const cfg = loadConfig(home())
     expect(cfg.policy.acceptMode).toBe('auto')
     expect(cfg.policy.maxWorkers).toBe(4)
     expect(cfg.feishu.reaction).toBe('Typing')
     expect(cfg.workerSpec.mode).toBe('prompt')
-    expect(cfg.backend.default).toBe('orca')
+    expect(cfg.runtime.default).toBe('orca')
+  })
+
+  it('旧版 backend 配置段兼容映射到 runtime', () => {
+    const dir = home()
+    writeFileSync(join(dir, 'config.yaml'), ['backend:', '  default: claude-cli'].join('\n'))
+    expect(loadConfig(dir).runtime.default).toBe('claude-cli')
   })
 
   it('图片转文本默认开启，可配置关闭与阈值', () => {

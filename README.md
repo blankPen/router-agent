@@ -104,20 +104,20 @@ Router（AgentLoop + DecisionEngine(Pi) + HTTP API + Web）
 领域内核（TS 零依赖：Ticket / Mandate / Assignment / Stage / Policy）
         │ Assignment
         ▼
-WorkerBackend 端口 ── OrcaAdapter（默认）/ ClaudeCliAdapter ── 未来：Codex
+WorkerRuntime 端口 ── OrcaRuntime（默认）/ ClaudeCliRuntime / AcpRuntime ── 未来：Codex
 ```
 
 一条消息会依次经过四步：
 
 1. **听**：常驻消费飞书群 / 私聊消息，按名单与 `@` 规则做确定性准入。
 2. **判**：未被直接指派的候选交给 Pi 研判（可批量），输出 `accept / stop / ignore / unavailable` 四类决定。
-3. **派**：接单后创建工单与授权（Mandate），先确认「项目 + 起始分支」，再按 `backend.default` 选择执行后端：Orca 用 `orca worktree create --repo ... --base-branch ...` 开 worktree + Claude Code 终端；Claude CLI 用 `git worktree` + `claude --bg` 后台会话。缺项目或分支时不开单，先在会话里追问（群配置里可固定项目和分支，免问答）。
+3. **派**：接单后创建工单与授权（Mandate），先确认「项目 + 起始分支」，再按 `runtime.default` 选择运行时：Orca 用 `orca worktree create --repo ... --base-branch ...` 开 worktree + Claude Code 终端；Claude CLI 用 `git worktree` + `claude --bg` 后台会话。缺项目或分支时不开单，先在会话里追问（群配置里可固定项目和分支，免问答）。
 4. **跟**：Worker 用 `ra report` 上报（失败自动落盘 `state.json`），Router 刷新工单阶段；PR 合并 / 关闭后闭环并通知发起人。
 
 关键约束：
 
 - **Engine 是唯一状态写入口**：Router、Worker、面板都不直接写 SQLite。
-- **WorkerBackend 是唯一扩展点**：换后端只加一个 adapter，内核与 Router 一行不改。
+- **WorkerRuntime 是唯一扩展点**：换运行时只加一个 adapter，内核与 Router 一行不改。
 - **所有对外通知走 Outbox**：幂等 key + 2s 起步的指数退避（上限 60s）。
 - **状态判定不解析终端屏幕文本**：`checkIdle` 只读中立 `AgentStatus`（Orca 映射自 `connected / orphaned / lastOutputAt`，Claude 映射自 `claude agents --json`）；主动巡检优先读 Agent 自己的会话记录（结构化 JSONL），只有读不到时才退回终端输出并做保守清洗。巡检消息是语义摘要：只保留助手文本与一行动作概要，工具调用回显与状态行会被过滤或折叠。
 - **研判层是 DecisionEngine 端口**：Pi 是唯一实现，研判与礼貌回复都走同一条 Pi 通道；研判工具只产出提案，写库仍由 Engine 统一完成。
@@ -383,7 +383,7 @@ retention:
 workerSpec:
   mode: prompt         # prompt | agent
 
-# Worker 工具策略：安全基线，backend.options 不允许覆盖这些字段
+# Worker 工具策略：安全基线，runtime.options 不允许覆盖这些字段
 worker:
   tools:
     fileAccess: read-write   # read-only = 只给 Read / Glob / Grep
@@ -392,13 +392,17 @@ worker:
                  python, python3, pytest, cargo, go, make, mvn, gradle]
     allowNetwork: false      # 预留字段：当前只解析，未用于收窄网络
 
-backend:
+runtime:
   default: orca            # orca | claude-cli（claude-cli 对 projects 的本地路径有要求，见「已知限制」）
-  # 后端专属的非安全参数：目前只有 claude-cli.model（映射成 claude --model）。
+  # 运行时专属的非安全参数：目前有 claude-cli.model 与 acp.command/args/env。
   # 写 allowedTools / permissionMode / sandbox / shellAllow / allowNetwork / fileAccess 会直接启动失败。
   # options:
   #   claude-cli:
   #     model: claude-sonnet-5-5
+  #   acp:
+  #     command: opencode     # Agent 可执行文件
+  #     args: [acp]           # 传给 Agent 的参数
+  #     env: {}               # 额外环境变量
 
 # 项目清单：开单前必须确认「哪个项目 + 哪个起始分支」
 projects: []
@@ -540,6 +544,35 @@ llm:
 
 两种模式都不改项目自己的 `CLAUDE.md`。
 
+### ACP Runtime（可选）
+
+任何实现了 [Agent Client Protocol](https://agentclientprotocol.com) 的 Agent，都可以用同一套 `AcpRuntime` 接入，不需要为每家写适配器。配置示例：
+
+```yaml
+runtime:
+  default: acp
+  options:
+    acp:
+      command: opencode        # 也可以是 claude-agent-acp / codex-acp / copilot ...
+      args: [acp]
+```
+
+常见启动命令：
+
+| Agent | command + args |
+|-|-|
+| OpenCode | `opencode acp` |
+| Gemini CLI | `gemini --acp` |
+| GitHub Copilot CLI | `copilot --acp --stdio` |
+| Cursor CLI | `cursor-agent acp` |
+| Goose | `goose acp` |
+| Claude Code | `claude-agent-acp`（ACP 适配器，非原生） |
+| Codex CLI | `codex-acp`（ACP 适配器，非原生） |
+
+`AcpRuntime` 负责：spawn Agent 子进程 → `initialize` → `session/new` → `session/prompt`；从 `session/update` 读取助手文本与工具调用；把 Agent 的 `session/request_permission` 按 `worker.tools` 策略自动放行或拒绝；进程退出后，若 Agent 声明 `loadSession`，追问时会用 `session/load` 恢复会话。
+
+当前不做客户端侧的 `fs/*` 与 `terminal/*` 代理：`initialize` 里声明不支持，Agent 需使用自己的文件/命令工具。Agent 必须预先完成登录（ACP 的 `auth_required` 会以启动失败上报）。
+
 ## 命令
 
 | 命令 | 说明 |
@@ -676,7 +709,7 @@ RA_PI_VERIFY=1 npx vitest run tests/verify-pi-live.test.ts   # 真实 Pi + 真�
 ```text
 src/core/     领域内核（model / stage / policy / engine / effects）
 src/store/    SQLite（node:sqlite）
-src/worker/   WorkerBackend 端口、BackendRegistry、OrcaAdapter、ClaudeCliBackend、state.json 轮询、worker 手册
+src/worker/   WorkerRuntime 端口、RuntimeRegistry、OrcaRuntime、ClaudeCliRuntime、state.json 轮询、worker 手册
 src/sources/  飞书事件、历史补拉、GitHub PR 跟踪
 src/router/   AgentLoop、工具契约、提示词、HTTP API
 src/web/      React 面板
@@ -694,7 +727,7 @@ src/cli/      ra 命令
 - 历史补拉按群游标增量进行：首次见到某个群只记基线（最新一条消息时间），不会把历史消息当新需求。
 - 实测 Orca 的 `lastOutputAt` 是毫秒数字、且 CLI 创建的终端可能 `orphaned=true` 但依然可用；适配层已分别做归一化与「只有 `connected=false` 才判死」的处理。
 - `workerSpec.mode: agent` 依赖 Orca 启动的 claude 是否加载全局 `~/.claude/agents/`；该前提尚未实测，默认使用已验证可行的 `prompt` 模式。
-- Claude CLI 后端用 `git worktree`，项目的 `repo` 必须是本地仓库绝对路径（`path:/abs` 或 `/abs`）；`ra init` 在 `backend.default: claude-cli` 时会直接问路径。
+- Claude CLI 运行时用 `git worktree`，项目的 `repo` 必须是本地仓库绝对路径（`path:/abs` 或 `/abs`）；`ra init` 在 `runtime.default: claude-cli` 时会直接问路径。
 - Claude CLI 的追问在当前轮结束后生效（与 TUI 输入排队一致）；会话 `blocked`（权限/人工输入）时只转人工，不自动 resume。需要轮内实时插话时要改用 `stream-json` 或 SDK/ACP。
 - Claude CLI 依赖 `claude agents --json --all` 的字段（本仓库实测 `2.1.318`）；升级后字段变化时状态会退化为 `null`，需要按版本适配。
 - 派工草稿按「群 + 同一个人」保存，30 分钟有效；同一个群里的多个未补齐请求会互相覆盖（后一次追问覆盖前一次）。
@@ -715,4 +748,4 @@ src/cli/      ra 命令
 
 ---
 
-问题、建议或想接入新的 WorkerBackend，欢迎提 Issue。
+问题、建议或想接入新的 WorkerRuntime，欢迎提 Issue。

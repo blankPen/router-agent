@@ -9,7 +9,7 @@ import { Command, CommanderError } from 'commander'
 import { ensureHome, loadConfig, policyOf, replyAlwaysChatsOf, setConfigValue, writeConfig } from '../config.js'
 import { Store } from '../store/db.js'
 import { Engine } from '../core/engine.js'
-import { createBackends } from '../worker/registry.js'
+import { createRuntimes } from '../worker/registry.js'
 import { GitHubTracker } from '../sources/github.js'
 import { FeishuConsumer, FeishuSender, attachQuotedMessage, normalizeFeishuEventDetailed } from '../sources/feishu.js'
 import { attachImageText } from '../sources/feishu-image.js'
@@ -220,9 +220,9 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
   ensureHome(home)
   const config = loadConfig(home, output.env as NodeJS.ProcessEnv)
   const lark = output.larkFor ?? (larkHome => createLarkRunner({ home: larkHome }))
-  let backend: import('../worker/port.js').WorkerBackend | undefined
+  let runtime: import('../worker/port.js').WorkerRuntime | undefined
   try {
-    backend = createBackends(config, {
+    runtime = createRuntimes(config, {
       home,
       workersDir: join(home, 'workers'),
       spec: config.workerSpec.mode,
@@ -231,13 +231,13 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
       git: output.git ?? realRunner('git'),
     }).default()
   } catch {
-    // 未注册/拼错的 backend 由配置检查单独报错，不让 doctor 直接崩溃。
+    // 未注册/拼错的 runtime 由配置检查单独报错，不让 doctor 直接崩溃。
   }
   const checks = await runDoctor({
     config,
     orca: output.orca ?? realRunner('orca'),
     lark: lark(config.feishu.larkHome),
-    ...(backend ? { backend } : {}),
+    ...(runtime ? { runtime } : {}),
     llm: () => {
       try {
         const resolved = resolvePiModelConfig({ configPath: join(home, 'config.yaml') })
@@ -249,12 +249,12 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
     portFree: () => isPortFree(config.server.port),
     servicePid: readPid(home),
   })
-  if (!backend) {
+  if (!runtime) {
     checks.unshift({
-      name: 'Worker backend',
+      name: 'Worker runtime',
       status: 'fail' as const,
-      detail: `未注册 backend: ${config.backend.default}`,
-      hint: 'ra config set backend.default orca|claude-cli',
+      detail: `未注册 runtime: ${config.runtime.default}`,
+      hint: 'ra config set runtime.default orca|claude-cli',
     })
   }
   if (opts.json) {
@@ -500,7 +500,7 @@ function cmdStatus(home: string, output: CliIo): number {
       output.stdout(`  - [${t.stage}] ${t.title}`)
     }
     const config = loadConfig(home)
-    output.stdout(`accept mode: ${config.policy.acceptMode}，并发上限: ${config.policy.maxWorkers}，后端: ${config.backend.default}`)
+    output.stdout(`accept mode: ${config.policy.acceptMode}，并发上限: ${config.policy.maxWorkers}，运行时: ${config.runtime.default}`)
     output.stdout(
       config.retention.enabled
         ? `闲置治理: 开启（${config.retention.idleHours}h 无进展提醒，${config.retention.closeGraceHours}h 未回复自动关闭）`
@@ -697,7 +697,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   const gitRunner = output.git ?? realRunner('git')
   const larkRunner = createLarkRunner({ home: config.feishu.larkHome })
   const ghRunner = realRunner('gh')
-  const backends = createBackends(config, {
+  const runtimes = createRuntimes(config, {
     home,
     workersDir: join(home, 'workers'),
     spec: config.workerSpec.mode,
@@ -705,7 +705,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     claude: claudeRunner,
     git: gitRunner,
   })
-  const backend = backends.default()
+  const runtime = runtimes.default()
   const sender = new FeishuSender(larkRunner)
   const prTracker = new GitHubTracker(ghRunner)
   const model = resolvePiModelConfig({ configPath: join(home, 'config.yaml') })
@@ -784,8 +784,8 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     config,
     store,
     engine,
-    backend,
-    backends,
+    runtime,
+    runtimes,
     prTracker,
     logger,
     effects,

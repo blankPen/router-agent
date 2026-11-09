@@ -45,13 +45,13 @@ Tests       291 passed | 4 skipped
 `RA_VERIFY=1 npx vitest run tests/verify-live.test.ts` → 4 passed。
 
 1. **真实 LLM 研判**：用 `.trove/config.json` 的 DeepSeek 配置跑通 `AgentLoop`，推断候选得到可解析决定，未落 `unavailable`。
-2. **真实 HTTP + Web**：`/api/status` 返回 `backend=orca`；`/` 返回 React 面板 HTML；`/app.js` 可加载。
+2. **真实 HTTP + Web**：`/api/status` 返回 `runtime=orca`；`/` 返回 React 面板 HTML；`/app.js` 可加载。
 3. **真实 Orca CLI**：`terminal list` 解析正常（不存在的 handle 返回 null 不抛错）；`worktree list` 可读。
 4. **真实飞书**：`event consume ... --dry-run` 预检通过；历史补拉真实群返回 6 条并正确过滤机器人自己的消息。
 
 ### 真实 Orca worktree 冒烟（已清理）
 
-用临时 git 仓库注册到 Orca，调用**项目内的 `OrcaAdapter.start()`** 走完整链路：
+用临时 git 仓库注册到 Orca，调用**项目内的 `OrcaRuntime.start()`** 走完整链路：
 
 - 成功创建 worktree：`/Users/admin/orca/workspaces/ra-orca-smoke/ra-tk_smoke`
 - 解析出 `handle=term_...` 与 `workdir`
@@ -235,12 +235,12 @@ RA_PI_VERIFY=1 npx vitest run tests/verify-pi-live.test.ts  → 1 passed
 - **数据来源**：优先读 Agent 自己的结构化会话记录（Claude Code `~/.claude/projects/<cwd-slug>/<session>.jsonl` 的尾部，只取 assistant 文本与工具调用）；读不到时退回 `orca terminal read --screen --limit 60 --json` 的渲染屏幕。
 - **摘要形态**：确定性语义摘要（不额外调用模型）——主内容是 assistant 文本，工具调用折叠成一行「动作概要」（修改 / 查看 / 检索 / 执行 + 文件名或一句话描述，同类动作合并计数）；`TodoWrite` 等纯流程工具直接过滤。终端兜底同样只保留自然语言活动行，工具调用回显（`⏺ Update(x)`）、工具结果（`⎿`）、状态行（`✻✽`）不进摘要。最多 4 行文本 / 1200 字。
 - **输出**：发到工单话题；同一静默期按 `progress.repeatMs`（默认 15 分钟）限流，摘要未变化会标注。
-- **兜底**：终端已退出、读不到输出或后端不支持 `read/session` 时跳过，交给 `checkIdle` 的 stale 处理；终端长时间无新输出时在消息里提示可能卡住。
+- **兜底**：终端已退出、读不到输出或运行时不支持 `read/session` 时跳过，交给 `checkIdle` 的 stale 处理；终端长时间无新输出时在消息里提示可能卡住。
 - **验证**：`tests/service-runtime.test.ts` 覆盖会话记录优先、终端兜底、静默检测、限流、review+新输入、终端退出、卡住提示、语义摘要与工具调用噪音过滤；`tests/worker/orca.test.ts` 覆盖会话 JSONL 解析与工具调用结构化摘要；并用真实会话记录 / `orca terminal read` 抽样验证。
 
 ## 6. 结论
 
-- 领域内核、Router、WorkerBackend、上报协议、飞书 / GitHub Source、HTTP API、Web 面板、CLI 均已实现并有测试覆盖。
+- 领域内核、Router、WorkerRuntime、上报协议、飞书 / GitHub Source、HTTP API、Web 面板、CLI 均已实现并有测试覆盖。
 - 研判层已切换为 Pi 单引擎：`assess` 与 `reply` 都走 Pi，工具白名单、proposal-only、超时预算与审计均已落地并有测试。
 - 多项目 / 多分支：开单前强制明确「任务 + 项目 + 起始分支」，缺信息先在会话里追问并落草稿；群级 `chatBindings` 可免问答。
 - 真实 LLM、Orca、lark-cli、HTTP 服务与 CLI 常驻链路均已跑通。

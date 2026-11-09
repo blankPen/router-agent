@@ -8,7 +8,7 @@ import { Command, CommanderError } from 'commander';
 import { ensureHome, loadConfig, policyOf, setConfigValue, writeConfig } from '../config.js';
 import { Store } from '../store/db.js';
 import { Engine } from '../core/engine.js';
-import { OrcaAdapter } from '../worker/orca/index.js';
+import { OrcaRuntime } from '../worker/orca/index.js';
 import { GitHubTracker } from '../sources/github.js';
 import { FeishuConsumer, FeishuSender, normalizeFeishuEventDetailed } from '../sources/feishu.js';
 import { backfillChats } from '../sources/feishu-backfill.js';
@@ -415,7 +415,7 @@ function cmdStatus(home, output) {
             output.stdout(`  - [${t.stage}] ${t.title}`);
         }
         const config = loadConfig(home);
-        output.stdout(`accept mode: ${config.policy.acceptMode}，并发上限: ${config.policy.maxWorkers}，后端: ${config.backend.default}`);
+        output.stdout(`accept mode: ${config.policy.acceptMode}，并发上限: ${config.policy.maxWorkers}，运行时: ${config.runtime.default}`);
         return 0;
     }
     finally {
@@ -576,7 +576,7 @@ async function cmdServe(home, output) {
     const orcaRunner = realRunner('orca');
     const larkRunner = createLarkRunner({ home: config.feishu.larkHome });
     const ghRunner = realRunner('gh');
-    const backend = new OrcaAdapter({
+    const runtime = new OrcaRuntime({
         runner: orcaRunner,
         workersDir: join(home, 'workers'),
         spec: config.workerSpec.mode,
@@ -625,7 +625,7 @@ async function cmdServe(home, output) {
         config,
         store,
         engine,
-        backend,
+        runtime,
         llm,
         prTracker,
         logger,

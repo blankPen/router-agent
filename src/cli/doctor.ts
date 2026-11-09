@@ -1,6 +1,6 @@
 import type { AppConfig } from '../config.js'
 import type { CommandRunner } from '../infra/process.js'
-import type { WorkerBackend } from '../worker/port.js'
+import type { WorkerRuntime } from '../worker/port.js'
 import {
   parseAuthUser,
   parseBotAvailable,
@@ -28,8 +28,8 @@ export interface DoctorDeps {
   llm: () => { ok: boolean; detail: string }
   portFree: () => Promise<boolean>
   servicePid: number | null
-  /** 当前默认后端；有 doctor() 时追加其后端自检。 */
-  backend?: WorkerBackend
+  /** 当前默认运行时；有 doctor() 时追加其运行时自检。 */
+  runtime?: WorkerRuntime
 }
 
 /** 启动前自检：把“配好了吗、能不能收到消息、能不能派工”一次性查清。 */
@@ -59,7 +59,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
     ...(config.policy.acceptMode === 'auto' ? { hint: '首次验收建议 ra config set policy.acceptMode observe' } : {}),
   })
 
-  if (config.backend.default === 'orca') {
+  if (config.runtime.default === 'orca') {
     checks.push(await check('Orca runtime', async () => {
       const res = await deps.orca.run(['status'])
       const parsed = parseOrcaStatus(res.stdout)
@@ -142,9 +142,9 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
     ...(deps.servicePid && alive(deps.servicePid) ? {} : { hint: 'ra start' }),
   })
 
-  if (deps.backend?.doctor) {
-    checks.push(await check(`Worker backend (${deps.backend.id})`, async () => {
-      const result = await deps.backend!.doctor!()
+  if (deps.runtime?.doctor) {
+    checks.push(await check(`Worker runtime (${deps.runtime.id})`, async () => {
+      const result = await deps.runtime!.doctor!()
       const failed = result.find(item => item.status === 'fail')
       const warned = result.find(item => item.status === 'warn')
       return {

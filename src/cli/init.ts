@@ -125,7 +125,7 @@ async function pickRepo(
 ): Promise<void> {
   const existingRepo = config.projects[0]?.repo ?? ''
   // Claude CLI 用 git worktree，需要本地仓库绝对路径，不走 Orca 的 displayName。
-  if (config.backend.default === 'claude-cli') {
+  if (config.runtime.default === 'claude-cli') {
     const repo = await prompts.input({
       message: '本地仓库绝对路径（Claude CLI 用，例如 /Users/me/project）',
       default: existingRepo,

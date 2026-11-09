@@ -104,7 +104,7 @@ Router (AgentLoop + DecisionEngine(Pi) + HTTP API + Web)
 Domain core (zero-dep TS: Ticket / Mandate / Assignment / Stage / Policy)
         │ Assignment
         ▼
-WorkerBackend port ── OrcaAdapter (default) ── future: Codex / Headless Claude
+WorkerRuntime port ── OrcaRuntime (default) / ClaudeCliRuntime / AcpRuntime ── future: Codex
 ```
 
 A message goes through four steps:
@@ -117,7 +117,7 @@ A message goes through four steps:
 Key constraints:
 
 - **Engine is the single writer**: the Router, Workers and dashboard never write SQLite directly.
-- **WorkerBackend is the only extension point**: another backend is one adapter, with no changes to the core or Router.
+- **WorkerRuntime is the only extension point**: another runtime takes one adapter, with no changes to the core or Router.
 - **All outbound notifications go through the Outbox**: idempotency key plus exponential backoff starting at 2s (capped at 60s).
 - **No TUI parsing for state**: `checkIdle` only reads Orca's structured fields (`connected` / `orphaned` / `lastOutputAt`); the proactive probe reads the agent's session transcript first and falls back to `orca terminal read --screen`. Probe messages are semantic summaries: assistant text plus a one-line action digest, with tool-call echoes and status lines filtered or collapsed.
 - **Triage is a DecisionEngine port**: Pi is the only implementation, and both triage and polite replies go through the same Pi channel; triage tools only produce proposals, and the Engine still writes everything.
@@ -373,7 +373,7 @@ retention:
 workerSpec:
   mode: prompt         # prompt | agent
 
-# Worker tool policy: the security baseline; backend.options may not override these fields
+# Worker tool policy: the security baseline; runtime.options may not override these fields
 worker:
   tools:
     fileAccess: read-write   # read-only = Read / Glob / Grep only
@@ -382,13 +382,17 @@ worker:
                  python, python3, pytest, cargo, go, make, mvn, gradle]
     allowNetwork: false      # reserved: parsed but not used to restrict networking yet
 
-backend:
+runtime:
   default: orca            # orca | claude-cli (claude-cli has local-path requirements, see Known limitations)
-  # Backend-specific non-security options: only claude-cli.model today (mapped to claude --model).
+  # Runtime-specific non-security options: claude-cli.model and acp.command/args/env.
   # allowedTools / permissionMode / sandbox / shellAllow / allowNetwork / fileAccess make startup fail.
   # options:
   #   claude-cli:
   #     model: claude-sonnet-5-5
+  #   acp:
+  #     command: opencode     # agent executable
+  #     args: [acp]           # arguments passed to the agent
+  #     env: {}               # extra environment variables
 
 # Projects: "which project + which base branch" must be confirmed before dispatch
 projects: []
@@ -528,6 +532,23 @@ It only applies to `backend.default: claude-cli` (mapped to Claude's `allowedToo
 
 Neither mode modifies the project's own `CLAUDE.md`.
 
+### ACP runtime (optional)
+
+Any agent that implements the [Agent Client Protocol](https://agentclientprotocol.com) can run through the same `AcpRuntime` — no per-agent adapter needed:
+
+```yaml
+runtime:
+  default: acp
+  options:
+    acp:
+      command: opencode        # or claude-agent-acp / codex-acp / copilot ...
+      args: [acp]
+```
+
+Common launch commands: `opencode acp`, `gemini --acp`, `copilot --acp --stdio`, `cursor-agent acp`, `goose acp`. Claude Code (`claude-agent-acp`) and Codex (`codex-acp`) are available through ACP adapters, not natively.
+
+`AcpRuntime` spawns the agent, runs `initialize → session/new → session/prompt`, streams `session/update` into activity, answers `session/request_permission` according to `worker.tools`, and restores a session with `session/load` when the agent advertises it. Client-side `fs/*` and `terminal/*` proxying is intentionally not implemented; agents must use their own tools. The agent must be logged in beforehand — `auth_required` surfaces as a launch failure.
+
 ## Commands
 
 | Command | Description |
@@ -641,7 +662,7 @@ Source layout:
 ```text
 src/core/     domain core (model / stage / policy / engine / effects)
 src/store/    SQLite (node:sqlite)
-src/worker/   WorkerBackend port, OrcaAdapter, state.json polling (CLI fallback), worker handbook
+src/worker/   WorkerRuntime port, OrcaRuntime / ClaudeCliRuntime / AcpRuntime, state.json polling, worker handbook
 src/sources/  Feishu events, history backfill, GitHub PR tracking
 src/router/   AgentLoop, tool contracts, prompts, HTTP API
 src/web/      React dashboard
@@ -676,4 +697,4 @@ The design reference is the Feishu document "router-agent（ra）技术设计方
 
 ---
 
-Questions, suggestions, or a new WorkerBackend? Open an issue.
+Questions, suggestions, or a new WorkerRuntime? Open an issue.
