@@ -15,6 +15,23 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
     />
     <link rel="stylesheet" href="./app.css" />
+    <!--
+      首帧前先按本地偏好解析主题，避免深色用户看到一帧亮色。
+      存储键与三态判断需和 src/web/client/theme.ts 保持一致。
+    -->
+    <script>
+      (() => {
+        try {
+          const stored = localStorage.getItem('router-agent.theme')
+          const mode = stored === 'light' || stored === 'dark' ? stored : 'system'
+          const dark = mode === 'dark'
+            || (mode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+          document.documentElement.dataset.theme = dark ? 'dark' : 'light'
+        } catch {
+          document.documentElement.dataset.theme = 'light'
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>
