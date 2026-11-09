@@ -44,19 +44,33 @@ It is a **clean rewrite** of dsh-superagent, with no dependency on the prototype
 
 | Dependency | Notes |
 |-|-|
-| Node.js | `>= 22.19.0` (uses the built-in `node:sqlite`; pinned to 22.19.0 via `.nvmrc`) |
-| pnpm | Install dependencies and build |
+| Node.js | `>= 22.19.0` (bundles npm; uses the built-in `node:sqlite`; pinned to 22.19.0 via `.nvmrc`) |
 | Orca | Provides the `orca` CLI that creates worktrees and terminals (only needed by the `orca` runtime) |
 | lark-cli | Feishu event consumption and messaging; needs a Feishu custom app |
 | Claude Code | The actual Worker; required by the `orca` / `claude-code` / `acp-claude` runtimes |
+| pnpm | Only needed to run from source or contribute (see the end of this section) |
 
-**1 · Install and build**
+**1 · Install**
 
 ```bash
+npm install -g router-agent   # install globally from npm, then use `ra` directly
+ra --help                     # verify the command is available
+```
+
+Upgrading is the same: `npm install -g router-agent@latest`.
+
+<details>
+<summary>Run from source or contribute?</summary>
+
+```bash
+git clone https://github.com/blankPen/router-agent.git
+cd router-agent
 pnpm install --registry=https://registry.npmjs.org/
 pnpm build
 pnpm link --global      # then use `ra` directly; without linking, use `node bin/ra.js <command>`
 ```
+
+</details>
 
 **2 · Initialize: two ways, pick either one**
 

@@ -44,19 +44,33 @@ router-agent（`ra`）是一个常驻的双层 Agent 系统：**Router 只做研
 
 | 依赖 | 说明 |
 |-|-|
-| Node.js | `>= 22.19.0`（使用内置 `node:sqlite`；项目根目录 `.nvmrc` 已固定 22.19.0） |
-| pnpm | 安装依赖与构建 |
+| Node.js | `>= 22.19.0`（自带 npm；使用内置 `node:sqlite`；项目根目录 `.nvmrc` 已固定 22.19.0） |
 | Orca | 提供 `orca` CLI，负责创建 worktree 与终端（仅 `orca` 运行时需要） |
 | lark-cli | 飞书事件消费、发消息；需要一个飞书自建应用 |
 | Claude Code | Worker 的实际执行者；`orca` / `claude-code` / `acp-claude` 运行时都需要 |
+| pnpm | 仅从源码运行或参与开发时需要（见本节末尾） |
 
-**1 · 安装并构建**
+**1 · 安装**
 
 ```bash
+npm install -g router-agent   # 从 npm 全局安装，装完直接用 ra
+ra --help                     # 确认命令可用
+```
+
+升级到最新版同样是 `npm install -g router-agent@latest`。
+
+<details>
+<summary>需要从源码运行或参与开发？</summary>
+
+```bash
+git clone https://github.com/blankPen/router-agent.git
+cd router-agent
 pnpm install --registry=https://registry.npmjs.org/
 pnpm build
 pnpm link --global      # 之后可直接用 ra；不 link 时用 node bin/ra.js <command>
 ```
+
+</details>
 
 **2 · 初始化：两种方式，任选一种**
 
