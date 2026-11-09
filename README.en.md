@@ -15,7 +15,7 @@ and every ticket gets its own branch, terminal and context.
 ![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
 
-[Quick start](#quick-start) &nbsp;·&nbsp; [How it works](#how-it-works) &nbsp;·&nbsp; [Configuration](#configuration) &nbsp;·&nbsp; [Commands](#commands) &nbsp;·&nbsp; [Worker protocol](#worker-report-protocol) &nbsp;·&nbsp; [Docs](#documentation)
+[Quick start](#quick-start) &nbsp;·&nbsp; [How it works](#how-it-works) &nbsp;·&nbsp; [Runtime](#runtimeworker-runtimes) &nbsp;·&nbsp; [Configuration](#configuration) &nbsp;·&nbsp; [Commands](#commands) &nbsp;·&nbsp; [Worker protocol](#worker-report-protocol) &nbsp;·&nbsp; [Docs](#documentation)
 
 [简体中文](README.md) · **English**
 
@@ -44,40 +44,64 @@ It is a **clean rewrite** of dsh-superagent, with no dependency on the prototype
 
 | Dependency | Notes |
 |-|-|
-| Node.js | `>= 22.19.0` (uses the built-in `node:sqlite`; pinned to 22.19.0 via `.node-version`) |
+| Node.js | `>= 22.19.0` (uses the built-in `node:sqlite`; pinned to 22.19.0 via `.nvmrc`) |
 | pnpm | Install dependencies and build |
-| Orca | Provides the `orca` CLI that creates worktrees and terminals |
+| Orca | Provides the `orca` CLI that creates worktrees and terminals (only needed by the `orca` runtime) |
 | lark-cli | Feishu event consumption and messaging; needs a Feishu custom app |
-| Claude Code | The actual Worker, launched by Orca inside the worktree |
+| Claude Code | The actual Worker; required by the `orca` / `claude-code` / `acp-claude` runtimes |
 
 **1 · Install and build**
 
 ```bash
 pnpm install --registry=https://registry.npmjs.org/
 pnpm build
+pnpm link --global      # then use `ra` directly; without linking, use `node bin/ra.js <command>`
 ```
 
-`ra` is available after `pnpm link --global`, or run it directly with `node bin/ra.js <command>`.
+**2 · Initialize: two ways, pick either one**
 
-**2 · Initialize**
+Initialization results in `~/.router-agent/config.yaml` (`ra init` also writes the global worker spec). Both paths write the same config, so you can mix them and run them repeatedly.
+
+| Path | Best for | Entry point |
+|-|-|-|
+| **Web setup page** (recommended) | First-time setup; you want live detection results while filling it in | `ra start` opens `#setup` |
+| **CLI wizard** | Remote / headless machines; configuring chats and members in one go | `ra init` |
+
+**Path A · Web setup page**
 
 ```bash
-ra init                 # guided: repo → bot → chat → allowed members, all in one command
-```
-
-`ra init` only asks for required fields and fills in sensible defaults. The dedicated bot, chat bindings and allowlists can all be configured in the same walkthrough.
-
-**3 · Start**
-
-```bash
-ra start                # background; opens the web setup page when ready
+ra start              # resident service; opens http://127.0.0.1:3083/#setup when ready
 ra status
-ra web                  # reopen the dashboard later
+ra web                # reopen the dashboard later
 ```
 
-`ra start` waits for the service to become ready, then opens the dashboard's **Setup** page in your default browser: worker runtime (including one-click ACP extension install), projects, Feishu access, and monitored chats with bindings. Save, then restart the service when the page asks. On a remote or headless machine use `ra start --no-open` to only print the dashboard URL.
+The page only covers the five things needed to get running, with a completion checklist at the top:
 
-**4 · Self-check and simulate**
+1. **LLM Provider**: Base URL / model / API key. The key is written only to `config.yaml` and never echoed back; leave it blank to keep using `~/.trove/config.json` or environment variables.
+2. **Worker runtime**: Orca / Claude Code / ACP Agent cards, with automatic checks for the CLI, version, ACP dependencies and login state, plus install guidance and a real handshake test.
+3. **Projects**: add a local project (system directory picker + Git detection) or a Git project (cloned into `<RA_HOME>/repos`).
+4. **Feishu access**: reuse the current lark-cli profile, or provide a dedicated bot's App ID / config directory.
+5. **Chats and bindings**: at least one monitored chat; bind it to a project so dispatch stops asking.
+
+![Web setup page: five-step checklist, LLM Provider and runtime cards](docs/assets/readme/setup-overview-light.png)
+
+Dark theme:
+
+![Web setup page (dark)](docs/assets/readme/setup-overview-dark.png)
+
+After saving, the page asks for a restart; click **Save and restart** to hot-restart the daemon (the browser page stays open). On a remote or headless machine use `ra start --no-open` to only print the dashboard URL.
+
+**Path B · CLI wizard**
+
+```bash
+ra init
+```
+
+The wizard walks through: **repository** (pick a Git repo from `orca repo list` for the Orca runtime; enter an absolute local path for other runtimes) → **Feishu bot** (reuse the current lark-cli profile / dedicated bot with an existing App ID + Secret / create a new app in the browser) → **user authorization** (optional; used to search chats and members by name) → **monitored chats** → **allowed members** → **bot identity** → **chat bindings**. It only asks for required fields; `ra init --yes` writes defaults only and is script-friendly.
+
+The two paths can hand off to each other: run `ra init` for the bot and chats, then use the web page for LLM / projects / bindings. The page submits only the fields you changed, so it won't overwrite the rest of the CLI-written config.
+
+**3 · Self-check and simulate**
 
 ```bash
 ra doctor                                              # config / Orca / Feishu / model / port — all green before going further
@@ -106,14 +130,14 @@ Router (AgentLoop + DecisionEngine(Pi) + HTTP API + Web)
 Domain core (zero-dep TS: Ticket / Mandate / Assignment / Stage / Policy)
         │ Assignment
         ▼
-WorkerRuntime port ── OrcaRuntime (default) / ClaudeCliRuntime / AcpRuntime ── future: Codex
+WorkerRuntime port ── OrcaRuntime (default) / ClaudeCodeRuntime / AcpRuntime (acp and 7 acp-*)
 ```
 
 A message goes through four steps:
 
 1. **Listen**: a resident consumer reads Feishu group / direct messages, and a deterministic gate applies the allowlist and `@` rules.
 2. **Decide**: candidates that weren't explicitly assigned go to Pi triage (batchable), producing one of `accept / stop / ignore / unavailable`.
-3. **Dispatch**: on acceptance, the Router creates a ticket and mandate, confirms "project + base branch", then runs `orca worktree create --repo ... --base-branch ...` to open an isolated worktree with a Claude Code terminal. If the project or branch is missing it does **not** open a ticket; it asks in the conversation first (chat bindings can pin both and skip the Q&A).
+3. **Dispatch**: on acceptance, the Router creates a ticket and mandate, confirms "project + base branch", then picks the runtime from `runtime.default`: Orca runs `orca worktree create --repo ... --base-branch ...` to open a worktree with a Claude Code terminal; Claude Code uses `git worktree` + a background `claude --bg` session; ACP starts the selected ACP Agent through `AcpRuntime`. If the project or branch is missing it does **not** open a ticket; it asks in the conversation first (chat bindings can pin both and skip the Q&A). See [Runtime](#runtimeworker-runtimes) for the differences and how to choose.
 4. **Follow**: the Worker reports with `ra report` (falling back to `state.json` on failure), and the Router advances the ticket. When the PR is merged or closed, the ticket closes and the requester is notified.
 
 Key constraints:
@@ -123,6 +147,89 @@ Key constraints:
 - **All outbound notifications go through the Outbox**: idempotency key plus exponential backoff starting at 2s (capped at 60s).
 - **No TUI parsing for state**: `checkIdle` only reads Orca's structured fields (`connected` / `orphaned` / `lastOutputAt`); the proactive probe reads the agent's session transcript first and falls back to `orca terminal read --screen`. Probe messages are semantic summaries: assistant text plus a one-line action digest, with tool-call echoes and status lines filtered or collapsed.
 - **Triage is a DecisionEngine port**: Pi is the only implementation, and both triage and polite replies go through the same Pi channel; triage tools only produce proposals, and the Engine still writes everything.
+
+## Runtime: worker runtimes
+
+Workers don't run inside the Router process. When a ticket starts, the Router picks a **WorkerRuntime** adapter from `runtime.default`, and that adapter creates the isolated workspace, launches the agent, delivers the ticket, reads status and carries follow-ups. The core and Router only depend on the `WorkerRuntime` port, so swapping runtimes needs no business-code changes.
+
+A config has one default runtime, but **project lists are kept per runtime**: Orca uses repository selectors (`name:` / `id:` / `path:`), while Claude Code and ACP need an absolute local repository path. Switching runtimes never feeds an Orca selector to a filesystem path, and existing tickets keep the runtime recorded in their assignment instead of being taken over by the new default.
+
+### Built-in runtimes
+
+| runtime id | How it launches | Workspace | Status source | Follow-up / recovery | Best for |
+|-|-|-|-|-|-|
+| `orca` (default) | Orca creates the worktree + Claude Code terminal | `orca worktree create --repo … --base-branch …` | Orca `AgentStatus` (`connected` / `orphaned` / `lastOutputAt`) | Terminal stays alive, follow-ups go straight in; probing reads the Claude transcript first | You already manage repos with Orca and want to watch the terminal |
+| `claude-code` | `git worktree` + background `claude --bg` session | Absolute local Git repository path | `claude agents --json --all` | Follow-ups use `claude --bg --resume <sessionId>` after a session ends; no automatic resume | You don't use Orca and just want Claude Code |
+| `acp` / `acp-*` | ACP child process: `initialize` → `session/new` → `session/prompt` | `git worktree` (absolute local path) | ACP `session/update` | `session/load` when the agent declares `loadSession` | You want Codex / Gemini / OpenCode and friends |
+
+`acp` is the custom-command entry point; `acp-*` are the built-in ACP agents, all sharing the same `AcpRuntime`.
+
+### Choose it in the web dashboard (recommended)
+
+**Setup → 2. Choose a runtime** and **Configuration → Dispatch and service → Worker runtime** use the same card grid:
+
+- Automatically checks whether the CLI is installed, its version, its source (PATH / ra-managed), ACP extension dependencies and login state;
+- **Install CLI** opens the agent's official install page; **Install ACP extension** has ra install the npm adapter into `~/.router-agent/runtimes/<agent>`;
+- **Check / try launch** performs a real ACP handshake (`initialize` + `session/new`) instead of trusting a version string;
+- Clicking a card switches `runtime.default` for new tickets only; tickets already in flight keep their runtime.
+
+![Runtime cards on the web setup page: built-in runtimes and ACP agent availability checks](docs/assets/readme/setup-runtime-light.png)
+
+### Choose it from the CLI
+
+```bash
+ra config set runtime.default claude-code
+ra runtime list                    # ACP agent status, version and source on this machine
+ra runtime install acp-claude      # installs into ~/.router-agent/runtimes/claude
+ra runtime check acp-claude        # full initialize + session/new handshake
+ra runtime login acp-codex         # interactive login
+ra runtime uninstall acp-codex     # remove a ra-managed adapter
+```
+
+### Runtime configuration
+
+```yaml
+runtime:
+  default: acp-codex        # orca | claude-code | acp | acp-*
+  # Runtime-specific non-safety options
+  options:
+    claude-code:
+      model: claude-sonnet-5-5
+    acp:                    # custom ACP command
+      command: opencode
+      args: [acp]
+      env: {}
+  # Non-Orca runtimes use their own project lists, independent of the top-level projects
+  projects:
+    claude-code:
+      - name: router-agent
+        repo: /Users/me/router-agent   # absolute local repository path
+        defaultBranch: main
+    acp-codex:
+      - name: router-agent
+        repo: /Users/me/router-agent
+        defaultBranch: main
+```
+
+Safety fields — `allowedTools` / `permissionMode` / `sandbox` / `shellAllow` / `allowNetwork` / `fileAccess` — may not be written under `runtime.options`; doing so makes startup fail. Worker permissions come from `worker.tools` and each adapter's built-in baseline.
+
+### ACP agent catalog
+
+Any agent implementing the [Agent Client Protocol](https://agentclientprotocol.com) plugs in through the same `AcpRuntime`. On startup ra probes the ACP agents available on this machine; missing / incompatible / logged-out entries are greyed out with a reason in the dashboard.
+
+| runtime id | Agent | Launch command | Online install | Session recovery | Notes |
+|-|-|-|-|-|-|
+| `acp-claude` | Claude Code | `claude-agent-acp` | ✅ | ✅ `session/load` | Requires a logged-in Claude Code |
+| `acp-codex` | Codex | `codex-acp` | ✅ | ❌ | Requires the local `codex` CLI; run `codex-acp login`; `--message-streaming` is enabled by default |
+| `acp-opencode` | OpenCode | `opencode acp` | ❌ | ✅ | Detected automatically when installed; run `ra runtime check` first |
+| `acp-gemini` | Gemini CLI | `gemini --acp` | ❌ | — | Experimental ACP mode |
+| `acp-copilot` | GitHub Copilot CLI | `copilot --acp --stdio` | ❌ | — | |
+| `acp-cursor` | Cursor CLI | `cursor-agent acp` | ❌ | — | Older versions may lack the `acp` subcommand |
+| `acp-goose` | Goose | `goose acp` | ❌ | — | |
+
+`AcpRuntime` spawns the agent child process → `initialize` → `session/new` → `session/prompt`; reads assistant text and tool calls from `session/update`; answers the agent's `session/request_permission` according to `worker.tools`; and, after the process exits, uses `session/load` for follow-ups when the agent declares `loadSession`.
+
+It does not proxy client-side `fs/*` or `terminal/*`: `initialize` declares them unsupported, so the agent must use its own file / command tools. The agent must already be logged in (ACP's `auth_required` surfaces as a launch failure).
 
 ## What it does
 
@@ -282,6 +389,20 @@ Raw terminal output **never enters the logs** (to avoid parsing TUI text); the p
 
 > **Only one event bus may run per bot.** If `ra logs` shows `another event bus is already connected`, stop the other consumer using that app, or give router-agent its own bot via the "dedicated bot" option in `ra init`.
 
+#### Web dashboard
+
+The dashboard opens automatically after `ra start` and any time via `ra web`. It has five pages:
+
+- **Setup**: only the five essentials — LLM Provider, runtime, projects, Feishu access, chats and bindings — with a completion checklist. See [Quick start · Path A](#quick-start) and [Runtime](#runtimeworker-runtimes).
+- **Tickets**: grouped by stage with counts, keyword search (title / ticket id / repo / PR), auto-refresh toggle and manual refresh; the detail view shows stage, assignment, PR, scope, report timeline (including full replies and `humanAction`) and delivery records, and lets you send follow-ups or stop the ticket.
+- **Logs**: reads `~/.router-agent/logs/router-agent.log` with incremental 2-second polling (only bytes after the cursor), optional live refresh, INFO / WARN / ERROR filters, message or field search, and copy; it follows new lines while pinned to the bottom and stops interrupting after you scroll up. Empty states cover a missing or not-yet-written file.
+- **Configuration**: grouped by LLM Provider / admission policy / triage and persona / session reuse / progress sync / idle governance / Feishu access / dispatch and service / projects and chat bindings. Each field carries help text and defaults, changes are marked dirty, and save runs both client and server validation before writing `config.yaml`. The runtime cards are the same component as on the setup page; project lists are isolated per runtime (Orca uses repository selectors, Claude Code / ACP require absolute local paths); add local projects with a system directory picker and Git detection, or Git projects by cloning from an ssh / http(s) URL.
+- **Sources**: service status, monitored chats and receive-scope overview.
+
+![Lower half of the setup page: project registration, Feishu access and chat bindings](docs/assets/readme/setup-steps-light.png)
+
+Fields are marked with their activation scope: **policy** (`acceptMode` / `maxWorkers` / `admission`) applies immediately after saving; everything else is read at service start, so use **Restart service** in the sidebar or configuration page to hot-restart the daemon (the browser page stays open), or run `ra stop && ra start`. `llm.apiKey` can be set under **Setup · LLM Provider** or **Configuration · LLM Provider**; the key is written only to `config.yaml` and never echoed back (`publicConfig` only returns `apiKeySet`). Saving rewrites `config.yaml`, so comments in the original file are lost.
+
 ### PR closure
 
 - After dispatch, the Router tracks the PR state for that branch (`pr:linked` / `pr:state`).
@@ -382,16 +503,21 @@ worker:
     allowNetwork: false      # reserved: parsed but not used to restrict networking yet
 
 runtime:
-  default: orca            # orca | claude-cli (claude-cli has local-path requirements, see Known limitations)
-  # Runtime-specific non-security options: claude-cli.model and acp.command/args/env.
+  default: orca            # orca | claude-code | acp | acp-* (non-Orca runtimes need local paths, see Runtime)
+  # Runtime-specific non-security options: claude-code.model (legacy key claude-cli.model) and acp.command/args/env.
   # allowedTools / permissionMode / sandbox / shellAllow / allowNetwork / fileAccess make startup fail.
   # options:
-  #   claude-cli:
+  #   claude-code:
   #     model: claude-sonnet-5-5
   #   acp:
   #     command: opencode     # agent executable
   #     args: [acp]           # arguments passed to the agent
   #     env: {}               # extra environment variables
+  # Non-Orca runtimes use their own project lists, independent of the top-level projects
+  # projects:
+  #   claude-code:
+  #     - name: router-agent
+  #       repo: /Users/me/router-agent   # Claude Code needs an absolute local repository path
 
 # Projects: "which project + which base branch" must be confirmed before dispatch
 projects: []
@@ -425,7 +551,7 @@ ra config edit                            # opens $EDITOR on the whole file (not
 | `progress.syncMs` / `probeMs` / `silenceMs` / `repeatMs` | ms; the first two accept 0 = off |
 | `retention.enabled` / `idleHours` / `closeGraceHours` / `zombieHours` / `sweepMinutes` | see the `retention` block above |
 | `workerSpec.mode` | `prompt` / `agent` |
-| `backend.default` | `orca` / `claude-cli` |
+| `runtime.default` | `orca` / `claude-code` / `acp` / `acp-*` |
 | `server.port` | 1–65535 |
 | `feishu.larkHome` / `appId` / `reaction` / `directMessages` / `allowed` / `bots` / `botOpenIds` / `botNames` | string, boolean or comma-separated list |
 | `feishu.chats` | comma-separated chat_ids; existing entries keep mode / bindings / sync, new ones default to `all` |
@@ -441,7 +567,7 @@ Chats and projects are composite, so they get dedicated forms that register and 
 | `chatSync.<chatId>` | `ra config set chatSync.oc_xxx true` | backfill this chat's history on startup |
 | `chatAllow.<chatId>` | `ra config set chatAllow.oc_xxx ou_a,ou_b` | empty = use the global `feishu.allowed` |
 
-`router.session.*`, `router.persona.*` and `feishu.images.*` are not in the `config set` allowlist — use `ra config edit` or the web dashboard; `worker.tools.*` and `backend.options.*` are not exposed in the dashboard and need `ra config edit`.
+`router.session.*`, `router.persona.*` and `feishu.images.*` are not in the `config set` allowlist — use `ra config edit` or the web dashboard; `worker.tools.*` and `runtime.options.*` are not exposed in the dashboard and need `ra config edit`.
 
 ### Environment variables
 
@@ -470,7 +596,7 @@ Bot credentials are managed by lark-cli's encrypted store; `router-agent` keeps 
 
 ### Projects and repo selectors
 
-Each `projects[].repo` decides the target of `orca worktree create --repo`. See what Orca has registered:
+Each `projects[].repo` decides the repository for a ticket: the Orca runtime passes it to `orca worktree create --repo`, while other runtimes treat it as the absolute local repository path for `git worktree`. See what Orca has registered:
 
 ```bash
 orca repo list --json | jq -r '.result.repos[] | "\(.displayName)\t\(.path)\t\(.kind)"'
@@ -483,7 +609,7 @@ The **Projects** editor in the web dashboard offers two ways to add one:
 | Add local project | Opens the native folder picker; detects the Git root, current branch and origin. Non-Git folders are rejected because worktrees need a Git repo |
 | Add Git project | Takes an ssh / http(s) URL, clones it to `<RA_HOME>/repos/<name>` (default `~/.router-agent/repos`), and for the Orca runtime runs `orca repo add --path ... --kind git`; the config stores `path:<absolute path>` |
 
-All three selector forms are supported:
+All four selector forms are supported:
 
 | Form | Example | Notes |
 |-|-|-|
@@ -493,6 +619,8 @@ All three selector forms are supported:
 | `path:` | `path:/Users/admin/du/teamwork-repos` | Absolute path |
 
 Note: only `kind: git` repos can create worktrees; `kind: folder` (plain folder projects) fail at `orca worktree create`.
+
+Non-Orca runtimes (`claude-code` / `acp-*`) don't use repository selectors: `repo` is an absolute local repository path, and project lists live under `runtime.projects.<runtime id>` — see [Runtime](#runtimeworker-runtimes).
 
 Also, the old global `repo` config has been removed (`ra` no longer reads it). Migrate existing configs to `projects`; `ra doctor` errors out and prints the command when no project is configured.
 
@@ -526,7 +654,7 @@ llm:
 | `shellAllow` | prefix array | only used when `shell: allowlist` |
 | `allowNetwork` | `true` / `false` | reserved: parsed but not used to restrict networking yet |
 
-It only applies to `backend.default: claude-cli` (mapped to Claude's `allowedTools`); with the `orca` backend the worker's permissions come from the Claude Code launched inside Orca. Security fields are decided here and by the adapter's built-in baseline only — the same keys under `backend.options` make startup fail.
+It applies to `claude-code` (mapped to Claude's `allowedTools`); ACP `session/request_permission` requests are allowed or denied under the same policy; with the `orca` runtime the worker's permissions come from the Claude Code launched inside Orca. Security fields are decided here and by the adapter's built-in baseline only — the same keys under `runtime.options` make startup fail.
 
 ### Worker spec injection
 
@@ -536,37 +664,6 @@ It only applies to `backend.default: claude-cli` (mapped to Claude's `allowedToo
 - `agent`: sends only the ticket and relies on the global `~/.claude/agents/router-agent-worker.md` (generated by `ra init`).
 
 Neither mode modifies the project's own `CLAUDE.md`.
-
-### ACP runtime (optional)
-
-Any agent that implements the [Agent Client Protocol](https://agentclientprotocol.com) can run through the same `AcpRuntime` — no per-agent adapter needed. ra probes locally available ACP agents after startup; the web panel lists them as selectable cards (with brand logos) under **Setup → Runtime** and **Settings → Worker runtime**, with version / dependency / login checks. Installation is split into **Install CLI**, which opens the vendor's official setup page, and **Install ACP extension**, which lets ra install the npm adapter into `~/.router-agent/runtimes` (shown only when one exists); a real ACP handshake test is available too. Unavailable entries (not installed, incompatible, or not logged in) are disabled with a reason.
-
-Built-in runtime ids: `acp-claude`, `acp-codex`, `acp-opencode`, `acp-gemini`, `acp-copilot`, `acp-cursor`, `acp-goose`. `acp-claude` and `acp-codex` can be installed on demand:
-
-```bash
-ra runtime list
-ra runtime install acp-claude
-ra runtime install acp-codex
-ra runtime check acp-codex
-ra runtime login acp-codex
-```
-
-```yaml
-runtime:
-  default: acp-codex
-  # options:
-  #   acp-codex:
-  #     args: ["--message-streaming"]
-  projects:
-    acp-codex:
-      - name: router-agent
-        repo: /Users/me/router-agent   # non-orca runtimes require an absolute local path
-        defaultBranch: main
-```
-
-The legacy `runtime.default: acp` + `runtime.options.acp.command` form is still supported as a custom-command runtime. Common launch commands: `opencode acp`, `gemini --acp`, `copilot --acp --stdio`, `cursor-agent acp`, `goose acp`. Claude Code (`claude-agent-acp`) and Codex (`codex-acp`) are ACP adapters, not native ACP.
-
-`AcpRuntime` spawns the agent, runs `initialize → session/new → session/prompt`, streams `session/update` into activity, answers `session/request_permission` according to `worker.tools`, and restores a session with `session/load` when the agent advertises it. Client-side `fs/*` and `terminal/*` proxying is intentionally not implemented; agents must use their own tools. The agent must be logged in beforehand — `auth_required` surfaces as a launch failure. `codex-acp` needs `--message-streaming` to emit assistant text (included in the catalog defaults).
 
 ## Commands
 
@@ -690,7 +787,7 @@ States:
 ## Development
 
 ```bash
-pnpm test        # 466 tests pass (5 skipped by default, including the live Pi check; covers the Pi triage / reply path)
+pnpm test        # 605 tests pass (4 skipped by default, including the live Pi check; covers the Pi triage / reply path)
 pnpm typecheck
 pnpm build       # tsc + esbuild (web dashboard and Markdown assets)
 pnpm check       # typecheck + test
