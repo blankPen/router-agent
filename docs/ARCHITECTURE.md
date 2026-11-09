@@ -5,7 +5,7 @@
 ## 分层
 
 ```text
-Sources（飞书 / GitHub）
+Sources（飞书 / GitHub / GitLab）
         │ Trigger
         ▼
 Router（AgentLoop + DecisionEngine(Pi) + HTTP API + Web）
@@ -200,9 +200,10 @@ ra report \
 `done` 是终态；其余四种阶段之间可以互相流转。PR 仍处于 open 时禁止结束工单。
 旧版本八阶段（`draft/accepted/assigned/running/review/person/idle/closed`）的历史数据迁移见 [TICKET-STAGE-MIGRATION.md](TICKET-STAGE-MIGRATION.md)。
 
-## PR 闭环
+## PR / MR 闭环
 
-- 派工成功后 Router 跟踪该分支的 PR 状态（`pr:linked` / `pr:state`）。
-- PR 仍处于 open 时禁止结束工单。
-- PR 合并或关闭后，工单变 `closed`，飞书收到一次闭环通知。
+- 派工成功后 Router 跟踪该分支的 PR / MR 状态（`pr:linked` / `pr:state`）。
+- 平台按 worktree 的 `git remote` 自动识别：`github.com` 走 `gh`，其它主机按 GitLab 走 `glab`（需本机安装并完成登录）；GitLab MR 不会交给 `gh`。
+- PR / MR 仍处于 open 时禁止结束工单。
+- PR / MR 合并或关闭后，工单变 `closed`，飞书收到一次闭环通知。
 - 不做自动合并：合并与否由人决定。

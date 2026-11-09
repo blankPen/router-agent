@@ -125,12 +125,12 @@ ra tickets                                             # 模拟产生的工单�
 2. `ra tickets` 出现工单，`ra ticket <id>` 能看到授权范围与强度；
 3. `orca worktree list --json`（`orca` 运行时；其它运行时用 `git worktree list`）出现 `ra-tk-<编号>-<语义slug>`，分支名为 `ra/tk-<编号>-<语义slug>`（目录名与分支名一一对应，只把 `/` 换成 `-`），对应运行时里出现 Agent 会话（Orca 为 Claude Code 终端）；
 4. Worker 执行 `ra report` 后，`ra ticket <id>` 的阶段在 `running → review/blocked` 之间变化；
-5. 合并或关闭 PR 后，工单变 `closed`，飞书收到一次闭环通知。
+5. 合并或关闭 PR / MR 后，工单变 `closed`，飞书收到一次闭环通知。
 
 ## 它怎么工作
 
 ```text
-Sources（飞书 / GitHub）
+Sources（飞书 / GitHub / GitLab）
         │ Trigger
         ▼
 Router（AgentLoop + DecisionEngine(Pi) + HTTP API + Web）
@@ -261,7 +261,7 @@ RA_PI_VERIFY=1 npx vitest run tests/verify-pi-live.test.ts   # 真实 Pi + 真�
 src/core/     领域内核（model / stage / policy / engine / effects）
 src/store/    SQLite（node:sqlite）
 src/worker/   WorkerRuntime 端口、RuntimeRegistry、OrcaRuntime、ClaudeCodeRuntime、AcpRuntime、state.json 轮询、worker 手册
-src/sources/  飞书事件、GitHub PR 跟踪
+src/sources/  飞书事件、GitHub / GitLab PR / MR 跟踪
 src/router/   AgentLoop、工具契约、提示词、HTTP API
 src/web/      React 面板
 src/cli/      ra 命令
@@ -270,8 +270,8 @@ src/cli/      ra 命令
 ## 已知限制
 
 - 第一版只支持 macOS（Orca 运行时在 Linux 上需要 `orca-ide`）。
-- 不做自动合并 PR，只跟踪与通知。
-- GitHub Source 只用于 PR 状态跟踪，不消费 Issue / 评论。
+- 不做自动合并 PR / MR，只跟踪与通知。
+- GitHub / GitLab Source 只用于 PR / MR 状态跟踪，不消费 Issue / 评论。
 - 各运行时的行为差异、附件与模型限制、Pi 版本约束等完整清单见 [docs/OPERATIONS.md](docs/OPERATIONS.md#已知限制)。
 
 ## 文档

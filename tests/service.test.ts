@@ -473,6 +473,24 @@ describe('RouterService 编排', () => {
     expect(call.hint).toEqual({ url: 'https://github.com/o/r/pull/12', cwd: `/tmp/${ticket.id}` })
   })
 
+  it('PR 状态查询无结果时只记一次 pr:track-failed', async () => {
+    engine.ingest(makeTrigger())
+    await service.runOnce()
+    const ticket = store.listTickets()[0]!
+    const assignment = store.latestAssignment(ticket.id)!
+    service.onWorkerState({
+      ticketId: ticket.id, assignmentId: assignment.id, turn: 1, state: 'ready', summary: 'PR 已开',
+      prNumber: 99, prUrl: 'u99', ackedInputs: [], updatedAt: '2026-11-06T10:01:00.000Z',
+    })
+
+    await service.trackPullRequests()
+    await service.trackPullRequests()
+
+    const misses = logs.filter(log => log.message === 'pr:track-failed')
+    expect(misses).toHaveLength(1)
+    expect(misses[0]?.extra).toMatchObject({ ticketId: ticket.id, prNumber: 99, repo: 'acme/web' })
+  })
+
   it('worker 上报 blocked 时通知发起人并登记待答问题', async () => {
     engine.ingest(makeTrigger())
     await service.runOnce()

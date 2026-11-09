@@ -125,12 +125,12 @@ For a real acceptance run, mention the bot in a chat with a small request, then 
 2. `ra tickets` shows a ticket, and `ra ticket <id>` shows its scope and strength;
 3. `orca worktree list --json` (for the `orca` runtime; use `git worktree list` for other runtimes) shows `ra-tk-<number>-<semantic slug>` with branch `ra/tk-<number>-<semantic slug>` (the directory name matches the branch, with `/` replaced by `-`), and the runtime shows an agent session (a Claude Code terminal for Orca);
 4. after the Worker runs `ra report`, the stage in `ra ticket <id>` moves between `running → review/blocked`;
-5. when the PR is merged or closed, the ticket becomes `closed` and Feishu gets one closure notification.
+5. when the PR / MR is merged or closed, the ticket becomes `closed` and Feishu gets one closure notification.
 
 ## How it works
 
 ```text
-Sources (Feishu / GitHub)
+Sources (Feishu / GitHub / GitLab)
         │ Trigger
         ▼
 Router (AgentLoop + DecisionEngine(Pi) + HTTP API + Web)
@@ -262,7 +262,7 @@ Source layout:
 src/core/     domain core (model / stage / policy / engine / effects)
 src/store/    SQLite (node:sqlite)
 src/worker/   WorkerRuntime port, RuntimeRegistry, OrcaRuntime, ClaudeCodeRuntime, AcpRuntime, state.json polling, worker handbook
-src/sources/  Feishu events, GitHub PR tracking
+src/sources/  Feishu events, GitHub / GitLab PR / MR tracking
 src/router/   AgentLoop, tool contracts, prompts, HTTP API
 src/web/      React dashboard
 src/cli/      ra commands
@@ -271,8 +271,8 @@ src/cli/      ra commands
 ## Known limitations
 
 - macOS only for now (the Orca runtime needs `orca-ide` on Linux).
-- No auto-merge; PRs are tracked and reported, not merged.
-- The GitHub source is only used for PR state tracking; it does not consume issues or comments.
+- No auto-merge; PRs / MRs are tracked and reported, not merged.
+- The GitHub / GitLab source is only used for PR / MR state tracking; it does not consume issues or comments.
 - Runtime-specific behavior, attachment / model limits and the Pi version constraint are listed in [docs/OPERATIONS.md](docs/OPERATIONS.md#已知限制) (Chinese).
 
 ## Documentation

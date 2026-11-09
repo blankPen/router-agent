@@ -63,7 +63,8 @@ Router 不做对话，只在必要时说话：
 | `outbox:sent` / `outbox:failed` | Outbox | `key` `text` / `error` | 对外通知结果 |
 | `api:input` / `api:stop` / `api:policy` / `api:config` | HTTP API | — | 面板 / CLI 的操作 |
 | `idle:nudge` / `idle:stale` | Service | — | 空闲唤醒与失联标记 |
-| `pr:linked` / `pr:state` | Service | — | PR 跟踪 |
+| `pr:linked` / `pr:state` | Service | — | PR / MR 跟踪 |
+| `pr:track-failed` | Service | `ticketId` `prNumber` `repo` `message` | PR / MR 状态查询无结果；同一工单 + PR 只记一次 |
 | `recover:*` | Service | — | 重启对账 |
 
 消息、配置与异常三类关键链路的补充事件（都遵循同一套 `at` / `level` / `message` + 业务字段格式）：
@@ -119,8 +120,8 @@ grep '"message":"trigger:' ~/.router-agent/logs/router-agent.log
 ## 已知限制
 
 - 第一版只支持 macOS（Orca 运行时在 Linux 上裸 `orca` 会撞 GNOME 屏幕阅读器，需要 `orca-ide`）。
-- 不做自动合并 PR，只跟踪与通知。
-- GitHub Source 只用于 PR 状态跟踪，不消费 Issue / 评论。
+- 不做自动合并 PR / MR，只跟踪与通知。
+- GitHub / GitLab Source 只用于 PR / MR 状态跟踪，不消费 Issue / 评论。
 - 上报走 `ra report`，`state.json` 只作为服务不可达时的兜底通道。
 - 图片会下载并落盘到 `/tmp/ra-images/`，原图路径透传给 Worker（可直接查看）；同时用多模态模型转成文字供研判。文件 / 语音等其它附件只识别到「这是一条附件消息」，需要内容时请用文字描述。
 - 图片转文本依赖模型支持 image 输入；主模型不支持时请在 `llm.imageModel` 单独配置视觉模型。单张转写失败时原图仍会落盘并透传，研判只能看到占位说明；`feishu.images.enabled: false` 则整条图片链路关闭。

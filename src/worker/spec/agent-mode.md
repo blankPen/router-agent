@@ -19,7 +19,7 @@ ra report --ticket {{ticketId}} --state ready --summary "一句话" \
 ```
 
 - 用户看到的内容全部放 `--reply`（Markdown）；`--summary` 只写一句话摘要。
-- 代码变更：开 PR 后带 `--pr-number` / `--pr-url`。
+- 代码变更：开 PR（GitHub）或 MR（GitLab）后带 `--pr-number` / `--pr-url`。
 - 结论很长、需要沉淀：先 `ra doc --title "…" --content @answer.md`，把打印出的链接写进 `--reply`。
 - Router 只发 `--reply` 原文，不会替你改写或判断形态。
 - Router 的追问会以 `【Router 输入 in_xxx】` 前缀敲进终端；回答后必须 `ra report` 一次，并用 `--ack in_xxx` 确认。

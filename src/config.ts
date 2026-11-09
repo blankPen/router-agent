@@ -11,12 +11,12 @@ import { noopLogger, errorMessage, type Logger } from './infra/logger.js'
 
 export type ChatMode = 'all' | 'mention'
 
-/** worker 的默认工具策略：只允许上报/文档/git/gh，默认无网络。 */
+/** worker 的默认工具策略：只允许上报/文档/git/gh/glab，默认无网络。 */
 export const DEFAULT_WORKER_TOOLS: ToolPolicy = {
   fileAccess: 'read-write',
   shell: 'allowlist',
   shellAllow: [
-    'ra report', 'ra doc', 'git', 'gh',
+    'ra report', 'ra doc', 'git', 'gh', 'glab',
     'pnpm', 'npm', 'npx', 'node', 'yarn', 'bun',
     'python', 'python3', 'pytest', 'cargo', 'go', 'make', 'mvn', 'gradle',
   ],
