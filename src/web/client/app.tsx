@@ -280,6 +280,32 @@ function Icon({ name, size = 16, className }: { name: IconName; size?: number; c
   )
 }
 
+// 品牌标识：与 docs/assets/router-agent-logo.svg 保持一致的矢量图形。
+function LogoMark({ size = 34 }: { size?: number }): JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 720 720" fill="none" aria-hidden="true">
+      <rect width="720" height="720" fill="#000000" />
+      <g stroke="#FFFFFF" strokeWidth="16">
+        <path d="M360 168V289.5" />
+        <path d="M359 553L360 428.5" />
+        <path d="M154 357.5L290.5 358.4" />
+        <path d="M565 357.5L429.5 358.4" />
+        <path d="M217 494L309 406.7" />
+        <path d="M502 494L409.9 406.9" />
+      </g>
+      <g fill="#FFFFFF">
+        <circle cx="360" cy="359" r="61.5" />
+        <circle cx="360" cy="168" r="36" />
+        <circle cx="359" cy="553" r="36" />
+        <circle cx="154" cy="357.5" r="36" />
+        <circle cx="565" cy="357.5" r="36" />
+        <circle cx="217" cy="494" r="36" />
+        <circle cx="502" cy="494" r="36" />
+      </g>
+    </svg>
+  )
+}
+
 // ---------------------------------------------------------------------------
 // 应用外壳
 // ---------------------------------------------------------------------------
@@ -345,7 +371,7 @@ function App(): JSX.Element {
     <div className="shell">
       <aside className="sidebar">
         <div className="brand">
-          <span className="brand-mark">ra</span>
+          <span className="brand-mark"><LogoMark size={34} /></span>
           <span className="brand-text">
             <strong>router-agent</strong>
             <small>control room</small>
