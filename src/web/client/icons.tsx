@@ -5,6 +5,7 @@ export type IconName =
   | 'stop' | 'alert' | 'plus' | 'trash' | 'branch' | 'terminal' | 'clock' | 'check' | 'chevron' | 'close'
   | 'folder' | 'git' | 'file-text'
   | 'zap' | 'play'
+  | 'sun' | 'moon' | 'monitor'
 
 export function Icon({ name, size = 16, className }: { name: IconName; size?: number; className?: string }): JSX.Element {
   const paths: Record<IconName, JSX.Element> = {
@@ -100,6 +101,20 @@ export function Icon({ name, size = 16, className }: { name: IconName; size?: nu
     close: <path d="M18 6 6 18M6 6l12 12" />,
     zap: <path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z" />,
     play: <path d="M7 4l13 8-13 8V4Z" />,
+    // 主题切换：太阳 / 月亮 / 显示器（跟随系统）。
+    sun: (
+      <>
+        <circle cx="12" cy="12" r="4" />
+        <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+      </>
+    ),
+    moon: <path d="M21 12.79A9 9 0 0 1 11.21 3 7 7 0 1 0 21 12.79Z" />,
+    monitor: (
+      <>
+        <rect x="2" y="3" width="20" height="14" rx="2" />
+        <path d="M8 21h8M12 17v4" />
+      </>
+    ),
     'file-text': (
       <>
         <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" />

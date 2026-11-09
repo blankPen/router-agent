@@ -3,6 +3,20 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      首帧前定好主题：读取面板主题选择（ra.theme = system / light / dark），
+      跟随系统或首次打开时按系统偏好解析，避免深色用户刷新时先闪一帧白底。
+      运行时由 src/web/client/theme.ts 接管同一份选择与 <html data-theme>。
+    -->
+    <script>
+      (function () {
+        var mode = null;
+        try { mode = localStorage.getItem('ra.theme') } catch (error) { /* 禁用存储时按系统 */ }
+        var dark = mode === 'dark'
+          || (mode !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+      })();
+    </script>
     <title>router-agent</title>
     <link
       rel="icon"

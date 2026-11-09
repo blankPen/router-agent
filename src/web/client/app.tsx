@@ -24,6 +24,16 @@ import {
   runtimeStatusLabel,
 } from './runtime-model.js'
 import { hashForTab, tabFromHash, type Tab } from './tabs.js'
+import {
+  applyTheme,
+  nextThemeMode,
+  readStoredThemeMode,
+  resolveTheme,
+  storeThemeMode,
+  themeModeIcon,
+  themeModeLabel,
+  type ThemeMode,
+} from './theme.js'
 import { ACP_RUNTIME_ID, ORCA_RUNTIME_ID, normalizeRuntimeId } from '../../worker/runtimes/catalog.js'
 
 // ---------------------------------------------------------------------------
@@ -212,12 +222,42 @@ function App(): JSX.Element {
   const [restartError, setRestartError] = useState<string | null>(null)
   // 配置页 / 初始化页共享同一个「有未保存修改」标记，切走前提醒一次。
   const dirtyRef = useRef(false)
+  // 主题选择（跟随系统 / 亮 / 暗）记忆在 localStorage，默认跟随系统。
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => readStoredThemeMode())
+  const [systemPrefersDark, setSystemPrefersDark] = useState<boolean>(
+    () => window.matchMedia('(prefers-color-scheme: dark)').matches,
+  )
+  const resolvedTheme = resolveTheme(themeMode, systemPrefersDark)
+  const nextMode = nextThemeMode(themeMode, systemPrefersDark)
+  const themeHint = `${themeModeLabel(themeMode)}${themeMode === 'system' ? `（当前${resolvedTheme === 'dark' ? '暗色' : '亮色'}）` : ''}，点击切换为${themeModeLabel(nextMode)}`
   // 窄屏下导航横向滚动，切页时把当前项滚进可视区，避免选中项被裁在屏幕外。
   const navRef = useRef<HTMLElement | null>(null)
 
   useEffect(() => {
     navRef.current?.querySelector<HTMLElement>('.nav-tab.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
   }, [tab])
+
+  // 跟随系统时要实时响应系统亮/暗切换；显式选择亮或暗时，这个监听只是空转。
+  useEffect(() => {
+    const query = window.matchMedia('(prefers-color-scheme: dark)')
+    const sync = (): void => setSystemPrefersDark(query.matches)
+    sync()
+    query.addEventListener('change', sync)
+    return () => query.removeEventListener('change', sync)
+  }, [])
+
+  // CSS 深色变量挂在 <html data-theme> 上；首帧由 index.html 的内联脚本先写好。
+  useEffect(() => {
+    applyTheme(resolvedTheme)
+  }, [resolvedTheme])
+
+  const cycleTheme = useCallback((): void => {
+    setThemeMode(current => {
+      const next = nextThemeMode(current, systemPrefersDark)
+      storeThemeMode(next)
+      return next
+    })
+  }, [systemPrefersDark])
 
   const switchTab = useCallback((next: Tab): void => {
     if (next === tab) return
@@ -290,6 +330,16 @@ function App(): JSX.Element {
             <strong>router-agent</strong>
             <small>control room</small>
           </span>
+          {/* 主题按钮常驻品牌行：宽屏和窄屏顶栏下都能点到，不随侧栏底部一起收起。 */}
+          <button
+            className="icon-btn theme-btn"
+            type="button"
+            title={`主题：${themeHint}`}
+            aria-label={`主题：${themeHint}`}
+            onClick={cycleTheme}
+          >
+            <Icon name={themeModeIcon(themeMode)} size={16} />
+          </button>
         </div>
 
         <nav className="side-nav" ref={navRef}>

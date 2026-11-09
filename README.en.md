@@ -75,7 +75,7 @@ ra status
 ra web                  # reopen the dashboard later
 ```
 
-`ra start` waits for the service to become ready, then opens the dashboard's **Setup** page in your default browser: worker runtime (including one-click ACP extension install), projects, Feishu access, and monitored chats with bindings. Save, then restart the service when the page asks. On a remote or headless machine use `ra start --no-open` to only print the dashboard URL.
+`ra start` waits for the service to become ready, then opens the dashboard's **Setup** page in your default browser: worker runtime (including one-click ACP extension install), projects, Feishu access, and monitored chats with bindings. Save, then restart the service when the page asks. On a remote or headless machine use `ra start --no-open` to only print the dashboard URL. The brand row in the sidebar also carries a global theme toggle that cycles **system → light → dark**; the choice is remembered in the browser and defaults to the system preference.
 
 **4 · Self-check and simulate**
 
