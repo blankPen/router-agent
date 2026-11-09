@@ -500,7 +500,13 @@ button, input, select {
   font-weight: 500;
   white-space: nowrap;
 }
-.pr-open { background: var(--info-soft); color: var(--info); }
+/* 「开放中」是待处理的活跃状态：用实心绿色主色强调，与浅绿底的「已合并」拉开层次。 */
+.pr-open {
+  background: var(--accent);
+  color: var(--on-accent);
+  padding: 0 8px;
+  font-weight: 600;
+}
 .pr-merged { background: var(--pill-positive-bg); color: var(--pill-positive-ink); }
 .pr-closed { background: var(--pill-negative-bg); color: var(--pill-negative-ink); }
 .pr-none { background: var(--active); color: var(--muted); }
