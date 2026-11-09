@@ -7,6 +7,7 @@ import { applyConfigPatch, policyOf, publicConfig, publicDefaults, requiresResta
 import { InstallStartError, type AcpRuntimeAdmin } from '../worker/runtimes/acp/admin.js'
 import { isWorkerRuntimeId, normalizeRuntimeId } from '../worker/runtimes/catalog.js'
 import { ProjectSetupError, type ProjectSetupPort } from './project-setup.js'
+import type { FeishuBotAdmin } from '../sources/feishu-bot-admin.js'
 import type { AcceptMode } from '../core/policy.js'
 import { noopSink, preview, type EventSink } from '../core/events.js'
 import { noopLogger, errorMessage, type Logger } from '../infra/logger.js'
@@ -35,6 +36,8 @@ export interface ApiServerOptions {
   resumeHint?: (ticketId: string) => Promise<ResumeHint | null> | ResumeHint | null
   /** ACP 运行时探测与安装；缺省时新端点返回 404。 */
   runtimeAdmin?: AcpRuntimeAdmin
+  /** 飞书机器人凭据与授权；缺省时相关端点返回 404。 */
+  feishuBot?: FeishuBotAdmin
   /** 面板「日志」页读取的日志文件；缺省时用 `<home>/logs/router-agent.log`。 */
   logPath?: string
   /** 项目登记：目录选择、Git 探测、clone 与 Orca 仓库登记；缺省时端点返回 404。 */
@@ -300,6 +303,73 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         })
       }
       return respond(res, 405, { error: 'method-not-allowed' })
+    }
+
+    if (path === '/api/feishu/status' && req.method === 'GET') {
+      if (!opts.feishuBot) return respond(res, 404, { error: 'feishu-bot-not-available' })
+      const status = await opts.feishuBot.status()
+      return respond(res, 200, {
+        profileHome: opts.feishuBot.profileHome,
+        configAppId: config.feishu.appId,
+        appId: status.appId,
+        bot: status.bot,
+        user: status.user,
+      })
+    }
+
+    if (path === '/api/feishu/credentials' && req.method === 'POST') {
+      if (!opts.feishuBot) return respond(res, 404, { error: 'feishu-bot-not-available' })
+      const body = await readJson(req)
+      const appId = typeof body.appId === 'string' ? body.appId.trim() : ''
+      const appSecret = typeof body.appSecret === 'string' ? body.appSecret : ''
+      if (!appId) return respond(res, 400, { error: 'app-id-required', message: 'App ID 不能为空' })
+      if (!appSecret.trim()) return respond(res, 400, { error: 'app-secret-required', message: 'App Secret 不能为空' })
+      const result = await opts.feishuBot.configure(appId, appSecret)
+      if (!result.ok) return respond(res, 400, { error: 'feishu-credentials-failed', message: result.message })
+      // 凭据写入成功后同步 appId，避免 config.yaml 与 lark-cli profile 指向两个应用。
+      config.feishu.appId = appId
+      if (config.home) {
+        try {
+          writeConfig(config.home, config)
+        } catch (error) {
+          return respond(res, 500, {
+            error: 'config-write-failed',
+            message: error instanceof Error ? error.message : String(error),
+          })
+        }
+      }
+      return respond(res, 200, {
+        ok: true,
+        message: result.message,
+        ...configPayload(config, opts.runtimeAdmin),
+      })
+    }
+
+    if (path === '/api/feishu/auth/login' && req.method === 'POST') {
+      if (!opts.feishuBot) return respond(res, 404, { error: 'feishu-bot-not-available' })
+      try {
+        return respond(res, 200, await opts.feishuBot.startLogin())
+      } catch (error) {
+        return respond(res, 400, {
+          error: 'feishu-auth-start-failed',
+          message: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+
+    if (path === '/api/feishu/auth/complete' && req.method === 'POST') {
+      if (!opts.feishuBot) return respond(res, 404, { error: 'feishu-bot-not-available' })
+      const body = await readJson(req)
+      const deviceCode = typeof body.deviceCode === 'string' ? body.deviceCode.trim() : ''
+      if (!deviceCode) return respond(res, 400, { error: 'device-code-required', message: 'device code 不能为空' })
+      try {
+        return respond(res, 200, { ok: true, ...(await opts.feishuBot.completeLogin(deviceCode)) })
+      } catch (error) {
+        return respond(res, 400, {
+          error: 'feishu-auth-complete-failed',
+          message: error instanceof Error ? error.message : String(error),
+        })
+      }
     }
 
     if (path === '/api/sources/feishu/chats' && req.method === 'GET') {

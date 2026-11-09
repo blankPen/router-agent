@@ -1,8 +1,8 @@
-import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { chatEntry, loadConfig, projectNameOf, projectsForRuntime, setProjectsForRuntime, writeConfig, type AppConfig, type ProjectConfig } from '../config.js'
 import { ORCA_RUNTIME_ID, normalizeRuntimeId } from '../worker/runtimes/catalog.js'
 import type { CommandRunner } from '../infra/process.js'
+import { FeishuBotAdmin, FEISHU_AUTH_DOMAINS } from '../sources/feishu-bot-admin.js'
 import {
   larkEnv,
   parseAppId,
@@ -23,8 +23,8 @@ export interface InitDeps {
   /** 存在即进入交互引导；不存在时写默认配置。 */
   prompts?: Prompter
   orca: CommandRunner
-  /** 按 larkHome 构造 lark-cli runner（空表示复用当前 profile）。 */
-  lark: (home?: string) => CommandRunner
+  /** 已绑定固定 lark-cli profile 的 runner。 */
+  lark: CommandRunner
   /** 需要交互式接管终端的 lark-cli 命令（新建应用、用户授权）。 */
   stream?: (argv: string[], env: NodeJS.ProcessEnv) => Promise<number>
 }
@@ -50,38 +50,26 @@ export async function runInitWizard(deps: InitDeps): Promise<AppConfig> {
   await pickRepo(deps, config, prompts, out)
 
   out('')
-  const source = await prompts.select<'reuse' | 'existing' | 'new'>({
-    message: '飞书机器人',
+  const source = await prompts.select<'existing' | 'new' | 'skip'>({
+    message: '飞书机器人（固定使用 ~/.router-agent-lark profile）',
     choices: [
-      { name: '复用当前 lark-cli 绑定的机器人', value: 'reuse' },
-      { name: '专属机器人 · 已有 App ID / App Secret', value: 'existing' },
-      { name: '专属机器人 · 现在新建应用（浏览器完成）', value: 'new' },
+      { name: '已有 App ID / App Secret，现在写入', value: 'existing' },
+      { name: '现在新建飞书应用（浏览器完成）', value: 'new' },
+      { name: '跳过，稍后在 Web 配置页填写', value: 'skip' },
     ],
-    default: config.feishu.larkHome ? 'existing' : 'reuse',
+    default: config.feishu.appId ? 'existing' : 'skip',
   })
 
-  if (source === 'reuse') {
-    config.feishu.larkHome = ''
-    config.feishu.appId = ''
-  } else {
-    config.feishu.larkHome = await prompts.input({
-      message: '专属配置目录（独立 lark-cli HOME）',
-      default: config.feishu.larkHome || join(homedir(), '.router-agent-lark'),
-    })
+  if (source !== 'skip') {
     await setupDedicatedApp(deps, config, source === 'new', prompts, out)
+    await ensureUserAuth(deps, prompts, out)
   }
 
-  await ensureUserAuth(deps, config, prompts, out)
-
-  const chats = await safeChats(deps.lark(config.feishu.larkHome))
+  const chats = await safeChats(deps.lark)
   if (chats.length === 0) {
     out('')
     out('⚠ 读不到群列表，跳过群/成员选择。')
-    if (config.feishu.larkHome) {
-      out(`   先确认专属机器人已配置：HOME=${config.feishu.larkHome} lark-cli config show`)
-    } else {
-      out('   先运行：lark-cli config init --new')
-    }
+    out('   请先在 Web 配置页写入 App ID / App Secret，并完成飞书授权。')
   } else {
     out('')
     const selected = await prompts.checkbox<string>({
@@ -225,16 +213,15 @@ async function setupDedicatedApp(
   prompts: Prompter,
   out: (line: string) => void,
 ): Promise<void> {
-  const home = config.feishu.larkHome
-  const lark = deps.lark(home)
+  const lark = deps.lark
 
   if (createNew) {
     out('即将调用 lark-cli config init --new，请在浏览器里完成应用创建。')
     if (!deps.stream) {
-      out(`请手动执行：HOME=${home} lark-cli config init --new`)
+      out('请手动执行：HOME=~/.router-agent-lark lark-cli config init --new')
       return
     }
-    const code = await deps.stream(['config', 'init', '--new'], larkEnv(home))
+    const code = await deps.stream(['config', 'init', '--new'], larkEnv())
     if (code !== 0) {
       out('⚠ 新建应用未完成，稍后可重新运行 ra init。')
       return
@@ -265,32 +252,24 @@ async function setupDedicatedApp(
   }
 
   // Secret 通过 stdin 传入，不出现在进程参数里。
-  const res = await lark.run(['config', 'init', '--app-id', config.feishu.appId, '--app-secret-stdin'], { input: `${secret.trim()}\n` })
-  const saved = /configuration saved|配置已保存/i.test(res.stdout)
-  if (!saved) {
-    out(`⚠ 写入 lark-cli 配置失败：${(res.stderr || res.stdout).trim().slice(0, 200)}`)
-    return
-  }
-  if (res.code !== 0) {
-    // lark-cli 会先落盘再校验凭据；校验失败通常意味着 App Secret 填错。
-    out(`⚠ 凭据已写入，但校验失败：${(res.stderr || res.stdout).trim().slice(0, 160)}`)
+  const result = await new FeishuBotAdmin({ lark }).configure(config.feishu.appId, secret)
+  if (!result.ok) {
+    out(`⚠ ${result.message}`)
     out('   请检查 App Secret 是否属于这个 App ID，然后重新运行 ra init。')
     return
   }
-  out('已写入 lark-cli 独立配置目录并校验通过（App Secret 未落到 config.yaml）。')
+  out(result.message)
 }
 
 async function ensureUserAuth(
   deps: InitDeps,
-  config: AppConfig,
   prompts: Prompter,
   out: (line: string) => void,
 ): Promise<void> {
-  const home = config.feishu.larkHome
-  const lark = deps.lark(home)
+  const lark = deps.lark
   let status
   try {
-    status = await lark.run(['auth', 'status'])
+    status = await lark.run(['auth', 'status', '--json'])
   } catch {
     return
   }
@@ -302,14 +281,14 @@ async function ensureUserAuth(
   out('当前还没有飞书用户授权（机器人身份已可用；用户授权用于按名字搜索群/成员）。')
   const yes = await prompts.confirm({ message: '现在完成用户授权？', default: false })
   if (!yes) {
-    out(`稍后可执行：${home ? `HOME=${home} ` : ''}lark-cli auth login`)
+    out('稍后可执行：HOME=~/.router-agent-lark lark-cli auth login')
     return
   }
   if (!deps.stream) {
-    out(`请手动执行：${home ? `HOME=${home} ` : ''}lark-cli auth login`)
+    out('请手动执行：HOME=~/.router-agent-lark lark-cli auth login')
     return
   }
-  const code = await deps.stream(['auth', 'login'], larkEnv(home))
+  const code = await deps.stream(['auth', 'login', '--domain', FEISHU_AUTH_DOMAINS.join(',')], larkEnv())
   out(code === 0 ? '用户授权完成。' : '⚠ 用户授权未完成，可稍后重试。')
 }
 
@@ -322,7 +301,7 @@ async function pickPeople(
 ): Promise<void> {
   let members: LarkMember[] = []
   try {
-    const res = await deps.lark(config.feishu.larkHome).run(['im', '+chat-members-list', '--chat-id', chatId, '--as', 'bot', '--format', 'json'])
+    const res = await deps.lark.run(['im', '+chat-members-list', '--chat-id', chatId, '--as', 'bot', '--format', 'json'])
     if (res.code === 0) members = parseLarkMembers(res.stdout)
   } catch {
     members = []
@@ -333,7 +312,7 @@ async function pickPeople(
 
   if (users.length > 0) {
     out('')
-    const selfId = await readSelfOpenId(deps.lark(config.feishu.larkHome))
+    const selfId = await readSelfOpenId(deps.lark)
     config.feishu.allowed = await prompts.checkbox<string>({
       message: '允许谁发起工作（名单内 @机器人 = 显式接单）',
       choices: users.map(user => ({
@@ -352,7 +331,7 @@ async function pickPeople(
     return
   }
 
-  const appId = await readAppId(deps.lark(config.feishu.larkHome))
+  const appId = await readAppId(deps.lark)
   let chosen = bots.find(bot => bot.appId && bot.appId === appId) ?? (bots.length === 1 ? bots[0] : undefined)
   if (!chosen) {
     out('')
@@ -381,7 +360,7 @@ async function safeChats(lark: CommandRunner): Promise<LarkChat[]> {
 
 async function readSelfOpenId(lark: CommandRunner): Promise<string> {
   try {
-    const res = await lark.run(['auth', 'status'])
+    const res = await lark.run(['auth', 'status', '--json'])
     return res.code === 0 ? parseSelfOpenId(res.stdout) : ''
   } catch {
     return ''
@@ -409,7 +388,7 @@ function summarize(config: AppConfig): string {
     `  运行时: ${config.runtime.default}`,
     `  项目: ${projects.join('，') || '(未设置)'}`,
     `  监控群: ${chats.join('，') || '(未设置)'}`,
-    `  机器人来源: ${config.feishu.larkHome ? config.feishu.larkHome : '当前 lark-cli profile'}`,
+    `  机器人 profile: ~/.router-agent-lark（固定）`,
     `  appId: ${config.feishu.appId || '(未设置)'}`,
     `  授权成员: ${config.feishu.allowed.join(', ') || '(未设置)'}`,
     `  机器人身份: ${config.feishu.botOpenIds.join(', ') || '(未设置)'}`,

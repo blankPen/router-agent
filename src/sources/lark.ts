@@ -1,10 +1,18 @@
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { realRunner, type CommandRunner } from '../infra/process.js'
 
-/** 为 lark-cli 子进程构造环境：独立配置目录靠 HOME 隔离。 */
-export function larkEnv(home?: string, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const env = { ...base }
-  if (home) env.HOME = home
-  return env
+/**
+ * router-agent 专属的 lark-cli profile。
+ *
+ * 固定目录，不接受任何配置项覆盖：router-agent 的机器人凭据与使用者终端里
+ * 的 lark-cli 完全隔离，面板也无法把它指到别的 HOME。
+ */
+export const LARK_PROFILE_HOME = join(homedir(), '.router-agent-lark')
+
+/** 为 lark-cli 子进程构造环境：HOME 固定指向专属 profile。 */
+export function larkEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return { ...base, HOME: LARK_PROFILE_HOME }
 }
 
 /** 给已有 runner 注入固定环境，调用方再传 env 时以后者为准。 */
@@ -14,9 +22,9 @@ export function withEnv(runner: CommandRunner, env: NodeJS.ProcessEnv): CommandR
   }
 }
 
-/** 绑定 lark-cli 的 runner；传入 larkHome 时使用独立配置目录。 */
-export function createLarkRunner(opts: { home?: string; bin?: string; baseEnv?: NodeJS.ProcessEnv } = {}): CommandRunner {
-  return withEnv(realRunner(opts.bin ?? 'lark-cli'), larkEnv(opts.home, opts.baseEnv ?? process.env))
+/** 绑定 lark-cli 的 runner；始终使用固定 profile。 */
+export function createLarkRunner(opts: { bin?: string; baseEnv?: NodeJS.ProcessEnv } = {}): CommandRunner {
+  return withEnv(realRunner(opts.bin ?? 'lark-cli'), larkEnv(opts.baseEnv ?? process.env))
 }
 
 export interface LarkChat {
@@ -141,6 +149,83 @@ export function parseAppId(stdout: string): string {
   } catch {
     return ''
   }
+}
+
+export interface LarkAuthStatus {
+  appId: string
+  bot: { available: boolean; status: string; message: string }
+  user: { available: boolean; status: string; message: string; openId: string; userName: string }
+}
+
+/** 解析 `lark-cli auth status --json`，同时给出机器人身份与用户授权状态。 */
+export function parseAuthStatus(stdout: string): LarkAuthStatus {
+  try {
+    const doc = JSON.parse(stdout) as Record<string, any>
+    const identities = doc?.identities ?? {}
+    const bot = identities.bot ?? {}
+    const user = identities.user ?? {}
+    return {
+      appId: String(doc?.appId ?? doc?.app_id ?? ''),
+      bot: {
+        available: Boolean(bot.available) || bot.status === 'ready',
+        status: String(bot.status ?? ''),
+        message: String(bot.message ?? ''),
+      },
+      user: {
+        available: Boolean(user.available) || user.status === 'ready',
+        status: String(user.status ?? ''),
+        message: String(user.message ?? ''),
+        openId: String(user.openId ?? user.open_id ?? ''),
+        userName: String(user.userName ?? user.user_name ?? user.name ?? ''),
+      },
+    }
+  } catch {
+    return {
+      appId: '',
+      bot: { available: false, status: '', message: '授权状态输出无法解析' },
+      user: { available: false, status: '', message: '', openId: '', userName: '' },
+    }
+  }
+}
+
+export interface LarkDeviceLogin {
+  deviceCode: string
+  verificationUrl: string
+  userCode: string
+}
+
+/**
+ * 解析 `lark-cli auth login --no-wait --json`。
+ *
+ * lark-cli 的 JSON 字段使用 snake_case；不同版本可能把结果包在 `data` 里，
+ * 解析失败时再从 stderr 兜底提取验证链接，避免直接让用户手敲命令。
+ */
+export function parseDeviceLogin(stdout: string, stderr = ''): LarkDeviceLogin {
+  let doc: Record<string, any> | null = null
+  try {
+    doc = JSON.parse(stdout) as Record<string, any>
+  } catch {
+    doc = null
+  }
+  const pick = (key: string, camel: string): string => {
+    const value = doc?.[key] ?? doc?.[camel] ?? doc?.data?.[key] ?? doc?.data?.[camel]
+    return value === undefined || value === null ? '' : String(value)
+  }
+  const text = `${stdout}\n${stderr}`
+  const verificationUrl = pick('verification_url', 'verificationUrl')
+    || pick('verification_uri', 'verificationUri')
+    || firstMatch(text, /(https?:\/\/[^\s"'<>]+)/)
+  return {
+    deviceCode: pick('device_code', 'deviceCode') || firstMatch(text, /device[_-]?code["'\s:=]+([\w-]+)/i),
+    verificationUrl,
+    userCode: pick('user_code', 'userCode')
+      || firstMatch(text, /user[_-]?code["'\s:=]+([\w-]+)/i)
+      || firstMatch(verificationUrl, /[?&]user_code=([^&]+)/),
+  }
+}
+
+function firstMatch(text: string, pattern: RegExp): string {
+  return pattern.exec(text)?.[1] ?? ''
 }
 
 /** 解析 `orca repo list --json`，只返回能创建 worktree 的 git 仓库。 */

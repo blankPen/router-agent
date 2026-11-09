@@ -14,15 +14,14 @@ export interface PiModelConfig {
 export interface ResolveModelOptions {
   /** ~/.router-agent/config.yaml 路径。 */
   configPath?: string
-  /** ~/.trove/config.json 路径。 */
-  trovePath?: string
   env?: NodeJS.ProcessEnv
-  /** 真实用户主目录，用于定位 .trove。 */
+  /** 真实用户主目录，用于定位 ~/.router-agent。 */
   home?: string
 }
 
 /**
- * 解析模型配置，优先级：环境变量 > ~/.router-agent/config.yaml > ~/.trove/config.json。
+ * 解析模型配置，优先级：环境变量 > ~/.router-agent/config.yaml。
+ * 不做任何隐式复用：baseUrl / apiKey / model 必须显式配置，缺一项直接报错。
  * Pi 通过 OpenAI 兼容接口调用模型，这里只负责把连接信息准备好。
  */
 export function resolvePiModelConfig(opts: ResolveModelOptions = {}): PiModelConfig {
@@ -38,12 +37,9 @@ export function resolvePiModelConfig(opts: ResolveModelOptions = {}): PiModelCon
   const configPath = opts.configPath ?? join(raHome, 'config.yaml')
   const fromConfig = readYamlModel(configPath)
 
-  const trovePath = opts.trovePath ?? join(userHome, '.trove', 'config.json')
-  const fromTrove = readTroveModel(trovePath)
-
-  const merged = { ...fromTrove, ...fromConfig, ...fromEnv }
+  const merged = { ...fromConfig, ...fromEnv }
   if (!merged.baseUrl || !merged.apiKey || !merged.model) {
-    throw new Error('pi:model-config-missing: 需要 baseUrl / apiKey / model（环境变量 RA_LLM_*、~/.router-agent/config.yaml 或 ~/.trove/config.json）')
+    throw new Error('pi:model-config-missing: 需要配置 baseUrl / apiKey / model（config.yaml 的 llm 段 / ra config set llm.* / 环境变量 RA_LLM_*）')
   }
   return merged as PiModelConfig
 }
@@ -106,22 +102,6 @@ export function resolveImageModelConfig(opts: ResolveModelOptions = {}): PiModel
     ...(model ? { model } : {}),
     ...(baseUrl ? { baseUrl } : {}),
     ...(apiKey ? { apiKey } : {}),
-  }
-}
-
-function readTroveModel(path: string): Partial<PiModelConfig> {
-  if (!existsSync(path)) return {}
-  try {
-    const doc = JSON.parse(readFileSync(path, 'utf8')) as Record<string, any>
-    const llm = doc?.llm
-    if (!llm) return {}
-    return {
-      ...(llm.baseUrl ? { baseUrl: String(llm.baseUrl) } : {}),
-      ...(llm.apiKey ? { apiKey: String(llm.apiKey) } : {}),
-      ...(llm.model ? { model: String(llm.model) } : {}),
-    }
-  } catch {
-    return {}
   }
 }
 

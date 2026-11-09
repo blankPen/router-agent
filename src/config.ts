@@ -44,9 +44,7 @@ export function chatEntry(chat: string, over: Partial<Omit<ChatSettings, 'chat'>
 }
 
 export interface FeishuSettings {
-  /** 独立 lark-cli 配置目录；空表示复用当前 lark-cli profile。 */
-  larkHome: string
-  /** 专属机器人的 App ID（App Secret 只写进 lark-cli 的加密存储）。 */
+  /** 专属机器人的 App ID；App Secret 只写进 lark-cli 的加密存储。 */
   appId: string
   /** 收到消息后立即回的确认表情（飞书 emoji_type），空字符串表示关闭。 */
   reaction: string
@@ -221,7 +219,6 @@ export function defaultConfig(): AppConfig {
     home: '',
     projects: [],
     feishu: {
-      larkHome: '',
       appId: '',
       reaction: 'Typing',
       chats: [],
@@ -287,6 +284,9 @@ export function defaultConfig(): AppConfig {
 
 const DEFAULT_CONFIG_YAML = `# router-agent 全局配置
 feishu:
+  # 专属机器人 App ID；App Secret 只写入 lark-cli 加密存储，不落本文件。
+  # lark-cli profile 固定为 ~/.router-agent-lark，不可配置。
+  appId: ""
   # 监控的群：一条配置同时决定「收什么消息 + 派工绑定」
   chats: []
   #  - chat: oc_xxx
@@ -383,8 +383,9 @@ projects: []
 server:
   port: 3083
 
-# 模型配置可留空，自动复用 ~/.trove/config.json 里的 llm 段；
+# 模型配置必填：baseUrl / model / apiKey 三项缺一不可，未配置时服务启动会直接报错；
 # 也可以在 Web 面板「初始化 · LLM Provider」里填写（密钥只写不回显）
+# 环境变量 RA_LLM_BASE_URL / RA_LLM_API_KEY / RA_LLM_MODEL 优先级更高，可按需覆盖
 # llm:
 #   baseUrl: https://api.deepseek.com/v1
 #   model: deepseek-v4-flash
@@ -469,7 +470,6 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
     home,
     projects: projectLists.orca ?? parseProjects(doc.projects),
     feishu: {
-      larkHome: env.RA_LARK_HOME ?? stringOr(doc.feishu?.larkHome, base.feishu.larkHome),
       appId: stringOr(doc.feishu?.appId, base.feishu.appId),
       reaction: stringOr(doc.feishu?.reaction, base.feishu.reaction),
       chats: parseChats(doc),
@@ -759,7 +759,6 @@ export function writeConfig(home: string, config: AppConfig): void {
   mkdirSync(home, { recursive: true })
   const doc: Record<string, unknown> = {
     feishu: {
-      larkHome: config.feishu.larkHome,
       appId: config.feishu.appId,
       reaction: config.feishu.reaction,
       chats: config.feishu.chats.map(chat => ({
@@ -892,7 +891,6 @@ export function publicDefaults(): Record<string, unknown> {
   const base = defaultConfig()
   return {
     feishu: {
-      larkHome: base.feishu.larkHome,
       appId: base.feishu.appId,
       reaction: base.feishu.reaction,
       directMessages: base.feishu.directMessages,
@@ -990,7 +988,6 @@ const ADMISSION_UNLISTED_ADDRESSED = ['explicit', 'inferred', 'ignore']
  * 这样做的好处是 API 永远不会因为面板拼错字段名而把 config.yaml 写成垃圾。
  */
 const CONFIG_VALIDATORS: Record<string, Validator> = {
-  'feishu.larkHome': stringValue,
   'feishu.appId': stringValue,
   'feishu.reaction': stringValue,
   'feishu.directMessages': boolValue(),
@@ -1273,9 +1270,6 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
   }
 
   switch (path) {
-    case 'feishu.larkHome':
-      config.feishu.larkHome = value
-      return true
     case 'feishu.appId':
       config.feishu.appId = value
       return true

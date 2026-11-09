@@ -16,9 +16,10 @@ import {
   type RuntimeChoiceView,
   type SectionDef,
 } from './fields.js'
-import { getJson, saveConfigPatch, sendJson, type ConfigBundle, type ConfigDoc } from './api.js'
+import { getJson, saveConfigPatch, sendJson, type ConfigBundle, type ConfigDoc, type ConfigSaveResult } from './api.js'
 import { Icon, LogoMark } from './icons.js'
 import { RuntimeCards, type RuntimeNotice } from './runtime-cards.js'
+import { FeishuBotPanel } from './feishu-panel.js'
 import { SpecsEditor } from './specs-editor.js'
 import {
   mergeRuntimeChoices,
@@ -1126,7 +1127,7 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
       if (result.runtimeChoices) setRuntimeChoices(result.runtimeChoices)
       if (typeof result.detecting === 'boolean') setDetecting(result.detecting)
       setPendingRestart(result.restartRequired)
-      const message = {
+      const message = secretDropNotice(patch, result) ?? {
         kind: result.restartRequired ? 'warn' as const : 'ok' as const,
         text: result.restartRequired
           ? `已保存 ${result.changed.length} 项，其中部分配置需要重启服务才生效；点右上角「重启服务」即可（页面不会刷新）。`
@@ -1292,6 +1293,17 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
                   </>
                 )}
 
+                {section.id === 'feishu' && (
+                  <FeishuBotPanel
+                    appId={String(draft.feishu?.appId ?? '')}
+                    onConfigSaved={config => {
+                      const nextAppId = String(config.feishu?.appId ?? '')
+                      setOriginal(current => (current ? setByPath(current, 'feishu.appId', nextAppId) : current))
+                      setDraft(current => (current ? setByPath(current, 'feishu.appId', nextAppId) : current))
+                    }}
+                  />
+                )}
+
                 {section.id === 'delivery' && (
                   <RuntimeCards
                     choices={runtimeChoices}
@@ -1375,9 +1387,20 @@ function SaveDock({ changed, errors, notice, saving, restarting, onReset, onSave
   )
 }
 
+/**
+ * 后端没把密钥写进去时给出明确提示，避免「面板显示已保存，但 config.yaml 里没有」。
+ * 常见原因是服务仍在运行不支持 llm.apiKey 的旧版本，重启后即可。
+ */
+function secretDropNotice(patch: Record<string, unknown>, result: ConfigSaveResult): RuntimeNotice | null {
+  if (!('llm.apiKey' in patch)) return null
+  const keySet = Boolean((result.config.llm as { apiKeySet?: boolean } | undefined)?.apiKeySet)
+  if (result.changed.includes('llm.apiKey') || keySet) return null
+  return { kind: 'error', text: 'API Key 没有写入 config.yaml：服务可能还在运行旧版本，请重启服务后再保存一次。' }
+}
+
 const SETUP_FEISHU_FIELDS: FieldDef[] = (() => {
   const all = SECTIONS.flatMap(section => section.fields)
-  return ['feishu.appId', 'feishu.larkHome', 'feishu.directMessages']
+  return ['feishu.appId', 'feishu.directMessages']
     .map(path => all.find(field => field.path === path))
     .filter((field): field is FieldDef => Boolean(field))
 })()
@@ -1395,7 +1418,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
   const [configPath, setConfigPath] = useState('')
   const [runtimeChoices, setRuntimeChoices] = useState<RuntimeChoiceView[]>([])
   const [detecting, setDetecting] = useState(false)
-  const [feishuMode, setFeishuMode] = useState<'reuse' | 'dedicated'>('reuse')
+  const [feishuReady, setFeishuReady] = useState(false)
   const [saving, setSaving] = useState(false)
   const [notice, setNotice] = useState<RuntimeNotice | null>(null)
   const [pendingRestart, setPendingRestart] = useState(false)
@@ -1415,7 +1438,6 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
         setConfigPath(data.configPath)
         setRuntimeChoices(data.runtimeChoices ?? [])
         setDetecting(Boolean(data.detecting))
-        setFeishuMode(data.config.feishu?.appId || data.config.feishu?.larkHome ? 'dedicated' : 'reuse')
         setLoadError(null)
       })
       .catch(error => setLoadError(error instanceof Error ? error.message : String(error)))
@@ -1431,7 +1453,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
 
   const changed = useMemo(() => {
     if (!draft || !original) return []
-    const paths = ['llm.baseUrl', 'llm.model', 'llm.apiKey', 'runtime.default', 'feishu.appId', 'feishu.larkHome', 'feishu.directMessages', 'feishu.chats']
+    const paths = ['llm.baseUrl', 'llm.model', 'llm.apiKey', 'runtime.default', 'feishu.appId', 'feishu.directMessages', 'feishu.chats']
     for (const runtime of runtimeCatalog) paths.push(projectPatchPath(runtime.id))
     return paths.filter(path => JSON.stringify(getByPath(draft, path)) !== JSON.stringify(getByPath(original, path)))
   }, [draft, original, runtimeCatalog])
@@ -1452,9 +1474,6 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       const message = fieldError(field, getByPath(draft, field.path))
       if (message) map.set(field.path, message)
     }
-    if (feishuMode === 'dedicated' && !String(draft.feishu?.appId ?? '').trim() && !String(draft.feishu?.larkHome ?? '').trim()) {
-      map.set('feishu.appId', '专属机器人至少填写 App ID 或配置目录')
-    }
     if (changedSet.has('feishu.chats')) {
       const chatMessage = chatsIssue(draft.feishu?.chats)
       if (chatMessage) map.set('feishu.chats', chatMessage)
@@ -1472,7 +1491,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       map.set('runtime.default', '自定义 acp 未配置 runtime.options.acp.command，重启后服务会启动失败')
     }
     return map
-  }, [draft, changed, feishuMode, runtimeCatalog, runtimeId])
+  }, [draft, changed, runtimeCatalog, runtimeId])
 
   const setField = (path: string, value: unknown): void => {
     setDraft(current => (current ? setByPath(current, path, value) : current))
@@ -1483,7 +1502,6 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
     if (!original) return
     if (!confirm('放弃所有未保存的修改？')) return
     setDraft(structuredClone(original))
-    setFeishuMode(original.feishu?.appId || original.feishu?.larkHome ? 'dedicated' : 'reuse')
     setNotice(null)
   }
 
@@ -1508,7 +1526,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       if (result.runtimeChoices) setRuntimeChoices(result.runtimeChoices)
       if (typeof result.detecting === 'boolean') setDetecting(result.detecting)
       setPendingRestart(result.restartRequired)
-      const message = {
+      const message = secretDropNotice(patch, result) ?? {
         kind: result.restartRequired ? 'warn' as const : 'ok' as const,
         text: result.restartRequired
           ? `已保存 ${result.changed.length} 项，重启服务后生效；点上方「立即重启」即可。`
@@ -1538,18 +1556,18 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
   const runtimeChoice = runtimeCatalog.find(choice => choice.id === runtimeId)
   const runtimeReady = runtimeChoice?.status === 'ready' || runtimeChoice?.status === 'unverified'
   const projectReady = activeProjects.length > 0 && !projectIssue(runtimeId, activeProjects)
-  const feishuReady = feishuMode === 'reuse'
-    || Boolean(String(draft.feishu?.appId ?? '').trim() || String(draft.feishu?.larkHome ?? '').trim())
   const chatReady = chats.length > 0 && !chatsIssue(chats)
-  const llmConfig = (draft.llm ?? {}) as { baseUrl?: string; model?: string; apiKeySet?: boolean }
-  // 密钥也可能来自 RA_LLM_API_KEY 或 ~/.trove；配置了 baseUrl + model 就算接入完成。
-  const llmReady = Boolean(llmConfig.apiKeySet || (String(llmConfig.baseUrl ?? '').trim() && String(llmConfig.model ?? '').trim()))
-  const keyConfigured = Boolean(llmConfig.apiKeySet)
+  const llmConfig = (draft.llm ?? {}) as { baseUrl?: string; model?: string; apiKey?: string; apiKeySet?: boolean }
+  // LLM Provider 必填：baseUrl + model + apiKey 缺一不可（本次新填、尚未保存的密钥也算）。
+  const keyConfigured = Boolean(llmConfig.apiKeySet || String(llmConfig.apiKey ?? '').trim())
+  const llmReady = Boolean(
+    String(llmConfig.baseUrl ?? '').trim() && String(llmConfig.model ?? '').trim() && keyConfigured,
+  )
   const steps = [
-    { label: 'LLM 已配置', hint: llmReady ? '已就绪' : '填写 API Key', done: llmReady },
+    { label: 'LLM 已配置', hint: llmReady ? '已就绪' : '填写 Base URL / 模型 / API Key', done: llmReady },
     { label: '运行时可用', hint: runtimeReady ? '已就绪' : runtimeChoice ? runtimeStatusLabel(runtimeChoice.status) : '未选择', done: runtimeReady },
     { label: '已登记项目', hint: projectReady ? `${activeProjects.length} 个项目` : '至少一个', done: projectReady },
-    { label: '飞书已接入', hint: feishuMode === 'reuse' ? '复用当前 profile' : '专属机器人', done: feishuReady },
+    { label: '飞书机器人已就绪', hint: feishuReady ? '已就绪' : '写入 App ID / App Secret', done: feishuReady },
     { label: '监控群已添加', hint: chatReady ? `${chats.length} 个群` : '至少一个', done: chatReady },
   ]
   const completed = steps.filter(step => step.done).length
@@ -1605,7 +1623,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
         <header className="settings-head">
           <div>
             <h2>1. LLM Provider</h2>
-            <p>Router 研判与图片转写使用的大模型接入。填写 API Key 后即写入 config.yaml，保存后不回显；也可以继续用环境变量 / ~/.trove/config.json 提供。</p>
+            <p>Router 研判与图片转写使用的大模型接入，三项均为必填；未配置时服务无法启动。API Key 只写入 config.yaml，保存后不回显。</p>
           </div>
           <div className="settings-badges">
             {llmReady ? <span className="badge hot">已就绪</span> : <span className="badge cold">未完成</span>}
@@ -1670,44 +1688,34 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       <section className="settings-card" id="setup-feishu">
         <header className="settings-head">
           <div>
-            <h2>4. 飞书接入</h2>
-            <p>机器人身份来自 lark-cli profile：可以复用当前登录，也可以给 router-agent 指定专属配置目录。</p>
+            <h2>4. 飞书机器人</h2>
+            <p>写入 App ID / App Secret 后，可在这里检查并完成飞书授权。</p>
           </div>
           <div className="settings-badges">
-            {feishuReady ? <span className="badge hot">已完成</span> : <span className="badge cold">未完成</span>}
+            {feishuReady ? <span className="badge hot">已就绪</span> : <span className="badge cold">未完成</span>}
           </div>
         </header>
-        <div className="segmented">
-          <button
-            className={feishuMode === 'reuse' ? 'active' : ''}
-            onClick={() => {
-              setFeishuMode('reuse')
-              setField('feishu.appId', '')
-              setField('feishu.larkHome', '')
-            }}
-          >
-            复用当前 lark-cli profile
-          </button>
-          <button className={feishuMode === 'dedicated' ? 'active' : ''} onClick={() => setFeishuMode('dedicated')}>
-            专属机器人
-          </button>
+        <div className="settings-rows">
+          {SETUP_FEISHU_FIELDS.filter(field => field.path !== 'feishu.directMessages').map(field => (
+            <FieldRow
+              key={field.path}
+              field={field}
+              value={getByPath(draft, field.path)}
+              defaultValue={getByPath(defaults, field.path)}
+              error={errors.get(field.path)}
+              onChange={value => setField(field.path, value)}
+            />
+          ))}
         </div>
-        {feishuMode === 'reuse' ? (
-          <p className="editor-hint">将清空 <code>feishu.appId</code> / <code>feishu.larkHome</code>，直接复用终端里 lark-cli 当前登录的机器人。</p>
-        ) : (
-          <div className="settings-rows">
-            {SETUP_FEISHU_FIELDS.filter(field => field.path !== 'feishu.directMessages').map(field => (
-              <FieldRow
-                key={field.path}
-                field={field}
-                value={getByPath(draft, field.path)}
-                defaultValue={getByPath(defaults, field.path)}
-                error={errors.get(field.path)}
-                onChange={value => setField(field.path, value)}
-              />
-            ))}
-          </div>
-        )}
+        <FeishuBotPanel
+          appId={String(draft.feishu?.appId ?? '')}
+          onConfigSaved={config => {
+            const nextAppId = String(config.feishu?.appId ?? '')
+            setOriginal(current => (current ? setByPath(current, 'feishu.appId', nextAppId) : current))
+            setDraft(current => (current ? setByPath(current, 'feishu.appId', nextAppId) : current))
+          }}
+          onStatus={setFeishuReady}
+        />
         {directMessagesField && (
           <div className="settings-rows">
             <FieldRow

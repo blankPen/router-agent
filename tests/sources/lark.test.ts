@@ -1,13 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { larkEnv, withEnv, parseLarkChats, parseLarkMembers, parseSelfOpenId, parseAppId, parseOrcaRepos, parseBotAvailable, parseEventPrecheck, parseOrcaStatus } from '../../src/sources/lark.js'
+import { LARK_PROFILE_HOME, larkEnv, withEnv, parseAuthStatus, parseDeviceLogin, parseLarkChats, parseLarkMembers, parseSelfOpenId, parseAppId, parseOrcaRepos, parseBotAvailable, parseEventPrecheck, parseOrcaStatus } from '../../src/sources/lark.js'
 import type { CommandRunner } from '../../src/infra/process.js'
 
 describe('lark-cli 配置隔离', () => {
-  it('传入 larkHome 时覆盖 HOME，否则继承父环境', () => {
+  it('始终使用固定的专属 profile，不接受配置目录覆盖', () => {
     const base = { HOME: '/Users/me', PATH: '/bin' }
-    expect(larkEnv('/Users/me/.router-agent-lark', base)).toEqual({ HOME: '/Users/me/.router-agent-lark', PATH: '/bin' })
-    expect(larkEnv('', base)).toEqual({ HOME: '/Users/me', PATH: '/bin' })
-    expect(larkEnv(undefined, base)).toEqual({ HOME: '/Users/me', PATH: '/bin' })
+    expect(larkEnv(base)).toEqual({ HOME: LARK_PROFILE_HOME, PATH: '/bin' })
   })
 
   it('withEnv 把固定环境传给底层 runner，调用方 env 优先', async () => {
@@ -49,6 +47,30 @@ describe('lark-cli 返回解析', () => {
     expect(parseSelfOpenId(JSON.stringify({ identities: { user: { openId: 'ou_me' } } }))).toBe('ou_me')
     expect(parseSelfOpenId('bad')).toBe('')
     expect(parseAppId(JSON.stringify({ appId: 'cli_a' }))).toBe('cli_a')
+  })
+
+  it('解析 auth status 的机器人 / 用户授权状态', () => {
+    const status = parseAuthStatus(JSON.stringify({
+      appId: 'cli_a',
+      identities: {
+        bot: { available: true, status: 'ready', message: 'Bot identity: ready' },
+        user: { available: true, status: 'needs_refresh', openId: 'ou_me', userName: '阿振' },
+      },
+    }))
+    expect(status).toMatchObject({
+      appId: 'cli_a',
+      bot: { available: true, status: 'ready' },
+      user: { available: true, status: 'needs_refresh', openId: 'ou_me', userName: '阿振' },
+    })
+    expect(parseAuthStatus('bad').bot.available).toBe(false)
+  })
+
+  it('解析 Device Flow 的 device_code 与 verification_url，兼容 data 包裹与 stderr 兜底', () => {
+    expect(parseDeviceLogin(JSON.stringify({ device_code: 'dc_1', verification_url: 'https://example.com/activate', user_code: 'uc_1' })))
+      .toEqual({ deviceCode: 'dc_1', verificationUrl: 'https://example.com/activate', userCode: 'uc_1' })
+    expect(parseDeviceLogin(JSON.stringify({ data: { device_code: 'dc_2', verification_url: 'https://example.com/2' } })).deviceCode).toBe('dc_2')
+    expect(parseDeviceLogin(JSON.stringify({ device_code: 'dc_3', verification_url: 'https://example.com/verify?user_code=AB-12' })).userCode).toBe('AB-12')
+    expect(parseDeviceLogin('not json', 'open https://example.com/3 to authorize').verificationUrl).toBe('https://example.com/3')
   })
 
   it('解析机器人身份、事件预检与 orca status', () => {

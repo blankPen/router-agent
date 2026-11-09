@@ -126,11 +126,15 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
   }
 
   checks.push(await check('飞书机器人身份', async () => {
-    const res = await deps.lark.run(['auth', 'status'])
+    const res = await deps.lark.run(['auth', 'status', '--json'])
     const bot = parseBotAvailable(res.stdout)
     const user = parseAuthUser(res.stdout)
-    if (!bot) return { status: 'fail', detail: '机器人身份不可用', hint: '检查 lark-cli config show 与 App Secret' }
-    return { status: 'ok', detail: `bot ready${user.available ? '，用户身份可用' : '，用户身份未授权（可选）'}` }
+    if (!bot) return { status: 'fail', detail: '机器人身份不可用', hint: '在 Web 配置页写入 App ID / App Secret' }
+    return {
+      status: 'ok',
+      detail: `bot ready${user.available ? '，用户身份可用' : '，用户身份未授权（可选）'}`,
+      ...(user.available ? {} : { hint: '如需按名字搜索群/成员，在 Web 配置页完成飞书授权' }),
+    }
   }))
 
   checks.push(await check('事件订阅预检', async () => {
@@ -167,7 +171,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
 
   checks.push(await check('模型配置', async () => {
     const result = deps.llm()
-    return result.ok ? { status: 'ok', detail: result.detail } : { status: 'fail', detail: result.detail, hint: '检查 ~/.trove/config.json 或 ra config set llm.*' }
+    return result.ok ? { status: 'ok', detail: result.detail } : { status: 'fail', detail: result.detail, hint: 'ra config set llm.baseUrl/llm.model/llm.apiKey，或写 config.yaml 的 llm 段' }
   }))
 
   checks.push(await check('服务端口', async () => {
