@@ -197,6 +197,25 @@ describe('RouterService 编排', () => {
     })
   })
 
+  it('启动时把旧的自定义 soulFile 迁移到内置规范存储', async () => {
+    const { writeFileSync, readFileSync, existsSync } = await import('node:fs')
+    const legacy = join(config.home, 'legacy-soul.md')
+    writeFileSync(legacy, '# 旧人格\n', 'utf8')
+    writeFileSync(join(config.home, 'config.yaml'), [
+      'router:',
+      '  persona:',
+      '    soulFile: ' + legacy,
+      '',
+    ].join('\n'), 'utf8')
+
+    new RouterService({ config, store, engine, runtime, decisionEngine: new AcceptEngine(), prTracker })
+
+    expect(readFileSync(join(config.home, 'specs', 'router', 'soul.md'), 'utf8')).toBe('# 旧人格\n')
+    expect(readFileSync(join(config.home, 'config.yaml'), 'utf8')).not.toContain('soulFile')
+    // 原文件保留，不删除用户已有内容。
+    expect(existsSync(legacy)).toBe(true)
+  })
+
   it('接单后排工启动 worker，并建立 Assignment', async () => {
     engine.ingest(makeTrigger())
     await service.runOnce()

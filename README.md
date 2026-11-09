@@ -164,7 +164,7 @@ Router 不再「逐条失忆」：同一个群里的每个人各有一个落盘�
 - **空闲回收**：30 分钟无消息只释放内存，文件保留，下一条消息重新打开；
 - **自动压缩**：用 Pi 原生 compaction，`contextTokens > contextWindow - reserveTokens` 时保留最近约 20k tokens，把更早的消息总结成结构化摘要；
 - **`/new`**：整条消息精确匹配，只重置发送者自己的 session；旧文件保留 7 天后由清理任务删除；
-- **人格**：`router.persona.soulFile` 可配置 soul；只改语气，不改工具白名单和权限判定。
+- **人格与规范**：Router 的 soul、执行规范与 Worker 规范统一存放在 `~/.router-agent/specs/`，可在 Web 面板「配置 → 规范文件」直接查看、编辑、保存或恢复默认；人格只改语气，不改工具白名单和权限判定。
 
 确定性回复（寒暄短路、附件提示、关闭话题提示等）也会写进 session，保证下一轮模型知道「刚才发生过什么」。
 
@@ -361,7 +361,6 @@ router:
   # 人格：只影响语气与表达，不影响工具权限
   persona:
     name: "阿罗"
-    soulFile: ""           # 空=内置 prompts/soul.md
     style: friendly        # friendly | concise | professional
     language: zh-CN
 
@@ -555,6 +554,8 @@ llm:
 - `agent`：只发工单，由全局 `~/.claude/agents/router-agent-worker.md` 提供规范（`ra init` 会生成）。
 
 两种模式都不改项目自己的 `CLAUDE.md`。
+
+这些规范 markdown 统一存放在状态目录的 `specs/` 下，可在 Web 面板「配置 → 规范文件」直接编辑或恢复默认。`agent` 模式的全局规范文件仍由 `ra init` 写入，修改 Worker 手册后重新执行一次 `ra init` 即可同步。
 
 ### ACP Runtime（可选）
 

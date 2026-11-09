@@ -157,7 +157,6 @@ export const SECTIONS: SectionDef[] = [
       { path: 'router.persona.name', label: '机器人自称', kind: 'text' },
       { path: 'router.persona.style', label: '说话风格', kind: 'select', options: PERSONA_STYLE_OPTIONS },
       { path: 'router.persona.language', label: '回复语言', kind: 'text', placeholder: 'zh-CN' },
-      { path: 'router.persona.soulFile', label: '自定义人格文件', kind: 'text', placeholder: '留空 = 内置 soul.md' },
     ],
   },
   {
