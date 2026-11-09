@@ -3,7 +3,7 @@
 export type IconName =
   | 'inbox' | 'sliders' | 'radio' | 'search' | 'refresh' | 'copy' | 'external'
   | 'stop' | 'alert' | 'plus' | 'trash' | 'branch' | 'terminal' | 'clock' | 'check' | 'chevron' | 'close'
-  | 'folder' | 'git' | 'file-text'
+  | 'folder' | 'git' | 'file-text' | 'download'
   | 'zap' | 'play'
   | 'sun' | 'moon' | 'monitor'
 
@@ -37,6 +37,13 @@ export function Icon({ name, size = 16, className }: { name: IconName; size?: nu
       <>
         <path d="M21 12a9 9 0 1 1-2.64-6.36" />
         <path d="M21 3v6h-6" />
+      </>
+    ),
+    download: (
+      <>
+        <path d="M12 3v12" />
+        <path d="m7 10 5 5 5-5" />
+        <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
       </>
     ),
     copy: (

@@ -141,6 +141,8 @@ export class PiDecisionEngine implements DecisionEngine {
   private compaction?: { enabled: boolean; reserveTokens: number; keepRecentTokens: number }
   private contextWindow: number
   private sessions: SessionRegistry<PiSessionLike> | null = null
+  /** 实际暴露给模型的工具；没有更新能力时去掉 router_update。 */
+  private toolNames: string[]
   /** 复用 session 后，工具闭包通过它读取本轮上下文。 */
   private turnRefs = new WeakMap<object, TurnRef>()
 
@@ -158,6 +160,7 @@ export class PiDecisionEngine implements DecisionEngine {
     this.sessionTokenBudget = opts.sessionTokenBudget === undefined ? 0 : Math.max(0, opts.sessionTokenBudget)
     this.compaction = opts.compaction
     this.contextWindow = opts.contextWindow && opts.contextWindow > 0 ? opts.contextWindow : 128_000
+    this.toolNames = DECISION_TOOL_NAMES.filter(name => name !== 'router_update' || opts.toolbox.canUpdate())
 
     if (opts.sessionPersistence && opts.sessionDir) {
       this.sessions = new SessionRegistry<PiSessionLike>({
@@ -170,8 +173,12 @@ export class PiDecisionEngine implements DecisionEngine {
   }
 
   async assess(req: DecisionRequest): Promise<DecisionEngineResult> {
-    if (req.session && this.sessions) return this.assessPersistent(req)
-    return this.assessTransient(req)
+    try {
+      return req.session && this.sessions ? await this.assessPersistent(req) : await this.assessTransient(req)
+    } finally {
+      // 更新工具只登记重启意图；本轮结束后再执行，保证「已更新」的回复先进入 outbox。
+      this.toolbox.flushRestartRequest()
+    }
   }
 
   /** 寒暄 / 追问的礼貌回复：同一个 Pi 通道，但不开任何工具。 */
@@ -232,7 +239,7 @@ export class PiDecisionEngine implements DecisionEngine {
     return this.runSession({
       systemPrompt: req.systemPrompt,
       userPrompt: req.userPrompt,
-      toolNames: [...DECISION_TOOL_NAMES],
+      toolNames: [...this.toolNames],
       tools: this.buildTools(turnRef),
     }).then(outcome => this.finishAssess(audit, req, state, outcome, started, this.timeoutMs, this.tokenBudget))
   }
@@ -250,7 +257,7 @@ export class PiDecisionEngine implements DecisionEngine {
     }
     turnRef.request = req
     turnRef.state = state
-    entry.session.setActiveToolsByName?.([...DECISION_TOOL_NAMES])
+    entry.session.setActiveToolsByName?.([...this.toolNames])
 
     const before = Array.isArray(entry.session.messages) ? entry.session.messages.length : 0
     const outcome = await this.runOnSession(entry.session as PiSessionLike, {
@@ -444,7 +451,7 @@ export class PiDecisionEngine implements DecisionEngine {
   }
 
   private buildTools(turnRef: TurnRef): PiToolDefinition[] {
-    return DECISION_TOOL_NAMES.map(name => {
+    return this.toolNames.map(name => {
       const spec = toolSpec(name)
       return {
         name: spec.name,
@@ -490,6 +497,9 @@ export class PiDecisionEngine implements DecisionEngine {
                 break
               case 'router_workspace_remove':
                 result = this.toolbox.removeWorkspace(args, ctx)
+                break
+              case 'router_update':
+                result = await this.toolbox.update(args, ctx)
                 break
               default:
                 result = this.toolbox.ticket(args)
@@ -538,7 +548,7 @@ export class PiDecisionEngine implements DecisionEngine {
       cwd: this.cwd,
       agentDir: this.agentDir,
       systemPrompt: input.systemPrompt,
-      toolNames: [...DECISION_TOOL_NAMES],
+      toolNames: [...this.toolNames],
       tools: this.buildTools(turnRef),
       apiKey: this.model.apiKey,
       baseUrl: this.model.baseUrl,

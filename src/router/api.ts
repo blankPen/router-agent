@@ -16,6 +16,14 @@ import type { ResumeHint } from '../worker/port.js'
 import type { WorkspaceAdminPort } from '../worker/workspaces/overview.js'
 import { readLogs } from './log-tail.js'
 import { getSpec, listSpecs, resetSpec, saveSpec, SpecError } from '../specs/index.js'
+import { PACKAGE_VERSION, type UpdateSnapshot } from '../update/index.js'
+
+/** 版本检查 / 升级端口；由 CLI 注入 UpdateService，单测可传假实现。 */
+export interface UpdatePort {
+  snapshot(): UpdateSnapshot
+  check(force?: boolean): Promise<UpdateSnapshot>
+  upgrade(options?: { force?: boolean }): Promise<UpdateSnapshot>
+}
 
 export interface ApiServerOptions {
   engine: Engine
@@ -29,6 +37,8 @@ export interface ApiServerOptions {
   onConfigChange?: (config: AppConfig, changed: string[]) => void | Promise<void>
   /** 面板「重启服务」：由服务层关闭当前进程并拉起新的 daemon。 */
   onRestart?: () => void | Promise<void>
+  /** 版本检查 / 升级；缺省时 `/api/update` 返回 404。 */
+  update?: UpdatePort
   onEvent?: EventSink
   /** Worker 通过 `ra report` POST 上来的状态；由服务层接到 onWorkerState。 */
   onReport?: (state: WorkerStateFile) => void | Promise<void>
@@ -80,6 +90,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       const tickets = opts.store.listTickets({ limit: 500 })
       return respond(res, 200, {
         stage: 'running',
+        version: PACKAGE_VERSION,
         runtime: config.runtime.default,
         pid: process.pid,
         startedAt: new Date(Date.now() - process.uptime() * 1_000).toISOString(),
@@ -518,6 +529,39 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       return respond(res, 202, { ok: true, restarting: true }, () => {
         setImmediate(() => { void opts.onRestart?.() })
       })
+    }
+
+    // 版本更新三件套：读缓存 / 主动检查 / 安装并重启。
+    if (path === '/api/update' && req.method === 'GET') {
+      if (!opts.update) return respond(res, 404, { error: 'update-not-available' })
+      return respond(res, 200, opts.update.snapshot())
+    }
+
+    if (path === '/api/update/check' && req.method === 'POST') {
+      if (!opts.update) return respond(res, 404, { error: 'update-not-available' })
+      return respond(res, 200, await opts.update.check(true))
+    }
+
+    if (path === '/api/update' && req.method === 'POST') {
+      if (!opts.update) return respond(res, 404, { error: 'update-not-available' })
+      const body = await readJson(req)
+      const snapshot = await opts.update.upgrade({ force: body.force === true })
+      const failed = snapshot.phase === 'failed'
+      const restarting = !failed && snapshot.phase === 'updated' && Boolean(opts.onRestart)
+      onEvent({
+        event: 'api:update',
+        phase: snapshot.phase,
+        from: snapshot.current,
+        to: snapshot.installedVersion ?? snapshot.latest,
+        ...(failed && snapshot.error ? { reason: snapshot.error } : {}),
+      })
+      // 安装成功后先回包再重启：重启会关掉当前进程，先让浏览器拿到结果。
+      return respond(
+        res,
+        failed ? 500 : 200,
+        { ...snapshot, restarting },
+        restarting ? () => { setImmediate(() => { void opts.onRestart?.() }) } : undefined,
+      )
     }
 
     if (path === '/api/runtimes' && req.method === 'GET') {

@@ -77,6 +77,20 @@ export function gate(trigger: Trigger, policy: Policy): GateResult {
   return applyAcceptMode({ action: 'infer', strength: 'inferred' }, policy)
 }
 
+/**
+ * 是否给收到的消息加「收到」表情。
+ *
+ * 两个条件同时成立才加：
+ * 1. 确实在跟机器人说话：@ / 私聊，或所在群配置为全量接收；
+ * 2. 准入 Gate 不会静默忽略：被群白名单拦截、`admission: ignore` 的消息不加。
+ *
+ * 否则用户会先看到「Typing」，然后永远等不到回复，表情也不会被撤销。
+ */
+export function shouldAcknowledge(trigger: Trigger, policy: Policy, replyAlwaysChats: ReadonlySet<string>): boolean {
+  if (trigger.addressed === 'none' && !replyAlwaysChats.has(trigger.chatId)) return false
+  return gate(trigger, policy).action !== 'ignore'
+}
+
 function applyAcceptMode(result: Extract<GateResult, { action: 'infer' }>, policy: Policy): GateResult {
   if (policy.acceptMode === 'off') {
     return { action: 'reply-only', strength: 'inferred', reason: 'accept-mode:off' }

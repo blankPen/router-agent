@@ -74,6 +74,15 @@ export const ROUTER_TOOL_SPECS: RouterToolSpec[] = [
     }),
   },
   {
+    name: 'router_update',
+    description:
+      '检查 router-agent 的 npm 最新版本；不传 check 时会安装最新版，并在本轮回复后自动重启整个服务。'
+      + '只有用户明确要求「更新版本 / 升级 ra / 检查有没有新版」时才调用，不要主动升级。',
+    parameters: Type.Object({
+      check: Type.Optional(Type.Boolean({ description: '只检查是否有新版本，不安装也不重启，默认 false' })),
+    }),
+  },
+  {
     name: 'router_decide',
     description: '对一条 Trigger 给出决定。accept 会创建工单并派工；ignore 表示不需要开工；unavailable 表示研判没完成。',
     parameters: Type.Object({
@@ -97,6 +106,7 @@ export const DECISION_TOOL_NAMES = [
   'router_ticket_progress',
   'router_ticket_close',
   'router_workspace_remove',
+  'router_update',
   'router_decide',
 ] as const
 
