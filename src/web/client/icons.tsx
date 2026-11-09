@@ -3,7 +3,8 @@
 export type IconName =
   | 'inbox' | 'sliders' | 'radio' | 'search' | 'refresh' | 'copy' | 'external'
   | 'stop' | 'alert' | 'plus' | 'trash' | 'branch' | 'terminal' | 'clock' | 'check' | 'chevron' | 'close'
-  | 'zap' | 'play' | 'file-text'
+  | 'folder' | 'git' | 'file-text'
+  | 'zap' | 'play'
 
 export function Icon({ name, size = 16, className }: { name: IconName; size?: number; className?: string }): JSX.Element {
   const paths: Record<IconName, JSX.Element> = {
@@ -69,6 +70,17 @@ export function Icon({ name, size = 16, className }: { name: IconName; size?: nu
         <circle cx="18" cy="6" r="3" />
         <circle cx="6" cy="18" r="3" />
         <path d="M18 9a9 9 0 0 1-9 9" />
+      </>
+    ),
+    folder: (
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />
+    ),
+    git: (
+      <>
+        <circle cx="6" cy="6" r="2.5" />
+        <circle cx="6" cy="18" r="2.5" />
+        <circle cx="18" cy="12" r="2.5" />
+        <path d="M6 8.5v7M8.5 6h4a3 3 0 0 1 3 3v1M8.5 18h4a3 3 0 0 0 3-3v-1" />
       </>
     ),
     terminal: (
