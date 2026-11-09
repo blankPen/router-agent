@@ -27,6 +27,7 @@ import { simulate } from './simulate.js'
 import { runReport, readContentArg, type ReportOptions } from './report.js'
 import type { Prompter } from './prompts.js'
 import { realRunner, type CommandRunner } from '../infra/process.js'
+import { errorMessage } from '../infra/logger.js'
 import { resolveImageModelConfig, resolvePiModelConfig } from '../router/model-config.js'
 import { createDecisionEngine } from '../router/engine-factory.js'
 import type { DecisionAudit } from '../router/decision-engine.js'
@@ -721,7 +722,9 @@ function cmdStop(home: string, output: CliIo): number {
 }
 
 async function cmdServe(home: string, output: CliIo): Promise<number> {
-  const config = loadConfig(home)
+  // 先建 logger 再读配置：配置解析失败、首次生成默认配置都要能落进日志。
+  const logger = createLogger(home, output)
+  const config = loadConfig(home, process.env, { logger })
   ensureHome(home)
   // 运行时探测在后台跑：先读缓存，API 立即可用，探测完成后刷新。
   const runtimeAdmin = new AcpRuntimeAdmin({ home, env: process.env, config })
@@ -749,7 +752,6 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     }
   }
   writeFileSync(join(home, 'router-agent.pid'), String(process.pid), 'utf8')
-  const logger = createLogger(home, output)
   void runtimeAdmin.detect()
     .then(snapshot => {
       logger.info('runtime:detected', {
@@ -832,7 +834,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       ...(audit.unavailableReason ? { unavailable: audit.unavailableReason } : {}),
     })
   }
-  const directory = new ChatDirectory(join(home, 'chats.json'))
+  const directory = new ChatDirectory(join(home, 'chats.json'), logger)
 
   const reactTo = async (messageId: string): Promise<void> => {
     const reactionId = await sender.react(messageId, config.feishu.reaction)
@@ -892,6 +894,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     projectSetup: new ProjectSetup({ home, git: gitRunner, orca: orcaRunner }),
     port: config.server.port,
     webRoot: existsSync(webRoot) ? webRoot : undefined,
+    logger,
     onEvent: sink,
     onReport: state => service.onWorkerState(state),
     resumeHint: ticketId => service.resumeHint(ticketId),
@@ -943,7 +946,11 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
           const quoted = await attachQuotedMessage(base, larkRunner)
           const trigger = await withImageText(quoted)
           const stored = engine.ingest(trigger)
-          if (!stored) return
+          if (!stored) {
+            // 重放 / 重复投递：消息已入库但被去重，日志里说清楚，避免误判成「消息丢了」。
+            logger.info('trigger:duplicate', { id: trigger.id, chat: trigger.chatId })
+            return
+          }
           const raw = trigger.raw as Record<string, unknown> | undefined
           const hasQuote = Boolean(raw?.quote)
           const imageCount = Array.isArray(raw?.images) ? raw.images.length : 0
@@ -954,6 +961,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
         })().catch(error => logger.warn('trigger:ingest-failed', { message: error instanceof Error ? error.message : String(error) }))
       },
       onReady: () => logger.info('feishu:ready', {}),
+      onReconnect: ({ attempt, delayMs }) => logger.warn('feishu:reconnecting', { attempt, delayMs }),
       onError: error => {
         if (/another event bus/i.test(error.message)) {
           logger.warn('feishu:bus-conflict', {
@@ -967,8 +975,13 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     : null
   consumer?.start()
   if (consumer) logger.info('feishu:consumer-started', { chats: config.feishu.chats.length })
-  void directory.refresh(larkRunner).then(count => logger.info('chats:refreshed', { count }))
-  const chatTimer = setInterval(() => { void directory.refresh(larkRunner) }, 600_000)
+  const refreshChats = (): void => {
+    void directory.refresh(larkRunner)
+      .then(count => logger.info('chats:refreshed', { count }))
+      .catch(error => logger.warn('chats:refresh-failed', { message: errorMessage(error) }))
+  }
+  refreshChats()
+  const chatTimer = setInterval(refreshChats, 600_000)
   chatTimer.unref()
 
   await service.start()

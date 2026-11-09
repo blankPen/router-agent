@@ -4,6 +4,7 @@ import type { Store } from '../store/db.js'
 import type { Clock, Engine } from '../core/engine.js'
 import { gate, type Policy } from '../core/policy.js'
 import type { SourceKind, Strength, Ticket, Trigger } from '../core/model.js'
+import { noopLogger, errorMessage, type Logger } from '../infra/logger.js'
 import { activeDraft, resolveDispatch, type DispatchMissing, type DispatchSettings } from './dispatch.js'
 import type { SessionKeyParts } from './session-registry.js'
 import type {
@@ -39,6 +40,8 @@ export interface AgentLoopOptions {
   persona?: { name: string; style: string; language: string }
   /** 审计出口：每次研判都会回调一次（CLI 落 decisions.jsonl）。 */
   onAudit?: (audit: DecisionAudit) => void
+  /** 关键链路日志：消息处理失败、模型不可用、会话读写失败都会在这里留痕。 */
+  logger?: Logger
 }
 
 export interface ClarifyInfo {
@@ -136,6 +139,7 @@ export class AgentLoop {
   /** 可替换：测试与模拟可以直接注入假引擎。 */
   decisionEngine: DecisionEngine
   private onAudit?: (audit: DecisionAudit) => void
+  private logger: Logger
 
   constructor(opts: AgentLoopOptions) {
     this.engine = opts.engine
@@ -154,6 +158,7 @@ export class AgentLoop {
     this.unifiedSystemPrompt = buildUnifiedSystemPrompt(opts.engine.policy(), this.soul, this.persona)
     this.decisionEngine = opts.decisionEngine
     this.onAudit = opts.onAudit
+    this.logger = opts.logger ?? noopLogger
   }
 
   setPolicy(policy: Policy): void {
@@ -171,8 +176,15 @@ export class AgentLoop {
     for (const trigger of pending) {
       try {
         await this.handle(trigger, result)
-      } catch {
+      } catch (error) {
         // 单条失败不影响同批其它消息；未落决定的会在 finally 里放回队列。
+        // 这里必须留日志，否则用户只会看到「消息没反应」却查不到原因。
+        this.logger.error('loop:trigger-failed', {
+          triggerId: trigger.id,
+          chat: trigger.chatId,
+          thread: trigger.threadId,
+          message: errorMessage(error),
+        })
       } finally {
         const current = this.store.getTrigger(trigger.id)
         if (current?.disposition === 'evaluating') this.store.setTriggerDisposition(trigger.id, 'pending')
@@ -334,7 +346,14 @@ export class AgentLoop {
         ...(session ? { session } : {}),
       })
       text = text.trim()
-    } catch {
+    } catch (error) {
+      // 模型回复失败时退回到固定话术；日志记下原因，避免把「模型挂了」误判成「模型不会答」。
+      this.logger.warn('chat:reply-failed', {
+        triggerId: trigger.id,
+        chat: trigger.chatId,
+        reason,
+        message: errorMessage(error),
+      })
       text = ''
     }
     const reply = text || fallback
@@ -386,7 +405,10 @@ export class AgentLoop {
         canMutate: this.canMutate(trigger),
         ...(session ? { session } : {}),
       })
-      .catch(error => failedResult(trigger.id, error))
+      .catch(error => {
+        this.logger.warn('decision:engine-failed', { triggerId: trigger.id, message: errorMessage(error) })
+        return failedResult(trigger.id, error)
+      })
     this.onAudit?.(result.audit)
 
     if (result.unavailableReason) return this.markUnavailable(trigger, result.unavailableReason)
@@ -509,8 +531,9 @@ export class AgentLoop {
     if (!parts) return
     try {
       await this.decisionEngine.recordTranscript?.(parts, text, this.unifiedSystemPrompt)
-    } catch {
-      // 会话写入失败不能影响正常回复与决策。
+    } catch (error) {
+      // 会话写入失败不能影响正常回复与决策，但需要留下原因。
+      this.logger.warn('session:transcript-failed', { key: parts.key, message: errorMessage(error) })
     }
   }
 
@@ -544,7 +567,8 @@ export class AgentLoop {
 
     try {
       await this.decisionEngine.resetSession?.(parts, trigger.actorId)
-    } catch {
+    } catch (error) {
+      this.logger.warn('session:reset-failed', { key: parts.key, message: errorMessage(error) })
       this.reply(trigger, '这次重置没成功，稍后再试一下。', `session-reset-failed:${trigger.id}`)
       this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'explicit', reason: 'session:reset:failed' })
       result.replied += 1

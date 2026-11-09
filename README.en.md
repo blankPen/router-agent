@@ -276,6 +276,26 @@ The Router doesn't chat; it only speaks when necessary:
 | `pr:linked` / `pr:state` | Service | — | PR tracking |
 | `recover:*` | Service | — | Restart reconciliation |
 
+Additional events covering messages, config, and exceptions (same `at` / `level` / `message` + business fields format):
+
+| Event | Source | Key fields | Meaning |
+|-|-|-|-|
+| `trigger:duplicate` | Source | `id` `chat` | Duplicate delivery was de-duplicated, not lost |
+| `feishu:reconnecting` | Source | `attempt` `delayMs` | Event consumer disconnected; backoff reconnect scheduled |
+| `feishu:spawn-failed` | Source | `message` | lark-cli could not be spawned (missing / permission); will retry |
+| `chats:refresh-failed` / `chats:parse-failed` / `chats:cache-invalid` | Source | `code` / `message` / `path` | Chat directory refresh failed or cache corrupted; old values kept |
+| `loop:trigger-failed` | Agent Loop | `triggerId` `chat` `message` | One message failed; the rest of the batch continues |
+| `decision:engine-failed` | Agent Loop | `triggerId` `message` | Decision engine call failed; handled as unavailable with the reason kept |
+| `chat:reply-failed` | Agent Loop | `triggerId` `chat` `reason` `message` | Reply model failed; fell back to the fixed wording |
+| `session:transcript-failed` / `session:reset-failed` | Agent Loop | `key` `message` | Session transcript / `/new` reset failed without breaking the reply |
+| `config:created` | Config | `path` | Default `config.yaml` written on first start |
+| `config:parse-failed` | Config | `path` `message` | YAML parse failed; started with defaults |
+| `config:legacy-backend` | Config | `path` | Legacy `backend` section mapped to `runtime` |
+| `config:invalid-security-override` | Config | `runtime` `keys` | `runtime.options` tried to override security settings; startup rejected |
+| `config:patch-rejected` / `config:write-failed` | HTTP API | `errors` / `message` | Dashboard config validation or persistence failed |
+| `api:request-failed` | HTTP API | `method` `path` `message` | Unexpected request-level error (client receives 500) |
+| `ticket:resume-failed` | HTTP API | `ticketId` `message` | Resume command generation failed; ticket detail still loads |
+
 Raw terminal output **never enters the logs** (to avoid parsing TUI text); the proactive probe prefers the Claude session transcript and otherwise posts a semantic summary (assistant text plus an action digest), never a replay of tool calls. To see what a Worker did, read the `report` `summary` and `~/.router-agent/workers/<ticketId>/events.log`.
 
 > **Only one event bus may run per bot.** If `ra logs` shows `another event bus is already connected`, stop the other consumer using that app, or give router-agent its own bot via the "dedicated bot" option in `ra init`.

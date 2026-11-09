@@ -451,3 +451,71 @@ describe('HTTP 管理 API', () => {
     expect(res.json.error).toBe('not-found')
   })
 })
+
+describe('API 异常日志', () => {
+  it('请求处理抛错时返回 500 并记录 api:request-failed', async () => {
+    const store = new Store(':memory:')
+    const config = { ...defaultConfig(), feishu: { ...defaultConfig().feishu, chats: [chatEntry('oc_dev')], botOpenIds: ['ou_bot'] } }
+    let n = 0
+    const engine = new Engine({ store, policy: policyOf(config), clock: { now: () => '2026-11-06T10:00:00.000Z' }, ids: { next: p => `${p}_${++n}` } })
+    engine.ingest({
+      id: 't1', source: 'feishu', externalId: 'om_1', threadId: 'feishu:oc_dev:om_root', chatId: 'oc_dev', chatName: '研发群',
+      actorId: 'ou_alice', actorName: 'Alice', isBot: false, text: '改登录超时', addressed: 'mention',
+      receivedAt: '2026-11-06T09:59:00.000Z', disposition: 'pending',
+    })
+    const ticketId = engine.decide({ triggerId: 't1', decision: 'accept', strength: 'explicit', reason: 'ok', title: '改登录超时' }).ticket!.id
+    engine.startAssignment(ticketId, { runtimeId: 'orca', handle: 'h1', workdir: '/tmp/wt' })
+
+    const logs: { level: string; message: string; extra?: Record<string, unknown> }[] = []
+    const server = await createApiServer({
+      engine, store, config,
+      logger: {
+        info: () => {},
+        warn: () => {},
+        error: (message, extra) => logs.push({ level: 'error', message, ...(extra ? { extra } : {}) }),
+      },
+      onReport: () => { throw new Error('report sink down') },
+    })
+    try {
+      const res = await call(server, 'POST', '/api/reports', { ticketId, state: 'ready', summary: 'x' })
+      expect(res.status).toBe(500)
+      const entry = logs.find(log => log.message === 'api:request-failed')
+      expect(entry?.extra?.message).toBe('report sink down')
+      expect(String(entry?.extra?.path)).toContain('/api/reports')
+    } finally {
+      await server.close()
+      store.close()
+    }
+  })
+
+  it('恢复命令抛错时详情仍可用，并记录 ticket:resume-failed', async () => {
+    const store = new Store(':memory:')
+    const config = { ...defaultConfig(), feishu: { ...defaultConfig().feishu, chats: [chatEntry('oc_dev')], botOpenIds: ['ou_bot'] } }
+    let n = 0
+    const engine = new Engine({ store, policy: policyOf(config), clock: { now: () => '2026-11-06T10:00:00.000Z' }, ids: { next: p => `${p}_${++n}` } })
+    engine.ingest({
+      id: 't1', source: 'feishu', externalId: 'om_1', threadId: 'feishu:oc_dev:om_root', chatId: 'oc_dev', chatName: '研发群',
+      actorId: 'ou_alice', actorName: 'Alice', isBot: false, text: '改登录超时', addressed: 'mention',
+      receivedAt: '2026-11-06T09:59:00.000Z', disposition: 'pending',
+    })
+    const ticketId = engine.decide({ triggerId: 't1', decision: 'accept', strength: 'explicit', reason: 'ok', title: '改登录超时' }).ticket!.id
+    engine.startAssignment(ticketId, { runtimeId: 'orca', handle: 'h1', workdir: '/tmp/wt' })
+
+    const logs: { message: string; extra?: Record<string, unknown> }[] = []
+    const server = await createApiServer({
+      engine, store, config,
+      logger: { info: () => {}, warn: (message, extra) => logs.push({ message, ...(extra ? { extra } : {}) }), error: () => {} },
+      resumeHint: () => { throw new Error('resume down') },
+    })
+    try {
+      const res = await call(server, 'GET', `/api/tickets/${ticketId}`)
+      expect(res.status).toBe(200)
+      expect(res.json.resume).toBeNull()
+      const entry = logs.find(log => log.message === 'ticket:resume-failed')
+      expect(entry?.extra?.message).toBe('resume down')
+    } finally {
+      await server.close()
+      store.close()
+    }
+  })
+})

@@ -276,6 +276,26 @@ Router 不做对话，只在必要时说话：
 | `pr:linked` / `pr:state` | Service | — | PR 跟踪 |
 | `recover:*` | Service | — | 重启对账 |
 
+消息、配置与异常三类关键链路的补充事件（都遵循同一套 `at` / `level` / `message` + 业务字段格式）：
+
+| 事件 | 来源 | 关键字段 | 说明 |
+|-|-|-|-|
+| `trigger:duplicate` | Source | `id` `chat` | 重复投递的消息被入库去重，不是消息丢失 |
+| `feishu:reconnecting` | Source | `attempt` `delayMs` | 事件消费者断开，已安排退避重连 |
+| `feishu:spawn-failed` | Source | `message` | lark-cli 无法拉起（未安装 / 无权限），会继续重试 |
+| `chats:refresh-failed` / `chats:parse-failed` / `chats:cache-invalid` | Source | `code` / `message` / `path` | 群名目录刷新失败或缓存损坏，旧值继续可用 |
+| `loop:trigger-failed` | Agent Loop | `triggerId` `chat` `message` | 单条消息处理异常，同批其它消息不受影响 |
+| `decision:engine-failed` | Agent Loop | `triggerId` `message` | 研判引擎调用失败，按 unavailable 处理并留下原因 |
+| `chat:reply-failed` | Agent Loop | `triggerId` `chat` `reason` `message` | 回复模型失败，已退回固定话术 |
+| `session:transcript-failed` / `session:reset-failed` | Agent Loop | `key` `message` | 会话转录 / `/new` 重置失败，不影响当轮回复 |
+| `config:created` | Config | `path` | 首次启动写入了默认 `config.yaml` |
+| `config:parse-failed` | Config | `path` `message` | YAML 解析失败，已降级为默认配置启动 |
+| `config:legacy-backend` | Config | `path` | 旧版 `backend` 段已兼容映射到 `runtime` |
+| `config:invalid-security-override` | Config | `runtime` `keys` | `runtime.options` 试图覆盖安全参数，启动被拒绝 |
+| `config:patch-rejected` / `config:write-failed` | HTTP API | `errors` / `message` | 面板保存的配置校验失败或落盘失败 |
+| `api:request-failed` | HTTP API | `method` `path` `message` | 请求级未预期异常（客户端会收到 500） |
+| `ticket:resume-failed` | HTTP API | `ticketId` `message` | 工单详情里的恢复命令生成失败，详情页仍可打开 |
+
 worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态）；主动巡检优先读 Claude 会话记录，其次才把终端里的语义摘要（助手文本 + 动作概要）发到话题，不逐条回放工具调用。要看它做了什么，读 `report` 的 `summary` 与 `~/.router-agent/workers/<ticketId>/events.log`。
 
 > **同一机器人只能有一个事件总线在跑。** 如果 `ra logs` 出现 `another event bus is already connected`，先停掉其它占用该应用的消费者，或用 `ra init` 的「专属机器人」选项给 router-agent 单独配一个。

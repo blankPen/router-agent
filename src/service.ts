@@ -23,13 +23,11 @@ import { EffectsProcessor } from './core/effects.js'
 import { preview } from './core/events.js'
 import { shouldSendAsText } from './sources/feishu.js'
 import type { CommandRunner } from './infra/process.js'
+import { noopLogger, type Logger } from './infra/logger.js'
 import type { GitHubTracker as GhTracker } from './sources/github.js'
 
-export interface Logger {
-  info(message: string, extra?: Record<string, unknown>): void
-  warn(message: string, extra?: Record<string, unknown>): void
-  error(message: string, extra?: Record<string, unknown>): void
-}
+// Logger 的实现放在 infra/logger.ts；这里保留 re-export，兼容既有 import。
+export type { Logger } from './infra/logger.js'
 
 export interface PrTracker {
   /** hint 用于把项目名/path 选择器解析成真实仓库：优先 PR 链接，其次 workdir。 */
@@ -67,8 +65,6 @@ export interface RouterServiceOptions {
   /** Claude Code 会话记录目录；默认 ~/.claude/projects，测试可注入。 */
   claudeProjectsDir?: string
 }
-
-const noopLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} }
 
 /** 进展游标的起点标记：表示「从派工这一刻开始」，之前没有需要同步的报告。 */
 const PROGRESS_FROM_START = '@start'
@@ -505,6 +501,7 @@ export class RouterService {
       engine: opts.engine,
       decisionEngine: opts.decisionEngine,
       clock: this.clock,
+      logger: this.logger,
       batchWindowMs: opts.agentLoopOptions?.batchWindowMs ?? 8000,
       dispatch: dispatchSettingsOf(opts.config),
       replyAlwaysChats: replyAlwaysChatsOf(opts.config),
