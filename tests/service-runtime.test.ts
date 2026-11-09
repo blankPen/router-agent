@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { mkdtempSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Store } from '../src/store/db.js'
 import { Engine } from '../src/core/engine.js'
 import { RouterService, extractTerminalSnippet, extractSessionSnippet, formatProbeMessage } from '../src/service.js'
+import { claudeProjectSlug } from '../src/worker/orca/session.js'
 import { defaultConfig, policyOf, type AppConfig, chatEntry } from '../src/config.js'
 import { DEFAULT_ADMISSION } from '../src/core/policy.js'
 import type {
@@ -157,6 +158,7 @@ describe('运行时机制', () => {
       clock: { now: () => new Date(now).toISOString() },
       logger: { info: () => {}, warn: () => {}, error: () => {} },
       agentLoopOptions: { batchWindowMs: 0 },
+      claudeProjectsDir: join(home, 'claude-projects'),
     })
   })
 
@@ -463,6 +465,91 @@ describe('运行时机制', () => {
     runtime.inspectWorkspace = async () => { throw new Error('orca:command-failed(worktree show): selector_not_found') }
     await expect(service.trackPullRequests()).resolves.toBeUndefined()
     expect(store.getTicket(ticketId)?.prNumber).toBe(0)
+  })
+
+  it('resumeHint 从共享 meta 和静态运行时映射生成命令', async () => {
+    const { ticketId } = await launchOne()
+    const workdir = join(config.home, 'worktrees', 'ra-tk-1-demo')
+    mkdirSync(workdir, { recursive: true })
+
+    // 新 assignment 用 ACP 运行时，模拟运行时写入的 meta。
+    now += 1_000
+    const assignment = engine.startAssignment(ticketId, { runtimeId: 'acp-claude', handle: 'sess_1', workdir })
+    mkdirSync(join(config.home, 'workers', ticketId), { recursive: true })
+    writeFileSync(join(config.home, 'workers', ticketId, 'meta.json'), JSON.stringify({
+      ticketId, assignmentId: assignment.id, runtime: 'acp-claude',
+      handle: assignment.handle, workdir, sessionId: 'sess_1',
+    }))
+
+    expect(await service.resumeHint(ticketId)).toEqual({
+      command: `cd '${workdir}' && claude '--resume' 'sess_1'`,
+      sessionId: 'sess_1',
+    })
+  })
+
+  it('resumeHint 在 meta 缺失、运行时不一致或运行时未收录时返回 null', async () => {
+    const { ticketId } = await launchOne()
+    const workdir = join(config.home, 'worktrees', 'ra-tk-1-demo')
+    mkdirSync(workdir, { recursive: true })
+    expect(await service.resumeHint(ticketId)).toBeNull()
+
+    const metaPath = join(config.home, 'workers', ticketId, 'meta.json')
+    mkdirSync(join(config.home, 'workers', ticketId), { recursive: true })
+
+    // meta 是 acp-claude，但最新 assignment 仍是 orca：旧 meta 不能跨运行时使用。
+    writeFileSync(metaPath, JSON.stringify({
+      ticketId, runtime: 'acp-claude', handle: 'sess_1', workdir, sessionId: 'sess_1',
+    }))
+    expect(await service.resumeHint(ticketId)).toBeNull()
+
+    // 新 assignment 切到 acp-claude，但 meta 写的是 orca：同样视为不一致。
+    now += 1_000
+    engine.startAssignment(ticketId, { runtimeId: 'acp-claude', handle: 'sess_1', workdir })
+    writeFileSync(metaPath, JSON.stringify({
+      ticketId, runtime: 'orca', handle: 'sess_1', workdir, sessionId: 'sess_1',
+    }))
+    expect(await service.resumeHint(ticketId)).toBeNull()
+
+    // 运行时一致且 Orca 的 meta 里已有 sessionId：按 Claude 会话恢复。
+    now += 1_000
+    engine.startAssignment(ticketId, { runtimeId: 'orca', handle: 'term-2', workdir })
+    writeFileSync(metaPath, JSON.stringify({
+      ticketId, runtime: 'orca', handle: 'term-2', workdir, sessionId: 'sess_1',
+    }))
+    expect(await service.resumeHint(ticketId)).toEqual({
+      command: `cd '${workdir}' && claude '--resume' 'sess_1'`,
+      sessionId: 'sess_1',
+      note: expect.stringContaining('不再由 Orca 托管'),
+    })
+    expect(await service.resumeHint('tk_missing')).toBeNull()
+  })
+
+  it('resumeHint 为 Orca 工单按 workdir 补 sessionId；没有记录时退回 terminal switch', async () => {
+    const { ticketId } = await launchOne()
+    const workdir = join(config.home, 'worktrees', 'ra-tk-1-demo')
+    mkdirSync(workdir, { recursive: true })
+    const metaPath = join(config.home, 'workers', ticketId, 'meta.json')
+    mkdirSync(join(config.home, 'workers', ticketId), { recursive: true })
+    const assignment = store.latestAssignment(ticketId)!
+    writeFileSync(metaPath, JSON.stringify({
+      ticketId, runtime: 'orca', handle: assignment.handle, workdir,
+    }))
+
+    // 没有 Claude 会话记录：退回 orca terminal switch，仍给可用命令。
+    expect(await service.resumeHint(ticketId)).toEqual({
+      command: `orca 'terminal' 'switch' '--terminal' '${assignment.handle}'`,
+      note: expect.stringContaining('Orca'),
+    })
+
+    // 写入会话记录后：按 workdir 找到最新 session，生成 claude --resume。
+    const projects = join(config.home, 'claude-projects', claudeProjectSlug(workdir))
+    mkdirSync(projects, { recursive: true })
+    writeFileSync(join(projects, 'sess_orca.jsonl'), '{}\n')
+    expect(await service.resumeHint(ticketId)).toEqual({
+      command: `cd '${workdir}' && claude '--resume' 'sess_orca'`,
+      sessionId: 'sess_orca',
+      note: expect.stringContaining('不再由 Orca 托管'),
+    })
   })
 
 })

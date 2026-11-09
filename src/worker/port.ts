@@ -161,6 +161,16 @@ export interface SessionSnapshot {
   filePath?: string
 }
 
+/** 人工接管会话时可直接粘贴到终端的恢复提示。 */
+export interface ResumeHint {
+  /** 完整 shell 命令，已包含 cd 到工作目录。 */
+  command: string
+  /** 运行时自己的会话 ID；用于展示与排障。 */
+  sessionId?: string
+  /** 不阻断复制，但需要提示用户的注意事项。 */
+  note?: string
+}
+
 export interface RuntimeCapabilities {
   agent: {
     liveStatus: boolean

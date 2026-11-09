@@ -6,16 +6,18 @@ import type { Assignment, Report, Stage, Ticket, Trigger } from './core/model.js
 import type { Store } from './store/db.js'
 import type { AppConfig, RetentionSettings } from './config.js'
 import { replyAlwaysChatsOf } from './config.js'
-import { WorkerRuntimeError, type WorkerRuntime, type WorkerContext, type SessionEvent, type WorkerRef, type AgentStatus } from './worker/port.js'
+import { WorkerRuntimeError, type WorkerRuntime, type WorkerContext, type SessionEvent, type WorkerRef, type AgentStatus, type ResumeHint } from './worker/port.js'
 import { AgentLoop } from './router/agent-loop.js'
 import type { DecisionAudit, DecisionEngine } from './router/decision-engine.js'
 import { dispatchSettingsOf } from './router/dispatch.js'
-import { ReportPoller, appendEvent, type WorkerMeta, type WorkerStateFile } from './worker/report-poller.js'
+import { ReportPoller, appendEvent, readWorkerMeta, type WorkerMeta, type WorkerStateFile } from './worker/report-poller.js'
 import { classifyAgentStatus } from './worker/status.js'
 import { RuntimeRegistry } from './worker/registry.js'
-import { normalizeRuntimeId } from './worker/runtimes/catalog.js'
+import { normalizeRuntimeId, ORCA_RUNTIME_ID } from './worker/runtimes/catalog.js'
 import { buildNeutralContract, buildWorkerPrompt } from './worker/spec/index.js'
 import { workBranch } from './worker/naming.js'
+import { buildResumeHint } from './worker/resume.js'
+import { latestClaudeSessionId } from './worker/orca/session.js'
 import { EffectsProcessor } from './core/effects.js'
 import { preview } from './core/events.js'
 import { shouldSendAsText } from './sources/feishu.js'
@@ -61,6 +63,8 @@ export interface RouterServiceOptions {
   staleAfterMs?: number
   /** 注入触发源（服务层用 FeishuConsumer 接）。 */
   onTrigger?: (trigger: Trigger) => void
+  /** Claude Code 会话记录目录；默认 ~/.claude/projects，测试可注入。 */
+  claudeProjectsDir?: string
 }
 
 const noopLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} }
@@ -452,6 +456,8 @@ export class RouterService {
   private running = false
   private idleAfterMs: number
   private staleAfterMs: number
+  /** Claude Code 会话记录目录；用于给 Orca 工单补 sessionId。 */
+  private claudeProjectsDir?: string
   private idle = new Map<string, { turn: number; nudgedAt: number | null; stale: boolean; blocked?: boolean; transferred?: boolean }>()
   private ticking = false
   /** 每条输入已经投递过几次；用于区分并发去重与串行重投。 */
@@ -491,6 +497,7 @@ export class RouterService {
     this.prTracker = opts.prTracker
     this.idleAfterMs = opts.idleAfterMs ?? 120_000
     this.staleAfterMs = opts.staleAfterMs ?? 300_000
+    this.claudeProjectsDir = opts.claudeProjectsDir
     this.progressSyncMs = opts.config.progress?.syncMs ?? 60_000
     this.progressProbeMs = opts.config.progress?.probeMs ?? 120_000
     this.progressSilenceMs = opts.config.progress?.silenceMs ?? 600_000
@@ -578,6 +585,43 @@ export class RouterService {
     } catch {
       return null
     }
+  }
+
+  /** 生成「在终端恢复最新会话」的命令；数据来自共享 meta + 静态运行时映射。 */
+  async resumeHint(ticketId: string): Promise<ResumeHint | null> {
+    const assignment = this.store.latestAssignment(ticketId)
+    // pending / 刚手工重绑时 handle 为空，此时旧 meta 不可信。
+    if (!assignment?.handle) return null
+
+    const meta = readWorkerMeta(join(this.config.home, 'workers'), ticketId)
+    if (!meta) return null
+
+    // meta 属于上一运行时/上一派工时，不能拿来给本次派工拼命令。
+    const metaRuntime = typeof meta.runtime === 'string' ? meta.runtime : ''
+    if (metaRuntime && normalizeRuntimeId(metaRuntime) !== normalizeRuntimeId(assignment.runtimeId)) {
+      return null
+    }
+
+    const workdir = (typeof meta.workdir === 'string' && meta.workdir) || assignment.workdir
+    if (!workdir) return null
+
+    const runtimeId = metaRuntime || assignment.runtimeId
+    let sessionId = typeof meta.sessionId === 'string' && meta.sessionId ? meta.sessionId : undefined
+    // Orca 的 meta 只记录终端句柄；按 workdir 从 Claude 会话记录里补出真实 session id。
+    // 找不到记录时 resume 模块会退回 orca terminal switch。
+    if (!sessionId && normalizeRuntimeId(runtimeId) === ORCA_RUNTIME_ID) {
+      sessionId = latestClaudeSessionId(
+        workdir,
+        this.claudeProjectsDir ? { projectsDir: this.claudeProjectsDir } : {},
+      ) ?? undefined
+    }
+    const handle = (typeof meta.handle === 'string' && meta.handle) || assignment.handle
+
+    return buildResumeHint(
+      runtimeId,
+      { workdir, sessionId, handle },
+      { workdirExists: existsSync(workdir) },
+    )
   }
 
   /** 一个完整周期：研判 → 上报 → Effects → 派工 → 投递。周期之间串行，避免重叠。 */
