@@ -432,7 +432,7 @@ async function cmdInit(home: string, opts: { yes?: boolean; agentsDir?: string }
 
   const agentsDir = opts.agentsDir ?? join(homedir(), '.claude', 'agents')
   mkdirSync(agentsDir, { recursive: true })
-  writeFileSync(join(agentsDir, 'router-agent-worker.md'), agentSpecDocument(), 'utf8')
+  writeFileSync(join(agentsDir, 'router-agent-worker.md'), agentSpecDocument(home), 'utf8')
   output.stdout('')
   output.stdout(`状态目录: ${home}`)
   output.stdout(`worker 全局规范: ${join(agentsDir, 'router-agent-worker.md')}`)

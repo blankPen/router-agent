@@ -69,6 +69,7 @@ export function createRuntimes(config: AppConfig, deps: RuntimeDeps): RuntimeReg
     runner: deps.orca,
     workersDir: deps.workersDir,
     spec: deps.spec,
+    home: deps.home,
   }))
 
   // 旧配置可能把选项写在 claude-cli 下，两个键都认。
