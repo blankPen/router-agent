@@ -92,6 +92,16 @@ Actions → 发布 npm 包 → Run workflow。发布的是所选分支 `package.
 
 判断规则与边界情况见 `scripts/release-plan.mjs`，单测见 `tests/scripts/release-plan.test.ts`。
 
+### 版本号会不会跳号？
+
+不会主动跳号。只有 `npm view` 确认已存在于 npm 的版本才会被跳过；每次合并最多发布一个新版本。
+
+- 发布失败（版本没有真正发出去）时，下一次合并会先补发当前版本，不会留下「占了号却没发布」的空洞；
+- 版本号写回 main 失败时，仓库里的版本号暂时落后，但下一次合并会以 npm 上最新版本为基准继续升 patch，
+  不会重复发布，也不会跳号。
+
+手动发 minor / major 时（例如 v0.3.9 → v0.4.0），中间的 patch 不会补发，这是 semver 的正常行为。
+
 ## 发布内容
 
 `package.json` 的 `files` 白名单只包含 `bin/` 与 `dist/`，再叠加 npm 强制包含的 `package.json` / `README.md`。

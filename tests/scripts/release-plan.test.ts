@@ -55,6 +55,15 @@ describe('发布计划', () => {
     expect(plan.autoBump).toBe(true)
   })
 
+  it('当前版本还没发布时先补发当前版本，不留空洞', () => {
+    const plan = planRelease(
+      { ...base, version: '0.4.0', beforeVersion: '0.4.0' },
+      published('0.3.0'),
+    )
+    expect(plan).toMatchObject({ shouldPublish: true, releaseVersion: '0.4.0', autoBump: false })
+    expect(plan.reason).toContain('尚未发布')
+  })
+
   it('推送里手动改了版本号时按该版本发布，不再自动升', () => {
     const plan = planRelease(
       { ...base, version: '0.4.0' },
@@ -114,8 +123,8 @@ describe('发布计划', () => {
     expect(planRelease(tag, published('0.3.0')).shouldPublish).toBe(false)
   })
 
-  it('版本号不是 x.y.z 时明确报错', () => {
+  it('已发布的预发布版本无法自动升 patch 时明确报错', () => {
     const context = { ...base, version: '0.4.0-beta.1', beforeVersion: '0.4.0-beta.1' }
-    expect(() => planRelease(context, published('0.3.0'))).toThrow('无法自动升 patch')
+    expect(() => planRelease(context, published('0.4.0-beta.1'))).toThrow('无法自动升 patch')
   })
 })

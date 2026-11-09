@@ -10,7 +10,8 @@
  *      - 本次推送改了 package.json 的 version → 视为手动发版（minor / major），按该版本发布。
  *      - 拿不到推送前的版本（force push / 首推）→ 当前版本未发布就发布，不自动升版。
  *      - 改动文件都不进 npm 包（文档 / 测试 / CI 等）→ 跳过，避免无意义地刷版本号。
- *      - 其余情况自动升 patch，并跳过 npm 上已被占用的版本。
+ *      - 当前版本还没发出去（例如上一次发布失败）→ 先补发当前版本，不跳号。
+ *      - 其余情况自动升 patch，并跳过 npm 上已被占用的版本（只跳过确实已发布的版本）。
  *
  * 输出：写到 `$GITHUB_OUTPUT`（should_publish / release_version / auto_bump / reason），
  * 有 `$GITHUB_STEP_SUMMARY` 时同时写一段可读的发布计划。
@@ -129,6 +130,11 @@ export function planRelease(context, isPublished) {
 
   if (!isShippableChange(changedFiles)) {
     return skip('本次改动未触及会进入 npm 包的文件，跳过自动升版')
+  }
+
+  // 当前版本还没发出去（通常是上一次发布失败）：先补发当前版本，避免直接升 patch 把它跳成空洞。
+  if (!isPublished(version)) {
+    return publish(version, false, `v${version} 尚未发布，先补发当前版本`)
   }
 
   const parsed = parseVersion(version)
