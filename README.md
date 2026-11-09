@@ -89,7 +89,7 @@ ra tickets                                             # 模拟产生的工单�
 1. `ra logs | grep trigger:ingested` 能看到消息进入；
 2. `ra tickets` 出现工单，`ra ticket <id>` 能看到授权范围与强度；
 3. `orca worktree list --json` 出现 `ra-tk-<编号>-<语义slug>`，分支名为 `ra/tk-<编号>-<语义slug>`（目录名与分支名一一对应，只把 `/` 换成 `-`），Orca 里出现 Claude Code 终端；
-4. Worker 执行 `ra report` 后，`ra ticket <id>` 的阶段在 `running → review/person` 之间变化；
+4. Worker 执行 `ra report` 后，`ra ticket <id>` 的阶段在 `running → review/blocked` 之间变化；
 5. 合并或关闭 PR 后，工单变 `closed`，飞书收到一次闭环通知。
 
 ## 它怎么工作
@@ -658,7 +658,18 @@ runtime:
 
 ## 工单阶段
 
-`draft → accepted → assigned → running → review → closed`，可在 `person`（等人）与 `idle`（空闲）之间来回。PR 仍处于 open 时禁止结束工单。
+工单只有五种阶段：
+
+| 阶段 | 含义 |
+| --- | --- |
+| `todo` 待办 | 已接单，尚未派工 |
+| `running` 进行中 | 已派工，worker 正在执行 |
+| `review` 审核中 | worker 已交付，等待发起人验收 |
+| `blocked` 已阻塞 | 等待人工回答、worker 失败/退出，或需要人工推动 |
+| `done` 已完成 | 工单闭环（PR 合并/关闭或人工结束） |
+
+`done` 是终态；其余四种阶段之间可以互相流转。PR 仍处于 open 时禁止结束工单。
+旧版本八阶段（`draft/accepted/assigned/running/review/person/idle/closed`）的历史数据迁移见 [docs/TICKET-STAGE-MIGRATION.md](docs/TICKET-STAGE-MIGRATION.md)。
 
 ## 闲置工单治理
 

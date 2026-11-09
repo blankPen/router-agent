@@ -252,12 +252,12 @@ describe('运行时机制', () => {
 
     const probe = store.listOutbox(200).find(item => item.text.includes('进展巡检'))
     expect(probe).toBeTruthy()
-    expect(probe!.text).toContain('assigned')
+    expect(probe!.text).toContain('running')
     expect(probe!.text).toContain('正在修改登录超时配置')
     expect(probe!.text).not.toContain('pnpm test 进行中')
     expect(probe!.text).not.toContain('Cascading')
     expect(probe!.threadId).toBe('om_root')
-    expect(store.getTicket(ticketId)?.stage).toBe('assigned')
+    expect(store.getTicket(ticketId)?.stage).toBe('running')
   })
 
   it('同一静默期按 repeatMs 限流，避免重复刷屏', async () => {

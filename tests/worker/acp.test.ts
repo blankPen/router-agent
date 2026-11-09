@@ -58,7 +58,7 @@ function context(home: string, tools: ToolPolicy = DEFAULT_TOOLS, contract = '# 
   return {
     ticket: {
       id: 'tk-1', title: '测试 ACP 运行时', threadId: 't', source: 'feishu', chatId: 'c',
-      mandateId: 'm', stage: 'accepted', repo: '/tmp/repo', branch: 'main',
+      mandateId: 'm', stage: 'todo', repo: '/tmp/repo', branch: 'main',
       prNumber: 0, prUrl: '', prState: 'none', createdAt: '2026-11-09T00:00:00.000Z', updatedAt: '2026-11-09T00:00:00.000Z',
     },
     assignment: {

@@ -187,7 +187,7 @@ describe('PiDecisionEngine', () => {
     expect(result.proposal?.decision).toBe('ignore')
     expect(result.proposal?.reason).toBe('ops:tool-reply')
     expect(result.reply).toBe('已关闭工单 tk-1，workspace 正在回收。')
-    expect(store.getTicket('tk-1')?.stage).toBe('closed')
+    expect(store.getTicket('tk-1')?.stage).toBe('done')
     expect(result.audit.toolCalls).toEqual([{ name: 'router_ticket_close', args: expect.any(String), ok: true }])
   })
 
@@ -203,7 +203,7 @@ describe('PiDecisionEngine', () => {
 
     const result = await enginePi.assess(request({ addressed: 'none' }, false))
 
-    expect(store.getTicket('tk-1')?.stage).not.toBe('closed')
+    expect(store.getTicket('tk-1')?.stage).not.toBe('done')
     expect(result.audit.toolCalls).toEqual([
       { name: 'router_ticket_close', args: expect.any(String), ok: false, error: 'permission:not-authorized' },
     ])

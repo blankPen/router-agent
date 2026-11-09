@@ -61,9 +61,9 @@ describe('ra CLI', () => {
     store.close()
 
     const output = io()
-    expect(await runCli(['tickets', '--home', dir, '--stage', 'accepted'], output)).toBe(0)
+    expect(await runCli(['tickets', '--home', dir, '--stage', 'todo'], output)).toBe(0)
     expect(output.out.join('\n')).toContain('改登录超时')
-    expect(output.out.join('\n')).toContain('accepted')
+    expect(output.out.join('\n')).toContain('todo')
   })
 
   it('ra ticket <id> 打印详情；工单不存在时返回非零', async () => {
@@ -111,7 +111,7 @@ describe('ra CLI', () => {
     writeFileSync(join(dir, 'config.yaml'), readFileSync(join(dir, 'config.yaml'), 'utf8').replace('port: 3083', 'port: 1'))
     expect(await runCli(['ticket', ticketId, '--stop', '--home', dir], output)).toBe(0)
     const after = new Store(join(dir, 'state.db'))
-    expect(after.getTicket(ticketId)?.stage).toBe('closed')
+    expect(after.getTicket(ticketId)?.stage).toBe('done')
     after.close()
   })
 

@@ -156,7 +156,7 @@ export class Engine {
       source: trigger.source,
       chatId: trigger.chatId,
       mandateId: this.ids.next('md'),
-      stage: 'accepted',
+      stage: 'todo',
       repo: input.repo?.trim() ?? '',
       branch: input.branch?.trim() ?? '',
       ...(triggerAttachments.length > 0 ? { attachments: triggerAttachments } : {}),
@@ -261,7 +261,7 @@ export class Engine {
 
   deliverInput(ticketId: string, opts: { kind: InputKind; text: string; assignmentId?: string }): Input {
     const ticket = this.requireTicket(ticketId)
-    if (ticket.stage === 'closed') throw new Error('ticket:closed')
+    if (ticket.stage === 'done') throw new Error('ticket:closed')
     // 工单已接但还没派工时先挂起，派工后由 startAssignment 重新绑定。
     const assignment = opts.assignmentId ?? this.store.latestAssignment(ticketId)?.id ?? ''
     const input: Input = {
@@ -297,7 +297,7 @@ export class Engine {
     const text = withAttachmentManifest(trigger.text, attachmentsOf(trigger.raw))
     for (const sub of subscriptions) {
       const ticket = this.store.getTicket(sub.ticketId)
-      if (!ticket || ticket.stage === 'closed' || ticket.stage === 'draft') continue
+      if (!ticket || ticket.stage === 'done') continue
       this.deliverInput(ticket.id, { kind: 'followup', text })
       delivered.push(ticket)
     }
@@ -318,7 +318,7 @@ export class Engine {
     const ticket = this.requireTicket(ticketId)
     if (ticket.prState === 'open') throw new Error('pr:open')
     const now = this.clock.now()
-    const updated: Ticket = { ...ticket, stage: 'closed' as Stage, closedAt: now, updatedAt: now }
+    const updated: Ticket = { ...ticket, stage: 'done' as Stage, closedAt: now, updatedAt: now }
     this.store.updateTicket(updated)
     this.store.clearAttention(ticketId)
     const assignment = this.store.latestAssignment(ticketId)
@@ -333,7 +333,7 @@ export class Engine {
   stopTicket(ticketId: string, reason: string): Ticket {
     const ticket = this.requireTicket(ticketId)
     const now = this.clock.now()
-    const updated: Ticket = { ...ticket, stage: 'closed' as Stage, closedAt: now, updatedAt: now }
+    const updated: Ticket = { ...ticket, stage: 'done' as Stage, closedAt: now, updatedAt: now }
     this.store.updateTicket(updated)
     this.store.clearAttention(ticketId)
     const assignment = this.store.latestAssignment(ticketId)

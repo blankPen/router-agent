@@ -67,8 +67,8 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         pid: process.pid,
         startedAt: new Date(Date.now() - process.uptime() * 1_000).toISOString(),
         tickets: {
-          open: tickets.filter(t => t.stage !== 'closed').length,
-          closed: tickets.filter(t => t.stage === 'closed').length,
+          open: tickets.filter(t => t.stage !== 'done').length,
+          closed: tickets.filter(t => t.stage === 'done').length,
           byStage: groupByStage(tickets.map(t => t.stage)),
         },
         policy: { version: opts.engine.policy().version, acceptMode: opts.engine.policy().acceptMode },
@@ -146,9 +146,9 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         const handle = String((body as Record<string, unknown>).handle ?? '')
         const workdir = String((body as Record<string, unknown>).workdir ?? '')
         if (!handle) return respond(res, 400, { error: 'handle-required' })
-        if (ticket.stage === 'closed') return respond(res, 409, { error: 'ticket-closed' })
+        if (ticket.stage === 'done') return respond(res, 409, { error: 'ticket-closed' })
         // 手工重绑通常是在恢复丢失的 worker：清掉转人工状态并恢复话题订阅，
-        // 否则工单会停在 person，后续消息也不会再扇出到这张工单。
+        // 否则工单会停在 blocked，后续消息也不会再扇出到这张工单。
         opts.engine.clearAttention(ticketId)
         const assignment = opts.engine.startAssignment(ticketId, { runtimeId: config.runtime.default, handle, workdir })
         opts.engine.subscribe(ticket.threadId, ticket.id)

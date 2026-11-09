@@ -91,7 +91,7 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
     .addHelpText('after', `
 示例:
   ra init
-  ra tickets --stage person
+  ra tickets --stage blocked
   ra config set policy.acceptMode observe
   ra config set project.router-agent "name:dsh/router-agent@main"
   ra config set chatBinding.oc_xxx "router-agent@main"
@@ -209,7 +209,7 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
     .action((opts: { home?: string }) => setCode(cmdWeb(homeOf(opts, output), output)))
 
   withHome(program.command('tickets').description('按阶段列出工单'))
-    .option('--stage <stage>', '按阶段过滤：draft/accepted/assigned/running/review/person/idle/closed')
+    .option('--stage <stage>', '按阶段过滤：todo/running/review/blocked/done')
     .option('--limit <n>', '返回条数', '200')
     .action((opts: { home?: string; stage?: string; limit?: string }) => {
       setCode(cmdTickets(homeOf(opts, output), opts, output))
@@ -534,7 +534,7 @@ async function cmdTicketStop(home: string, ticketId: string, output: CliIo): Pro
       output.stderr(`未找到工单: ${ticketId}`)
       return 1
     }
-    if (ticket.stage === 'closed') {
+    if (ticket.stage === 'done') {
       output.stdout(`工单已关闭: ${ticketId}`)
       return 0
     }
@@ -553,9 +553,9 @@ function cmdStatus(home: string, output: CliIo): number {
   const store = openStore(home)
   try {
     const tickets = store.listTickets({ limit: 500 })
-    const open = tickets.filter(t => t.stage !== 'closed').length
+    const open = tickets.filter(t => t.stage !== 'done').length
     output.stdout(`工单：开工 ${open} / 总计 ${tickets.length}`)
-    for (const t of tickets.filter(t => t.stage !== 'closed').slice(0, 10)) {
+    for (const t of tickets.filter(t => t.stage !== 'done').slice(0, 10)) {
       output.stdout(`  - [${t.stage}] ${t.title}`)
     }
     const config = loadConfig(home)

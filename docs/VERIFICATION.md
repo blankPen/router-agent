@@ -87,7 +87,7 @@ ra init → 配置 port 3099 → ra start → curl /api/status → curl / → ra
 | 命令运行器 | 原先或带或不带二进制名，真实环境报 `ENOENT` | `CommandRunner` 统一绑定二进制，argv 不含命令名 |
 | 飞书幂等 key 超长 | 拼接 turn + updatedAt 后超过 50 字符，飞书直接拒绝发送 | `fitIdempotencyKey()` 截断 + 稳定哈希 |
 | `.trove` 定位 | 传入临时 `--home` 时把 `.trove` 也指到临时目录 | 状态目录与真实用户主目录分离 |
-| worker 会话被删 | 每秒重试 `terminal send`，工单一直挂着 running | 检测到终端不存在后结束派工、转 person、取消订阅并只通知一次 |
+| worker 会话被删 | 每秒重试 `terminal send`，工单一直挂着 running | 检测到终端不存在后结束派工、转 blocked、取消订阅并只通知一次 |
 | lark-cli 机器人隔离 | 原先只能复用默认 profile | 新增 `feishu.larkHome`，所有 lark-cli 子进程注入独立 HOME |
 | init 依赖手工配置 | 原先要手动跑 lark-cli 并填 4 个 id | 交互式引导 + 内部调用 `lark-cli config init` / `auth login` |
 | CLI 解析手写 | 手写 argv 解析、无补全/帮助 | 换 `commander`：子命令、选项、`--help`、退出码 |
@@ -128,7 +128,7 @@ ra init                       # 生成 ~/.claude/agents/router-agent-worker.md
    repo: "<你的仓库名>"
    ```
 2. `ra start`，在群里 @机器人 提一个可执行的小需求。
-3. 观察 `ra tickets` 是否出现 `accepted → assigned`，Orca 是否打开新终端。
+3. 观察 `ra tickets` 是否出现 `todo → running`，Orca 是否打开新终端。
 4. worker 写完 `state.json` 后观察 `ra ticket <id>` 是否进入 `running / review`。
 
 这一步会真实创建 worktree 并启动 Claude Code，因此没有自动执行。

@@ -6,8 +6,8 @@ export type Decision = 'accept' | 'stop' | 'ignore' | 'unavailable'
 /** 决定的依据强度：显式（@bot / 直接指派）或推断（LLM 研判）。 */
 export type Strength = 'explicit' | 'inferred'
 
-/** 工单阶段。person 表示等人，idle 表示 worker 空闲但活未完。 */
-export type Stage = 'draft' | 'accepted' | 'assigned' | 'running' | 'review' | 'person' | 'idle' | 'closed'
+/** 工单阶段（五种）：待办 / 进行中 / 审核中 / 已阻塞 / 已完成。 */
+export type Stage = 'todo' | 'running' | 'review' | 'blocked' | 'done'
 
 /** Worker 上报的六种状态。 */
 export type ReportState = 'progress' | 'waiting' | 'ready' | 'blocked' | 'failed' | 'dropped'
