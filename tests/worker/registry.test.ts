@@ -83,7 +83,7 @@ describe('RuntimeRegistry', () => {
     await expect(registry.get('acp-codex').start({
       ticket: {
         id: 'tk-1', title: 't', threadId: 't', source: 'feishu', chatId: 'c',
-        repo: '/tmp/repo', branch: 'main', task: 't', stage: 'assigned',
+        repo: '/tmp/repo', branch: 'main', task: 't', stage: 'running',
       },
       assignment: { id: 'as-1', ticketId: 'tk-1', runtimeId: 'acp-codex', handle: '', workdir: '', status: 'pending', startedAt: '' },
       brief: { ticketId: 'tk-1', title: 't', scope: '', workBranch: 'ra/tk-1', contract: 'x' },

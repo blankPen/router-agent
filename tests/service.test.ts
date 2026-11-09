@@ -256,7 +256,7 @@ describe('RouterService 编排', () => {
 
     const ticket = store.listTickets()[0]!
     expect(store.latestAssignment(ticket.id)?.status).toBe('ended')
-    expect(store.getTicket(ticket.id)?.stage).toBe('person')
+    expect(store.getTicket(ticket.id)?.stage).toBe('blocked')
     expect(store.getAttention(ticket.id)?.question).toContain('执行环境创建失败')
 
     // 失败必须留下可诊断的日志，而不是只有 code=1
@@ -292,8 +292,8 @@ describe('RouterService 编排', () => {
 
     // 第一张失败后阶段回落，额度立刻释放给第二张
     expect(flaky.starts).toHaveLength(1)
-    expect(store.listTickets().filter(ticket => ticket.stage === 'assigned')).toHaveLength(1)
-    expect(store.listTickets().filter(ticket => ticket.stage === 'person')).toHaveLength(1)
+    expect(store.listTickets().filter(ticket => ticket.stage === 'running')).toHaveLength(1)
+    expect(store.listTickets().filter(ticket => ticket.stage === 'blocked')).toHaveLength(1)
   })
 
   it('并发已满时记录排队日志并回贴排队提示，而不是静默跳过', async () => {
@@ -327,7 +327,7 @@ describe('RouterService 编排', () => {
     engine.ingest(makeTrigger())
     await service.runOnce()
     const ticket = store.listTickets()[0]!
-    expect(store.getTicket(ticket.id)?.stage).toBe('person')
+    expect(store.getTicket(ticket.id)?.stage).toBe('blocked')
 
     // 没有新输入：连续多轮也不能重试（否则每秒打一次 Orca）
     await service.runOnce()
@@ -338,7 +338,7 @@ describe('RouterService 编排', () => {
     engine.deliverInput(ticket.id, { kind: 'followup', text: '分支改成 main 了，再试一次' })
     await service.runOnce()
     expect(flaky.starts).toHaveLength(1)
-    expect(store.getTicket(ticket.id)?.stage).toBe('assigned')
+    expect(store.getTicket(ticket.id)?.stage).toBe('running')
   })
 
   it('服务重启后，失败前积压的旧输入不会再触发重试（水位持久化）', async () => {
@@ -366,7 +366,7 @@ describe('RouterService 编排', () => {
     engine.deliverInput(ticket.id, { kind: 'followup', text: '？' })
     await service.runOnce()
     expect(flaky.failures).toBe(2)
-    expect(store.getTicket(ticket.id)?.stage).toBe('person')
+    expect(store.getTicket(ticket.id)?.stage).toBe('blocked')
 
     // 模拟重启：内存里的失败记录清空，水位必须从 cursors 恢复，旧输入不能再触发派工
     service = build()
@@ -416,7 +416,7 @@ describe('RouterService 编排', () => {
     prTracker.states.set(12, 'merged')
     await service.trackPullRequests()
 
-    expect(store.getTicket(ticket.id)?.stage).toBe('closed')
+    expect(store.getTicket(ticket.id)?.stage).toBe('done')
     expect(store.getTicket(ticket.id)?.prState).toBe('merged')
     const outbox = store.claimOutbox('2026-11-06T10:10:00.000Z', 10)
     expect(outbox.some(item => item.text.includes('已合并'))).toBe(true)
@@ -466,7 +466,7 @@ describe('RouterService 编排', () => {
       ackedInputs: [], updatedAt: '2026-11-06T10:01:00.000Z',
     })
 
-    expect(store.getTicket(ticket.id)?.stage).toBe('person')
+    expect(store.getTicket(ticket.id)?.stage).toBe('blocked')
     expect(store.getAttention(ticket.id)?.question).toBe('请提供测试账号')
     const outbox = store.claimOutbox('2026-11-06T10:10:00.000Z', 10)
     expect(outbox.some(item => item.text.includes('测试账号'))).toBe(true)
@@ -488,7 +488,7 @@ describe('RouterService 编排', () => {
     await service.recover()
     expect(runtime.starts).toHaveLength(1)
     expect(store.latestAssignment(ticket.id)?.status).toBe('ended')
-    expect(store.getTicket(ticket.id)?.stage).toBe('person')
+    expect(store.getTicket(ticket.id)?.stage).toBe('blocked')
 
     const outbox = store.claimOutbox('2026-11-06T10:10:00.000Z', 20)
     expect(outbox.filter(item => item.text.includes('执行会话已不存在'))).toHaveLength(1)
@@ -504,7 +504,7 @@ describe('RouterService 编排', () => {
     runtime.handles.delete(assignment.handle)
     await service.runOnce()
 
-    expect(store.getTicket(ticket.id)?.stage).toBe('person')
+    expect(store.getTicket(ticket.id)?.stage).toBe('blocked')
     expect(store.latestAssignment(ticket.id)?.status).toBe('ended')
     const outbox = store.claimOutbox('2026-11-06T10:10:00.000Z', 20)
     expect(outbox.filter(item => item.text.includes('执行会话已不存在'))).toHaveLength(1)
@@ -525,7 +525,7 @@ describe('RouterService 编排', () => {
     service.stopTicket(ticket.id, '人工停止')
     await service.runOnce()
     expect(runtime.stopped).toContain(assignment.handle)
-    expect(store.getTicket(ticket.id)?.stage).toBe('closed')
+    expect(store.getTicket(ticket.id)?.stage).toBe('done')
   })
 
   it('待投递的 follow-up 会在下一轮投给 worker', async () => {
@@ -772,18 +772,18 @@ describe('RouterService 编排', () => {
       const ticketId = seed()
 
       await service.sweepRetention(T0 + 24 * HOUR + 1000)
-      expect(store.getTicket(ticketId)?.stage).not.toBe('closed')
+      expect(store.getTicket(ticketId)?.stage).not.toBe('done')
 
       // 让提醒真正发出去（Effects 消费 outbox），之后才会进入关闭倒计时
       await service.runOnce()
 
       // 宽限期内不关闭
       await service.sweepRetention(T0 + 29 * HOUR)
-      expect(store.getTicket(ticketId)?.stage).not.toBe('closed')
+      expect(store.getTicket(ticketId)?.stage).not.toBe('done')
 
       // 宽限期满自动关闭
       await service.sweepRetention(T0 + 30 * HOUR + 1000)
-      expect(store.getTicket(ticketId)?.stage).toBe('closed')
+      expect(store.getTicket(ticketId)?.stage).toBe('done')
 
       const texts = store.listOutbox(50).map(item => item.text)
       expect(texts.some(text => text.includes('24 小时没有新的进展'))).toBe(true)
@@ -801,7 +801,7 @@ describe('RouterService 编排', () => {
 
       // 不跑 Effects：提醒仍停留在 outbox pending，宽限期到了也不能关。
       await service.sweepRetention(T0 + 31 * HOUR)
-      expect(store.getTicket(ticketId)?.stage).not.toBe('closed')
+      expect(store.getTicket(ticketId)?.stage).not.toBe('done')
     })
 
     it('PR 仍开着：只催办一次，不自动关闭', async () => {
@@ -810,7 +810,7 @@ describe('RouterService 编排', () => {
       await service.sweepRetention(T0 + 24 * HOUR + 1000)
       await service.sweepRetention(T0 + 48 * HOUR)
 
-      expect(store.getTicket(ticketId)?.stage).not.toBe('closed')
+      expect(store.getTicket(ticketId)?.stage).not.toBe('done')
       const urges = store.claimOutbox('2026-11-07T20:00:00.000Z', 50).filter(item => item.text.includes('PR 已经'))
       expect(urges).toHaveLength(1)
     })
@@ -821,12 +821,12 @@ describe('RouterService 编排', () => {
       runtime.outputAt = '2026-11-06T10:00:00.000Z'
 
       await service.sweepRetention(T0 + 6 * HOUR + 1000)
-      expect(store.getTicket(ticketId)?.stage).toBe('person')
+      expect(store.getTicket(ticketId)?.stage).toBe('blocked')
       expect(store.getAttention(ticketId)?.question).toContain('6 小时没有上报')
 
       // 转人工后不再自动关闭
       await service.sweepRetention(T0 + 30 * HOUR)
-      expect(store.getTicket(ticketId)?.stage).not.toBe('closed')
+      expect(store.getTicket(ticketId)?.stage).not.toBe('done')
     })
 
     it('提醒后出现新进展：取消自动关闭', async () => {
@@ -846,7 +846,7 @@ describe('RouterService 编排', () => {
       })
 
       await service.sweepRetention(T0 + 31 * HOUR)
-      expect(store.getTicket(ticketId)?.stage).not.toBe('closed')
+      expect(store.getTicket(ticketId)?.stage).not.toBe('done')
       expect(store.getCursor(`retention:reminder:${ticketId}`)).toBeNull()
     })
 
@@ -857,7 +857,7 @@ describe('RouterService 编排', () => {
       await service.sweepRetention(T0 + 24 * HOUR + 1000)
       await service.runOnce()
       await service.sweepRetention(T0 + 30 * HOUR + 1000)
-      expect(store.getTicket(ticketId)?.stage).toBe('closed')
+      expect(store.getTicket(ticketId)?.stage).toBe('done')
 
       await service.runOnce()
       expect(runtime.removed).toHaveLength(0)

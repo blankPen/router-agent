@@ -434,14 +434,11 @@ button, input, select {
 .chip.active .chip-count { color: inherit; opacity: 0.65; }
 
 /* 阶段配色 */
-.stage-draft { --stage: #8b8a82; }
-.stage-accepted { --stage: #3b6ea5; }
-.stage-assigned { --stage: #6a55a3; }
+.stage-todo { --stage: #3b6ea5; }
 .stage-running { --stage: #1e7a5a; }
 .stage-review { --stage: #a9741a; }
-.stage-person { --stage: #bf5b1f; }
-.stage-idle { --stage: #8b8a82; }
-.stage-closed { --stage: #9b998f; }
+.stage-blocked { --stage: #bf5b1f; }
+.stage-done { --stage: #9b998f; }
 
 /* ---------------------------------------------------------------------------
    工单：看板 + 抽屉

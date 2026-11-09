@@ -68,7 +68,7 @@ describe('Engine', () => {
 
     expect(outcome.decision.decision).toBe('accept')
     expect(outcome.ticket?.title).toBe('调整登录超时')
-    expect(outcome.ticket?.stage).toBe('accepted')
+    expect(outcome.ticket?.stage).toBe('todo')
     expect(outcome.mandate?.scope).toBe('只改登录超时，不改鉴权逻辑')
     expect(outcome.mandate?.policyVersion).toBe('p1')
     expect(store.getTrigger('trg_1')?.disposition).toBe('evaluated')
@@ -112,11 +112,11 @@ describe('Engine', () => {
     expect(outcome.ticket).toBeUndefined()
   })
 
-  it('派工启动后工单进入 assigned，报告 progress 后进入 running', () => {
+  it('派工启动后工单进入 running，报告 progress 后保持 running', () => {
     engine.ingest(makeTrigger())
     const { ticket } = engine.decide({ triggerId: 'trg_1', decision: 'accept', strength: 'explicit', reason: 'ok' })
     const assignment = engine.startAssignment(ticket!.id, { runtimeId: 'orca', handle: 'term-1', workdir: '/tmp/wt' })
-    expect(store.getTicket(ticket!.id)?.stage).toBe('assigned')
+    expect(store.getTicket(ticket!.id)?.stage).toBe('running')
 
     engine.report(assignment.id, {
       ticketId: ticket!.id,
@@ -165,7 +165,7 @@ describe('Engine', () => {
     expect(store.getTicket(ticket!.id)?.stage).toBe('review')
   })
 
-  it('report blocked 携带 humanAction 时进入 person 并登记待答问题', () => {
+  it('report blocked 携带 humanAction 时进入 blocked 并登记待答问题', () => {
     engine.ingest(makeTrigger())
     const { ticket } = engine.decide({ triggerId: 'trg_1', decision: 'accept', strength: 'explicit', reason: 'ok' })
     const assignment = engine.startAssignment(ticket!.id, { runtimeId: 'orca', handle: 'term-1', workdir: '/tmp/wt' })
@@ -177,7 +177,7 @@ describe('Engine', () => {
       humanAction: '请提供一个可用的测试账号',
       ackedInputs: [],
     })
-    expect(store.getTicket(ticket!.id)?.stage).toBe('person')
+    expect(store.getTicket(ticket!.id)?.stage).toBe('blocked')
     expect(store.getAttention(ticket!.id)?.question).toBe('请提供一个可用的测试账号')
   })
 
@@ -190,7 +190,7 @@ describe('Engine', () => {
     expect(() => engine.closeTicket(ticket!.id, 'done')).toThrow(/pr:open/)
     const closed = engine.updatePr(ticket!.id, { number: 3, url: 'u', state: 'merged' })
     expect(closed.stage).toBe('review')
-    expect(engine.closeTicket(ticket!.id, 'done').stage).toBe('closed')
+    expect(engine.closeTicket(ticket!.id, 'done').stage).toBe('done')
   })
 
   it('投递输入有单调 seq，ack 后不再重复投递', () => {
@@ -252,7 +252,7 @@ describe('Engine', () => {
     engine.ingest(makeTrigger({ id: 't1', externalId: 'e1' }))
     const { ticket } = engine.decide({ triggerId: 't1', decision: 'accept', strength: 'explicit', reason: 'ok' })
     engine.stopTicket(ticket!.id, '人工停止')
-    expect(store.getTicket(ticket!.id)?.stage).toBe('closed')
+    expect(store.getTicket(ticket!.id)?.stage).toBe('done')
 
     engine.ingest(makeTrigger({ id: 't2', externalId: 'e2', text: '继续做' }))
     expect(engine.fanOut('t2')).toHaveLength(0)

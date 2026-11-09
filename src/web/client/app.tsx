@@ -124,17 +124,14 @@ interface ServiceStatus {
 // 常量与工具
 // ---------------------------------------------------------------------------
 
-const STAGE_ORDER = ['draft', 'accepted', 'assigned', 'running', 'review', 'person', 'idle', 'closed']
+const STAGE_ORDER = ['todo', 'running', 'review', 'blocked', 'done']
 
 const STAGE_LABEL: Record<string, string> = {
-  draft: '草稿',
-  accepted: '已接单',
-  assigned: '已派工',
-  running: '执行中',
-  review: '待评审',
-  person: '等人',
-  idle: '空闲',
-  closed: '已关闭',
+  todo: '待办',
+  running: '进行中',
+  review: '审核中',
+  blocked: '已阻塞',
+  done: '已完成',
 }
 
 const REPORT_STATE_LABEL: Record<string, string> = {
@@ -393,7 +390,7 @@ function TicketsView(): JSX.Element {
     return map
   }, [tickets])
 
-  const openCount = tickets.filter(ticket => ticket.stage !== 'closed').length
+  const openCount = tickets.filter(ticket => ticket.stage !== 'done').length
 
   const filtered = useMemo(() => {
     const query = keyword.trim().toLowerCase()
@@ -525,7 +522,7 @@ function TicketsView(): JSX.Element {
                 />
               )}
             </div>
-            {detail && detail.ticket.stage !== 'closed' && (
+            {detail && detail.ticket.stage !== 'done' && (
               <FollowupComposer
                 ticketId={detail.ticket.id}
                 onSent={() => {
@@ -548,7 +545,7 @@ function StagePill({ stage }: { stage: string }): JSX.Element {
 function TicketDetailView({ detail, onChanged }: { detail: TicketDetail; onChanged: () => void }): JSX.Element {
   const [copied, setCopied] = useState('')
   const { ticket } = detail
-  const open = ticket.stage !== 'closed'
+  const open = ticket.stage !== 'done'
   const resume = detail.resume
 
   const copy = async (label: string, value: string): Promise<void> => {

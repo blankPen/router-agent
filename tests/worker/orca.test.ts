@@ -25,7 +25,7 @@ const ticket: Ticket = {
   source: 'feishu',
   chatId: 'oc_chat',
   mandateId: 'md_1',
-  stage: 'accepted',
+  stage: 'todo',
   repo: 'dsh/router-agent',
   branch: 'main',
   prNumber: 0,
