@@ -83,11 +83,7 @@ ra web                # 之后想再打开面板
 4. **飞书接入**：复用当前 lark-cli profile，或填专属机器人的 App ID / 配置目录。
 5. **群与绑定**：至少添加一个监控群；可把群固定到某个项目，之后开工不再追问。
 
-![Web 初始化页：五步完成度清单、LLM Provider 与运行时卡片](docs/assets/readme/setup-overview-light.png)
-
-深色主题：
-
-![Web 初始化页（深色）](docs/assets/readme/setup-overview-dark.png)
+![Web 初始化页：五步完成度清单、LLM Provider 与运行时卡片](docs/assets/readme/setup-overview-dark.png)
 
 保存后页面会提示需要重启，点「保存并重启」即可热重启 daemon（浏览器页面不刷新）。远程机器或没有图形界面时用 `ra start --no-open`，只打印面板地址。
 
@@ -173,7 +169,7 @@ Worker 不在 Router 进程里跑。每张工单开工时，Router 按 `runtime.
 - **检测 / 试启动** 做一次真实 ACP 握手（`initialize` + `session/new`），避免只看版本号；
 - 点卡片即切换 `runtime.default`，只影响新工单；已开工的工单保留原运行时。
 
-![Web 初始化页的运行时卡片：内置运行时与 ACP Agent 的可用性检测](docs/assets/readme/setup-runtime-light.png)
+![Web 初始化页的运行时卡片：内置运行时与 ACP Agent 的可用性检测](docs/assets/readme/setup-runtime-dark.png)
 
 ### 用 CLI 选
 
@@ -401,7 +397,7 @@ worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态�
 
 初始化页的下半部分（项目 / 飞书 / 群绑定）：
 
-![Web 初始化页：项目登记、飞书接入与群绑定](docs/assets/readme/setup-steps-light.png)
+![Web 初始化页：项目登记、飞书接入与群绑定](docs/assets/readme/setup-steps-dark.png)
 
 配置项会标注生效范围：**策略**（`acceptMode` / `maxWorkers` / `admission`）保存后立即生效；其余配置在服务启动时读入，保存后点侧栏或配置页的「重启服务」即可热重启 daemon（浏览器页面不会刷新），也可以手动 `ra stop && ra start`。面板可以在「初始化 · LLM Provider」或「配置 · LLM Provider」里填写 `llm.apiKey`，密钥只写入 `config.yaml`，保存后不会再回显（`publicConfig` 只返回 `apiKeySet`）；也可以用 CLI / 环境变量配置。保存会重写 `config.yaml`，原文件的注释会丢失。
 

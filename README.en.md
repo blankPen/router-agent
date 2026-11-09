@@ -83,11 +83,7 @@ The page only covers the five things needed to get running, with a completion ch
 4. **Feishu access**: reuse the current lark-cli profile, or provide a dedicated bot's App ID / config directory.
 5. **Chats and bindings**: at least one monitored chat; bind it to a project so dispatch stops asking.
 
-![Web setup page: five-step checklist, LLM Provider and runtime cards](docs/assets/readme/setup-overview-light.png)
-
-Dark theme:
-
-![Web setup page (dark)](docs/assets/readme/setup-overview-dark.png)
+![Web setup page: five-step checklist, LLM Provider and runtime cards](docs/assets/readme/setup-overview-dark.png)
 
 After saving, the page asks for a restart; click **Save and restart** to hot-restart the daemon (the browser page stays open). On a remote or headless machine use `ra start --no-open` to only print the dashboard URL.
 
@@ -173,7 +169,7 @@ A config has one default runtime, but **project lists are kept per runtime**: Or
 - **Check / try launch** performs a real ACP handshake (`initialize` + `session/new`) instead of trusting a version string;
 - Clicking a card switches `runtime.default` for new tickets only; tickets already in flight keep their runtime.
 
-![Runtime cards on the web setup page: built-in runtimes and ACP agent availability checks](docs/assets/readme/setup-runtime-light.png)
+![Runtime cards on the web setup page: built-in runtimes and ACP agent availability checks](docs/assets/readme/setup-runtime-dark.png)
 
 ### Choose it from the CLI
 
@@ -399,7 +395,7 @@ The dashboard opens automatically after `ra start` and any time via `ra web`. It
 - **Configuration**: grouped by LLM Provider / admission policy / triage and persona / session reuse / progress sync / idle governance / Feishu access / dispatch and service / projects and chat bindings. Each field carries help text and defaults, changes are marked dirty, and save runs both client and server validation before writing `config.yaml`. The runtime cards are the same component as on the setup page; project lists are isolated per runtime (Orca uses repository selectors, Claude Code / ACP require absolute local paths); add local projects with a system directory picker and Git detection, or Git projects by cloning from an ssh / http(s) URL.
 - **Sources**: service status, monitored chats and receive-scope overview.
 
-![Lower half of the setup page: project registration, Feishu access and chat bindings](docs/assets/readme/setup-steps-light.png)
+![Lower half of the setup page: project registration, Feishu access and chat bindings](docs/assets/readme/setup-steps-dark.png)
 
 Fields are marked with their activation scope: **policy** (`acceptMode` / `maxWorkers` / `admission`) applies immediately after saving; everything else is read at service start, so use **Restart service** in the sidebar or configuration page to hot-restart the daemon (the browser page stays open), or run `ra stop && ra start`. `llm.apiKey` can be set under **Setup · LLM Provider** or **Configuration · LLM Provider**; the key is written only to `config.yaml` and never echoed back (`publicConfig` only returns `apiKeySet`). Saving rewrites `config.yaml`, so comments in the original file are lost.
 
