@@ -250,8 +250,9 @@ pnpm check       # typecheck + test
 RA_PI_VERIFY=1 npx vitest run tests/verify-pi-live.test.ts   # 真实 Pi + 真实模型（默认跳过）
 ```
 
-发布 npm 包由 GitHub Actions 自动完成：合并到 `main` 后若 `package.json` 版本尚未发布则自动发布
-（也支持推送 `v*` tag 或手动触发），配置与发版流程见 [docs/PUBLISHING.md](docs/PUBLISHING.md)。
+发布 npm 包由 GitHub Actions 自动完成：合并到 `main` 后自动升 patch 并发布（只改文档 / 测试 / CI
+时跳过；需要 minor / major 时在 PR 里手动改版本号），也支持推送 `v*` tag 或手动触发。
+配置与发版流程见 [docs/PUBLISHING.md](docs/PUBLISHING.md)。
 
 代码结构：
 
