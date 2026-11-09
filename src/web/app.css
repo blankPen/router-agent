@@ -1,6 +1,6 @@
 /* ---------------------------------------------------------------------------
    router-agent · control room
-   Framed sheet：染色外框 + 白色工作面；墨色正文，单一 teal 强调色只用于选中态。
+   Framed sheet：染色外框 + 白色工作面；墨色正文，单一绿色强调色用于选中态与主操作。
    阶段、运行时状态等语义色保留。
    --------------------------------------------------------------------------- */
 
@@ -16,9 +16,9 @@
   --text: #131416;
   --muted: #5d5f60;
   --faint: #6b6b6b;
-  --accent: #1b6c80;
-  --accent-deep: #155362;
-  --accent-soft: #e7f1f3;
+  --accent: #1a7f55;
+  --accent-deep: #146243;
+  --accent-soft: #e6f5ec;
   --on-accent: #ffffff;
   /* 单一重点色：菜单、选中态、主按钮、开关、聚焦框统一走 accent。 */
   --primary: var(--accent);
@@ -97,10 +97,10 @@
     --text: #ffffff;
     --muted: #b4b4b4;
     --faint: #949494;
-    --accent: #5fb3c6;
-    --accent-deep: #7cc8d8;
-    --accent-soft: #172a2e;
-    --on-accent: #000000;
+    --accent: #58d29b;
+    --accent-deep: #7be0b2;
+    --accent-soft: #142a1e;
+    --on-accent: #06231a;
     --positive: #3fc07a;
     --negative: #e5566f;
     --warning: #d8b062;
