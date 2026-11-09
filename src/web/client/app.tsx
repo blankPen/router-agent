@@ -181,7 +181,8 @@ const PR_STATE_LABEL: Record<string, string> = {
 const LOG_LEVELS = ['all', 'info', 'warn', 'error', 'raw'] as const
 const LOG_LEVEL_LABEL: Record<string, string> = { all: '全部', info: 'INFO', warn: 'WARN', error: 'ERROR', raw: 'TEXT' }
 const LOG_LEVEL_COLOR: Record<string, string> = {
-  all: 'var(--accent)',
+  // 颜色只落在状态上：总数用中性灰，其余按级别取语义色。
+  all: 'var(--muted)',
   info: 'var(--info)',
   warn: 'var(--warning)',
   error: 'var(--negative)',
@@ -210,6 +211,12 @@ function App(): JSX.Element {
   const [restartError, setRestartError] = useState<string | null>(null)
   // 配置页 / 初始化页共享同一个「有未保存修改」标记，切走前提醒一次。
   const dirtyRef = useRef(false)
+  // 窄屏下导航横向滚动，切页时把当前项滚进可视区，避免选中项被裁在屏幕外。
+  const navRef = useRef<HTMLElement | null>(null)
+
+  useEffect(() => {
+    navRef.current?.querySelector<HTMLElement>('.nav-tab.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }, [tab])
 
   const switchTab = useCallback((next: Tab): void => {
     if (next === tab) return
@@ -272,7 +279,7 @@ function App(): JSX.Element {
           </span>
         </div>
 
-        <nav className="side-nav">
+        <nav className="side-nav" ref={navRef}>
           <button className={`nav-tab ${tab === 'setup' ? 'active' : ''}`} onClick={() => switchTab('setup')}>
             <Icon name="zap" />
             <span>初始化</span>
@@ -282,10 +289,6 @@ function App(): JSX.Element {
             <span>工单</span>
             {status && status.tickets.open > 0 && <span className="nav-count">{status.tickets.open}</span>}
           </button>
-          <button className={`nav-tab ${tab === 'logs' ? 'active' : ''}`} onClick={() => switchTab('logs')}>
-            <Icon name="file-text" />
-            <span>日志</span>
-          </button>
           <button className={`nav-tab ${tab === 'config' ? 'active' : ''}`} onClick={() => switchTab('config')}>
             <Icon name="sliders" />
             <span>配置</span>
@@ -293,6 +296,11 @@ function App(): JSX.Element {
           <button className={`nav-tab ${tab === 'sources' ? 'active' : ''}`} onClick={() => switchTab('sources')}>
             <Icon name="radio" />
             <span>来源</span>
+          </button>
+          {/* 日志是排障时的末位入口，放在菜单最后，日常操作优先。 */}
+          <button className={`nav-tab ${tab === 'logs' ? 'active' : ''}`} onClick={() => switchTab('logs')}>
+            <Icon name="file-text" />
+            <span>日志</span>
           </button>
         </nav>
 
@@ -2189,10 +2197,22 @@ function LogsView(): JSX.Element {
     }
   }
 
+  const clearFilters = useCallback((): void => {
+    setLevel('all')
+    setKeyword('')
+  }, [])
+
   const levels = LOG_LEVELS.filter(item => item !== 'raw' || (counts.raw ?? 0) > 0)
-  const subtitle = meta
-    ? `${meta.path || '未配置日志目录'}${meta.exists ? ` · ${formatBytes(meta.size)}` : ' · 文件尚未生成'}${syncedAt ? ` · 更新于 ${syncedAt.toLocaleTimeString('zh-CN')}` : ''}`
-    : '正在读取日志文件…'
+  const loading = meta === null
+  const subtitle = meta ? (
+    <>
+      <span className="log-path">{meta.path || '未配置日志目录'}</span>
+      <span className="log-submeta">
+        {meta.exists ? ` · ${formatBytes(meta.size)}` : ' · 文件尚未生成'}
+        {syncedAt ? ` · 更新于 ${syncedAt.toLocaleTimeString('zh-CN')}` : ''}
+      </span>
+    </>
+  ) : '正在读取日志文件…'
 
   return (
     <>
@@ -2218,39 +2238,64 @@ function LogsView(): JSX.Element {
         }
       />
 
-      {error && <div className="banner danger"><Icon name="alert" /><div><strong>读取日志失败</strong><p>{error}</p></div></div>}
-
-      <div className="filter-bar log-toolbar">
-        <div className="stage-chips">
-          {levels.map(item => (
-            <button
-              key={item}
-              className={`chip ${level === item ? 'active' : ''}`}
-              style={{ ['--stage' as string]: LOG_LEVEL_COLOR[item] }}
-              onClick={() => setLevel(item)}
-            >
-              <span className="chip-dot" />
-              {LOG_LEVEL_LABEL[item]}
-              <span className="chip-count">{counts[item] ?? 0}</span>
-            </button>
-          ))}
+      <section className="log-console" aria-busy={loading || undefined}>
+        <div className="log-toolbar">
+          <div className="log-filters" role="group" aria-label="按级别过滤">
+            {levels.map(item => (
+              <button
+                key={item}
+                type="button"
+                className={`log-chip ${level === item ? 'active' : ''}`}
+                aria-pressed={level === item}
+                onClick={() => setLevel(item)}
+              >
+                <span className="log-chip-dot" style={{ background: LOG_LEVEL_COLOR[item] }} />
+                <span>{LOG_LEVEL_LABEL[item]}</span>
+                <span className="log-chip-count">{counts[item] ?? 0}</span>
+              </button>
+            ))}
+          </div>
+          <div className="search-box log-search">
+            <Icon name="search" size={15} />
+            <input
+              value={keyword}
+              onChange={event => setKeyword(event.target.value)}
+              placeholder="过滤消息或字段…"
+              aria-label="过滤日志"
+            />
+          </div>
+          {notice && <span className="log-notice" role="status">{notice}</span>}
+          <button className="btn ghost tiny" onClick={() => setLines([])} disabled={lines.length === 0}>清空视图</button>
         </div>
-        <div className="search-box log-search">
-          <Icon name="search" size={15} />
-          <input
-            value={keyword}
-            onChange={event => setKeyword(event.target.value)}
-            placeholder="过滤消息或字段…"
-            aria-label="过滤日志"
-          />
-        </div>
-        {notice && <span className="log-notice">{notice}</span>}
-        <button className="btn ghost tiny" onClick={() => setLines([])} disabled={lines.length === 0}>清空视图</button>
-      </div>
 
-      <div className="log-panel">
-        <div className="log-view" ref={scrollerRef} onScroll={onScroll}>
-          {!meta?.exists ? (
+        {error && (
+          <div className="log-alert" role="alert">
+            <Icon name="alert" size={14} />
+            <div>
+              <strong>读取日志失败</strong>
+              <span>{error}{syncedAt ? ` · 上次成功 ${syncedAt.toLocaleTimeString('zh-CN')}` : ''}</span>
+            </div>
+            <button className="btn ghost tiny" onClick={() => void pull()}>重试</button>
+          </div>
+        )}
+
+        <div
+          className="log-view"
+          ref={scrollerRef}
+          onScroll={onScroll}
+          role="log"
+          aria-label="运行日志"
+          // 每 2 秒都有新行，交给读屏实时播报会变成噪音，按需浏览即可。
+          aria-live="off"
+          tabIndex={0}
+        >
+          {loading ? (
+            <div className="log-empty">
+              <Icon name="file-text" size={22} />
+              <p>正在读取日志…</p>
+              <small>连接本机日志文件，读取完成后会从最新内容开始显示。</small>
+            </div>
+          ) : !meta?.exists ? (
             <div className="log-empty">
               <Icon name="file-text" size={22} />
               <p>还没有日志文件</p>
@@ -2261,6 +2306,9 @@ function LogsView(): JSX.Element {
               <Icon name="file-text" size={22} />
               <p>{lines.length === 0 ? '暂无日志' : '没有匹配的日志'}</p>
               <small>{lines.length === 0 ? '服务产生新日志后会自动出现在这里。' : '换个级别或关键字试试。'}</small>
+              {(level !== 'all' || keyword.trim()) && (
+                <button className="btn ghost tiny" onClick={clearFilters}>清除筛选</button>
+              )}
             </div>
           ) : (
             rows
@@ -2272,7 +2320,7 @@ function LogsView(): JSX.Element {
             最新
           </button>
         )}
-      </div>
+      </section>
     </>
   )
 }
