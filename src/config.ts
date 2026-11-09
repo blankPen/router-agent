@@ -386,7 +386,8 @@ projects: []
 server:
   port: 3083
 
-# 模型配置可留空，自动复用 ~/.trove/config.json 里的 llm 段
+# 模型配置可留空，自动复用 ~/.trove/config.json 里的 llm 段；
+# 也可以在 Web 面板「初始化 · LLM Provider」里填写（密钥只写不回显）
 # llm:
 #   baseUrl: https://api.deepseek.com/v1
 #   model: deepseek-v4-flash
@@ -925,6 +926,14 @@ const stringValue: Validator = {
   check: value => (typeof value === 'string' ? null : '需要字符串'),
 }
 
+/** 面板写入密钥时不允许空串：留空在 UI 层表示「保持原密钥」，不会走到这里。 */
+const secretValue: Validator = {
+  check: value => {
+    if (typeof value !== 'string') return '需要字符串'
+    return value.trim() ? null : 'API Key 不能为空'
+  },
+}
+
 function enumValue(allowed: readonly string[]): Validator {
   return { check: value => (typeof value === 'string' && allowed.includes(value) ? null : `只能是 ${allowed.join(' / ')}`) }
 }
@@ -1025,6 +1034,7 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
 
   'llm.baseUrl': stringValue,
   'llm.model': stringValue,
+  'llm.apiKey': secretValue,
 }
 
 /** 整段替换的复杂字段（项目、群、白名单这类不适合逐项点路径编辑的配置）。 */
@@ -1121,17 +1131,20 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
       }
       continue
     }
-    if (path === 'llm.apiKey') {
-      // 面板不接收明文密钥；显式忽略而不是写入。
-      continue
-    }
     const validator = CONFIG_VALIDATORS[path]
     if (!validator) {
       errors.push({ path, message: '不是可编辑的配置项' })
       continue
     }
     // 旧值 claude-cli 在写入前归一成 claude-code；未知值仍由校验器拒绝。
-    const next = path === 'runtime.default' && typeof value === 'string' ? normalizeRuntimeId(value) : value
+    // LLM 连接信息统一去掉首尾空白，避免粘贴密钥时把换行带进 config.yaml。
+    const next = typeof value !== 'string'
+      ? value
+      : path === 'runtime.default'
+        ? normalizeRuntimeId(value)
+        : path.startsWith('llm.')
+          ? value.trim()
+          : value
     const message = validator.check(next)
     if (message) errors.push({ path, message })
     else accepted.push({ path, value: next })

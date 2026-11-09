@@ -10,7 +10,7 @@ import { runtimeStatusLabel, type RuntimeChoiceView } from './runtime-model.js'
 
 export type { RuntimeChoiceView } from './runtime-model.js'
 
-export type FieldKind = 'text' | 'number' | 'switch' | 'select' | 'list'
+export type FieldKind = 'text' | 'password' | 'number' | 'switch' | 'select' | 'list'
 
 export interface FieldOption {
   value: string
@@ -79,7 +79,43 @@ const WORKER_MODE_OPTIONS: FieldOption[] = [
   { value: 'agent', label: 'agent · Agent 模式，上下文更深' },
 ]
 
+/**
+ * LLM Provider：Router 研判与图片转写用的大模型接入。
+ *
+ * 密钥只写不读——保存后 `publicConfig` 只回 `apiKeySet`，不会把明文下发回面板。
+ * 初始化页与配置页共用同一份字段定义。
+ */
+export const LLM_FIELDS: FieldDef[] = [
+  {
+    path: 'llm.baseUrl',
+    label: '模型 Base URL',
+    kind: 'text',
+    placeholder: '例如 https://api.deepseek.com/v1',
+    hint: 'OpenAI 兼容接口地址；留空则复用 ~/.trove/config.json',
+  },
+  {
+    path: 'llm.model',
+    label: '模型名',
+    kind: 'text',
+    placeholder: '例如 deepseek-v4-flash',
+    hint: 'Router 研判与图片转写默认都使用这个模型',
+  },
+  {
+    path: 'llm.apiKey',
+    label: 'API Key',
+    kind: 'password',
+    placeholder: '留空 = 保持已配置的密钥',
+    hint: '只写入 config.yaml，保存后不会回显；环境变量 RA_LLM_API_KEY 优先级更高',
+  },
+]
+
 export const SECTIONS: SectionDef[] = [
+  {
+    id: 'llm',
+    title: 'LLM Provider',
+    description: 'Router 研判与图片转写使用的大模型接入。密钥只写入 config.yaml，保存后不回显明文。',
+    fields: LLM_FIELDS,
+  },
   {
     id: 'policy',
     title: '准入策略',
@@ -187,7 +223,7 @@ export const SECTIONS: SectionDef[] = [
   {
     id: 'delivery',
     title: '派工与服务',
-    description: 'Worker 执行方式、监听端口与模型接入。模型密钥不在此处展示，请用 CLI / 环境变量配置。',
+    description: 'Worker 执行方式与监听端口。',
     fields: [
       { path: 'workerSpec.mode', label: 'Worker 规格模式', kind: 'select', options: WORKER_MODE_OPTIONS },
       {
@@ -198,8 +234,6 @@ export const SECTIONS: SectionDef[] = [
         hint: '只影响新工单；已派出的工单继续使用创建时的运行时',
       },
       { path: 'server.port', label: '面板端口', kind: 'number', min: 1, max: 65_535, unit: '端口' },
-      { path: 'llm.baseUrl', label: '模型 Base URL', kind: 'text', placeholder: '留空 = 复用 ~/.trove/config.json' },
-      { path: 'llm.model', label: '模型名', kind: 'text', placeholder: '例如 deepseek-v4-flash' },
     ],
   },
 ]

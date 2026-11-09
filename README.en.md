@@ -489,7 +489,7 @@ Also, the old global `repo` config has been removed (`ra` no longer reads it). M
 
 ### Model configuration
 
-The model config automatically reuses the `llm` section of `~/.trove/config.json` (`baseUrl` / `model` / `apiKey`). You can also add an `llm:` section to this file, or override with `RA_LLM_BASE_URL` / `RA_LLM_API_KEY` / `RA_LLM_MODEL`.
+The model config automatically reuses the `llm` section of `~/.trove/config.json` (`baseUrl` / `model` / `apiKey`). You can also fill it in from the dashboard's **LLM Provider** step (the key is write-only and never echoed back), add an `llm:` section to this file, or override with `RA_LLM_BASE_URL` / `RA_LLM_API_KEY` / `RA_LLM_MODEL`.
 
 Precedence: **environment variables > `config.yaml` > `.trove`**.
 
