@@ -1452,3 +1452,33 @@ Orca 运行时用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.t
 - `deliver()` 在 `working/blocked` 只排队，绝不 resume；`blocked` 置 attention；
 - `stop()` 用 `claude stop`；清理 worktree 用 GitWorktreeProvider，不用 `claude rm`；
 - 不需要 `ProcessSpawner`；Claude 自己的后台管理承担进程生命周期。
+## 附录 D · ACP Runtime 实现（2026-11-09）
+
+`AcpRuntime`（`src/worker/runtimes/acp/`）是协议层实现：一个客户端同时适配所有实现 ACP 的 Agent。
+
+### D.1 协议与消息
+
+- 传输：Agent 子进程 + stdio JSONL（JSON-RPC 2.0），与 ACP v1 一致。
+- 启动序列：`initialize`（`protocolVersion: 1`、`clientCapabilities`、`clientInfo`）→ `session/new`（`cwd`、`mcpServers: []`）→ `session/prompt`（内容块 `{ type: 'text', text }`）。
+- 追问：同一进程继续 `session/prompt`；进程退出后，若 `agentCapabilities.loadSession=true`，重启 Agent 并 `session/load { sessionId, cwd, mcpServers }`，历史重放期间的 `session/update` 被抑制，避免活动重复。
+- 活动：`session/update` 的 `agent_message_chunk` 落为文本事件，`tool_call` 落为工具事件；`tool_call_update / plan / usage_update` 只更新状态，不重复落库。
+- 停止：先发 `session/cancel` 通知，再关闭子进程；`stop()` 幂等。
+
+### D.2 权限与能力
+
+- `session/request_permission` 由客户端应答：按 `worker.tools` 选择 `allow_*` / `reject_*` 选项；没有匹配选项时回 `cancelled`，绝不挂起。
+- 映射：读/搜索/思考放行；编辑/移动/删除看 `fileAccess`；执行看 `shell`（allowlist 按命令前缀）；网络看 `allowNetwork`；未知工具按只读拒绝。
+- 客户端不实现 `fs/*` 与 `terminal/*` 代理：`initialize` 声明不支持，相关反向请求返回 `-32601`，Agent 需使用自己的文件与命令工具。
+- `capabilities`：`liveStatus/processExit/activity/structuredInput = true`，`output = false`，`nudge = false`；工作区走 `GitWorktreeProvider`，`cleanup = true`。
+
+### D.3 已知限制
+
+- Claude Code 与 Codex 需要外部 ACP 适配器（`claude-agent-acp` / `codex-acp`），不是原生 ACP；适配器版本需与上游 CLI 对齐。
+- `session/load` 的支持程度因 Agent 而异；不支持时追问会以 `acp:agent-gone` 拒绝，需要人工重派。
+- Agent 必须预先完成认证；`session/new` 返回 `-32000 auth_required` 时以 `agent:launch-failed` 上报，并在 detail 里带认证方法。
+- 远程 ACP（HTTP/WebSocket）仍是 draft，当前只支持本地 stdio。
+
+### D.4 验证记录
+
+- 单测：`tests/worker/acp.test.ts` 用 `tests/fixtures/fake-acp-agent.mjs` 覆盖握手、首轮、追问、忙碌排队、权限放行/拒绝、进程退出后 `session/load` 恢复。
+- 真实 Agent：本机 `opencode 2.1.4` 的 `opencode acp` 完成 `initialize` 与 `session/new`；`session/prompt` 因上游模型不可用返回错误（协议链路正常，环境缺模型配置）。

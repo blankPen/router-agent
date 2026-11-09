@@ -3,6 +3,7 @@ import type { CommandRunner } from '../infra/process.js'
 import { WorkerRuntimeError, type WorkerRuntime } from './port.js'
 import { OrcaRuntime } from './orca/index.js'
 import { ClaudeCliRuntime } from './runtimes/claude-cli/index.js'
+import { AcpRuntime } from './runtimes/acp/index.js'
 
 export interface RuntimeDeps {
   home: string
@@ -68,6 +69,29 @@ export function createRuntimes(config: AppConfig, deps: RuntimeDeps): RuntimeReg
     ...(typeof claudeOptions.model === 'string' ? { model: claudeOptions.model } : {}),
     ...(deps.env ? { env: deps.env } : {}),
   }))
+
+  const acpOptions = (config.runtime.options?.['acp'] ?? {}) as Record<string, unknown>
+  const acpCommand = typeof acpOptions.command === 'string' ? acpOptions.command.trim() : ''
+  if (acpCommand) {
+    const acpArgs = Array.isArray(acpOptions.args)
+      ? acpOptions.args.filter((item): item is string => typeof item === 'string')
+      : []
+    const acpEnv = acpOptions.env && typeof acpOptions.env === 'object'
+      ? Object.fromEntries(Object.entries(acpOptions.env as Record<string, unknown>).filter(([, value]) => typeof value === 'string')) as NodeJS.ProcessEnv
+      : undefined
+    runtimes.set('acp', new AcpRuntime({
+      command: acpCommand,
+      args: acpArgs,
+      workersDir: deps.workersDir,
+      home: deps.home,
+      git: deps.git,
+      ...(acpEnv ? { env: { ...(deps.env ?? {}), ...acpEnv } } : deps.env ? { env: deps.env } : {}),
+    }))
+  }
+
+  if (config.runtime.default === 'acp' && !runtimes.has('acp')) {
+    throw new WorkerRuntimeError('runtime:unknown', '默认 runtime 为 acp，但未配置 runtime.options.acp.command')
+  }
 
   return new RuntimeRegistry(runtimes, config.runtime.default)
 }

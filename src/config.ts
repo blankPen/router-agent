@@ -338,6 +338,12 @@ workerSpec:
 
 runtime:
   default: orca
+  # ACP 运行时（可选）：任意实现 ACP 的 Agent 都可通过它接入
+  # options:
+  #   acp:
+  #     command: opencode     # Agent 可执行文件
+  #     args: [acp]           # 传给 Agent 的参数
+  #     env: {}               # 额外环境变量
 
 # 项目清单：开单前必须明确「哪个项目 + 哪个起始分支」
 projects: []
@@ -932,7 +938,7 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
   'retention.sweepMinutes': intValue(1, 1_440, ' 分钟'),
 
   'workerSpec.mode': enumValue(WORKER_MODES),
-  'runtime.default': enumValue(['orca']),
+  'runtime.default': enumValue(['orca', 'claude-cli', 'acp']),
   'server.port': intValue(1, 65_535),
 
   'llm.baseUrl': stringValue,

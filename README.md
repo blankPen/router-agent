@@ -104,7 +104,7 @@ Router（AgentLoop + DecisionEngine(Pi) + HTTP API + Web）
 领域内核（TS 零依赖：Ticket / Mandate / Assignment / Stage / Policy）
         │ Assignment
         ▼
-WorkerRuntime 端口 ── OrcaRuntime（默认）/ ClaudeCliRuntime ── 未来：Codex
+WorkerRuntime 端口 ── OrcaRuntime（默认）/ ClaudeCliRuntime / AcpRuntime ── 未来：Codex
 ```
 
 一条消息会依次经过四步：
@@ -380,6 +380,12 @@ workerSpec:
 
 runtime:
   default: orca
+  # ACP 运行时（可选）：任意实现 ACP 的 Agent 都可通过它接入
+  # options:
+  #   acp:
+  #     command: opencode     # Agent 可执行文件
+  #     args: [acp]           # 传给 Agent 的参数
+  #     env: {}               # 额外环境变量
 
 # 项目清单：开单前必须确认「哪个项目 + 哪个起始分支」
 projects: []
@@ -464,6 +470,35 @@ llm:
 - `agent`：只发工单，由全局 `~/.claude/agents/router-agent-worker.md` 提供规范（`ra init` 会生成）。
 
 两种模式都不改项目自己的 `CLAUDE.md`。
+
+### ACP Runtime（可选）
+
+任何实现了 [Agent Client Protocol](https://agentclientprotocol.com) 的 Agent，都可以用同一套 `AcpRuntime` 接入，不需要为每家写适配器。配置示例：
+
+```yaml
+runtime:
+  default: acp
+  options:
+    acp:
+      command: opencode        # 也可以是 claude-agent-acp / codex-acp / copilot ...
+      args: [acp]
+```
+
+常见启动命令：
+
+| Agent | command + args |
+|-|-|
+| OpenCode | `opencode acp` |
+| Gemini CLI | `gemini --acp` |
+| GitHub Copilot CLI | `copilot --acp --stdio` |
+| Cursor CLI | `cursor-agent acp` |
+| Goose | `goose acp` |
+| Claude Code | `claude-agent-acp`（ACP 适配器，非原生） |
+| Codex CLI | `codex-acp`（ACP 适配器，非原生） |
+
+`AcpRuntime` 负责：spawn Agent 子进程 → `initialize` → `session/new` → `session/prompt`；从 `session/update` 读取助手文本与工具调用；把 Agent 的 `session/request_permission` 按 `worker.tools` 策略自动放行或拒绝；进程退出后，若 Agent 声明 `loadSession`，追问时会用 `session/load` 恢复会话。
+
+当前不做客户端侧的 `fs/*` 与 `terminal/*` 代理：`initialize` 里声明不支持，Agent 需使用自己的文件/命令工具。Agent 必须预先完成登录（ACP 的 `auth_required` 会以启动失败上报）。
 
 ## 命令
 
