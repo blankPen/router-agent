@@ -230,4 +230,42 @@ describe('ClaudeCodeRuntime', () => {
     const snapshot = await runtime.activity({ ref: ref(home, { sessionId }) })
     expect(snapshot?.events[0]?.text).toBe('正在补测试')
   })
+
+  it('removeWorkspace 先删 claude agent view，再删 worktree 目录', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-claude-'))
+    const workdir = join(home, 'worktrees', 'ra-tk-1-demo')
+    mkdirSync(workdir, { recursive: true })
+    mkdirSync(join(home, 'workers', 'tk-1'), { recursive: true })
+    writeFileSync(join(home, 'workers', 'tk-1', 'meta.json'), JSON.stringify({
+      ticketId: 'tk-1', assignmentId: 'as-1', runtime: 'claude-code', handle: 'e46aaf7e',
+      workdir, repo: '/tmp/repo', branch: 'main', workBranch: 'ra/tk-1-demo',
+    }))
+    const claude = scripted(() => ({ code: 0, stdout: '', stderr: '' }))
+    const git = gitRunner()
+    const runtime = new ClaudeCodeRuntime({ claude, git, home, workersDir: join(home, 'workers') })
+
+    await runtime.removeWorkspace({ ticketId: 'tk-1', workdir })
+    expect(claude.calls.map(call => call.argv)).toEqual([['rm', 'e46aaf7e']])
+    expect(git.calls.some(call => call.argv[0] === 'worktree' && call.argv[1] === 'remove')).toBe(true)
+  })
+
+  it('removeWorkspace 对已不存在的 agent 会话幂等，不挡住 worktree 回收', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-claude-'))
+    const workdir = join(home, 'worktrees', 'ra-tk-1-demo')
+    mkdirSync(workdir, { recursive: true })
+    mkdirSync(join(home, 'workers', 'tk-1'), { recursive: true })
+    writeFileSync(join(home, 'workers', 'tk-1', 'meta.json'), JSON.stringify({
+      ticketId: 'tk-1', assignmentId: 'as-1', runtime: 'claude-code', handle: 'gone',
+      workdir, repo: '/tmp/repo', branch: 'main', workBranch: 'ra/tk-1-demo',
+    }))
+    const claude = scripted(argv => {
+      if (argv[0] === 'rm') return { code: 1, stdout: '', stderr: 'no such session' }
+      return { code: 0, stdout: '', stderr: '' }
+    })
+    const git = gitRunner()
+    const runtime = new ClaudeCodeRuntime({ claude, git, home, workersDir: join(home, 'workers') })
+
+    await expect(runtime.removeWorkspace({ ticketId: 'tk-1', workdir })).resolves.toBeUndefined()
+    expect(git.calls.some(call => call.argv[0] === 'worktree' && call.argv[1] === 'remove')).toBe(true)
+  })
 })
