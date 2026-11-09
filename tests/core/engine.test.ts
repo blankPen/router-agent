@@ -218,6 +218,36 @@ describe('Engine', () => {
     expect(store.getTrigger('t2')?.disposition).toBe('fanned_out')
   })
 
+  it('开单时把 Trigger 里落盘的原始附件复制到工单，供后续派工透传', () => {
+    engine.ingest(makeTrigger({
+      raw: { attachments: [{ path: '/tmp/ra-images/t1/img_a.png', mimeType: 'image/png' }] },
+    }))
+    const { ticket } = engine.decide({ triggerId: 'trg_1', decision: 'accept', strength: 'explicit', reason: 'ok' })
+
+    expect(ticket?.attachments).toEqual([{ path: '/tmp/ra-images/t1/img_a.png', mimeType: 'image/png' }])
+    expect(store.getTicket(ticket!.id)?.attachments).toEqual(ticket?.attachments)
+  })
+
+  it('追问扇出时把图片路径一并投给 Worker', () => {
+    engine.ingest(makeTrigger({ id: 't1', externalId: 'e1' }))
+    const { ticket } = engine.decide({ triggerId: 't1', decision: 'accept', strength: 'explicit', reason: 'ok' })
+    engine.startAssignment(ticket!.id, { runtimeId: 'orca', handle: 'term-1', workdir: '/tmp/wt' })
+
+    engine.ingest(makeTrigger({
+      id: 't2',
+      externalId: 'e2',
+      text: '按这张图改',
+      addressed: 'none',
+      raw: { attachments: [{ path: '/tmp/ra-images/t2/img_b.png', mimeType: 'image/png', quoted: true }] },
+    }))
+    engine.fanOut('t2')
+
+    const input = store.pendingInputs(ticket!.id)[0]!
+    expect(input.text).toContain('按这张图改')
+    expect(input.text).toContain('/tmp/ra-images/t2/img_b.png')
+    expect(input.text).toContain('引用消息里的图片')
+  })
+
   it('停止工单后不再接收扇出', () => {
     engine.ingest(makeTrigger({ id: 't1', externalId: 'e1' }))
     const { ticket } = engine.decide({ triggerId: 't1', decision: 'accept', strength: 'explicit', reason: 'ok' })

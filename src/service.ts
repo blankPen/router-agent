@@ -768,6 +768,7 @@ export class RouterService {
           workdir: '',
           statePath,
           eventsPath,
+          attachments: ticket.attachments ?? [],
         })
     const ctx: WorkerContext = {
       ticket,

@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import type { Ticket } from '../../core/model.js'
+import type { Attachment, Ticket } from '../../core/model.js'
 
 export type WorkerSpecMode = 'prompt' | 'agent'
 
@@ -16,6 +16,8 @@ export interface WorkerPromptInput {
   /** worktree 自己的工作分支（语义化命名）。 */
   workBranch?: string
   workdir?: string
+  /** 发起人随消息发来的原始附件；默认取工单上的 attachments。 */
+  attachments?: Attachment[]
 }
 
 /** 注入给 worker 的完整手册（prompt 模式）或简短指令（agent 模式）。 */
@@ -32,6 +34,7 @@ export function buildWorkerPrompt(input: WorkerPromptInput): string {
     branch: input.branch ?? input.ticket.branch ?? '(仓库默认分支)',
     workBranch: input.workBranch ?? `ra/${input.ticket.id}`,
     workdir: input.workdir ?? '(由 Orca 决定)',
+    attachments: attachmentsSection(input.attachments ?? input.ticket.attachments ?? []),
   })
 }
 
@@ -46,6 +49,7 @@ export interface WorkerContractInput {
   workdir?: string
   statePath: string
   eventsPath: string
+  attachments?: Attachment[]
 }
 
 export function buildNeutralContract(input: WorkerContractInput): string {
@@ -60,11 +64,29 @@ export function buildNeutralContract(input: WorkerContractInput): string {
     workdir: input.workdir ?? '(由运行时决定)',
     statePath: input.statePath,
     eventsPath: input.eventsPath,
+    attachments: attachmentsSection(input.attachments ?? []),
   })
 }
 
 function readSpec(file: string): string {
   return readFileSync(fileURLToPath(new URL(`./${file}`, import.meta.url)), 'utf8')
+}
+
+/**
+ * 原始附件段：把 Router 落盘的本地路径交给 Worker，让它直接看原图。
+ * 没有附件时返回空字符串，模板里对应位置自然留空。
+ */
+function attachmentsSection(attachments: Attachment[]): string {
+  if (attachments.length === 0) return ''
+  const lines = attachments.map(item => `- \`${item.path}\`${item.quoted ? '（引用消息里的图片）' : ''}`)
+  return [
+    '## 附件图片（原图）',
+    '',
+    '发起人随消息发来了原始图片，Router 已落盘到本机。请直接用 Read 工具查看原图，',
+    '不要只依赖 Router 的文字转写；图片里的细节以原图为准。',
+    '',
+    ...lines,
+  ].join('\n')
 }
 
 function render(template: string, vars: Record<string, string>): string {

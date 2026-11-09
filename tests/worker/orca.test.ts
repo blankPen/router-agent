@@ -321,6 +321,22 @@ describe('Worker 提示词', () => {
     expect(prompt).toContain('ra doc')
   })
 
+  it('把工单上的原始图片路径写进 Worker 手册，提示用 Read 看原图', () => {
+    const withImages = {
+      ...ticket,
+      attachments: [
+        { path: '/tmp/ra-images/tk_1/img_a.png', mimeType: 'image/png' },
+        { path: '/tmp/ra-images/tk_1/img_b.png', mimeType: 'image/png', quoted: true },
+      ],
+    }
+    const prompt = buildWorkerPrompt({ mode: 'prompt', ticket: withImages, mandateScope: '按图改', statePath: '/tmp/s.json', eventsPath: '/tmp/e.log', repo: 'dsh/router-agent' })
+    expect(prompt).toContain('附件图片（原图）')
+    expect(prompt).toContain('/tmp/ra-images/tk_1/img_a.png')
+    expect(prompt).toContain('/tmp/ra-images/tk_1/img_b.png')
+    expect(prompt).toContain('引用消息里的图片')
+    expect(prompt).toContain('Read 工具')
+  })
+
   it('agent 模式指示 worker 按全局 agent 规范执行，只发 Mandate', () => {
     const prompt = buildWorkerPrompt({ mode: 'agent', ticket, mandateScope: '只改登录超时', statePath: '/tmp/s.json', eventsPath: '/tmp/e.log', repo: 'dsh/router-agent' })
     expect(prompt).toContain('router-agent-worker')

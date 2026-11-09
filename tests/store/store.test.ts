@@ -110,6 +110,25 @@ describe('Store', () => {
     s.close()
   })
 
+  it('工单的原始附件会落库并读回', () => {
+    const s = store()
+    s.insertTicket({
+      ...ticket,
+      attachments: [
+        { path: '/tmp/ra-images/tk1/img_a.png', mimeType: 'image/png' },
+        { path: '/tmp/ra-images/tk1/img_b.jpg', mimeType: 'image/jpeg', quoted: true },
+      ],
+    })
+    expect(s.getTicket('tk1')?.attachments).toEqual([
+      { path: '/tmp/ra-images/tk1/img_a.png', mimeType: 'image/png' },
+      { path: '/tmp/ra-images/tk1/img_b.jpg', mimeType: 'image/jpeg', quoted: true },
+    ])
+    // 更新其它字段时不能丢掉附件。
+    s.updateTicket({ ...s.getTicket('tk1')!, stage: 'running' })
+    expect(s.getTicket('tk1')?.attachments).toHaveLength(2)
+    s.close()
+  })
+
   it('旧库的 backend_id 列自动迁移为 runtime_id', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ra-db-'))
     const path = join(dir, 'ra.sqlite')

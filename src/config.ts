@@ -301,7 +301,7 @@ feishu:
   bots: []             # 允许产生推断候选的机器人 open_id
   botOpenIds: []       # 机器人自己的 open_id
   botNames: []         # 机器人显示名
-  # 图片消息：下载 image_key 后转成文本再进入研判
+  # 图片消息：原图落盘并透传给 Worker，同时转成文本进入研判
   images:
     enabled: true
     maxChars: 2000     # 单张图片转写结果的最大字符数
