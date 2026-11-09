@@ -13,6 +13,7 @@ import {
   type FieldDef,
   type SectionDef,
 } from './fields.js'
+import { ORCA_BACKEND_ID, WORKER_BACKENDS } from '../../worker/backends/catalog.js'
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -75,8 +76,23 @@ type ConfigDoc = Record<string, any>
 interface ProjectDraft {
   name: string
   repo: string
-  branches: string[]
   defaultBranch: string
+}
+
+/** 项目清单按后端隔离：orca 用顶层 projects，其它后端用 backend.projects.<id>。 */
+function projectPatchPath(backendId: string): string {
+  return backendId === ORCA_BACKEND_ID ? 'projects' : `backend.projects.${backendId}`
+}
+
+function projectsOf(doc: ConfigDoc, backendId: string): ProjectDraft[] {
+  const list = backendId === ORCA_BACKEND_ID
+    ? doc.projects
+    : doc.backend?.projects?.[backendId]
+  return Array.isArray(list) ? list as ProjectDraft[] : []
+}
+
+function isLocalRepoPath(repo: string): boolean {
+  return repo.trim().replace(/^path:/, '').startsWith('/')
 }
 
 interface ChatDraft {
@@ -84,13 +100,14 @@ interface ChatDraft {
   mode: string
   repo: string
   branch: string
-  sync: boolean
   allowed: string[]
 }
 
 interface ServiceStatus {
   stage: string
   backend: string
+  pid?: number
+  startedAt?: string
   tickets: { open: number; closed: number; byStage: Record<string, number> }
   now: string
 }
@@ -269,9 +286,17 @@ function Icon({ name, size = 16, className }: { name: IconName; size?: number; c
 
 type Tab = 'tickets' | 'config' | 'sources'
 
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+type RestartPhase = 'idle' | 'restarting' | 'done' | 'error'
+
 function App(): JSX.Element {
   const [tab, setTab] = useState<Tab>('tickets')
   const [status, setStatus] = useState<ServiceStatus | null>(null)
+  const [restartPhase, setRestartPhase] = useState<RestartPhase>('idle')
+  const [restartError, setRestartError] = useState<string | null>(null)
 
   useEffect(() => {
     const load = (): void => {
@@ -281,6 +306,38 @@ function App(): JSX.Element {
     const timer = setInterval(load, 15_000)
     return () => clearInterval(timer)
   }, [])
+
+  const restartDaemon = useCallback(async (): Promise<void> => {
+    if (restartPhase === 'restarting') return
+    const beforePid = status?.pid
+    setRestartPhase('restarting')
+    setRestartError(null)
+    try {
+      await sendJson<{ ok: boolean }>('/api/restart', 'POST', {})
+      // 旧进程会先退出、新进程再绑定端口；这里轮询到「pid 变了」或「中途掉线后恢复」为止。
+      const deadline = Date.now() + 30_000
+      let dropped = false
+      while (Date.now() < deadline) {
+        await sleep(700)
+        try {
+          const next = await getJson<ServiceStatus>('/api/status')
+          if (dropped || !beforePid || next.pid !== beforePid) {
+            setStatus(next)
+            setRestartPhase('done')
+            setTimeout(() => setRestartPhase(current => current === 'done' ? 'idle' : current), 4_000)
+            return
+          }
+        } catch {
+          dropped = true
+        }
+      }
+      throw new Error('重启超时，请检查 ra 服务日志')
+    } catch (error) {
+      setRestartError(error instanceof Error ? error.message : String(error))
+      setRestartPhase('error')
+      setTimeout(() => setRestartPhase(current => current === 'error' ? 'idle' : current), 8_000)
+    }
+  }, [restartPhase, status?.pid])
 
   const live = status?.stage === 'running'
 
@@ -312,17 +369,26 @@ function App(): JSX.Element {
         </nav>
 
         <div className="sidebar-foot">
-          <span className={`status-dot ${live ? 'live' : ''}`} />
+          <span className={`status-dot ${live && restartPhase !== 'restarting' ? 'live' : ''}`} />
           <span className="sidebar-status">
-            <strong>{live ? '服务运行中' : status?.stage ?? '未连接'}</strong>
-            <small>{status?.backend ? `后端 ${status.backend}` : 'router-agent'}</small>
+            <strong>{restartPhase === 'restarting' ? '正在重启…' : restartPhase === 'done' ? '服务已重启' : restartPhase === 'error' ? '重启失败' : live ? '服务运行中' : status?.stage ?? '未连接'}</strong>
+            <small>{restartError ?? (status?.backend ? `后端 ${status.backend}` : 'router-agent')}</small>
           </span>
+          <button
+            className="icon-btn restart-btn"
+            title="重启 ra 服务（页面不刷新）"
+            aria-label="重启 ra 服务"
+            onClick={() => void restartDaemon()}
+            disabled={restartPhase === 'restarting'}
+          >
+            <Icon name="refresh" size={14} className={restartPhase === 'restarting' ? 'spin' : undefined} />
+          </button>
         </div>
       </aside>
 
       <div className="workspace">
         {tab === 'tickets' && <TicketsView />}
-        {tab === 'config' && <ConfigView />}
+        {tab === 'config' && <ConfigView restarting={restartPhase === 'restarting'} onRestart={() => void restartDaemon()} />}
         {tab === 'sources' && <SourcesView />}
       </div>
     </div>
@@ -748,11 +814,15 @@ function MetaItem({ label, value, href, mono, wide, title }: {
 // ---------------------------------------------------------------------------
 
 const CUSTOM_SECTIONS: SectionDef[] = [
-  { id: 'projects', title: '项目清单', description: '开单前必须明确「哪个项目 + 哪个起始分支」。这里维护可派工的项目。', fields: [] },
-  { id: 'feishu.chats', title: '群与绑定', description: '监控哪些群、收全部消息还是只收 @、绑定到哪个项目与分支。', fields: [] },
+  {
+    id: 'projects',
+    title: '项目与群绑定',
+    description: '维护可派工的项目，以及每个群绑定到哪个项目 / 分支。项目清单按 Worker 后端隔离。',
+    fields: [],
+  },
 ]
 
-function ConfigView(): JSX.Element {
+function ConfigView({ restarting, onRestart }: { restarting: boolean; onRestart: () => void }): JSX.Element {
   const [original, setOriginal] = useState<ConfigDoc | null>(null)
   const [draft, setDraft] = useState<ConfigDoc | null>(null)
   const [defaults, setDefaults] = useState<ConfigDoc>({})
@@ -778,7 +848,11 @@ function ConfigView(): JSX.Element {
   const changed = useMemo(() => {
     if (!draft || !original) return []
     const paths = FIELD_PATHS.filter(path => JSON.stringify(getByPath(draft, path)) !== JSON.stringify(getByPath(original, path)))
-    if (JSON.stringify(draft.projects) !== JSON.stringify(original.projects)) paths.push('projects')
+    for (const backend of WORKER_BACKENDS) {
+      if (JSON.stringify(projectsOf(draft, backend.id)) !== JSON.stringify(projectsOf(original, backend.id))) {
+        paths.push(projectPatchPath(backend.id))
+      }
+    }
     if (JSON.stringify(draft.feishu?.chats) !== JSON.stringify(original.feishu?.chats)) paths.push('feishu.chats')
     return paths
   }, [draft, original])
@@ -797,9 +871,17 @@ function ConfigView(): JSX.Element {
         if (!String(chat.chat || '').trim()) map.set('feishu.chats', '每行都需要填写 chat_id')
       }
     }
-    if (Array.isArray(draft.projects)) {
-      for (const project of draft.projects as ProjectDraft[]) {
-        if (!String(project.repo || '').trim()) map.set('projects', '每个项目都需要填写 repo')
+    for (const backend of WORKER_BACKENDS) {
+      const path = projectPatchPath(backend.id)
+      for (const project of projectsOf(draft, backend.id)) {
+        if (!String(project.repo || '').trim()) {
+          map.set(path, `${backend.label}：每个项目都需要填写 repo`)
+          break
+        }
+        if (backend.id !== ORCA_BACKEND_ID && !isLocalRepoPath(project.repo)) {
+          map.set(path, `${backend.label}：repo 必须是本地仓库绝对路径（例如 /Users/me/project）`)
+          break
+        }
       }
     }
     return map
@@ -836,7 +918,7 @@ function ConfigView(): JSX.Element {
       const message = {
         kind: result.restartRequired ? 'warn' as const : 'ok' as const,
         text: result.restartRequired
-          ? `已保存 ${result.changed.length} 项，其中需要重启 ra start 的改动尚未生效。`
+          ? `已保存 ${result.changed.length} 项，其中部分配置需要重启服务才生效；点右上角「重启服务」即可（页面不会刷新）。`
           : `已保存 ${result.changed.length} 项，已立即生效。`,
       }
       setNotice(message)
@@ -854,6 +936,14 @@ function ConfigView(): JSX.Element {
   if (!draft || !original) return <div className="empty-state tall"><p>正在读取配置…</p></div>
 
   const query = filter.trim().toLowerCase()
+  const backendId = typeof draft.backend?.default === 'string' ? draft.backend.default : ORCA_BACKEND_ID
+  const backendLabel = WORKER_BACKENDS.find(backend => backend.id === backendId)?.label ?? backendId
+  const activeProjectsPath = projectPatchPath(backendId)
+  const activeProjects = projectsOf(draft, backendId)
+  const projectErrors = WORKER_BACKENDS
+    .map(backend => errors.get(projectPatchPath(backend.id)))
+    .filter((message): message is string => Boolean(message))
+    .join('；')
   const sections = [...SECTIONS, ...CUSTOM_SECTIONS]
   const visible = sections.filter(section =>
     !query ||
@@ -869,9 +959,15 @@ function ConfigView(): JSX.Element {
         title="配置"
         subtitle="修改 config.yaml。策略项立即生效，其余配置在重启服务后生效。"
         actions={
-          changed.length > 0
-            ? <span className="unsaved-badge">{changed.length} 项未保存</span>
-            : <span className="saved-badge"><Icon name="check" size={13} />已同步</span>
+          <>
+            <button className="btn tiny" onClick={onRestart} disabled={restarting} title="重启 ra 服务，当前页面不会刷新">
+              <Icon name="refresh" size={13} className={restarting ? 'spin' : undefined} />
+              {restarting ? '重启中…' : '重启服务'}
+            </button>
+            {changed.length > 0
+              ? <span className="unsaved-badge">{changed.length} 项未保存</span>
+              : <span className="saved-badge"><Icon name="check" size={13} />已同步</span>}
+          </>
         }
       />
 
@@ -884,8 +980,17 @@ function ConfigView(): JSX.Element {
           <div className="config-nav-list">
             {sections.map(section => {
               const hasFields = section.fields.length > 0
-              const dirty = hasFields ? section.fields.some(field => changed.includes(field.path)) : changed.includes(section.id)
-              const invalid = hasFields ? section.fields.some(field => errors.has(field.path)) : errors.has(section.id)
+              const projectSection = section.id === 'projects'
+              const dirty = hasFields
+                ? section.fields.some(field => changed.includes(field.path))
+                : projectSection
+                  ? WORKER_BACKENDS.some(backend => changed.includes(projectPatchPath(backend.id))) || changed.includes('feishu.chats')
+                  : changed.includes(section.id)
+              const invalid = hasFields
+                ? section.fields.some(field => errors.has(field.path))
+                : projectSection
+                  ? WORKER_BACKENDS.some(backend => errors.has(projectPatchPath(backend.id))) || errors.has('feishu.chats')
+                  : errors.has(section.id)
               return (
                 <button
                   key={section.id}
@@ -912,7 +1017,9 @@ function ConfigView(): JSX.Element {
           {visible.map(section => {
             const dirty = section.fields.length > 0
               ? section.fields.some(field => changed.includes(field.path))
-              : changed.includes(section.id)
+              : section.id === 'projects'
+                ? WORKER_BACKENDS.some(backend => changed.includes(projectPatchPath(backend.id))) || changed.includes('feishu.chats')
+                : changed.includes(section.id)
             return (
               <section key={section.id} id={`sec-${section.id}`} className="settings-card">
                 <header className="settings-head">
@@ -929,18 +1036,30 @@ function ConfigView(): JSX.Element {
                 </header>
 
                 {section.id === 'projects' && (
-                  <ProjectsEditor
-                    projects={draft.projects ?? []}
-                    error={errors.get('projects')}
-                    onChange={value => setField('projects', value)}
-                  />
-                )}
-                {section.id === 'feishu.chats' && (
-                  <ChatsEditor
-                    chats={draft.feishu?.chats ?? []}
-                    error={errors.get('feishu.chats')}
-                    onChange={value => setField('feishu.chats', value)}
-                  />
+                  <>
+                    <div className="editor-block">
+                      <h3 className="editor-subtitle">项目清单</h3>
+                      <p className="editor-hint">
+                        当前编辑：<strong>{backendLabel}</strong> 的项目清单。项目按后端隔离，切换上方「Worker 后端」即可编辑另一套。
+                      </p>
+                      <ProjectsEditor
+                        backendId={backendId}
+                        projects={activeProjects}
+                        error={projectErrors || undefined}
+                        onChange={value => setField(activeProjectsPath, value)}
+                      />
+                    </div>
+                    <div className="editor-block">
+                      <h3 className="editor-subtitle">群与绑定</h3>
+                      <p className="editor-hint">配置监控哪些群、收全部消息还是只收 @；绑定项目只能从当前后端的项目清单里选，分支自动跟随项目的默认分支。</p>
+                      <ChatsEditor
+                        chats={draft.feishu?.chats ?? []}
+                        projects={activeProjects}
+                        error={errors.get('feishu.chats')}
+                        onChange={value => setField('feishu.chats', value)}
+                      />
+                    </div>
+                  </>
                 )}
 
                 {section.fields.length > 0 && (
@@ -1070,54 +1189,56 @@ function control(field: FieldDef, value: unknown, onChange: (value: unknown) => 
   )
 }
 
-function ProjectsEditor({ projects, error, onChange }: {
+function ProjectsEditor({ backendId, projects, error, onChange }: {
+  backendId: string
   projects: ProjectDraft[]
   error?: string
   onChange: (value: ProjectDraft[]) => void
 }): JSX.Element {
+  const isOrca = backendId === ORCA_BACKEND_ID
   const update = (index: number, patch: Partial<ProjectDraft>): void => {
     onChange(projects.map((project, i) => (i === index ? { ...project, ...patch } : project)))
   }
   return (
     <div className="editor">
-      {projects.length === 0 && <p className="editor-empty">还没有项目。没有项目时开单会先追问仓库。</p>}
+      {projects.length === 0 && <p className="editor-empty">该后端还没有项目。没有项目时开单会先追问仓库。</p>}
       {projects.length > 0 && (
         <div className="editor-head">
           <span>项目名</span>
-          <span>仓库选择器</span>
+          <span>{isOrca ? 'Orca 选择器' : '本地仓库路径'}</span>
           <span>默认分支</span>
-          <span>允许分支</span>
           <span />
         </div>
       )}
       {projects.map((project, index) => (
         <div key={index} className="editor-row project-row">
           <input value={project.name} placeholder="router-agent" onChange={event => update(index, { name: event.target.value })} />
-          <input value={project.repo} placeholder="name:dsh/router-agent" onChange={event => update(index, { repo: event.target.value })} />
-          <input value={project.defaultBranch} placeholder="main" onChange={event => update(index, { defaultBranch: event.target.value })} />
           <input
-            value={project.branches.join(', ')}
-            placeholder="main, release"
-            onChange={event => update(index, { branches: event.target.value.split(',').map(item => item.trim()).filter(Boolean) })}
+            value={project.repo}
+            placeholder={isOrca ? 'name:dsh/router-agent' : '/Users/me/router-agent'}
+            onChange={event => update(index, { repo: event.target.value })}
           />
+          <input value={project.defaultBranch} placeholder="main" onChange={event => update(index, { defaultBranch: event.target.value })} />
           <button className="icon-btn danger" title="删除项目" onClick={() => onChange(projects.filter((_, i) => i !== index))}>
             <Icon name="trash" size={14} />
           </button>
         </div>
       ))}
       {error && <p className="field-error">{error}</p>}
-      <button className="btn add" onClick={() => onChange([...projects, { name: '', repo: '', defaultBranch: '', branches: [] }])}>
+      <button className="btn add" onClick={() => onChange([...projects, { name: '', repo: '', defaultBranch: '' }])}>
         <Icon name="plus" size={13} />添加项目
       </button>
     </div>
   )
 }
 
-function ChatsEditor({ chats, error, onChange }: {
+function ChatsEditor({ chats, projects, error, onChange }: {
   chats: ChatDraft[]
+  projects: ProjectDraft[]
   error?: string
   onChange: (value: ChatDraft[]) => void
 }): JSX.Element {
+  const projectOf = (name: string): ProjectDraft | undefined => projects.find(project => project.name === name)
   const update = (index: number, patch: Partial<ChatDraft>): void => {
     onChange(chats.map((chat, i) => (i === index ? { ...chat, ...patch } : chat)))
   }
@@ -1129,8 +1250,6 @@ function ChatsEditor({ chats, error, onChange }: {
           <span>chat_id</span>
           <span>接收</span>
           <span>绑定项目</span>
-          <span>绑定分支</span>
-          <span>补拉</span>
           <span>本群名单</span>
           <span />
         </div>
@@ -1145,17 +1264,20 @@ function ChatsEditor({ chats, error, onChange }: {
             </select>
             <Icon name="chevron" size={12} className="select-chevron" />
           </span>
-          <input value={chat.repo} placeholder="可空" onChange={event => update(index, { repo: event.target.value })} />
-          <input value={chat.branch} placeholder="可空" onChange={event => update(index, { branch: event.target.value })} />
-          <button
-            type="button"
-            role="switch"
-            aria-checked={chat.sync === true}
-            className={`toggle small ${chat.sync ? 'on' : ''}`}
-            onClick={() => update(index, { sync: !chat.sync })}
-          >
-            <span className="toggle-track"><span className="toggle-knob" /></span>
-          </button>
+          <span className="select-wrap compact">
+            <select
+              value={chat.repo}
+              onChange={event => {
+                const name = event.target.value
+                update(index, { repo: name, branch: projectOf(name)?.defaultBranch ?? '' })
+              }}
+            >
+              <option value="">不绑定（开工前追问）</option>
+              {projects.map(project => <option key={project.name} value={project.name}>{project.name}</option>)}
+              {chat.repo && !projectOf(chat.repo) && <option value={chat.repo}>⚠ {chat.repo}（不在当前清单）</option>}
+            </select>
+            <Icon name="chevron" size={12} className="select-chevron" />
+          </span>
           <input
             value={chat.allowed.join(', ')}
             placeholder="可空，沿用全局"
@@ -1167,7 +1289,7 @@ function ChatsEditor({ chats, error, onChange }: {
         </div>
       ))}
       {error && <p className="field-error">{error}</p>}
-      <button className="btn add" onClick={() => onChange([...chats, { chat: '', mode: 'all', repo: '', branch: '', sync: false, allowed: [] }])}>
+      <button className="btn add" onClick={() => onChange([...chats, { chat: '', mode: 'all', repo: '', branch: '', allowed: [] }])}>
         <Icon name="plus" size={13} />添加群
       </button>
     </div>
@@ -1247,14 +1369,14 @@ function SourcesView(): JSX.Element {
             </tbody>
           </table>
         )}
-        <p className="editor-foot">要调整群和绑定，请到「配置 → 群与绑定」。</p>
+        <p className="editor-foot">要调整群和绑定，请到「配置 → 项目与群绑定」。</p>
       </section>
 
       <section className="settings-card">
         <header className="settings-head">
           <div>
             <h2>接收范围</h2>
-            <p>私聊与全局许可名单；群级名单在「群与绑定」里单独配置。</p>
+            <p>私聊与全局许可名单；群级名单在「项目与群绑定」里单独配置。</p>
           </div>
         </header>
         <div className="meta-card flush">

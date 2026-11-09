@@ -13,6 +13,7 @@ import { dispatchSettingsOf } from './router/dispatch.js'
 import { ReportPoller, appendEvent, type WorkerMeta, type WorkerStateFile } from './worker/report-poller.js'
 import { classifyAgentStatus } from './worker/status.js'
 import { BackendRegistry } from './worker/registry.js'
+import { normalizeBackendId } from './worker/backends/catalog.js'
 import { buildNeutralContract, buildWorkerPrompt } from './worker/spec/index.js'
 import { workBranch } from './worker/naming.js'
 import { EffectsProcessor } from './core/effects.js'
@@ -59,8 +60,6 @@ export interface RouterServiceOptions {
   staleAfterMs?: number
   /** 注入触发源（服务层用 FeishuConsumer 接）。 */
   onTrigger?: (trigger: Trigger) => void
-  /** 启动时补拉历史消息。 */
-  backfill?: () => Promise<Trigger[]>
 }
 
 const noopLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} }
@@ -454,7 +453,6 @@ export class RouterService {
   private staleAfterMs: number
   private idle = new Map<string, { turn: number; nudgedAt: number | null; stale: boolean; blocked?: boolean; transferred?: boolean }>()
   private ticking = false
-  private backfill?: () => Promise<Trigger[]>
   /** 每条输入已经投递过几次；用于区分并发去重与串行重投。 */
   private deliveryAttempts = new Map<string, number>()
   /** queued/rejected 后的退避截止时间，避免每秒拉起一次 Agent 查询。 */
@@ -503,7 +501,6 @@ export class RouterService {
       zombieHours: 6,
       sweepMinutes: 5,
     }
-    this.backfill = opts.backfill
     this.decisionEngine = opts.decisionEngine
     const soul = loadSoul(opts.config)
     this.loop = new AgentLoop({
@@ -605,15 +602,6 @@ export class RouterService {
     if (this.running) return
     this.running = true
     await this.recover()
-    if (this.backfill) {
-      try {
-        const triggers = await this.backfill()
-        for (const trigger of triggers) this.engine.ingest(trigger)
-        if (triggers.length > 0) this.logger.info('backfill:done', { count: triggers.length })
-      } catch (error) {
-        this.logger.warn('backfill:failed', { message: error instanceof Error ? error.message : String(error) })
-      }
-    }
     const every = (ms: number, fn: () => Promise<void> | void): void => {
       const timer = setInterval(() => {
         Promise.resolve(fn()).catch(error => this.logger.error('loop:error', { message: error instanceof Error ? error.message : String(error) }))
@@ -739,7 +727,7 @@ export class RouterService {
     // 旧工单沿用创建时的后端；新工单用默认后端。
     const latest = this.store.latestAssignment(ticket.id)
     const backendId = latest?.backendId && this.backends.has(latest.backendId)
-      ? latest.backendId
+      ? normalizeBackendId(latest.backendId)
       : this.backends.default().id
     const backend = this.backends.get(backendId)
     const assignment = this.engine.startAssignment(ticket.id, {
@@ -1732,7 +1720,8 @@ export class RouterService {
   }
 
   /**
-   * Worker 会话被意外删除：结束派工、转人工、取消线程订阅，只通知一次。
+   * Worker 会话已不存在：结束派工、转人工、取消线程订阅，只通知一次。
+   * 找不到终端/后台会话不一定是被人删了，电脑重启、Orca 退出、进程退出都会导致；
    * 不自动重开新 worker——新会话没有原上下文，重跑等于从头再来。
    */
   private handleLostWorker(ticket: Ticket, reason: string): void {
@@ -1740,11 +1729,12 @@ export class RouterService {
     if (assignment && assignment.status !== 'ended') {
       this.store.updateAssignment({ ...assignment, status: 'ended', endedAt: this.clock.now() })
     }
-    this.engine.setAttention(ticket.id, '执行会话意外删除，已经找不到了')
+    const workdirNote = assignment?.workdir ? `工作区仍保留在 ${assignment.workdir}，未提交的改动可能还在。` : ''
+    this.engine.setAttention(ticket.id, '执行会话已不存在（电脑重启、终端关闭或进程退出都会导致）')
     this.engine.unsubscribe(ticket.threadId, ticket.id)
     this.notify(
       ticket,
-      `工单「${ticket.title}」的执行会话意外删除，已经找不到了，无法继续执行。如果还需要继续，请在本话题里说明，我会重新开一张工单。`,
+      `工单「${ticket.title}」的执行会话已不存在（电脑重启、终端关闭或进程退出都会导致），无法继续执行。${workdirNote}如果还需要继续，请在本话题里说明，我会重新开一张工单。`,
       `worker-lost:${ticket.id}`,
     )
     this.log('worker:lost', ticket.id, { handle: assignment?.handle ?? '', reason })

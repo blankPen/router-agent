@@ -1,4 +1,5 @@
 import type { AppConfig, ChatBinding, ProjectConfig } from '../config.js'
+import { projectsForBackend } from '../config.js'
 import type { DispatchDraft } from '../core/model.js'
 
 /** 草稿的默认有效期：半小时内没补齐就当作新会话。 */
@@ -48,17 +49,16 @@ export interface DispatchResolution {
   branch: string
   project?: ProjectConfig
   missing: DispatchMissing[]
-  /** 用户给了不在清单里的项目名 / 分支，追问时要原样提示。 */
+  /** 用户给了不在清单里的项目名，追问时要原样提示。 */
   rejectedRepo?: string
-  rejectedBranch?: string
   /** 该群配置的绑定（追问时用来解释“为什么不问”）。 */
   binding?: ChatBinding
 }
 
-/** 配置折算成派工设置：群绑定直接来自 feishu.chats 里带 repo 的条目。 */
+/** 配置折算成派工设置：项目清单按当前默认后端隔离；群绑定直接来自 feishu.chats 里带 repo 的条目。 */
 export function dispatchSettingsOf(config: AppConfig): DispatchSettings {
   return {
-    projects: config.projects,
+    projects: projectsForBackend(config),
     bindings: config.feishu.chats
       .filter(chat => chat.repo)
       .map(chat => ({ chat: chat.chat, repo: chat.repo, branch: chat.branch })),
@@ -87,11 +87,17 @@ export function resolveDispatch(input: ResolveDispatchInput): DispatchResolution
   }
   if (!repo && !rejectedRepo && binding?.repo) {
     project = matchProject(settings.projects, binding.repo)
-    repo = project?.repo ?? binding.repo
+    // 项目清单非空时，绑定名必须能在「当前后端」的清单里找到；
+    // 否则宁可追问，也不要把 orca 的选择器直接交给 claude-code 当路径用。
+    if (project) repo = project.repo
+    else if (settings.projects.length === 0) repo = binding.repo
+    else rejectedRepo = binding.repo
   }
   if (!repo && !rejectedRepo && draft?.repo) {
     project = matchProject(settings.projects, draft.repo)
-    repo = project?.repo ?? draft.repo
+    if (project) repo = project.repo
+    else if (settings.projects.length === 0) repo = draft.repo
+    else rejectedRepo = draft.repo
   }
   if (!repo && !rejectedRepo && settings.projects.length === 1) {
     project = settings.projects[0]
@@ -99,14 +105,11 @@ export function resolveDispatch(input: ResolveDispatchInput): DispatchResolution
   }
 
   let branch = ''
-  let rejectedBranch = ''
-  if (providedBranch) {
-    if (project && project.branches.length > 0 && !project.branches.includes(providedBranch)) rejectedBranch = providedBranch
-    else branch = providedBranch
-  }
-  if (!branch && !rejectedBranch && binding?.branch && (!binding.repo || sameRepo(binding.repo, repo, project))) branch = binding.branch
-  if (!branch && !rejectedBranch && draft?.branch && (!draft.repo || sameRepo(draft.repo, repo, project))) branch = draft.branch
-  if (!branch && !rejectedBranch && project?.defaultBranch) branch = project.defaultBranch
+  // 项目清单不再限制起始分支：用户指定什么就用什么，由 git 在创建 worktree 时校验。
+  if (providedBranch) branch = providedBranch
+  if (!branch && binding?.branch && (!binding.repo || sameRepo(binding.repo, repo, project))) branch = binding.branch
+  if (!branch && draft?.branch && (!draft.repo || sameRepo(draft.repo, repo, project))) branch = draft.branch
+  if (!branch && project?.defaultBranch) branch = project.defaultBranch
 
   const missing: DispatchMissing[] = []
   if (!repo) missing.push('repo')
@@ -118,7 +121,6 @@ export function resolveDispatch(input: ResolveDispatchInput): DispatchResolution
     ...(project ? { project } : {}),
     missing,
     ...(rejectedRepo ? { rejectedRepo } : {}),
-    ...(rejectedBranch ? { rejectedBranch } : {}),
     ...(binding ? { binding } : {}),
   }
 }

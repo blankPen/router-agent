@@ -162,7 +162,7 @@ src/worker/
     codex-sessions.ts          # 新增
   backends/
     orca/index.ts              # OrcaBackend（组合内部构件），行为与今天一致
-    claude-cli/index.ts        # Claude Code CLI
+    claude-code/index.ts        # Claude Code CLI
     codex-cli/index.ts         # Codex CLI
 ```
 
@@ -549,7 +549,7 @@ export interface ProcessSpawner {
 | 结构化活动 | Claude JSONL（借 Claude） | `~/.claude/projects/<slug>/<session>.jsonl` | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
 | PR 线索 | `linkedPR` | 无，靠 `gh pr list --head` | 无，靠 `gh pr list --head` |
 | 仓库发现 | `orca repo list` | 配置文件 / `git` 目录 | 配置文件 / `git` 目录 |
-| 工具策略 | Agent 规范 + Orca 启动参数 | `--allowedTools` / `--permission-mode` | `-s workspace-write` / 配置覆盖 |
+| 工具策略 | Agent 规范 + Orca 启动参数 | `--allowedTools` / `--dangerously-skip-permissions` | `-s workspace-write` / 配置覆盖 |
 
 > Claude / Codex 的 CLI 事实已在本机实测：Claude Code `2.1.318` 的 `claude --bg`、`claude agents --json --all`、`claude --bg --resume <session-id>`、`claude stop/attach/logs` 均可用于后台会话管理；`--bg --resume` 不带新 flags 且会话处于 `done/stopped` 时继续同一 id，否则 fork 新 id。Codex `0.166.0` 支持 `codex exec --json`、`-C <dir>`、`--output-last-message`、`codex exec resume <session-id> <prompt>`。完整实测记录见附录 C。
 
@@ -672,7 +672,7 @@ function classifyAgentStatus(s: AgentStatus | null): AgentVerdict {
 
 ### D5：活动读取独立于运行时
 
-**决策**：`ActivitySource` 单独实现，adapter 可组合不同来源（Orca 后端组合 Claude 会话 + 终端输出；Claude CLI 只用 Claude 会话；Codex 只用 Codex rollout）。
+**决策**：`ActivitySource` 单独实现，adapter 可组合不同来源（Orca 后端组合 Claude 会话 + 终端输出；Claude Code 只用 Claude 会话；Codex 只用 Codex rollout）。
 
 **理由**：活动格式由 **Agent 产品** 决定，不由 **进程托管方式** 决定。今天 Orca 里跑的也是 Claude Code，所以 `orca/session.ts` 读的是 Claude 的 JSONL；把它留在 Orca 目录下会误导后续实现。
 
@@ -684,7 +684,7 @@ function classifyAgentStatus(s: AgentStatus | null): AgentVerdict {
 
 ### D7：工作区优先复用 Git，不把 Orca 当通用依赖
 
-**决策**：Claude CLI / Codex CLI 使用 `GitWorktreeProvider`（`git worktree add/remove/list --porcelain`）；Orca 仍是 Orca 的 provider。
+**决策**：Claude Code / Codex CLI 使用 `GitWorktreeProvider`（`git worktree add/remove/list --porcelain`）；Orca 仍是 Orca 的 provider。
 
 **理由**：这两个 CLI 本身只需要一个 cwd，不需要 Orca 的终端管理；直接依赖 `git` 可以减少一层故障面，也让 Linux 支持更容易。
 
@@ -711,10 +711,10 @@ function classifyAgentStatus(s: AgentStatus | null): AgentVerdict {
 
 **决策**：`ToolPolicy` 只描述 `fileAccess / shell / shellAllow / allowNetwork`；adapter 负责映射：
 - Orca：写进 worker 规范 / 启动 prompt（交互式终端保留人工审批）；
-- Claude：`--allowedTools` 用命令级白名单（默认 `Read,Write,Edit,Glob,Grep` + `Bash(ra report:*),Bash(ra doc:*),Bash(git:*),Bash(gh:*)` + 常用构建/测试命令 `pnpm/npm/npx/node/yarn/bun/python/pytest/cargo/go/make/mvn/gradle`，**不放行裸 `Bash`、不放行 `ra config/stop/serve`**）+ `--permission-mode acceptEdits`；`--permission-prompts none` 需显式开启；
+- Claude：启动时显式传 `--dangerously-skip-permissions`（worker 在隔离 worktree 内无人值守执行，不能停在权限确认上）；`--allowedTools` 仍保留命令级基线（默认 `Read,Write,Edit,Glob,Grep` + `Bash(ra report:*),Bash(ra doc:*),Bash(git:*),Bash(gh:*)` + 常用构建/测试命令），便于审计；
 - Codex：`-s workspace-write`（默认）+ 关闭网络；`--dangerously-bypass-approvals-and-sandbox` 仅显式配置。
 
-**安全参数不可被 `backend.options` 覆盖**：`allowedTools / permissionMode / sandbox / shellAllow / allowNetwork` 只由 `worker.tools` 与内置安全基线生成；`backend.options` 只能放模型、超时、并发等非安全参数。`loadConfig` 发现 options 试图放宽安全策略时拒绝启动。
+**安全参数不可被 `backend.options` 覆盖**：`allowedTools / sandbox / shellAllow / allowNetwork` 只由 `worker.tools` 与内置安全基线生成；`backend.options` 只能放模型、超时、并发等非安全参数。`loadConfig` 发现 options 试图放宽安全策略时拒绝启动。
 
 **理由**：这是「Agent 工具适配」的真正差异点之一；不抽象会把 Claude 的工具名或 Codex 的沙箱参数写进内核。`fileAccess` 在 Claude 上只是约定（没有 OS 级文件沙箱），必须在文档和 doctor 里明确，不能宣称已强制隔离。
 
@@ -729,13 +729,13 @@ function classifyAgentStatus(s: AgentStatus | null): AgentVerdict {
 - **launch / relaunch**（首次派工还没有 assignment）：用 `registry.default()`，或由 effect payload 显式带 `backendId`；`launch-worker` 不适用「从 latestAssignment 反查」；
 - 手工绑定 Assignment 时校验 `backendId` 已注册，不允许写入未知后端；
 - 后端不存在时抛 `backend:unknown`，转人工，不回退到默认后端；
-- `loadConfig` / `ra serve` 启动时校验 `backend.default` 已注册；P2 只注册 `orca`，因此 P2 阶段配置成 `claude-cli` 必须在启动期 fail-fast，而不是等第一张工单派工时才报错。
+- `loadConfig` / `ra serve` 启动时校验 `backend.default` 已注册；P2 只注册 `orca`，因此 P2 阶段配置成 `claude-code` 必须在启动期 fail-fast，而不是等第一张工单派工时才报错。
 
 ### D12：默认安全边界：环境变量白名单 + 最小工具权限 + 单实例锁
 
 **决策**：
 - Agent 子进程只继承显式 allowlist 的环境变量；prompt 走 stdin/临时文件，不进 argv；
-- Claude 默认 `permission-mode=acceptEdits` + 命令级 `Bash(ra report:*) / Bash(ra doc:*) / Bash(git:*) / Bash(gh:*)`，**不放行裸 `Bash`、不放行 `ra config/stop/serve`**；Codex 默认 `-s workspace-write` 且关闭网络；`allowNetwork` 默认 `false`；
+- Claude 默认 `--dangerously-skip-permissions`（2026-11-08 起，worker 无人值守）+ 命令级 `--allowedTools` 基线；该模式会跳过所有权限确认，必须确保工单只跑在隔离 worktree 内；Codex 默认 `-s workspace-write` 且关闭网络；`allowNetwork` 默认 `false`；
 - `ra serve` 使用独占文件锁保证单实例；同一工单的 launch/cleanup 按 ticket 加进程内互斥，同一 repo 的 worktree 操作串行化；
 - `ra report` 增加 `--port` / `RA_PORT`，不再依赖读取完整 `config.yaml`；`ra doc` 优先走 Router 代理，避免 Agent 直接持有飞书凭证；`ra config` 默认脱敏，`ra stop / config set / serve` 不进入 Worker 白名单。
 
@@ -841,7 +841,7 @@ git worktree remove -- <workdir>
 ```bash
 claude --bg --name <ticketId>-<slug> \
   --add-dir <workersDir>/<ticketId> \
-  --permission-mode acceptEdits \
+  --dangerously-skip-permissions \
   --model <model> \
   --allowedTools "Read,Write,Edit,Glob,Grep,Bash(ra report:*),Bash(ra doc:*),Bash(git:*),Bash(gh:*),Bash(pnpm:*),Bash(npm:*),Bash(npx:*),Bash(node:*),Bash(python:*),Bash(pytest:*)" \
   -- "Read <briefPath> and execute the ticket. Report via ra report."
@@ -876,7 +876,7 @@ claude --bg --name <ticketId>-<slug> \
 - `claude attach <id>` 是人工入口：用户可在 agent view 里恢复、接管、回答权限提示，Router 不代劳。
 
 **风险**：
-- `state=blocked` 是权限/人工输入卡点；headless 场景默认用 `acceptEdits` + 命令级 `allowedTools` 尽量不触发，但无法完全避免；
+- `state=blocked` 是权限/人工输入卡点；从 2026-11-08 起启动命令带 `--dangerously-skip-permissions`，正常情况下不再因权限确认阻塞；
 - `--bg --resume` 在不满足条件时会 fork 副本；adapter 必须把“新 id”当错误而不是成功；
 - `cli` 版本升级可能改变 `agents --json` 字段；解析器要按版本容错，失败返回 `null`；
 - Claude 没有 OS 级文件沙箱：`fileAccess` 只是约定；需要强制隔离时用 macOS `sandbox-exec` 或容器，一期不做，但必须在 doctor 里提示风险。
@@ -962,7 +962,7 @@ export interface WorkerMetaV2 {
 
 ### 9.5 前端/CLI 展示
 
-`Assignment.backendId` 已存在，`ra ticket` / Web 面板可以显示 `orca / claude-cli / codex-cli`；不需要改状态机。
+`Assignment.backendId` 已存在，`ra ticket` / Web 面板可以显示 `orca / claude-code / codex-cli`；不需要改状态机。
 
 ---
 
@@ -999,14 +999,19 @@ export interface WorkerMetaV2 {
 
 ```yaml
 backend:
-  default: orca            # 兼容旧值；可为 claude-cli / codex-cli（必须已注册，否则启动失败）
+  default: orca            # 兼容旧值；可为 claude-code / codex-cli（必须已注册，否则启动失败）
   options:                 # 只放非安全参数：模型、超时、并发
-    claude-cli:
+    claude-code:
       model: sonnet
       turnTimeoutMs: 7200000
     codex-cli:
       model: gpt-5-codex
       turnTimeoutMs: 7200000
+  projects:                # 项目清单按后端隔离；orca 也兼容顶层 projects
+    claude-code:
+      - name: router-agent
+        repo: /Users/me/router-agent   # Claude Code 必须用本地仓库绝对路径
+        defaultBranch: main
 
 # 中立工具策略：Router 生成，adapter 只映射；安全参数不可被 backend.options 覆盖
 worker:
@@ -1019,7 +1024,7 @@ worker:
 
 - `src/config.ts` 的 `backend` 从 `{ default: 'orca' }` 放宽为 `{ default: string; options?: Record<string, unknown> }`。
 - `loadConfig` 必须真正解析 `doc.backend.default / doc.backend.options`（当前写死 `{ default: 'orca' }`，见 `config.ts:232/399`）；非法值或未注册值抛 `backend:unknown`，旧配置缺省仍是 `orca`。
-- `config set backend.default claude-cli` 不再被 `value !== 'orca'` 拒绝（`config.ts:899-901`）。
+- `config set backend.default claude-code` 不再被 `value !== 'orca'` 拒绝（`config.ts:899-901`）。
 - `src/router/api.ts:118` 手工绑定 Assignment 时用配置的 backend，并校验 `backendId` 已注册，而不是写死 `'orca'`。
 - `ToolPolicy` 由 `worker.tools` 生成；`allowedTools / permissionMode / sandbox / shellAllow / allowNetwork` 等安全参数只能来自 `worker.tools` 与 adapter 内置安全基线，`backend.options` 不允许覆盖；`loadConfig` 发现放宽尝试直接拒绝。
 - `shellAllow` 按命令前缀匹配：`ra report` / `ra doc` 可用，`ra config` / `ra stop` / `ra serve` 不在白名单。
@@ -1045,7 +1050,7 @@ export class BackendRegistry {
 export function createBackends(config: AppConfig, deps: BackendDeps): BackendRegistry {
   const backends = new Map<string, WorkerBackend>()
   backends.set('orca', new OrcaBackend(deps))
-  // P3: backends.set('claude-cli', new ClaudeCliBackend(deps))
+  // P3: backends.set('claude-code', new ClaudeCodeBackend(deps))
   // P4: backends.set('codex-cli', new CodexCliBackend(deps))
   return new BackendRegistry(backends, config.backend.default)
 }
@@ -1106,7 +1111,7 @@ export function createBackends(config: AppConfig, deps: BackendDeps): BackendReg
 
 - `loadConfig` 真正解析 `backend.default / backend.options`（当前写死）；启动期校验 default 已注册，未知值 fail-fast；
 - `BackendRegistry` 按 id 取后端；已有 assignment 的生命周期操作按 `assignment.backendId` 路由；launch/relaunch 用 `registry.default()` 或 effect 显式 backendId；
-- `ra serve` 用注册表；`backend.default` 只决定新工单；P2 只注册 `orca`，配置其他值直接启动失败；P3 在同一期追加 `claude-cli`；
+- `ra serve` 用注册表；`backend.default` 只决定新工单；P2 只注册 `orca`，配置其他值直接启动失败；P3 在同一期追加 `claude-code`；
 - doctor/init 改为 backend 自检/仓库发现；
 - 加 `ra serve` 单实例锁 + 工单 launch lease + repo 级 worktree 串行化。
 - **验收**：旧 Orca 工单与手工绑定继续工作；未知 backend 明确报错；单实例测试通过。
@@ -1116,19 +1121,19 @@ export function createBackends(config: AppConfig, deps: BackendDeps): BackendReg
 
 - **前置安全项**：`ra report` 支持 `--port` / `RA_PORT`；`ra doc` 走 Router 代理（或使用只读最小 `RA_HOME`），避免 Agent 依赖完整 `config.yaml`；
 - `GitWorktreeProvider`（含 `--`、分支校验、路径约束、失败回滚）；
-- `ClaudeCliRuntime`：`claude --bg` 启动、`claude agents --json --all` 读状态、`claude --bg --resume` 追问、`claude stop` 停止；brief 写文件，env allowlist，单飞 + 按 `(input.id, attempt)` 幂等；
+- `ClaudeCodeRuntime`：`claude --bg` 启动、`claude agents --json --all` 读状态、`claude --bg --resume` 追问、`claude stop` 停止；brief 写文件，env allowlist，单飞 + 按 `(input.id, attempt)` 幂等；
 - `ClaudeSessionActivity` 复用，按 sessionId 精确定位；`claude logs` 仅作兜底且必须清洗 ANSI；
 - 明确语义：追问在当前轮结束后生效；`blocked` 置 attention 等人工，不自动 resume；不实现轮内实时插话。
 - **验收**：在临时仓库跑通「接单 → 改文件 → `ra report` → PR → 闭环」；`ra doctor` 通过；launch 失败无残留；重复 tick 只投递一次；`--resume` 产生新 id 时明确报错；Router 重启后能从 `agents --json --all` 找回 done/stopped 会话。
 - **风险**：权限/认证/模型额度；`blocked` 权限提示；CLI 版本字段变化。
-- **回滚**：不注册 `claude-cli`；默认仍 `orca`。
+- **回滚**：不注册 `claude-code`；默认仍 `orca`。
 
 **一期总验收（P0–P3 一起）**：
 - Orca 路径行为不变，现有测试全绿；
-- `backend.default` 可在 `orca` / `claude-cli` 间切换，旧工单按 `assignment.backendId` 走原后端；
+- `backend.default` 可在 `orca` / `claude-code` 间切换，旧工单按 `assignment.backendId` 走原后端；
 - Claude 临时仓库完整链路跑通：接单 → 改文件 → `ra report` → PR → 闭环；
 - 追问在当轮结束后自动送达；`blocked` 能转人工；Router 重启后能找回 done/stopped 会话；
-- `ra doctor` 能同时检查 Orca 与 Claude CLI 的可执行文件、认证与仓库可见性；
+- `ra doctor` 能同时检查 Orca 与 Claude Code 的可执行文件、认证与仓库可见性；
 - 安全项：env allowlist、`ra report` 免 config、prompt 走文件、无裸 `Bash`。
 
 ### P4 · Codex CLI 后端（二期）
@@ -1176,14 +1181,14 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
   - `isZombie` / `checkIdle` / `recover` / `workerGone` 对 `null` / `lost` / `exited` 的 6.4 矩阵逐项覆盖；
   - `deliver` 抛 `agent:gone` 后转失联；连续 tick 下未 ack 的重投按退避，不每秒执行；
   - `trackPullRequests` 在无 `linkedPr` 时调用 `findByBranch`，本地路径仓库不走 `gh --repo`；
-  - 旧 `backend_id='orca'` 工单与新 `claude-cli` 工单共存时，各走各的后端；
+  - 旧 `backend_id='orca'` 工单与新 `claude-code` 工单共存时，各走各的后端；
   - capability 降级矩阵逐项覆盖；
   - 环境变量 allowlist、prompt 不进 argv、日志脱敏、路径越界拒绝。
 
 ### 14.3 真实链路验收
 
 - Orca：按 `docs/VERIFICATION.md` 的流程重跑。
-- Claude CLI：临时 git 仓库 + `RA_*` 环境变量，跑完整链路；验证 `ra report` 能从 Agent shell 发出；验证失败重试不产生第二个 worktree。
+- Claude Code：临时 git 仓库 + `RA_*` 环境变量，跑完整链路；验证 `ra report` 能从 Agent shell 发出；验证失败重试不产生第二个 worktree。
 - Codex CLI：同上；额外验证会话活动解析、非 0 退出转人工、网络默认关闭。
 
 ### 14.4 静态约束
@@ -1217,7 +1222,7 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
 ### 15.2 待实测（实现前必须做）
 
 1. Claude Code：`claude --bg --resume <sessionId>` 在 `blocked`（权限提示）状态下是否也 fork 副本；如果是，确认「blocked 只能人工 attach 或先 stop」的降级策略。
-2. Claude Code：`acceptEdits` + 命令级 `Bash(ra report:*)` 在后台会话中是否按预期放行/拒绝；`blocked` 的常见触发条件与提示文案。
+2. Claude Code：`--dangerously-skip-permissions` 在后台会话中是否完全跳过权限确认；`blocked` 的常见触发条件与提示文案。
 3. Codex：`codex exec resume <session> --json -` 是否存在并支持 stdin；`--json` 事件里 session id 的位置。
 4. Codex：`-s workspace-write` 下 `git push` / `gh` 是否可用；网络关闭配置键的确切名称。
 5. 两个 CLI 在 worktree 目录内的 `ra` 可见性（PATH / nvm / fnm），以及 env allowlist 下认证变量是否足够。
@@ -1231,7 +1236,7 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
 ### 15.3 开放问题（需要产品/架构确认）
 
 1. 追问语义默认按「当轮结束后生效」设计（与 Claude Code TUI 的输入排队一致）；是否接受？若必须轮内实时插话，需要 `stream-json` 或 SDK/ACP。
-2. 一期 Claude CLI 已纳入交付，但默认后端是否仍保持 Orca？是否先在某个项目/群绑定上试切 Claude？
+2. 一期 Claude Code 已纳入交付，但默认后端是否仍保持 Orca？是否先在某个项目/群绑定上试切 Claude？
 3. 用户是否需要在飞书里感知「当前工单跑在哪个 Agent 后端」？
 4. Claude/Codex 的模型额度与 Router 的 Pi 额度是否分开计费/限额？
 
@@ -1307,7 +1312,7 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
   8. 过宽的 `ra` 通配与 `backend.options` 可绕过安全基线 → 收敛到 `ra report` / `ra doc`，安全参数只由 `worker.tools` 与内置基线生成，options 只放模型/超时/并发。
 - 结论：接口、状态、迁移、安全四条线已闭环；可以进入人工评审，开发从 P0 开始。
 
-### Round 6 · 用户反馈：Claude CLI 追问与 agent view
+### Round 6 · 用户反馈：Claude Code 追问与 agent view
 
 - 反馈：建议用 `claude agents` 的 agent view 驱动、`claude --bg "任务描述"` 追问；并质疑 Claude Code CLI 是否根本无法追问、是否必须用 ACP / SDK。
 - 实测（附录 C）：CLI **可以**追问，但有条件——会话 `done/stopped` 且 `--bg --resume` **不带新 flags** 时继续同一 id；`working/blocked` 或带 flags 会 fork 新 id。轮内实时追投需要 `-p --input-format stream-json` 或 SDK/ACP。
@@ -1321,19 +1326,19 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
 
 ### Round 7 · 一期范围确认
 
-- 反馈：追问「当轮结束后生效」需要更直白的解释；一期把 Claude CLI 一起实现。
+- 反馈：追问「当轮结束后生效」需要更直白的解释；一期把 Claude Code 一起实现。
 - 修正：
   1. 在 9.1 增加追问语义小节与时间线例子，明确「一轮 = 一次完整回复周期，不是整张工单」，并与 Claude Code TUI 的输入排队类比；
   2. 第 13 节明确「一期 = P0–P3（含 Claude Code CLI）」，P4/P5 为二期；
   3. 增加「一期总验收」清单，覆盖 Orca 回归、Claude 链路、追问、重启恢复、安全项；
   4. 开放问题改为「是否接受当轮结束语义」与「默认后端是否仍为 Orca」。
-- 结论：一期范围锁定为 Orca 等价拆解 + Claude CLI 可用；Codex 与清理放二期。
+- 结论：一期范围锁定为 Orca 等价拆解 + Claude Code 可用；Codex 与清理放二期。
 
 ---
 
 ### Round 8 · 实现代码评审
 
-- 评审对象：一期实现 diff（WorkerBackend v2 / Registry / Claude CLI / GitWorktree / service 路由）。
+- 评审对象：一期实现 diff（WorkerBackend v2 / Registry / Claude Code / GitWorktree / service 路由）。
 - 发现并修复：
   1. accepted 未 ack 的输入仍会每 tick 重投 → accepted 后按 30s/60s/120s…（上限 10min）退避；新输入到达时立即投递；
   2. `sessionId` 只在 start 的 2–4s 窗口捕获 → deliver/status 从 `agents --json` 回填，不再把缺 sessionId 当永久 lost；
@@ -1356,7 +1361,7 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
 - `src/worker/registry.ts`：`BackendRegistry`，按 `assignment.backendId` 取后端；默认后端启动期校验；
 - `src/service.ts`：去 Orca 类型、按 assignment 路由、`buildWorkerContext`、launch 半成功清理、投递 receipt；
 - `src/worker/orca/*`：Orca 适配新契约（status/output/activity/inspectWorkspace/removeWorkspace/nudge）；
-- `src/worker/backends/claude-cli/*`：`claude --bg` + `claude agents --json --all` + `claude --bg --resume`（无 flags）+ `claude stop`；
+- `src/worker/backends/claude-code/*`：`claude --bg` + `claude agents --json --all` + `claude --bg --resume`（无 flags）+ `claude stop`；
 - `src/worker/workspaces/git-worktree.ts`：git worktree、分支/路径校验、失败回滚；
 - 配置：`worker.tools`、`backend.default/options` 解析；`ra init` 在 Claude 后端下问本地路径；
 - `ra report --port` / `RA_PORT`；`ra serve` 单实例锁；doctor 追加当前后端自检。
@@ -1428,7 +1433,7 @@ Orca 后端用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.ts` 
 
 ### C.1 命令与字段
 
-- 启动：`claude --bg --name <name> --permission-mode plan --model haiku "<prompt>"`，输出 `backgrounded · <short-id> · <name>`。
+- 启动：`claude --bg --name <name> --dangerously-skip-permissions --model haiku "<prompt>"`，输出 `backgrounded · <short-id> · <name>`。
 - 列表：`claude agents --json --all` 返回数组，元素字段为 `id / pid / cwd / kind / startedAt / sessionId / name / state / status / waitingFor`。
 - 观察到的状态组合：
   - `state=working, status=busy`：运行中；

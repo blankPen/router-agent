@@ -24,7 +24,7 @@ describe.skipIf(!live)('Pi 真实环境验证', () => {
     config.home = home
     config.router.timeoutMs = 90_000
     config.router.tokenBudget = 64_000
-    config.projects = [{ name: 'router-agent', repo: 'name:dsh/router-agent', branches: ['main'], defaultBranch: 'main' }]
+    config.projects = [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }]
     config.feishu.allowed = ['ou_live']
 
     const result = await simulate(

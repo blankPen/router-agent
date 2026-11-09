@@ -6,6 +6,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { DEFAULT_ADMISSION, type AcceptMode, type AdmissionTable, type Policy } from './core/policy.js'
 import type { WorkerSpecMode } from './worker/spec/index.js'
 import type { ToolPolicy } from './worker/port.js'
+import { ORCA_BACKEND_ID, WORKER_BACKEND_IDS, normalizeBackendId } from './worker/backends/catalog.js'
 
 export type ChatMode = 'all' | 'mention'
 
@@ -22,8 +23,8 @@ export const DEFAULT_WORKER_TOOLS: ToolPolicy = {
 }
 
 /**
- * 一个被监控的群：接收方式、派工绑定、历史补拉都写在这一条里，
- * 不再需要同时在 chats / otherChats / syncChat / chatBindings 四处登记。
+ * 一个被监控的群：接收方式与派工绑定都写在这一条里，
+ * 不再需要同时在 chats / otherChats / chatBindings 四处登记。
  */
 export interface ChatSettings {
   chat: string
@@ -33,14 +34,12 @@ export interface ChatSettings {
   repo: string
   /** 群级派工绑定：起始分支；空表示开工前追问。 */
   branch: string
-  /** 启动时补拉该群历史。 */
-  sync: boolean
   /** 本群只允许这些 open_id 操作；空表示沿用全局 feishu.allowed。 */
   allowed: string[]
 }
 
 export function chatEntry(chat: string, over: Partial<Omit<ChatSettings, 'chat'>> = {}): ChatSettings {
-  return { chat, mode: 'all', repo: '', branch: '', sync: false, allowed: [], ...over }
+  return { chat, mode: 'all', repo: '', branch: '', allowed: [], ...over }
 }
 
 export interface FeishuSettings {
@@ -124,15 +123,21 @@ export interface RouterSettings {
   persona: PersonaSettings
 }
 
-/** 一个可派工的项目。name 是用户/模型口中引用的名字，repo 是交给 Orca 的选择器。 */
+/** 一个可派工的项目。name 是用户/模型口中引用的名字，repo 是交给后端的仓库定位。 */
 export interface ProjectConfig {
   name: string
   repo: string
-  /** 允许作为起始分支的白名单；空数组表示不限制。 */
-  branches: string[]
   /** 工单未指定分支时的默认起始分支；空字符串表示必须问用户。 */
   defaultBranch: string
 }
+
+/**
+ * 按后端隔离的项目清单。
+ *
+ * - `orca` 存在顶层 `projects`（兼容旧配置与旧工具）；
+ * - 其它后端存在 `backend.projects.<backendId>`，只在该后端作为默认后端时使用。
+ */
+export type BackendProjects = Record<string, ProjectConfig[]>
 
 /** 群级绑定视图：派工解析只需要这三项。 */
 export interface ChatBinding {
@@ -180,9 +185,26 @@ export interface AppConfig {
   retention: RetentionSettings
   workerSpec: { mode: WorkerSpecMode }
   worker: { tools: ToolPolicy }
-  backend: { default: string; options?: Record<string, unknown> }
+  backend: { default: string; options?: Record<string, unknown>; projects?: BackendProjects }
   server: { port: number }
   llm?: { baseUrl?: string; apiKey?: string; model?: string; temperature?: number; contextWindow?: number }
+}
+
+/** 某个后端当前可用的项目清单；orca 兼容顶层 projects。 */
+export function projectsForBackend(config: AppConfig, backendId: string = config.backend.default): ProjectConfig[] {
+  const id = normalizeBackendId(backendId)
+  if (id === ORCA_BACKEND_ID) return config.projects
+  return config.backend.projects?.[id] ?? []
+}
+
+/** 写入某个后端的项目清单；orca 同步顶层字段，保持旧配置与旧工具可读。 */
+export function setProjectsForBackend(config: AppConfig, backendId: string, projects: ProjectConfig[]): void {
+  const id = normalizeBackendId(backendId)
+  if (id === ORCA_BACKEND_ID) {
+    config.projects = projects
+    return
+  }
+  config.backend.projects = { ...(config.backend.projects ?? {}), [id]: projects }
 }
 
 /**
@@ -267,13 +289,12 @@ export function defaultConfig(): AppConfig {
 
 const DEFAULT_CONFIG_YAML = `# router-agent 全局配置
 feishu:
-  # 监控的群：一条配置同时决定「收什么消息 + 派工绑定 + 是否补拉历史」
+  # 监控的群：一条配置同时决定「收什么消息 + 派工绑定」
   chats: []
   #  - chat: oc_xxx
   #    mode: all          # all=全部消息且不 @ 也回复；mention=只收 @机器人
   #    repo: router-agent # 可选：群绑定项目（项目名或仓库选择器），开工不再追问
-  #    branch: main       # 可选：群绑定起始分支
-  #    sync: false        # 可选：启动时补拉该群历史
+  #    branch: main       # 由项目默认分支自动决定
   #    allowed: [ou_xxx]  # 可选：本群只允许这些人操作（空=沿用全局 allowed）
   directMessages: true
   allowed: []          # 允许发起工作的 open_id
@@ -337,14 +358,19 @@ workerSpec:
   mode: prompt         # prompt | agent
 
 backend:
-  default: orca
+  default: orca         # 新工单默认后端：orca | claude-code
+  # 非 orca 后端用独立项目清单，和顶层 projects 互不影响
+  # projects:
+  #   claude-code:
+  #     - name: router-agent
+  #       repo: /Users/me/router-agent   # Claude Code 需要本地仓库绝对路径
+  #       defaultBranch: main
 
-# 项目清单：开单前必须明确「哪个项目 + 哪个起始分支」
+# orca 项目清单（顶层 projects 只属于 orca 后端）
 projects: []
 #  - name: router-agent            # 用户/模型引用的项目名
 #    repo: name:dsh/router-agent   # 交给 Orca 的仓库选择器
 #    defaultBranch: main           # 未指定分支时使用；留空则必须问用户
-#    branches: [main, release]     # 可选：允许的起始分支白名单
 
 server:
   port: 3083
@@ -390,6 +416,7 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
   const progressSilenceMs = Number(progressDoc.silenceMs)
   const progressRepeatMs = Number(progressDoc.repeatMs)
   const retentionDoc = doc.retention ?? {}
+  const projectLists = parseProjectLists(doc.backend?.projects)
 
   const admissionDoc = doc.policy?.admission ?? {}
   const admission: AdmissionTable = {
@@ -410,9 +437,9 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
     }
   }
 
-  return {
+  const config: AppConfig = {
     home,
-    projects: parseProjects(doc.projects),
+    projects: projectLists.orca ?? parseProjects(doc.projects),
     feishu: {
       larkHome: env.RA_LARK_HOME ?? stringOr(doc.feishu?.larkHome, base.feishu.larkHome),
       appId: stringOr(doc.feishu?.appId, base.feishu.appId),
@@ -460,12 +487,17 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
       },
     },
     backend: {
-      default: stringOr(doc.backend?.default, base.backend.default),
+      // 旧配置里的 claude-cli 自动归一成 claude-code，避免升级后启动失败。
+      default: normalizeBackendId(stringOr(doc.backend?.default, base.backend.default)),
       ...(doc.backend?.options && typeof doc.backend.options === 'object' ? { options: doc.backend.options } : {}),
+      ...(Object.keys(projectLists.others).length > 0 ? { projects: projectLists.others } : {}),
     },
     server: { port: Number.isFinite(port) && port >= 0 && port < 65536 ? port : base.server.port },
     ...(doc.llm ? { llm: doc.llm } : {}),
   }
+  // 群绑定分支始终跟随项目清单，避免 YAML 里残留的自定义分支与面板显示不一致。
+  alignChatBranches(config)
+  return config
 }
 
 /** 把配置折算成领域 Policy；版本号是规则的指纹。 */
@@ -586,7 +618,6 @@ function parseProjects(value: unknown): ProjectConfig[] {
     projects.push({
       name,
       repo,
-      branches: stringArray(entry.branches, []).map(branch => branch.trim()).filter(Boolean),
       defaultBranch: typeof entry.defaultBranch === 'string' ? entry.defaultBranch.trim() : '',
     })
   }
@@ -594,9 +625,28 @@ function parseProjects(value: unknown): ProjectConfig[] {
 }
 
 /**
+ * 解析 `backend.projects`：
+ * - `orca` 键优先于顶层 `projects`（新配置写哪里都能读）；
+ * - 其它后端按 id 归一（旧键 claude-cli 也认）；
+ * - 未知后端直接忽略，避免拼错键名时静默生效。
+ */
+function parseProjectLists(value: unknown): { orca?: ProjectConfig[]; others: BackendProjects } {
+  const others: BackendProjects = {}
+  if (!isRecord(value)) return { others }
+  let orca: ProjectConfig[] | undefined
+  for (const [rawId, list] of Object.entries(value)) {
+    const id = normalizeBackendId(rawId)
+    if (!WORKER_BACKEND_IDS.includes(id)) continue
+    if (id === ORCA_BACKEND_ID) orca = parseProjects(list)
+    else others[id] = parseProjects(list)
+  }
+  return { ...(orca ? { orca } : {}), others }
+}
+
+/**
  * 统一的群配置解析：
- * - 新写法 `feishu.chats: [{ chat, mode, repo, branch, sync }]`（字符串条目等价于 mode=all）
- * - 兼容旧写法 `otherChats`（mention）、`syncChat`（sync=true）、顶层 `chatBindings`（补 repo/branch，
+ * - 新写法 `feishu.chats: [{ chat, mode, repo, branch }]`（字符串条目等价于 mode=all）
+ * - 兼容旧写法 `otherChats`（mention）与顶层 `chatBindings`（补 repo/branch，
  *   且只要绑定了就视为监控该群——避免「绑定了却收不到消息」的割裂）。
  */
 function parseChats(doc: Record<string, any>): ChatSettings[] {
@@ -627,7 +677,6 @@ function parseChats(doc: Record<string, any>): ChatSettings[] {
     settings.mode = entry.mode === 'mention' ? 'mention' : 'all'
     if (typeof entry.repo === 'string') settings.repo = entry.repo.trim()
     if (typeof entry.branch === 'string') settings.branch = entry.branch.trim()
-    if (entry.sync === true) settings.sync = true
     settings.allowed = stringArray(entry.allowed, settings.allowed).map(id => id.trim()).filter(Boolean)
     explicit.add(chat)
   }
@@ -635,10 +684,6 @@ function parseChats(doc: Record<string, any>): ChatSettings[] {
   for (const chat of stringArray(feishu.otherChats, [])) {
     if (!chat || explicit.has(chat)) continue
     ensure(chat).mode = 'mention'
-  }
-  for (const chat of stringArray(feishu.syncChat, [])) {
-    if (!chat) continue
-    ensure(chat).sync = true
   }
   for (const binding of parseLegacyBindings(doc.chatBindings)) {
     const settings = ensure(binding.chat)
@@ -676,7 +721,10 @@ function parseLegacyBindings(value: unknown): ChatBinding[] {
 
 /** 从选择器里取一个可读的项目名：name:dsh/router-agent → dsh/router-agent。 */
 export function projectNameOf(repo: string): string {
-  return repo.trim().replace(/^(id|name|path):/, '')
+  const raw = repo.trim().replace(/^(id|name|path):/, '').replace(/\/+$/, '')
+  // 本地绝对路径取最后一段作为项目名，避免名字里出现整条路径。
+  if (raw.startsWith('/')) return raw.split('/').filter(Boolean).at(-1) ?? raw
+  return raw
 }
 
 /** 把配置写回 config.yaml；保留所有可选字段当前值，方便用 `ra config` 继续调。 */
@@ -692,7 +740,6 @@ export function writeConfig(home: string, config: AppConfig): void {
         mode: chat.mode,
         ...(chat.repo ? { repo: chat.repo } : {}),
         ...(chat.branch ? { branch: chat.branch } : {}),
-        ...(chat.sync ? { sync: true } : {}),
         ...(chat.allowed.length > 0 ? { allowed: chat.allowed } : {}),
       })),
       directMessages: config.feishu.directMessages,
@@ -738,6 +785,9 @@ export function writeConfig(home: string, config: AppConfig): void {
     backend: {
       default: config.backend.default,
       ...(config.backend.options ? { options: config.backend.options } : {}),
+      ...(config.backend.projects && Object.keys(config.backend.projects).length > 0
+        ? { projects: config.backend.projects }
+        : {}),
     },
     projects: config.projects,
     server: { port: config.server.port },
@@ -929,7 +979,7 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
   'retention.sweepMinutes': intValue(1, 1_440, ' 分钟'),
 
   'workerSpec.mode': enumValue(WORKER_MODES),
-  'backend.default': enumValue(['orca']),
+  'backend.default': enumValue(WORKER_BACKEND_IDS),
   'server.port': intValue(1, 65_535),
 
   'llm.baseUrl': stringValue,
@@ -939,8 +989,15 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
 /** 整段替换的复杂字段（项目、群、白名单这类不适合逐项点路径编辑的配置）。 */
 const LIST_PATHS = ['projects', 'feishu.chats'] as const
 
-function validateProjects(value: unknown): { error: string | null; value: ProjectConfig[] } {
+/** 后端本地仓库路径：接受 `/abs` 与 `path:/abs`，不接受 Orca 的 name:/id: 选择器。 */
+export function isLocalRepoPath(repo: string): boolean {
+  const path = repo.trim().replace(/^path:/, '')
+  return path.startsWith('/')
+}
+
+function validateProjects(value: unknown, backendId: string = ORCA_BACKEND_ID): { error: string | null; value: ProjectConfig[] } {
   if (!Array.isArray(value)) return { error: '需要项目数组', value: [] }
+  const id = normalizeBackendId(backendId)
   const projects: ProjectConfig[] = []
   const names = new Set<string>()
   for (const [index, item] of value.entries()) {
@@ -951,12 +1008,15 @@ function validateProjects(value: unknown): { error: string | null; value: Projec
     const finalName = name || projectNameOf(repo)
     if (names.has(finalName)) return { error: `项目名重复：${finalName}`, value: [] }
     names.add(finalName)
-    const branches = Array.isArray(item.branches) ? item.branches.map(String).map(b => b.trim()).filter(Boolean) : []
-    const defaultBranch = typeof item.defaultBranch === 'string' ? item.defaultBranch.trim() : ''
-    if (defaultBranch && branches.length > 0 && !branches.includes(defaultBranch)) {
-      return { error: `项目 ${finalName} 的默认分支 ${defaultBranch} 不在白名单里`, value: [] }
+    // 两套清单各自独立：claude-code 只认本地绝对路径，避免把 Orca 选择器当路径用。
+    if (id !== ORCA_BACKEND_ID && !isLocalRepoPath(repo)) {
+      return {
+        error: `项目 ${finalName} 的 repo 必须是本地仓库绝对路径（例如 /Users/me/project 或 path:/Users/me/project），${id} 不接受 name:/id: 选择器`,
+        value: [],
+      }
     }
-    projects.push({ name: finalName, repo, branches, defaultBranch })
+    const defaultBranch = typeof item.defaultBranch === 'string' ? item.defaultBranch.trim() : ''
+    projects.push({ name: finalName, repo, defaultBranch })
   }
   return { error: null, value: projects }
 }
@@ -977,7 +1037,6 @@ function validateChats(value: unknown): { error: string | null; value: ChatSetti
       mode,
       repo: typeof item.repo === 'string' ? item.repo.trim() : '',
       branch: typeof item.branch === 'string' ? item.branch.trim() : '',
-      sync: item.sync === true,
       allowed,
     }))
   }
@@ -988,7 +1047,7 @@ function validateChats(value: unknown): { error: string | null; value: ChatSetti
  * 把面板提交的一批点路径改动写进配置对象。
  *
  * - 全部字段先校验，有任意一项不合法就整体拒绝（不会写一半）。
- * - `projects` / `feishu.chats` 走整段替换，并做去重、默认分支白名单等交叉校验。
+ * - `projects` / `feishu.chats` 走整段替换，并做项目名去重等交叉校验。
  * - 返回 changed 供调用方判断是否需要刷新策略 / 提示重启。
  */
 export function applyConfigPatch(config: AppConfig, patch: Record<string, unknown>): ConfigPatchResult {
@@ -996,9 +1055,22 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
   const accepted: { path: string; value: unknown }[] = []
 
   for (const [path, value] of Object.entries(patch)) {
+    // 按后端隔离的项目清单：backend.projects.<backendId>
+    const backendProjectPath = /^backend\.projects\.([^.]+)$/.exec(path)
+    if (backendProjectPath) {
+      const id = normalizeBackendId(backendProjectPath[1]!)
+      if (!WORKER_BACKEND_IDS.includes(id)) {
+        errors.push({ path, message: `未知 backend: ${backendProjectPath[1]}` })
+      } else {
+        const result = validateProjects(value, id)
+        if (result.error) errors.push({ path, message: result.error })
+        else accepted.push({ path, value: result.value })
+      }
+      continue
+    }
     if ((LIST_PATHS as readonly string[]).includes(path)) {
       if (path === 'projects') {
-        const result = validateProjects(value)
+        const result = validateProjects(value, ORCA_BACKEND_ID)
         if (result.error) errors.push({ path, message: result.error })
         else accepted.push({ path, value: result.value })
       } else {
@@ -1017,9 +1089,11 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
       errors.push({ path, message: '不是可编辑的配置项' })
       continue
     }
-    const message = validator.check(value)
+    // 旧值 claude-cli 在写入前归一成 claude-code；未知值仍由校验器拒绝。
+    const next = path === 'backend.default' && typeof value === 'string' ? normalizeBackendId(value) : value
+    const message = validator.check(next)
     if (message) errors.push({ path, message })
-    else accepted.push({ path, value })
+    else accepted.push({ path, value: next })
   }
 
   if (errors.length > 0) return { errors, changed: [] }
@@ -1030,10 +1104,32 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
     if (JSON.stringify(before) === JSON.stringify(value)) continue
     if (path === 'projects') config.projects = value as ProjectConfig[]
     else if (path === 'feishu.chats') config.feishu.chats = value as ChatSettings[]
-    else setPath(config as unknown as Record<string, unknown>, path, value)
+    else if (path.startsWith('backend.projects.')) {
+      setProjectsForBackend(config, path.slice('backend.projects.'.length), value as ProjectConfig[])
+    } else setPath(config as unknown as Record<string, unknown>, path, value)
     changed.push(path)
   }
+
+  // 群绑定只跟随项目清单：分支一律取项目的默认分支，不允许在群里单独自定义。
+  const touchesBindings = 'feishu.chats' in patch
+    || 'backend.default' in patch
+    || Object.keys(patch).some(path => path === 'projects' || path.startsWith('backend.projects.'))
+  if (touchesBindings) alignChatBranches(config)
+
   return { errors: [], changed }
+}
+
+/** 把群绑定的分支对齐到对应项目的默认分支；未绑定项目时清空分支。 */
+function alignChatBranches(config: AppConfig): void {
+  const projects = projectsForBackend(config)
+  for (const chat of config.feishu.chats) {
+    if (!chat.repo) {
+      chat.branch = ''
+      continue
+    }
+    const project = projects.find(item => item.name === chat.repo || item.repo === chat.repo)
+    if (project) chat.branch = project.defaultBranch
+  }
 }
 
 /** 除了策略以外，配置都在服务启动时读入，保存后需要重启 `ra start` 才生效。 */
@@ -1067,15 +1163,19 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
   }
   const bool = (): boolean | null => (value === 'true' ? true : value === 'false' ? false : null)
 
-  // 多项目：`ra config set project.<name> <repo>[@<defaultBranch>]`
+  // 多项目：`ra config set project.<name> <repo>[@<defaultBranch>]`，写入当前默认后端的清单
   if (path.startsWith('project.')) {
     const name = path.slice('project.'.length).trim()
     const [repo, defaultBranch] = splitBranch(value)
     if (!name || !repo) return false
-    const project: ProjectConfig = { name, repo, branches: [], defaultBranch }
-    const index = config.projects.findIndex(item => item.name === name)
-    if (index >= 0) config.projects[index] = { ...config.projects[index]!, ...project, branches: config.projects[index]!.branches }
-    else config.projects.push(project)
+    const backendId = config.backend.default
+    if (normalizeBackendId(backendId) !== ORCA_BACKEND_ID && !isLocalRepoPath(repo)) return false
+    const project: ProjectConfig = { name, repo, defaultBranch }
+    const projects = projectsForBackend(config, backendId)
+    const index = projects.findIndex(item => item.name === name)
+    if (index >= 0) projects[index] = { ...projects[index]!, ...project }
+    else projects.push(project)
+    setProjectsForBackend(config, backendId, projects)
     return true
   }
 
@@ -1086,7 +1186,9 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
     if (!chat || !repo) return false
     const entry = ensureChat(config, chat)
     entry.repo = repo
-    entry.branch = branch
+    // 绑定到项目清单里的项目时，分支跟随项目的默认分支；手写仓库才使用显式分支。
+    const project = projectsForBackend(config).find(item => item.name === repo || item.repo === repo)
+    entry.branch = project ? project.defaultBranch : branch
     return true
   }
 
@@ -1106,15 +1208,6 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
     return true
   }
 
-  // 群历史补拉：`ra config set chatSync.<chatId> true|false`
-  if (path.startsWith('chatSync.')) {
-    const chat = path.slice('chatSync.'.length).trim()
-    const v = bool()
-    if (!chat || v === null) return false
-    ensureChat(config, chat).sync = v
-    return true
-  }
-
   switch (path) {
     case 'feishu.larkHome':
       config.feishu.larkHome = value
@@ -1126,7 +1219,7 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
       config.feishu.reaction = value
       return true
     case 'feishu.chats': {
-      // 逗号分隔的 chat_id 列表；已有条目的 mode/绑定/sync 保留，新条目默认 all
+      // 逗号分隔的 chat_id 列表；已有条目的 mode/绑定保留，新条目默认 all
       const existing = new Map(config.feishu.chats.map(chat => [chat.chat, chat]))
       config.feishu.chats = list().map(chat => existing.get(chat) ?? chatEntry(chat))
       return true
@@ -1252,10 +1345,12 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
       config.server.port = v
       return true
     }
-    case 'backend.default':
-      if (!value.trim()) return false
-      config.backend.default = value.trim()
+    case 'backend.default': {
+      const id = normalizeBackendId(value)
+      if (!WORKER_BACKEND_IDS.includes(id)) return false
+      config.backend.default = id
       return true
+    }
     case 'llm.baseUrl':
     case 'llm.apiKey':
     case 'llm.model': {

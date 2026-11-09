@@ -7,7 +7,7 @@ import type { AddressInfo } from 'node:net'
 import { Store } from '../../src/store/db.js'
 import { Engine } from '../../src/core/engine.js'
 import { createApiServer, type ApiServer } from '../../src/router/api.js'
-import { defaultConfig, loadConfig, policyOf, type AppConfig, chatEntry } from '../../src/config.js'
+import { defaultConfig, loadConfig, policyOf, projectsForBackend, type AppConfig, chatEntry } from '../../src/config.js'
 
 function call(server: ApiServer, method: string, path: string, body?: unknown): Promise<{ status: number; json: any }> {
   return new Promise((resolve, reject) => {
@@ -89,6 +89,20 @@ describe('HTTP 管理 API', () => {
     expect(res.json.ticket.id).toBe(ticketId)
     expect(res.json.mandate.ticketId).toBe(ticketId)
     expect(res.json.assignment.id).toBe(assignmentId)
+  })
+
+  it('POST /api/tickets/:id/assignment 手工重绑并恢复话题订阅', async () => {
+    const ticket = store.getTicket(ticketId)!
+    engine.unsubscribe(ticket.threadId, ticketId)
+    engine.setAttention(ticketId, '执行会话已不存在')
+    expect(store.getTicket(ticketId)?.stage).toBe('person')
+
+    const res = await call(server, 'POST', `/api/tickets/${ticketId}/assignment`, { handle: 'h2', workdir: '/tmp/wt2' })
+    expect(res.status).toBe(201)
+    expect(store.latestAssignment(ticketId)?.handle).toBe('h2')
+    expect(store.getTicket(ticketId)?.stage).toBe('assigned')
+    expect(store.getAttention(ticketId)).toBeFalsy()
+    expect(store.listSubscriptions(ticket.threadId).some(sub => sub.ticketId === ticketId)).toBe(true)
   })
 
   it('POST /api/tickets/:id/input 投递 follow-up', async () => {
@@ -186,7 +200,7 @@ describe('HTTP 管理 API', () => {
     config.home = mkdtempSync(join(tmpdir(), 'ra-api-config-'))
     const chats = [
       chatEntry('oc_a', { mode: 'mention', repo: 'router-agent', branch: 'main' }),
-      chatEntry('oc_b', { sync: true, allowed: ['ou_bob'] }),
+      chatEntry('oc_b', { allowed: ['ou_bob'] }),
     ]
     const ok = await call(server, 'PUT', '/api/config', { patch: { 'feishu.chats': chats } })
     expect(ok.status).toBe(200)
@@ -212,11 +226,64 @@ describe('HTTP 管理 API', () => {
     expect(res.json.chats).toEqual([chatEntry('oc_dev')])
   })
 
+  it('PUT /api/config 按后端分别保存两套项目清单', async () => {
+    config.home = mkdtempSync(join(tmpdir(), 'ra-api-config-'))
+    const res = await call(server, 'PUT', '/api/config', {
+      patch: {
+        'backend.default': 'claude-code',
+        'projects': [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }],
+        'backend.projects.claude-code': [{ name: 'router-agent', repo: '/Users/me/router-agent', defaultBranch: 'main' }],
+      },
+    })
+    expect(res.status).toBe(200)
+    expect(res.json.config.backend.projects['claude-code']).toHaveLength(1)
+    const saved = loadConfig(config.home!)
+    expect(saved.backend.default).toBe('claude-code')
+    expect(saved.projects[0]?.repo).toBe('name:dsh/router-agent')
+    expect(projectsForBackend(saved, 'claude-code')[0]?.repo).toBe('/Users/me/router-agent')
+  })
+
+  it('PUT /api/config 拒绝 claude-code 清单里的 Orca 选择器', async () => {
+    config.home = mkdtempSync(join(tmpdir(), 'ra-api-config-'))
+    const res = await call(server, 'PUT', '/api/config', {
+      patch: {
+        'backend.projects.claude-code': [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }],
+      },
+    })
+    expect(res.status).toBe(400)
+    expect(res.json.errors[0].path).toBe('backend.projects.claude-code')
+  })
+
   it('GET /api/status 汇总活跃工单与后端状态', async () => {
     const res = await call(server, 'GET', '/api/status')
     expect(res.json.stage).toBe('running')
     expect(res.json.tickets.open).toBe(1)
     expect(res.json.backend).toBe('orca')
+  })
+
+  it('GET /api/status 带 pid 与启动时间，供面板判断是否完成重启', async () => {
+    const res = await call(server, 'GET', '/api/status')
+    expect(res.json.pid).toBe(process.pid)
+    expect(typeof res.json.startedAt).toBe('string')
+  })
+
+  it('POST /api/restart 未注入回调时返回 501', async () => {
+    const res = await call(server, 'POST', '/api/restart')
+    expect(res.status).toBe(501)
+  })
+
+  it('POST /api/restart 先返回 202，再触发重启回调', async () => {
+    let restarted = 0
+    const extra = await createApiServer({ engine, store, config, onRestart: () => { restarted += 1 } })
+    try {
+      const res = await call(extra, 'POST', '/api/restart')
+      expect(res.status).toBe(202)
+      expect(res.json.restarting).toBe(true)
+      await new Promise(resolve => setTimeout(resolve, 30))
+      expect(restarted).toBe(1)
+    } finally {
+      await extra.close()
+    }
   })
 
   it('POST /api/reports 把 ra report 的载荷转成 WorkerStateFile', async () => {

@@ -1,6 +1,7 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { chatEntry, loadConfig, projectNameOf, writeConfig, type AppConfig, type ProjectConfig } from '../config.js'
+import { chatEntry, loadConfig, projectNameOf, projectsForBackend, setProjectsForBackend, writeConfig, type AppConfig, type ProjectConfig } from '../config.js'
+import { CLAUDE_CODE_BACKEND_ID, normalizeBackendId } from '../worker/backends/catalog.js'
 import type { CommandRunner } from '../infra/process.js'
 import {
   larkEnv,
@@ -123,11 +124,11 @@ async function pickRepo(
   prompts: Prompter,
   out: (line: string) => void,
 ): Promise<void> {
-  const existingRepo = config.projects[0]?.repo ?? ''
-  // Claude CLI 用 git worktree，需要本地仓库绝对路径，不走 Orca 的 displayName。
-  if (config.backend.default === 'claude-cli') {
+  const existingRepo = projectsForBackend(config)[0]?.repo ?? ''
+  // Claude Code 用 git worktree，需要本地仓库绝对路径，不走 Orca 的 displayName。
+  if (normalizeBackendId(config.backend.default) === CLAUDE_CODE_BACKEND_ID) {
     const repo = await prompts.input({
-      message: '本地仓库绝对路径（Claude CLI 用，例如 /Users/me/project）',
+      message: '本地仓库绝对路径（Claude Code 用，例如 /Users/me/project）',
       default: existingRepo,
     })
     await registerProject(config, repo, prompts, out)
@@ -167,7 +168,8 @@ async function pickRepo(
 async function registerProject(config: AppConfig, repo: string, prompts: Prompter, out: (line: string) => void): Promise<void> {
   if (!repo) return
   const name = projectNameOf(repo)
-  const existing = config.projects.find(project => project.name === name)
+  const projects = projectsForBackend(config)
+  const existing = projects.find(project => project.name === name)
   const defaultBranch = await prompts.input({
     message: `项目「${name}」的默认起始分支（工单没指定时使用；留空则每次开工前问你）`,
     default: existing?.defaultBranch || '',
@@ -175,25 +177,26 @@ async function registerProject(config: AppConfig, repo: string, prompts: Prompte
   const project: ProjectConfig = {
     name,
     repo,
-    branches: existing?.branches ?? [],
     defaultBranch: defaultBranch.trim(),
   }
-  const index = config.projects.findIndex(item => item.name === name)
-  if (index >= 0) config.projects[index] = project
-  else config.projects.push(project)
-  out(`  项目已登记：${project.name}（默认分支 ${project.defaultBranch || '未设置'}）`)
+  const index = projects.findIndex(item => item.name === name)
+  if (index >= 0) projects[index] = project
+  else projects.push(project)
+  setProjectsForBackend(config, config.backend.default, projects)
+  out(`  项目已登记：${project.name}（默认分支 ${project.defaultBranch || '未设置'}，后端 ${config.backend.default}）`)
 }
 
 /** 群级绑定：选定群固定用某个项目 / 分支，Router 之后不再追问。 */
 async function bindChats(config: AppConfig, prompts: Prompter, out: (line: string) => void): Promise<void> {
-  if (config.projects.length === 0) return
+  const projects = projectsForBackend(config)
+  if (projects.length === 0) return
   const unbound = config.feishu.chats.filter(chat => !chat.repo)
   if (unbound.length === 0) return
   out('')
   const choice = await prompts.select<string>({
     message: '要给监控群绑定固定的项目 / 分支吗？（绑定后 Router 开工不再追问）',
     choices: [
-      ...config.projects.map(project => ({
+      ...projects.map(project => ({
         name: `${project.name}${project.defaultBranch ? `  @ ${project.defaultBranch}` : ''}`,
         value: project.name,
       })),
@@ -202,18 +205,17 @@ async function bindChats(config: AppConfig, prompts: Prompter, out: (line: strin
     default: '',
   })
   if (!choice) return
-  const project = config.projects.find(item => item.name === choice)
+  const project = projects.find(item => item.name === choice)
   if (!project) return
-  const branch = await prompts.input({ message: `群绑定的起始分支（项目 ${project.name}）`, default: project.defaultBranch })
-  if (!branch.trim()) {
-    out('  分支为空，跳过群绑定')
-    return
+  if (!project.defaultBranch) {
+    out(`  项目「${project.name}」没有默认分支；群绑定后开工时仍会追问分支`)
   }
   for (const chat of unbound) {
     chat.repo = project.name
-    chat.branch = branch.trim()
+    // 群绑定不单独设置分支，永远跟随项目清单的默认分支。
+    chat.branch = project.defaultBranch
   }
-  out(`  已绑定 ${unbound.length} 个群 → ${project.name} @ ${branch.trim()}`)
+  out(`  已绑定 ${unbound.length} 个群 → ${project.name}${project.defaultBranch ? ` @ ${project.defaultBranch}` : '（分支待定）'}`)
 }
 
 async function setupDedicatedApp(
@@ -400,10 +402,11 @@ function unique(values: string[]): string[] {
 }
 
 function summarize(config: AppConfig): string {
-  const projects = config.projects.map(project => `${project.name}${project.defaultBranch ? ` @ ${project.defaultBranch}` : ''}`)
+  const projects = projectsForBackend(config).map(project => `${project.name}${project.defaultBranch ? ` @ ${project.defaultBranch}` : ''}`)
   const chats = config.feishu.chats.map(chat => `${chat.chat}:${chat.mode}${chat.repo ? `→${chat.repo}@${chat.branch || '?'}` : ''}`)
   return [
     '当前配置：',
+    `  后端: ${config.backend.default}`,
     `  项目: ${projects.join('，') || '(未设置)'}`,
     `  监控群: ${chats.join('，') || '(未设置)'}`,
     `  机器人来源: ${config.feishu.larkHome ? config.feishu.larkHome : '当前 lark-cli profile'}`,
@@ -415,7 +418,7 @@ function summarize(config: AppConfig): string {
 
 function missingRequired(config: AppConfig): string[] {
   const missing: string[] = []
-  if (config.projects.length === 0) missing.push('projects')
+  if (projectsForBackend(config).length === 0) missing.push('projects')
   if (config.feishu.chats.length === 0) missing.push('feishu.chats')
   if (config.feishu.allowed.length === 0) missing.push('feishu.allowed')
   if (config.feishu.botOpenIds.length === 0) missing.push('feishu.botOpenIds')

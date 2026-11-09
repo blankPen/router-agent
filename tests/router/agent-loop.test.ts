@@ -442,7 +442,7 @@ describe('Router 常驻 Agent Loop', () => {
 })
 describe('多项目 / 多分支派工', () => {
   const dispatch: DispatchSettings = {
-    projects: [{ name: 'router-agent', repo: 'name:dsh/router-agent', branches: [], defaultBranch: '' }],
+    projects: [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: '' }],
     bindings: [],
   }
 
@@ -453,7 +453,7 @@ describe('多项目 / 多分支派工', () => {
 
   it('缺项目与分支时不开单，先追问并把请求记成草稿', async () => {
     const ambiguous: DispatchSettings = {
-      projects: [dispatch.projects[0]!, { name: 'super-agent', repo: 'name:dsh/super-agent', branches: [], defaultBranch: '' }],
+      projects: [dispatch.projects[0]!, { name: 'super-agent', repo: 'name:dsh/super-agent', defaultBranch: '' }],
       bindings: [],
     }
     const { engine, loop, store } = setup([decide({}), SAY('要改哪个项目、从哪个分支开始？')], ambiguous)
@@ -531,29 +531,23 @@ describe('多项目 / 多分支派工', () => {
     expect(payload.dispatch).toBeUndefined()
   })
 
-  it('用户给的分支不在白名单时，不建单并带着拒绝原因追问', async () => {
-    const guarded: DispatchSettings = { projects: [{ ...dispatch.projects[0]!, branches: ['main', 'release'] }], bindings: [] }
-    const { engine, loop, store } = setup([decide({ branch: 'feature/x' }), SAY('只支持 main 或 release，从哪个开始？')], guarded)
+  it('用户指定的分支不再做白名单校验，直接开单', async () => {
+    const { engine, loop, store } = setup([decide({ branch: 'feature/x' })], dispatch)
     engine.ingest(trigger())
 
     const result = await loop.tick()
 
-    expect(result.accepted).toHaveLength(0)
-    expect(store.listTickets()).toHaveLength(0)
-    const draft = store.getDispatchDraft('oc_dev', 'ou_alice')!
-    expect(draft.branch).toBe('')
-    const decision = store.getDecision(store.listTriggers()[0]!.decisionId!)
-    expect(decision?.reason).toBe('clarify:missing-branch')
+    expect(result.accepted).toHaveLength(1)
+    expect(store.listTickets()[0]?.branch).toBe('feature/x')
   })
 
   it('模型不可用时，派工追问走确定性兜底话术', () => {
-    const projects = [{ name: 'router-agent', branches: ['main', 'release'] }, { name: 'super-agent', branches: [] }]
+    const projects = [{ name: 'router-agent' }, { name: 'super-agent' }]
     expect(clarifyFallback({ missing: ['repo', 'branch'], repo: '', branch: '', task: 'x' }, projects)).toBe(
       '确认一下再开工：要改哪个项目（router-agent、super-agent），从哪个分支开始？',
     )
     expect(clarifyFallback({ missing: ['branch'], repo: 'r', branch: '', task: 'x' }, projects)).toContain('从哪个分支开始')
     expect(clarifyFallback({ missing: ['repo'], repo: '', branch: 'main', rejectedRepo: 'nope', task: 'x' }, projects)).toContain('没有找到项目「nope」')
-    expect(clarifyFallback({ missing: ['branch'], repo: 'r', branch: '', rejectedBranch: 'dev', task: 'x' }, projects)).toContain('main、release')
   })
 
   it('JSON 兜底路径同样受派工校验：缺分支不建单', async () => {
@@ -571,7 +565,7 @@ describe('多项目 / 多分支派工', () => {
 
 describe('群级白名单', () => {
   it('群白名单外的人 @bot：直接忽略，不调模型也不回复', async () => {
-    const dispatch: DispatchSettings = { projects: [{ name: 'router-agent', repo: 'name:dsh/router-agent', branches: [], defaultBranch: 'main' }], bindings: [] }
+    const dispatch: DispatchSettings = { projects: [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }], bindings: [] }
     const { engine, loop, llm, store } = setup([], dispatch)
     engine.updatePolicy({ ...policy, allowedByChat: { oc_dev: ['ou_other'] } })
     engine.ingest(trigger({ actorId: 'ou_alice' }))
@@ -654,6 +648,32 @@ describe('已关闭工单话题', () => {
     expect(store.getMandate(reopened.mandateId)?.scope).toContain('3081')
     const outbox = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)
     expect(outbox.some(item => item.text.includes(`基于原工单 ${closedId}`))).toBe(true)
+  })
+
+  it('切换后端后重新开工，会把旧后端的项目映射到当前清单', async () => {
+    const claudeDispatch: DispatchSettings = {
+      projects: [{ name: 'router-agent', repo: '/Users/me/router-agent', defaultBranch: 'main' }],
+      bindings: [],
+    }
+    const { engine, loop } = setup([], claudeDispatch)
+    engine.ingest(trigger())
+    const outcome = engine.decide({
+      triggerId: 't1',
+      decision: 'accept',
+      strength: 'explicit',
+      reason: 'test',
+      title: '旧工单',
+      scope: '旧范围',
+      repo: 'name:dsh/router-agent',
+      branch: 'main',
+    })
+    engine.closeTicket(outcome.ticket!.id, 'idle:test')
+
+    engine.ingest(trigger({ id: 't2', externalId: 'om_2', text: '重新开工' }))
+    const result = await loop.tick()
+
+    expect(result.accepted).toHaveLength(1)
+    expect(result.accepted[0]).toMatchObject({ repo: '/Users/me/router-agent', branch: 'main' })
   })
 })
 

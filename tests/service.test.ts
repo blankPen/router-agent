@@ -176,7 +176,7 @@ describe('RouterService 编排', () => {
     logs = []
     store = new Store(':memory:')
     config = { ...defaultConfig(), home }
-    config.projects = [{ name: 'acme/web', repo: 'acme/web', branches: [], defaultBranch: 'main' }]
+    config.projects = [{ name: 'acme/web', repo: 'acme/web', defaultBranch: 'main' }]
     config.policy = { acceptMode: 'auto', maxWorkers: 2, admission: { ...DEFAULT_ADMISSION } }
     config.feishu = { ...config.feishu, chats: [chatEntry('oc_dev')], allowed: ['ou_alice'] }
     let n = 0
@@ -471,7 +471,7 @@ describe('RouterService 编排', () => {
     expect(store.getTicket(ticket.id)?.stage).toBe('person')
 
     const outbox = store.claimOutbox('2026-11-06T10:10:00.000Z', 20)
-    expect(outbox.filter(item => item.text.includes('意外删除'))).toHaveLength(1)
+    expect(outbox.filter(item => item.text.includes('执行会话已不存在'))).toHaveLength(1)
   })
 
   it('worker 会话被删后，追加输入不再每秒重试，只通知一次', async () => {
@@ -487,13 +487,13 @@ describe('RouterService 编排', () => {
     expect(store.getTicket(ticket.id)?.stage).toBe('person')
     expect(store.latestAssignment(ticket.id)?.status).toBe('ended')
     const outbox = store.claimOutbox('2026-11-06T10:10:00.000Z', 20)
-    expect(outbox.filter(item => item.text.includes('意外删除'))).toHaveLength(1)
+    expect(outbox.filter(item => item.text.includes('执行会话已不存在'))).toHaveLength(1)
 
     // 下一轮不再尝试投递，也不会重复通知
     const before = backend.delivered.length
     await service.runOnce()
     expect(backend.delivered.length).toBe(before)
-    expect(store.claimOutbox('2026-11-06T10:11:00.000Z', 20).filter(item => item.text.includes('意外删除'))).toHaveLength(0)
+    expect(store.claimOutbox('2026-11-06T10:11:00.000Z', 20).filter(item => item.text.includes('执行会话已不存在'))).toHaveLength(0)
   })
 
   it('停止工单会触发 worker 停止', async () => {

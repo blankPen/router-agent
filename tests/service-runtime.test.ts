@@ -144,7 +144,7 @@ describe('运行时机制', () => {
     const home = mkdtempSync(join(tmpdir(), 'ra-rt-'))
     store = new Store(':memory:')
     config = { ...defaultConfig(), home }
-    config.projects = [{ name: 'acme/web', repo: 'acme/web', branches: [], defaultBranch: 'main' }]
+    config.projects = [{ name: 'acme/web', repo: 'acme/web', defaultBranch: 'main' }]
     config.policy = { acceptMode: 'auto', maxWorkers: 4, admission: { ...DEFAULT_ADMISSION } }
     config.feishu = { ...config.feishu, chats: [chatEntry('oc_dev')], allowed: ['ou_alice'] }
     let n = 0
@@ -465,22 +465,4 @@ describe('运行时机制', () => {
     expect(store.getTicket(ticketId)?.prNumber).toBe(0)
   })
 
-  it('启动时执行历史补拉，补回来的消息进入领域', async () => {
-    service = new RouterService({
-      config, store, engine, backend,
-      decisionEngine: acceptEngine(),
-      prTracker: new NullPrTracker(),
-      clock: { now: () => new Date(now).toISOString() },
-      logger: { info: () => {}, warn: () => {}, error: () => {} },
-      backfill: async () => [{
-        id: 'feishu_om_backfill', source: 'feishu', externalId: 'om_backfill',
-        threadId: 'feishu:oc_dev:om_backfill', chatId: 'oc_dev', chatName: '',
-        actorId: 'ou_alice', actorName: 'Alice', isBot: false, text: '历史消息：改一下超时',
-        addressed: 'none', receivedAt: new Date(now - 60_000).toISOString(), disposition: 'pending',
-      }],
-    } as never)
-    await service.start()
-    service.stop()
-    expect(store.listTriggers().map(t => t.externalId)).toContain('om_backfill')
-  })
 })

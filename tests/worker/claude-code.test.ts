@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { CommandResult, CommandRunner } from '../../src/infra/process.js'
-import { ClaudeCliBackend, allowedToolsFrom } from '../../src/worker/backends/claude-cli/index.js'
+import { ClaudeCodeBackend, allowedToolsFrom } from '../../src/worker/backends/claude-code/index.js'
 import { WorkerBackendError, type WorkerContext, type WorkerRef } from '../../src/worker/port.js'
 import { claudeProjectSlug } from '../../src/worker/orca/session.js'
 import { parseGitHubRepo } from '../../src/worker/workspaces/git-worktree.js'
@@ -46,7 +46,7 @@ function context(home: string): WorkerContext {
       prNumber: 0, prUrl: '', prState: 'none', createdAt: '2026-11-08T00:00:00.000Z', updatedAt: '2026-11-08T00:00:00.000Z',
     },
     assignment: {
-      id: 'as-1', ticketId: 'tk-1', backendId: 'claude-cli', handle: '', workdir: '',
+      id: 'as-1', ticketId: 'tk-1', backendId: 'claude-code', handle: '', workdir: '',
       status: 'pending', startedAt: '2026-11-08T00:00:00.000Z',
     },
     workdir: join(home, 'worktrees', 'ra-tk-1-demo'),
@@ -60,7 +60,7 @@ function ref(home: string, over: Partial<WorkerRef> = {}): WorkerRef {
   return { handle: 'e46aaf7e', ticketId: 'tk-1', workdir: join(home, 'worktrees', 'ra-tk-1-demo'), ...over }
 }
 
-describe('ClaudeCliBackend', () => {
+describe('ClaudeCodeBackend', () => {
   it('claudeProjectSlug 把非字母数字都替换成短横线', () => {
     expect(claudeProjectSlug('/Users/admin/.trove')).toBe('-Users-admin--trove')
     expect(claudeProjectSlug('/tmp/中文 repo_1')).toBe('-tmp----repo-1')
@@ -91,7 +91,7 @@ describe('ClaudeCliBackend', () => {
       if (argv[0] === 'agents') return { code: 0, stdout: JSON.stringify(agents), stderr: '' }
       return { code: 0, stdout: '', stderr: '' }
     })
-    const backend = new ClaudeCliBackend({ claude, git, home, workersDir: join(home, 'workers') })
+    const backend = new ClaudeCodeBackend({ claude, git, home, workersDir: join(home, 'workers') })
     const started = await backend.start(context(home))
     expect(started.handle).toBe('e46aaf7e')
     expect(started.sessionId).toBe('11111111-1111-1111-1111-111111111111')
@@ -99,6 +99,8 @@ describe('ClaudeCliBackend', () => {
     const bg = claude.calls.find(call => call.argv[0] === '--bg')
     expect(bg?.argv).toContain('--name')
     expect(bg?.argv).toContain('--add-dir')
+    expect(bg?.argv).toContain('--dangerously-skip-permissions')
+    expect(bg?.argv).not.toContain('--permission-mode')
     expect(bg?.argv).toContain('--')
     expect(bg?.argv.at(-1)).toContain('brief.md')
     expect(bg?.argv).not.toContain('--resume')
@@ -112,7 +114,7 @@ describe('ClaudeCliBackend', () => {
       if (argv[0] === 'agents') return { code: 0, stdout: JSON.stringify(agents), stderr: '' }
       return { code: 0, stdout: '', stderr: '' }
     })
-    const backend = new ClaudeCliBackend({ claude, git, home, workersDir: join(home, 'workers') })
+    const backend = new ClaudeCodeBackend({ claude, git, home, workersDir: join(home, 'workers') })
     const receipt = await backend.deliver(ref(home, { sessionId: 's1' }), [{ id: 'in_1', kind: 'followup', text: '补测试' }])
     expect(receipt.status).toBe('queued')
     expect(claude.calls.some(call => call.argv.includes('--resume'))).toBe(false)
@@ -127,11 +129,11 @@ describe('ClaudeCliBackend', () => {
       if (argv[0] === '--bg') return { code: 0, stdout: 'backgrounded · e46aaf7e · ra-tk-1-demo\n', stderr: '' }
       return { code: 0, stdout: '', stderr: '' }
     })
-    const backend = new ClaudeCliBackend({ claude, git, home, workersDir: join(home, 'workers') })
+    const backend = new ClaudeCodeBackend({ claude, git, home, workersDir: join(home, 'workers') })
     // 先写 meta，模拟 start 时没来得及捕获 sessionId
     mkdirSync(join(home, 'workers', 'tk-1'), { recursive: true })
     writeFileSync(join(home, 'workers', 'tk-1', 'meta.json'), JSON.stringify({
-      ticketId: 'tk-1', assignmentId: 'as-1', backend: 'claude-cli', handle: 'e46aaf7e',
+      ticketId: 'tk-1', assignmentId: 'as-1', backend: 'claude-code', handle: 'e46aaf7e',
       workdir: join(home, 'worktrees', 'ra-tk-1-demo'), repo: '/tmp/repo', branch: 'main',
       workBranch: 'ra/tk-1-demo', status: 'running',
     }))
@@ -152,10 +154,10 @@ describe('ClaudeCliBackend', () => {
       if (argv[0] === '--bg') return { code: 0, stdout: 'note: started a copy as 95c4c910\n', stderr: '' }
       return { code: 0, stdout: '', stderr: '' }
     })
-    const backend = new ClaudeCliBackend({ claude, git, home, workersDir: join(home, 'workers') })
+    const backend = new ClaudeCodeBackend({ claude, git, home, workersDir: join(home, 'workers') })
     mkdirSync(join(home, 'workers', 'tk-1'), { recursive: true })
     writeFileSync(join(home, 'workers', 'tk-1', 'meta.json'), JSON.stringify({
-      ticketId: 'tk-1', assignmentId: 'as-1', backend: 'claude-cli', handle: 'e46aaf7e',
+      ticketId: 'tk-1', assignmentId: 'as-1', backend: 'claude-code', handle: 'e46aaf7e',
       workdir: join(home, 'worktrees', 'ra-tk-1-demo'), repo: '/tmp/repo', branch: 'main',
       workBranch: 'ra/tk-1-demo', sessionId: 's1', status: 'running',
     }))
@@ -168,7 +170,7 @@ describe('ClaudeCliBackend', () => {
       if (argv[0] === 'agents') return { code: 1, stdout: '', stderr: 'temporary failure' }
       return { code: 0, stdout: '', stderr: '' }
     })
-    const backend = new ClaudeCliBackend({ claude, git: gitRunner(), home, workersDir: join(home, 'workers') })
+    const backend = new ClaudeCodeBackend({ claude, git: gitRunner(), home, workersDir: join(home, 'workers') })
     const receipt = await backend.deliver(ref(home, { sessionId: 's1' }), [{ id: 'in_q', kind: 'followup', text: '继续' }])
     expect(receipt.status).toBe('queued')
     expect(claude.calls.some(call => call.argv.includes('--resume'))).toBe(false)
@@ -180,7 +182,7 @@ describe('ClaudeCliBackend', () => {
       if (argv[0] === 'agents') return { code: 0, stdout: '[]', stderr: '' }
       return { code: 0, stdout: '', stderr: '' }
     })
-    const backend = new ClaudeCliBackend({ claude, git: gitRunner(), home, workersDir: join(home, 'workers') })
+    const backend = new ClaudeCodeBackend({ claude, git: gitRunner(), home, workersDir: join(home, 'workers') })
     const receipt = await backend.deliver(ref(home, { sessionId: 's1' }), [{ id: 'in_l', kind: 'followup', text: '继续' }])
     expect(receipt.status).toBe('rejected')
     expect(claude.calls.some(call => call.argv.includes('--resume'))).toBe(false)
@@ -189,7 +191,7 @@ describe('ClaudeCliBackend', () => {
   it('stop 对不存在的会话幂等', async () => {
     const home = mkdtempSync(join(tmpdir(), 'ra-claude-'))
     const claude = scripted(() => ({ code: 1, stdout: "No job matching 'gone'. Run `claude agents` to list running sessions.", stderr: '' }))
-    const backend = new ClaudeCliBackend({ claude, git: gitRunner(), home, workersDir: join(home, 'workers') })
+    const backend = new ClaudeCodeBackend({ claude, git: gitRunner(), home, workersDir: join(home, 'workers') })
     await expect(backend.stop(ref(home, { handle: 'gone' }), 'test')).resolves.toBeUndefined()
   })
 
@@ -201,7 +203,7 @@ describe('ClaudeCliBackend', () => {
       if (argv[0] === 'agents') return { code: 0, stdout: JSON.stringify(agents), stderr: '' }
       return { code: 0, stdout: '', stderr: '' }
     })
-    const backend = new ClaudeCliBackend({ claude, git, home, workersDir: join(home, 'workers') })
+    const backend = new ClaudeCodeBackend({ claude, git, home, workersDir: join(home, 'workers') })
     agents = [{ id: 'e46aaf7e', kind: 'background', state: 'working', status: 'busy', sessionId: 's1', startedAt: Date.now() }]
     expect((await backend.status(ref(home)))?.phase).toBe('running')
     agents = [{ id: 'e46aaf7e', kind: 'background', state: 'blocked', status: 'waiting', waitingFor: 'permission prompt', sessionId: 's1' }]
@@ -224,7 +226,7 @@ describe('ClaudeCliBackend', () => {
       message: { content: [{ type: 'text', text: '正在补测试' }] },
     })}\n`)
     const claude = scripted(() => ({ code: 0, stdout: '[]', stderr: '' }))
-    const backend = new ClaudeCliBackend({ claude, git: gitRunner(), home, workersDir: join(home, 'workers'), claudeProjectsDir: projects })
+    const backend = new ClaudeCodeBackend({ claude, git: gitRunner(), home, workersDir: join(home, 'workers'), claudeProjectsDir: projects })
     const snapshot = await backend.activity({ ref: ref(home, { sessionId }) })
     expect(snapshot?.events[0]?.text).toBe('正在补测试')
   })

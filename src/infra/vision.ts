@@ -85,65 +85,106 @@ export function createVisionTranscriber(model: VisionModelConfig, opts: VisionOp
   const prompt = opts.prompt?.trim() || DEFAULT_VISION_PROMPT
   const url = chatCompletionsUrl(model.baseUrl)
   let unsupported: string | null = null
+  // 一旦确认这个模型会把预算耗在 reasoning 上，后续图片直接关闭推理，省掉一次白跑的请求。
+  let reasoningOff = false
+
+  /** 发一次请求；reasoningOff=true 时显式关闭推理模型的思考预算。 */
+  async function request(reasoningOff: boolean, image: ImageInput): Promise<unknown> {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    let response: Response
+    try {
+      response = await fetchImpl(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(model.apiKey ? { Authorization: `Bearer ${model.apiKey}` } : {}),
+        },
+        body: JSON.stringify({
+          model: model.model,
+          temperature: model.temperature ?? 0.1,
+          max_tokens: maxTokens,
+          // 推理模型的思考 token 也算在 max_tokens 里；图片转写不需要推理，重试时直接关掉。
+          ...(reasoningOff ? { reasoning_effort: 'none' } : {}),
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: prompt },
+                { type: 'image_url', image_url: { url: `data:${image.mimeType};base64,${image.data}` } },
+              ],
+            },
+          ],
+        }),
+        signal: controller.signal,
+      })
+    } catch (error) {
+      if (isAbortError(error)) throw new Error(`image:vision-timeout(${timeoutMs}ms)`)
+      throw new Error(`image:vision-request-failed: ${errorText(error)}`)
+    } finally {
+      clearTimeout(timer)
+    }
+
+    if (!response.ok) {
+      const detail = (await response.text().catch(() => '')).slice(0, 200)
+      // 404/415/422，或 400 且明确提到 image/vision，基本可判定为「这个模型/接口不接受图片」。
+      // 「图片太大」之类的 400 不熔断，换一张图仍可能成功。
+      const looksUnsupported = response.status === 404 || response.status === 415 || response.status === 422 ||
+        (response.status === 400 && /(not|doesn'?t|unsupported).{0,40}(support|image|vision)|modalit|multimodal/i.test(detail))
+      if (looksUnsupported) unsupported = `http-${response.status}${detail ? `: ${detail}` : ''}`
+      throw new Error(`image:vision-http-${response.status}${detail ? `: ${detail}` : ''}`)
+    }
+
+    try {
+      return await response.json()
+    } catch (error) {
+      throw new Error(`image:vision-invalid-json: ${errorText(error)}`)
+    }
+  }
 
   return {
     async transcribe(image: ImageInput): Promise<string> {
       if (unsupported) throw new Error(`image:vision-unsupported: ${unsupported}`)
 
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), timeoutMs)
-      let response: Response
-      try {
-        response = await fetchImpl(url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(model.apiKey ? { Authorization: `Bearer ${model.apiKey}` } : {}),
-          },
-          body: JSON.stringify({
-            model: model.model,
-            temperature: model.temperature ?? 0.1,
-            max_tokens: maxTokens,
-            messages: [
-              {
-                role: 'user',
-                content: [
-                  { type: 'text', text: prompt },
-                  { type: 'image_url', image_url: { url: `data:${image.mimeType};base64,${image.data}` } },
-                ],
-              },
-            ],
-          }),
-          signal: controller.signal,
-        })
-      } catch (error) {
-        if (isAbortError(error)) throw new Error(`image:vision-timeout(${timeoutMs}ms)`)
-        throw new Error(`image:vision-request-failed: ${errorText(error)}`)
-      } finally {
-        clearTimeout(timer)
+      let payload = await request(reasoningOff, image)
+      let text = parseChatCompletionText(payload)
+      // 推理模型的 reasoning_content 会把 max_tokens 吃光，content 为空或半截就截断。
+      // 转写不需要思考，发现这种情况时明确关闭推理重试一次。
+      if (!reasoningOff && reasoningUsedUp(payload, text)) {
+        try {
+          const retried = await request(true, image)
+          const retriedText = parseChatCompletionText(retried)
+          if (retriedText.length > text.length) {
+            payload = retried
+            text = retriedText
+            reasoningOff = true
+          }
+        } catch {
+          // 部分 OpenAI 兼容服务不认识 reasoning_effort；重试失败保留首次结果。
+        }
       }
-
-      if (!response.ok) {
-        const detail = (await response.text().catch(() => '')).slice(0, 200)
-        // 404/415/422，或 400 且明确提到 image/vision，基本可判定为「这个模型/接口不接受图片」。
-        // 「图片太大」之类的 400 不熔断，换一张图仍可能成功。
-        const looksUnsupported = response.status === 404 || response.status === 415 || response.status === 422 ||
-          (response.status === 400 && /(not|doesn'?t|unsupported).{0,40}(support|image|vision)|modalit|multimodal/i.test(detail))
-        if (looksUnsupported) unsupported = `http-${response.status}${detail ? `: ${detail}` : ''}`
-        throw new Error(`image:vision-http-${response.status}${detail ? `: ${detail}` : ''}`)
-      }
-
-      let payload: unknown
-      try {
-        payload = await response.json()
-      } catch (error) {
-        throw new Error(`image:vision-invalid-json: ${errorText(error)}`)
-      }
-      const text = parseChatCompletionText(payload)
-      if (!text) throw new Error('image:vision-empty')
+      if (!text) throw new Error(`image:vision-empty(${completionDetail(payload)})`)
       return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text
     },
   }
+}
+
+/** 推理 token 是否占满了预算：有 reasoning 消耗，且 content 为空或因为长度被截断。 */
+function reasoningUsedUp(payload: unknown, text: string): boolean {
+  const root = payload as Record<string, any> | null | undefined
+  const choice = root?.choices?.[0]
+  const finish = String(choice?.finish_reason ?? '')
+  const reasoning = Number(root?.usage?.completion_tokens_details?.reasoning_tokens ?? root?.usage?.reasoning_tokens ?? 0)
+  if (!Number.isFinite(reasoning) || reasoning <= 0) return false
+  return !text || finish === 'length'
+}
+
+/** 给空结果留一个可排查的细节：finish_reason 与 reasoning token 数。 */
+function completionDetail(payload: unknown): string {
+  const root = payload as Record<string, any> | null | undefined
+  const finish = String(root?.choices?.[0]?.finish_reason ?? 'unknown')
+  const reasoning = Number(root?.usage?.completion_tokens_details?.reasoning_tokens ?? root?.usage?.reasoning_tokens ?? 0)
+  return `finish=${finish}, reasoning=${Number.isFinite(reasoning) ? reasoning : 0}`
 }
 
 function isAbortError(error: unknown): boolean {

@@ -104,14 +104,14 @@ Router（AgentLoop + DecisionEngine(Pi) + HTTP API + Web）
 领域内核（TS 零依赖：Ticket / Mandate / Assignment / Stage / Policy）
         │ Assignment
         ▼
-WorkerBackend 端口 ── OrcaAdapter（默认）/ ClaudeCliAdapter ── 未来：Codex
+WorkerBackend 端口 ── OrcaAdapter（默认）/ ClaudeCodeBackend ── 未来：Codex
 ```
 
 一条消息会依次经过四步：
 
 1. **听**：常驻消费飞书群 / 私聊消息，按名单与 `@` 规则做确定性准入。
 2. **判**：未被直接指派的候选交给 Pi 研判（可批量），输出 `accept / stop / ignore / unavailable` 四类决定。
-3. **派**：接单后创建工单与授权（Mandate），先确认「项目 + 起始分支」，再按 `backend.default` 选择执行后端：Orca 用 `orca worktree create --repo ... --base-branch ...` 开 worktree + Claude Code 终端；Claude CLI 用 `git worktree` + `claude --bg` 后台会话。缺项目或分支时不开单，先在会话里追问（群配置里可固定项目和分支，免问答）。
+3. **派**：接单后创建工单与授权（Mandate），先确认「项目 + 起始分支」，再按 `backend.default` 选择执行后端：Orca 用 `orca worktree create --repo ... --base-branch ...` 开 worktree + Claude Code 终端；Claude Code 用 `git worktree` + `claude --bg` 后台会话。缺项目或分支时不开单，先在会话里追问（群配置里可固定项目和分支，免问答）。
 4. **跟**：Worker 用 `ra report` 上报（失败自动落盘 `state.json`），Router 刷新工单阶段；PR 合并 / 关闭后闭环并通知发起人。
 
 关键约束：
@@ -130,7 +130,6 @@ WorkerBackend 端口 ── OrcaAdapter（默认）/ ClaudeCliAdapter ── 未
 - 私聊单独开关；机器人、系统消息、互动卡片不会进入领域。
 - 群级 `allowed` 非空时，这个群只有名单内的人能触发；名单外的人 @ 机器人也会被静默忽略。
 - 图片消息会先下载 `image_key` 并转成文字（含引用消息里的图片、富文本里的图片），再和文字一起进入研判；识别失败时仍按纯附件处理，@ 或私聊回一句「看不到附件内容，请用文字说明」。文件 / 语音等其它附件不下载、不做多模态识别。
-- 历史补拉按群游标增量进行，首次见到某个群只记基线，不会把历史消息当新需求。
 
 ### 判：Gate 在前，Pi 在后
 
@@ -181,7 +180,7 @@ Router：工单「调整登录超时」（tk_1）已开始执行。后续进展�
 - 追问期间请求会记成**派工草稿**（按群 + 同一个人，30 分钟内有效），用户补齐后直接开单，不用复述任务。
 - 项目 / 分支的取值优先级：**本条消息明确说的 > 群配置里的绑定 > 上次草稿 > 唯一项目的 `defaultBranch`**。
 - 起始分支会传给 `orca worktree create --base-branch <ref>`；worker 的 worktree 就从该分支切出。
-- 用户说的项目不在 `projects` 清单里、或分支不在 `branches` 白名单里，Router 会带着可选值再问一次，不会猜。
+- 用户说的项目不在 `projects` 清单里时，Router 会带着可选项目再问一次，不会猜；分支不做白名单限制，用户指定什么就用什么。
 
 **群绑定（免问答）**：群配置本身同时承担「监控」和「派工绑定」，一条就够：
 
@@ -190,7 +189,6 @@ Router：工单「调整登录超时」（tk_1）已开始执行。后续进展�
 ra config set project.router-agent "name:dsh/router-agent@main"
 ra config set chatBinding.oc_xxx "router-agent@main"   # 绑定同时意味着监控该群
 ra config set chatMode.oc_xxx mention                  # 可选：只收 @ 消息
-ra config set chatSync.oc_xxx true                     # 可选：启动时补拉历史
 ```
 
 对应的 YAML：
@@ -200,11 +198,11 @@ feishu:
   chats:
     - chat: oc_xxx
       mode: all
-      repo: router-agent
-      branch: main
+      repo: router-agent   # 只能是当前后端项目清单里的项目名
+      branch: main         # 自动跟随项目默认分支，不单独维护
 ```
 
-绑定后该群开工不再追问项目 / 分支；没写 `repo` / `branch` 的群仍会按规则追问。
+绑定后该群开工不再追问项目；项目配了默认分支时也不再追问分支。没写 `repo` 的群仍会按规则追问。
 
 **群级白名单**：`allowed` 非空时，这个群**只有名单内的人能触发**——名单外的人 @ 机器人也会被静默忽略（不进研判、不回复、不开单），并且覆盖全局 `feishu.allowed`。
 
@@ -253,7 +251,7 @@ Router 不做对话，只在必要时说话：
 | worker 交付结论 | 简单单行回复走**纯文本**；带 Markdown 的以**飞书卡片**渲染（卡片内 Markdown 先归一化）回话题；有文档 / PR 链接一并展示 |
 | worker 进展（`--state progress` 或 Router 主动巡检） | 上报的进展**不逐条发送**：按 `progress.syncMs` 合并成一条话题消息（追问的回答除外）；worker 静默时 Router 按 `progress.probeMs` 主动取进展（优先会话记录，其次终端屏幕），整理成语义摘要（助手文本 + 一行动作概要，过滤工具调用噪音）发到话题，同一静默期按 `progress.repeatMs` 限流 |
 
-- 确认表情是 best-effort：失败只记 `feishu:reaction-failed`，不影响研判；只对首次入库、且是在跟它说话（@ / 私聊）的消息加；补拉与重放不会重复加；回复发出后自动撤销（`feishu:unreact-failed` 是撤销失败的日志）。`ra config set feishu.reaction ""` 可关闭。
+- 确认表情是 best-effort：失败只记 `feishu:reaction-failed`，不影响研判；只对首次入库、且是在跟它说话（@ / 私聊）的消息加；重放不会重复加；回复发出后自动撤销（`feishu:unreact-failed` 是撤销失败的日志）。`ra config set feishu.reaction ""` 可关闭。
 - 全部 emoji_type 见飞书文档「表情文案」，注意**大小写敏感**（`Typing` 不是 `TYPING`）。
 - 出站按内容分流：**单行、≤200 字、不含 Markdown 语法**的回复直接用 `text` 消息；其余用飞书**互动卡片**渲染 Markdown，卡片失败自动降级为 post 富文本。分流规则：`threadId` 为空 = 普通消息，有值 = 话题回复。
 - 卡片内的 Markdown 会先归一化（`normalizeCardMarkdown`），把 Card 1.0 不支持的语法降级掉：`#` 标题 → 加粗行、`>` 引用 → `▍`、表格 → 加粗表头 + 列表行、`- [x]` → ☑ / ☐、`<br>` → 换行、`![图片](http...)` → 可点击链接；代码块内原样保留。
@@ -287,10 +285,10 @@ worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态�
 `ra web` 打开的面板分三块：
 
 - **工单**：按阶段分组 + 计数、关键字搜索（标题 / 工单号 / 仓库 / PR）、自动刷新开关与手动刷新；详情页有阶段、派工、PR、授权范围、上报时间线（含完整回复与 `humanAction`）、投递记录，可直接投递 follow-up 或停止工单。
-- **配置**：按「准入策略 / 研判与人格 / 会话复用 / 进展同步 / 闲置治理 / 飞书接入 / 派工与服务 / 项目清单 / 群与绑定」分组；每个字段带说明与默认值提示，改动逐项标脏，保存前做前端 + 后端双重校验，保存后写回 `config.yaml`。
+- **配置**：按「准入策略 / 研判与人格 / 会话复用 / 进展同步 / 闲置治理 / 飞书接入 / 派工与服务 / 项目与群绑定」分组；每个字段带说明与默认值提示，改动逐项标脏，保存前做前端 + 后端双重校验，保存后写回 `config.yaml`。「派工与服务」里可在 `orca` / `claude-code` 之间切换新工单的 Worker 后端；项目清单按后端隔离，切换后端后「项目与群绑定」里的项目清单会切换到该后端自己的一套（Orca 用仓库选择器，Claude Code 必须是本地仓库绝对路径）。群绑定的项目只能从当前清单里选，分支自动跟随项目的默认分支，不能单独自定义。
 - **来源**：服务状态、监控群、接收范围概览。
 
-配置项会标注生效范围：**策略**（`acceptMode` / `maxWorkers` / `admission`）保存后立即生效；其余配置在服务启动时读入，保存后需 `ra start` 重启才生效。面板不会展示或接收模型密钥明文（`llm.apiKey` 请用 CLI / 环境变量配置），保存会重写 `config.yaml`，原文件的注释会丢失。
+配置项会标注生效范围：**策略**（`acceptMode` / `maxWorkers` / `admission`）保存后立即生效；其余配置在服务启动时读入，保存后点侧栏或配置页的「重启服务」即可热重启 daemon（浏览器页面不会刷新），也可以手动 `ra stop && ra start`。面板不会展示或接收模型密钥明文（`llm.apiKey` 请用 CLI / 环境变量配置），保存会重写 `config.yaml`，原文件的注释会丢失。
 
 ### PR 闭环
 
@@ -308,13 +306,12 @@ feishu:
   larkHome: ""         # 专属机器人的独立 lark-cli 配置目录；空=复用当前 profile
   appId: ""            # 专属机器人 App ID（App Secret 只存 lark-cli 加密存储）
   reaction: "Typing"   # 收到消息立即回的确认表情（飞书 emoji_type；空字符串关闭）
-  # 监控的群：一条配置同时决定「收什么消息 + 派工绑定 + 是否补拉历史」
+  # 监控的群：一条配置同时决定「收什么消息 + 派工绑定」
   chats:
     - chat: oc_xxx     # 群 chat_id
       mode: all        # all=全部消息且不 @ 也回复；mention=只收 @机器人
-      repo: router-agent   # 可选：群绑定项目（项目名或仓库选择器）
-      branch: main         # 可选：群绑定起始分支
-      sync: false          # 可选：启动时补拉该群历史
+      repo: router-agent   # 可选：群绑定项目（只能是当前后端项目清单里的项目名）
+      branch: main         # 由项目默认分支自动决定，面板不可单独编辑
       allowed: [ou_xxx]    # 可选：本群只允许这些人操作（空=沿用全局 allowed）
   directMessages: true
   allowed: []          # 允许发起工作的 open_id
@@ -379,14 +376,18 @@ workerSpec:
   mode: prompt         # prompt | agent
 
 backend:
-  default: orca
+  default: orca         # 新工单默认后端：orca | claude-code
+  # 非 orca 后端使用独立项目清单，和顶层 projects 互不影响
+  # projects:
+  #   claude-code:
+  #     - name: router-agent
+  #       repo: /Users/me/router-agent   # Claude Code 需要本地仓库绝对路径
 
-# 项目清单：开单前必须确认「哪个项目 + 哪个起始分支」
+# orca 项目清单：开单前必须确认「哪个项目 + 哪个起始分支」
 projects: []
 #  - name: router-agent            # 用户/模型引用的项目名
 #    repo: name:dsh/router-agent   # 交给 Orca 的仓库选择器
 #    defaultBranch: main           # 未指定分支时使用；留空则每次开工前追问
-#    branches: [main, release]     # 可选：允许的起始分支白名单
 
 server:
   port: 3083
@@ -416,7 +417,7 @@ ra config --edit                          # 直接编辑整份配置
 
 命令与选项均由 `commander` 解析：`ra --help`、`ra init --help`、`ra tickets --help` 可查用法。
 
-机器人凭据由 lark-cli 的加密存储管理，`router-agent` 只保存 `larkHome` 与 `appId`。运行期所有 lark-cli 子进程（事件消费、发消息、补拉、群名刷新）都会带上 `HOME=<larkHome>`，与其它 agent 的 lark-cli profile 完全隔离。
+机器人凭据由 lark-cli 的加密存储管理，`router-agent` 只保存 `larkHome` 与 `appId`。运行期所有 lark-cli 子进程（事件消费、发消息、群名刷新）都会带上 `HOME=<larkHome>`，与其它 agent 的 lark-cli profile 完全隔离。
 
 ### 项目与仓库选择
 
@@ -574,6 +575,7 @@ ra report \
 | POST | `/api/reports` | Worker 上报状态与回复（`ra report` 的入口） |
 | GET / PUT | `/api/policy` | 读写策略（保存后落盘） |
 | GET / PUT | `/api/config` | 配置面板：读安全快照 / 按点路径提交补丁（白名单校验 + 落盘） |
+| POST | `/api/restart` | 热重启 daemon：先返回 202，再释放端口并拉起新进程（页面不刷新） |
 | GET | `/api/sources/feishu/chats` | 飞书来源配置 |
 
 ## 开发
@@ -593,8 +595,8 @@ RA_PI_VERIFY=1 npx vitest run tests/verify-pi-live.test.ts   # 真实 Pi + 真�
 ```text
 src/core/     领域内核（model / stage / policy / engine / effects）
 src/store/    SQLite（node:sqlite）
-src/worker/   WorkerBackend 端口、BackendRegistry、OrcaAdapter、ClaudeCliBackend、state.json 轮询、worker 手册
-src/sources/  飞书事件、历史补拉、GitHub PR 跟踪
+src/worker/   WorkerBackend 端口、BackendRegistry、OrcaAdapter、ClaudeCodeBackend、state.json 轮询、worker 手册
+src/sources/  飞书事件、GitHub PR 跟踪
 src/router/   AgentLoop、工具契约、提示词、HTTP API
 src/web/      React 面板
 src/cli/      ra 命令
@@ -608,12 +610,11 @@ src/cli/      ra 命令
 - 上报走 `ra report`，`state.json` 只作为服务不可达时的兜底通道。
 - 图片会下载并用多模态模型转成文字；文件 / 语音等其它附件只识别到「这是一条附件消息」，需要内容时请用文字描述。
 - 图片转文本依赖模型支持 image 输入；主模型不支持时请在 `llm.imageModel` 单独配置视觉模型，否则图片仍按纯附件处理。
-- 历史补拉按群游标增量进行：首次见到某个群只记基线（最新一条消息时间），不会把历史消息当新需求。
 - 实测 Orca 的 `lastOutputAt` 是毫秒数字、且 CLI 创建的终端可能 `orphaned=true` 但依然可用；适配层已分别做归一化与「只有 `connected=false` 才判死」的处理。
 - `workerSpec.mode: agent` 依赖 Orca 启动的 claude 是否加载全局 `~/.claude/agents/`；该前提尚未实测，默认使用已验证可行的 `prompt` 模式。
-- Claude CLI 后端用 `git worktree`，项目的 `repo` 必须是本地仓库绝对路径（`path:/abs` 或 `/abs`）；`ra init` 在 `backend.default: claude-cli` 时会直接问路径。
-- Claude CLI 的追问在当前轮结束后生效（与 TUI 输入排队一致）；会话 `blocked`（权限/人工输入）时只转人工，不自动 resume。需要轮内实时插话时要改用 `stream-json` 或 SDK/ACP。
-- Claude CLI 依赖 `claude agents --json --all` 的字段（本仓库实测 `2.1.318`）；升级后字段变化时状态会退化为 `null`，需要按版本适配。
+- Claude Code 后端用 `git worktree`，项目清单与 Orca 隔离（`backend.projects.claude-code`），`repo` 必须是本地仓库绝对路径（`path:/abs` 或 `/abs`）；`ra init` 在 `backend.default: claude-code` 时会直接问路径。切换后端后，没有对应清单项目的工单会先追问，不会把 Orca 选择器当路径用。
+- Claude Code 后端启动时带 `--dangerously-skip-permissions`，正常情况下不会因权限确认阻塞；若仍进入 `blocked`（例如等待人工输入），只转人工，不自动 resume。追问在当前轮结束后生效（与 TUI 输入排队一致）；需要轮内实时插话时要改用 `stream-json` 或 SDK/ACP。
+- Claude Code 依赖 `claude agents --json --all` 的字段（本仓库实测 `2.1.318`）；升级后字段变化时状态会退化为 `null`，需要按版本适配。
 - 派工草稿按「群 + 同一个人」保存，30 分钟有效；同一个群里的多个未补齐请求会互相覆盖（后一次追问覆盖前一次）。
 - Pi SDK 仍在演进，本仓库锁定 `@earendil-works/pi-coding-agent@1.5.0`，升级前先跑 `RA_PI_VERIFY=1` 的真实环境验证。
 - Pi 是唯一研判引擎，没有回退到旧实现的开关；Pi 不可用时候选会按 `unavailable` 落库，不会静默重试。
@@ -623,7 +624,7 @@ src/cli/      ra 命令
 | 文档 | 内容 |
 |-|-|
 | [docs/COMPARISON.md](docs/COMPARISON.md) | 与 dsh-superagent 原型的差距分析与可迁移机制 |
-| [docs/AGENT-ADAPTER-DESIGN.md](docs/AGENT-ADAPTER-DESIGN.md) | Agent 工具适配器接口设计：Orca / Claude CLI / Codex 的契约与迁移方案 |
+| [docs/AGENT-ADAPTER-DESIGN.md](docs/AGENT-ADAPTER-DESIGN.md) | Agent 工具适配器接口设计：Orca / Claude Code / Codex 的契约与迁移方案 |
 | [docs/VERIFICATION.md](docs/VERIFICATION.md) | 真实环境验证记录与需要人工执行的剩余步骤 |
 | [docs/show-me-router-flow.html](docs/show-me-router-flow.html) | 消息 → 研判 → 派工 → 上报 → 闭环的可视化流程 |
 | [README.en.md](README.en.md) | English version |

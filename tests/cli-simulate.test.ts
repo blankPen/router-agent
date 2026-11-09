@@ -10,7 +10,7 @@ import { extractJsonObject } from '../src/router/model-config.js'
 
 function config(): AppConfig {
   const value = defaultConfig()
-  value.projects = [{ name: 'teamwork-repos', repo: 'teamwork-repos', branches: [], defaultBranch: 'main' }]
+  value.projects = [{ name: 'teamwork-repos', repo: 'teamwork-repos', defaultBranch: 'main' }]
   value.feishu.chats = [chatEntry('oc_dsh')]
   value.feishu.allowed = ['ou_me']
   value.feishu.botOpenIds = ['ou_bot']
