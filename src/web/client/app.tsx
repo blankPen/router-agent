@@ -322,7 +322,8 @@ function App(): JSX.Element {
         </div>
       </aside>
 
-      <div className="workspace">
+      {/* key 绑 tab：切页时重建滚动容器，回到页面顶部而不是沿用上一页的滚动位置。 */}
+      <div className={`workspace tab-${tab}`} key={tab}>
         {tab === 'setup' && (
           <SetupView
             restarting={restartPhase === 'restarting'}
@@ -875,8 +876,9 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
     onRestart()
   }
 
-  const save = async (): Promise<void> => {
-    if (!draft || !original || changed.length === 0 || errors.size > 0) return
+  // 返回是否保存成功，供「保存并重启」判断要不要接着触发重启。
+  const save = async (): Promise<boolean> => {
+    if (!draft || !original || changed.length === 0 || errors.size > 0) return false
     const patch: Record<string, unknown> = {}
     for (const path of changed) patch[path] = getByPath(draft, path)
     setSaving(true)
@@ -898,13 +900,19 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
       }
       setNotice(message)
       window.setTimeout(() => setNotice(current => (current === message ? null : current)), 6_000)
+      return true
     } catch (error) {
       const message = { kind: 'error' as const, text: error instanceof Error ? error.message : String(error) }
       setNotice(message)
       window.setTimeout(() => setNotice(current => (current === message ? null : current)), 8_000)
+      return false
     } finally {
       setSaving(false)
     }
+  }
+
+  const saveAndRestart = async (): Promise<void> => {
+    if (await save()) onRestart()
   }
 
   if (loadError) return <div className="banner danger"><Icon name="alert" />读取配置失败：{loadError}</div>
@@ -1087,21 +1095,26 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
         errors={errors}
         notice={notice}
         saving={saving}
+        restarting={restarting}
         onReset={resetAll}
         onSave={() => void save()}
+        onSaveAndRestart={() => void saveAndRestart()}
       />
     </>
   )
 }
 
-function SaveDock({ changed, errors, notice, saving, onReset, onSave }: {
+function SaveDock({ changed, errors, notice, saving, restarting, onReset, onSave, onSaveAndRestart }: {
   changed: string[]
   errors: Map<string, string>
   notice: RuntimeNotice | null
   saving: boolean
+  restarting?: boolean
   onReset: () => void
   onSave: () => void
+  onSaveAndRestart: () => void
 }): JSX.Element {
+  const blocked = changed.length === 0 || errors.size > 0 || saving
   return (
     <div className={`save-dock ${changed.length > 0 ? 'dirty' : ''} ${errors.size > 0 ? 'invalid' : ''} ${changed.length === 0 && errors.size === 0 && !notice ? 'hidden' : ''}`}>
       <div className="save-status">
@@ -1112,8 +1125,12 @@ function SaveDock({ changed, errors, notice, saving, onReset, onSave }: {
       </div>
       <div className="save-buttons">
         <button className="btn ghost" onClick={onReset} disabled={changed.length === 0 || saving}>放弃</button>
-        <button className="btn primary" onClick={onSave} disabled={changed.length === 0 || errors.size > 0 || saving}>
+        <button className="btn primary" onClick={onSave} disabled={blocked}>
           {saving ? '保存中…' : '保存配置'}
+        </button>
+        <button className="btn" onClick={onSaveAndRestart} disabled={blocked || restarting} title="保存后立即重启 ra 服务（页面不会刷新）">
+          <Icon name="refresh" size={13} className={restarting ? 'spin' : undefined} />
+          {restarting ? '重启中…' : '保存并重启'}
         </button>
       </div>
     </div>
@@ -1233,8 +1250,9 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
     onRestart()
   }
 
-  const save = async (): Promise<void> => {
-    if (!draft || !original || changed.length === 0 || errors.size > 0) return
+  // 返回是否保存成功，供「保存并重启」判断要不要接着触发重启。
+  const save = async (): Promise<boolean> => {
+    if (!draft || !original || changed.length === 0 || errors.size > 0) return false
     const patch: Record<string, unknown> = {}
     for (const path of changed) patch[path] = getByPath(draft, path)
     setSaving(true)
@@ -1256,13 +1274,19 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       }
       setNotice(message)
       window.setTimeout(() => setNotice(current => (current === message ? null : current)), 8_000)
+      return true
     } catch (error) {
       const message = { kind: 'error' as const, text: error instanceof Error ? error.message : String(error) }
       setNotice(message)
       window.setTimeout(() => setNotice(current => (current === message ? null : current)), 8_000)
+      return false
     } finally {
       setSaving(false)
     }
+  }
+
+  const saveAndRestart = async (): Promise<void> => {
+    if (await save()) onRestart()
   }
 
   if (loadError) return <div className="banner danger"><Icon name="alert" />读取配置失败：{loadError}</div>
@@ -1456,8 +1480,10 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
         errors={errors}
         notice={notice}
         saving={saving}
+        restarting={restarting}
         onReset={resetAll}
         onSave={() => void save()}
+        onSaveAndRestart={() => void saveAndRestart()}
       />
     </>
   )

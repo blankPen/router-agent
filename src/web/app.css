@@ -105,6 +105,7 @@
     --negative: #e5566f;
     --warning: #d8b062;
     --info: #8fb2e0;
+    --info-soft: #16243a;
     --pill-positive-bg: #172a1d;
     --pill-positive-ink: #3fc07a;
     --pill-negative-bg: #2c1a20;
@@ -161,7 +162,10 @@ button, input, select {
 .shell {
   display: grid;
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
-  min-height: 100vh;
+  /* 整页不滚动：滚动统一收进 workspace，侧边栏固定在视口内。 */
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
   background: var(--ground);
 }
 
@@ -255,13 +259,21 @@ button, input, select {
 
 .workspace {
   margin: 16px;
-  padding: 24px 32px 120px;
+  padding: 24px 32px 32px;
   min-width: 0;
-  min-height: calc(100vh - 32px);
+  height: calc(100vh - 32px);
+  height: calc(100dvh - 32px);
+  min-height: 0;
+  /* 各页面自己的滚动容器：只滚内容区，侧边栏与页面外框保持不动。 */
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-sheet);
 }
+/* 带固定保存浮层的页面多留底部空间，其余页面不留空白滚动。 */
+.workspace.tab-setup,
+.workspace.tab-config { padding-bottom: 120px; }
 
 /* ---------------------------------------------------------------------------
    页头
@@ -409,7 +421,8 @@ button, input, select {
 .board {
   display: grid;
   grid-auto-flow: column;
-  grid-auto-columns: 216px;
+  /* 卡片列至少 260px：屏幕够宽时平分剩余空间，不够时横向滚动。 */
+  grid-auto-columns: minmax(260px, 1fr);
   gap: 16px;
   align-items: start;
   overflow-x: auto;
@@ -423,6 +436,8 @@ button, input, select {
   flex-direction: column;
   gap: 10px;
   min-width: 0;
+  /* 单列最高锁在视口内，超过的卡片在列内部滚动，不把整页撑高。 */
+  max-height: calc(100vh - 190px);
   scroll-snap-align: start;
 }
 .board-col-head {
@@ -433,10 +448,18 @@ button, input, select {
   font-size: 12px;
   font-weight: 500;
   color: var(--muted);
+  flex-shrink: 0;
 }
 .group-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--stage, var(--faint)); }
 .board-col-count { margin-left: auto; color: var(--muted); font-weight: 500; font-variant-numeric: tabular-nums; }
-.board-col-body { display: flex; flex-direction: column; gap: 10px; }
+.board-col-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+}
 .board-empty {
   padding: 22px 14px;
   border: 1px dashed var(--border);
@@ -829,7 +852,8 @@ button, input, select {
   scroll-margin-top: 24px;
 }
 /* settings-card 内直接挂载的模块统一左右留白，避免只有标题对齐、内容贴边。 */
-.settings-card > .runtime-status { margin: 24px var(--card-pad-x) 0; }
+/* 末位是运行时区块时也要留出卡片底部呼吸，避免内容贴着卡片下边框。 */
+.settings-card > .runtime-status { margin: 24px var(--card-pad-x) 20px; }
 .settings-card > .meta-card { margin-left: var(--card-pad-x); margin-right: var(--card-pad-x); }
 .settings-card > .banner { margin-left: var(--card-pad-x); margin-right: var(--card-pad-x); }
 .settings-card > .segmented { margin-left: var(--card-pad-x); }
@@ -1184,7 +1208,8 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 .runtime-badge.not-installed { color: var(--pill-neutral-ink); background: var(--pill-neutral-bg); }
 .runtime-badge.incompatible { color: var(--pill-negative-ink); background: var(--pill-negative-bg); }
 .runtime-badge.needs-auth { color: var(--pill-warning-ink); background: var(--pill-warning-bg); }
-.runtime-badge.unverified { color: var(--info); background: var(--info-soft); }
+/* 「待验证」是未定状态，跟其它状态一样走中性 pill；蓝色会打破绿/灰体系，跳得突兀。 */
+.runtime-badge.unverified { color: var(--pill-neutral-ink); background: var(--pill-neutral-bg); }
 .runtime-badge.pending { color: var(--pill-neutral-ink); background: var(--pill-neutral-bg); }
 
 /* 运行时卡片（初始化页 / 配置页共用） */
@@ -1307,6 +1332,8 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 }
 
 /* 初始化页 */
+/* 初始化页的卡片直接挂在 workspace 下，没有 .config-body 的 flex gap，这里补卡片之间的纵向间距。 */
+.workspace > .settings-card + .settings-card { margin-top: 24px; }
 .setup-progress { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 24px 0; }
 .setup-step {
   display: flex;
@@ -1561,7 +1588,11 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 }
 
 @media (max-width: 940px) {
-  .shell { grid-template-columns: 1fr; }
+  .shell {
+    grid-template-columns: 1fr;
+    /* 顶栏一行 + 剩余高度交给 workspace，滚动仍只发生在 workspace 内。 */
+    grid-template-rows: auto minmax(0, 1fr);
+  }
   .sidebar {
     position: sticky;
     height: auto;
@@ -1578,8 +1609,9 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
   .nav-tab { width: auto; padding: 7px 11px; }
   .side-nav { margin-left: auto; }
   .sidebar-foot { display: none; }
-  .workspace { margin: 0; min-height: 0; border: 0; border-radius: 0; padding: 20px 18px 130px; }
-  .board { grid-auto-columns: 240px; }
+  .workspace { margin: 0; height: auto; min-height: 0; border: 0; border-radius: 0; padding: 20px 18px 24px; }
+  .workspace.tab-setup, .workspace.tab-config { padding-bottom: 130px; }
+  .board { grid-auto-columns: minmax(240px, 1fr); }
   .drawer { width: min(560px, calc(100vw - 20px)); }
   .config-layout { grid-template-columns: 1fr; gap: 16px; }
   .config-nav { position: static; max-height: none; }
@@ -1615,7 +1647,7 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
   .restart-banner { flex-wrap: wrap; }
   .restart-banner .btn { margin-left: 0; }
   .search-box { min-width: 0; width: 100%; }
-  .board { grid-auto-columns: 232px; }
+  .board { grid-auto-columns: minmax(232px, 1fr); }
   .drawer { width: 100%; }
   .drawer-scroll { padding: 16px 16px 24px; }
   .detail { padding: 18px 16px; }
