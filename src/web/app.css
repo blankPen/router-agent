@@ -1,52 +1,57 @@
 /* ---------------------------------------------------------------------------
    router-agent · control room
-   温润中性底 + 深绿强调色；侧栏导航 + 卡片化内容区。
+   黑白中性底 + 状态强调色；侧栏导航 + 卡片化内容区。
+   品牌/交互元素一律黑白，阶段、报告、PR、成败等状态保留原有配色。
    --------------------------------------------------------------------------- */
 
 :root {
-  --bg: #f4f3ee;
-  --sidebar: #efede7;
+  --bg: #f6f6f6;
+  --sidebar: #efefef;
   --surface: #ffffff;
-  --surface-2: #faf9f6;
-  --surface-3: #f2f1ec;
-  --ink: #171a18;
-  --muted: #6f756f;
-  --faint: #9aa09a;
-  --line: #e3e1d9;
-  --line-soft: #efede7;
-  --accent: #1f6a55;
-  --accent-deep: #174e40;
+  --surface-2: #fafafa;
+  --surface-3: #f0f0f0;
+  --ink: #141414;
+  --muted: #6b6b6b;
+  --faint: #9a9a9a;
+  --line: #e3e3e3;
+  --line-soft: #eeeeee;
+  --accent: #141414;
+  --accent-deep: #000000;
   --on-accent: #ffffff;
-  --accent-soft: #e6f0eb;
+  --accent-soft: #ededed;
+  --ok: #1e7a5a;
+  --ok-soft: #e6f0eb;
   --danger: #b4453a;
   --danger-soft: #fbeceb;
   --warn: #a9741a;
   --warn-soft: #fdf4e2;
   --info: #3b6ea5;
   --info-soft: #eaf1fa;
-  --shadow-sm: 0 1px 2px rgba(23, 26, 24, 0.05);
-  --shadow-md: 0 1px 2px rgba(23, 26, 24, 0.04), 0 10px 30px rgba(23, 26, 24, 0.05);
-  --shadow-lg: 0 2px 4px rgba(23, 26, 24, 0.05), 0 18px 48px rgba(23, 26, 24, 0.12);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.04), 0 10px 30px rgba(0, 0, 0, 0.05);
+  --shadow-lg: 0 2px 4px rgba(0, 0, 0, 0.05), 0 18px 48px rgba(0, 0, 0, 0.12);
   --radius: 12px;
   color-scheme: light dark;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #101312;
-    --sidebar: #141715;
-    --surface: #191d1b;
-    --surface-2: #1d211e;
-    --surface-3: #232824;
-    --ink: #eef1ec;
-    --muted: #9ba49c;
-    --faint: #737c74;
-    --line: #2b302c;
-    --line-soft: #232824;
-    --accent: #8fc7b1;
-    --accent-deep: #b7dccb;
-    --on-accent: #0d1512;
-    --accent-soft: #1b2b25;
+    --bg: #0f0f0f;
+    --sidebar: #141414;
+    --surface: #1a1a1a;
+    --surface-2: #202020;
+    --surface-3: #272727;
+    --ink: #f0f0f0;
+    --muted: #a3a3a3;
+    --faint: #787878;
+    --line: #2f2f2f;
+    --line-soft: #272727;
+    --accent: #f0f0f0;
+    --accent-deep: #ffffff;
+    --on-accent: #0a0a0a;
+    --accent-soft: #2a2a2a;
+    --ok: #8fc7b1;
+    --ok-soft: #1b2b25;
     --danger: #e08a80;
     --danger-soft: #2c1c1a;
     --warn: #d8b062;
@@ -304,7 +309,7 @@ button, input, select {
 .switch input:checked + .switch-track,
 .toggle.on .toggle-track { background: var(--accent); border-color: var(--accent); }
 .switch input:checked + .switch-track .switch-knob,
-.toggle.on .toggle-knob { transform: translateX(15px); background: #fff; }
+.toggle.on .toggle-knob { transform: translateX(15px); background: var(--on-accent); }
 .toggle {
   display: inline-flex;
   align-items: center;
@@ -481,7 +486,7 @@ button, input, select {
   white-space: nowrap;
 }
 .pr-open { background: var(--info-soft); color: var(--info); }
-.pr-merged { background: var(--accent-soft); color: var(--accent); }
+.pr-merged { background: var(--ok-soft); color: var(--ok); }
 .pr-closed { background: var(--danger-soft); color: var(--danger); }
 .pr-none { background: var(--surface-3); color: var(--faint); }
 
@@ -582,7 +587,7 @@ button, input, select {
 .report-dropped { --report: #8b8a82; }
 .report-state.report-progress { background: var(--info-soft); color: var(--info); }
 .report-state.report-waiting { background: var(--warn-soft); color: var(--warn); }
-.report-state.report-ready { background: var(--accent-soft); color: var(--accent); }
+.report-state.report-ready { background: var(--ok-soft); color: var(--ok); }
 .report-state.report-blocked, .report-state.report-failed { background: var(--danger-soft); color: var(--danger); }
 .report-state.report-dropped { background: var(--surface-3); color: var(--faint); }
 
@@ -618,7 +623,7 @@ button, input, select {
 .input-time { font-size: 11px; color: var(--faint); white-space: nowrap; }
 .input-pending { background: var(--warn-soft); color: var(--warn); }
 .input-delivered { background: var(--info-soft); color: var(--info); }
-.input-acked { background: var(--accent-soft); color: var(--accent); }
+.input-acked { background: var(--ok-soft); color: var(--ok); }
 
 .composer {
   display: flex;
@@ -685,7 +690,7 @@ button, input, select {
   font-weight: 500;
 }
 .unsaved-badge { background: var(--warn-soft); color: var(--warn); }
-.saved-badge { background: var(--accent-soft); color: var(--accent); }
+.saved-badge { background: var(--ok-soft); color: var(--ok); }
 
 .config-layout {
   display: grid;
@@ -770,7 +775,7 @@ button, input, select {
   font-size: 10.5px;
   font-weight: 500;
 }
-.badge.hot { background: var(--accent-soft); color: var(--accent); }
+.badge.hot { background: var(--ok-soft); color: var(--ok); }
 .badge.cold { background: var(--surface-3); color: var(--faint); }
 .badge.dirty { background: var(--warn-soft); color: var(--warn); }
 
@@ -968,7 +973,7 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 .save-status { display: flex; align-items: center; gap: 10px; min-width: 0; flex-wrap: wrap; }
 .save-buttons { display: flex; align-items: center; gap: 7px; margin-left: auto; flex-shrink: 0; }
 .notice { padding: 3px 9px; border-radius: 7px; font-size: 11px; line-height: 1.5; }
-.notice.ok { background: var(--accent-soft); color: var(--accent); }
+.notice.ok { background: var(--ok-soft); color: var(--ok); }
 .notice.warn { background: var(--warn-soft); color: var(--warn); }
 .notice.error { background: var(--danger-soft); color: var(--danger); }
 
@@ -994,7 +999,7 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 }
 .stat-label { font-size: 10px; font-weight: 600; letter-spacing: 0.09em; text-transform: uppercase; color: var(--faint); }
 .stat-value { font-size: 24px; font-weight: 650; letter-spacing: -0.02em; line-height: 1.3; }
-.stat-value.ok { color: var(--accent); }
+.stat-value.ok { color: var(--ok); }
 .stat-value.muted { color: var(--muted); }
 
 .data-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
