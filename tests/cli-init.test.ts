@@ -135,7 +135,7 @@ describe('交互式 ra init', () => {
       checkboxes: [['oc_dsh'], ['ou_me']],
     })
     const seeded = loadConfig(home)
-    seeded.projects = [{ name: 'teamwork-repos', repo: 'teamwork-repos', branches: ['main'], defaultBranch: 'release' }]
+    seeded.projects = [{ name: 'teamwork-repos', repo: 'teamwork-repos', defaultBranch: 'release' }]
     seeded.feishu.chats = [chatEntry('oc_dsh')]
     seeded.feishu.allowed = ['ou_me']
     writeConfig(home, seeded)
@@ -143,7 +143,7 @@ describe('交互式 ra init', () => {
     const config = await runInitWizard(deps)
     expect(prompts.asked.length).toBeGreaterThan(0)
     // 已有项目的分支白名单 / 默认分支不被默认项清掉
-    expect(config.projects[0]).toMatchObject({ name: 'teamwork-repos', repo: 'teamwork-repos', branches: ['main'], defaultBranch: 'release' })
+    expect(config.projects[0]).toMatchObject({ name: 'teamwork-repos', repo: 'teamwork-repos', defaultBranch: 'release' })
     expect(config.feishu.chats).toEqual([chatEntry('oc_dsh')])
     expect(config.feishu.allowed).toEqual(['ou_me'])
     expect(config.feishu.larkHome).toBe('')

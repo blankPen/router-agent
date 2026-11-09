@@ -23,7 +23,7 @@ ra 的**主干是通的**：Source → Gate → LLM 研判 → 工单/Mandate �
 
 | 层 | ra 现状 | prototype | 判断 |
 |-|-|-|-|
-| 来源 | 飞书事件流（lark-cli 子进程）+ 启动一次性补拉；GitHub 只查 PR 三态 | 飞书事件流 + 每群游标补拉 + 线程轮询双通道；GitHub Issue/PR/评论/review/CI 全覆盖；图片附件链路；Source 插件契约 | **差距大** |
+| 来源 | 飞书事件流（lark-cli 子进程）；GitHub 只查 PR 三态 | 飞书事件流 + 每群游标补拉 + 线程轮询双通道；GitHub Issue/PR/评论/review/CI 全覆盖；图片附件链路；Source 插件契约 | **差距大** |
 | 准入 | 3×2 准入表 + acceptMode + bot 名单（`core/policy.ts`） | 同为 3 格表，但按 Source 维度、默认更保守、Mandate 恢复前重校验 | **接近，默认值偏松** |
 | 研判 | 单条 LLM + 5 个工具 + 3 轮 | 批量候选 + 强 schema（每条规则必须给结论）+ 方向四字段 + deadline/重排 | **差距中** |
 | 执行 | Orca worktree + 终端 + 上报协议；无 resume/暂停/handback | 持久 session + 槽位调度（人工 +1 槽）+ pause/retry/stop + handback | **差距中** |
@@ -39,7 +39,7 @@ ra 的**主干是通的**：Source → Gate → LLM 研判 → 工单/Mandate �
 
 > 修复进度：A1、B1（见第 3 节）、A4 已于 2026-11-06 修复并验证；A2、A3、A5–A7 仍待做。
 
-### A1 启动补拉取到的是「最老的 50 条消息」
+### A1 启动补拉取到的是「最老的 50 条消息」（该功能已于 2026-11-08 移除）
 
 - 证据：`src/sources/feishu-backfill.ts:5-9` —— `['im','+chat-messages-list','--chat-id',chatId,'--as','bot','--page-size','50','--order','asc',...]`，调用处 `src/cli/index.ts:669` 没有传 `startTime`。
 - 已实测确认（2026-11-06，本机 bot 身份，只读）：同一群 `--order asc --page-size 3` 返回建群系统消息（2026-11-02 16:24），`--order desc` 返回最新消息（2026-11-03 21:14）。即 `asc` 且无 `--start-time`、无 `--page-all` 拿到的是**该群最早的一页**。
@@ -102,7 +102,7 @@ ra 的**主干是通的**：Source → Gate → LLM 研判 → 工单/Mandate �
 - 对照：prototype 会把图片下载成模型可见附件，并先校验模型是否支持 image——那是另一档能力（需要多模态），本次不做。
 - **已修复（2026-11-06）**：`system` / `interactive` 在归一化阶段直接丢弃（带 `system-message` / `card-message` 原因）；附件类消息保留预渲染文本并打 `mediaOnly` 标记（持久化到 `triggers.media_only`），Router 遇到纯附件不开单、不调模型，@ 或私聊时回一句「看不到附件内容，请用文字说明」，群里的未 @ 附件完全静默。
 
-### B2 没有周期性补拉，断线期间的消息永久丢
+### B2 没有周期性补拉，断线期间的消息永久丢（补拉功能已于 2026-11-08 移除）
 
 - 证据：`src/service.ts:159-167` 只在 `start()` 时做一次 backfill；`FeishuConsumer` 断线重连（`feishu.ts:186-196`）不补消息。
 - 后果：事件总线抖动、`another event bus is already connected`、机器休眠恢复——这些窗口里的消息不会进来。README 里也承认「同一机器人只能有一个事件总线」。
@@ -219,8 +219,6 @@ ra 的**主干是通的**：Source → Gate → LLM 研判 → 工单/Mandate �
 ## 附：本次核查的关键证据索引
 
 ```text
-src/sources/feishu-backfill.ts          补拉命令（已改为 --start + 游标增量）
-src/cli/index.ts:683                    补拉装配（游标接 Store）
 src/service.ts:229-231                  并发口径只算 assigned/running
 src/core/stage.ts:17-22                 person/review 不消耗槽位
 src/router/agent-loop.ts:78             setPolicy 无生产调用点

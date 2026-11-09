@@ -46,7 +46,6 @@ export interface ClarifyInfo {
   repo: string
   branch: string
   rejectedRepo?: string
-  rejectedBranch?: string
   /** 尚未开工的原始请求，多轮补齐时保持不变。 */
   task: string
 }
@@ -287,14 +286,12 @@ export class AgentLoop {
         needs: {
           missing: info.missing,
           ...(info.rejectedRepo ? { rejected_repo: info.rejectedRepo } : {}),
-          ...(info.rejectedBranch ? { rejected_branch: info.rejectedBranch } : {}),
           resolved_repo: info.repo,
           resolved_branch: info.branch,
         },
         projects: (this.dispatch?.projects ?? []).map(project => ({
           name: project.name,
           defaultBranch: project.defaultBranch,
-          branches: project.branches,
         })),
         draft: { task: info.task },
       }, clarifyFallback(info, this.dispatch?.projects))
@@ -422,7 +419,7 @@ export class AgentLoop {
     if (proposal.decision === 'accept' && this.dispatch) {
       const draft = activeDraft(this.store, trigger.chatId, trigger.actorId, this.clock.now())
       const resolution = resolveDispatch({ settings: this.dispatch, chatId: trigger.chatId, draft, repo, branch })
-      if (resolution.missing.length > 0 || resolution.rejectedRepo || resolution.rejectedBranch) {
+      if (resolution.missing.length > 0 || resolution.rejectedRepo) {
         return {
           outcome: 'clarify',
           clarify: {
@@ -430,7 +427,6 @@ export class AgentLoop {
             repo: resolution.repo,
             branch: resolution.branch,
             ...(resolution.rejectedRepo ? { rejectedRepo: resolution.rejectedRepo } : {}),
-            ...(resolution.rejectedBranch ? { rejectedBranch: resolution.rejectedBranch } : {}),
             task: draft?.task ?? trigger.text,
           },
         }
@@ -664,6 +660,41 @@ export class AgentLoop {
     const draftKey = reopenDraftKey(trigger.threadId, trigger.actorId)
     const draft = this.store.getCursor(draftKey)
     const task = [draft, trigger.text].map(text => text?.trim() ?? '').filter(Boolean).join('\n\n')
+
+    // 重新开工会建一张【新工单】，它使用当前默认后端；旧工单的 repo 可能属于
+    // 另一个后端（例如 orca 的 name: 选择器），必须先映射到当前后端的项目清单。
+    let repo = closed.repo
+    let branch = closed.branch
+    if (this.dispatch) {
+      const settings = this.dispatch
+      const resolveFor = (repoHint?: string) => resolveDispatch({
+        settings,
+        chatId: trigger.chatId,
+        ...(repoHint ? { repo: repoHint } : {}),
+        ...(closed.branch ? { branch: closed.branch } : {}),
+      })
+      let resolution = resolveFor(closed.repo)
+      if (!resolution.repo) {
+        // 用户在重新开工的这句话里点名了当前清单里的项目时优先使用。
+        const named = settings.projects.find(project => task.includes(project.name))
+        if (named) resolution = resolveFor(named.name)
+      }
+      if (!resolution.repo) resolution = resolveFor()
+      repo = resolution.repo
+      branch = resolution.branch
+      if (!repo) {
+        const names = settings.projects.map(project => project.name)
+        this.reply(
+          trigger,
+          `原工单使用的项目「${closed.repo || '(未设置)'}」不在当前后端的项目清单里。请重新描述需求并指定项目${names.length > 0 ? `（可选：${names.slice(0, 5).join('、')}）` : '（当前后端还没有配置项目）'}，我会按新工单处理。`,
+          `reopen-project:${trigger.id}`,
+          { thread: true },
+        )
+        this.store.setCursor(draftKey, task, this.clock.now())
+        return null
+      }
+    }
+
     const outcome = this.engine.decide({
       triggerId: trigger.id,
       decision: 'accept',
@@ -671,8 +702,8 @@ export class AgentLoop {
       reason: `thread:reopen:${closed.id}`,
       title: `续作：${closed.title}`,
       scope: task || trigger.text,
-      ...(closed.repo ? { repo: closed.repo } : {}),
-      ...(closed.branch ? { branch: closed.branch } : {}),
+      ...(repo ? { repo } : {}),
+      ...(branch ? { branch } : {}),
     })
     this.store.deleteCursor(draftKey)
 
@@ -758,7 +789,6 @@ export class AgentLoop {
       data.projects = this.dispatch.projects.map(project => ({
         name: project.name,
         defaultBranch: project.defaultBranch,
-        branches: project.branches,
       }))
     }
     const draft = activeDraft(this.store, trigger.chatId, trigger.actorId, this.clock.now())
@@ -832,7 +862,6 @@ function readPrompt(file: string): string {
 /** 追问话术的 reason：告诉模型缺什么、为什么问。 */
 export function clarifyReason(info: ClarifyInfo): string {
   if (info.rejectedRepo) return `用户说的项目「${info.rejectedRepo}」不在已配置的项目清单里，需要请用户重新选择`
-  if (info.rejectedBranch) return `用户说的分支「${info.rejectedBranch}」不在允许的起始分支里，需要请用户重新选择`
   if (info.missing.includes('repo') && info.missing.includes('branch')) return '派工信息不全：缺少项目（repo）与起始分支（branch），需要问清楚后再开工'
   if (info.missing.includes('repo')) return '派工信息不全：缺少项目（repo），需要问清楚后再开工'
   if (info.missing.includes('branch')) return '派工信息不全：缺少起始分支（branch），需要问清楚后再开工'
@@ -840,14 +869,10 @@ export function clarifyReason(info: ClarifyInfo): string {
 }
 
 /** 模型不可用时的兜底追问：不猜，直接把缺的项和可选项摆出来。 */
-export function clarifyFallback(info: ClarifyInfo, projects: Array<{ name: string; branches: string[] }> = []): string {
+export function clarifyFallback(info: ClarifyInfo, projects: Array<{ name: string }> = []): string {
   const names = projects.map(project => project.name)
   if (info.rejectedRepo) {
     return `没有找到项目「${info.rejectedRepo}」${names.length > 0 ? `，可选：${names.slice(0, 5).join('、')}` : ''}。要改哪个项目？`
-  }
-  if (info.rejectedBranch) {
-    const branches = projects.flatMap(project => project.branches)
-    return `分支「${info.rejectedBranch}」不在允许范围${branches.length > 0 ? `（${[...new Set(branches)].slice(0, 5).join('、')}）` : ''}，从哪个分支开始？`
   }
   const parts: string[] = []
   if (info.missing.includes('repo')) parts.push(names.length > 0 ? `要改哪个项目（${names.slice(0, 5).join('、')}）` : '要改哪个项目')

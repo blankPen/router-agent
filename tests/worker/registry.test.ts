@@ -25,18 +25,28 @@ describe('RuntimeRegistry', () => {
   it('按 id 取运行时，未知 id 抛 runtime:unknown', () => {
     const registry = new RuntimeRegistry(new Map([
       ['orca', fake('orca')],
-      ['claude-cli', fake('claude-cli')],
+      ['claude-code', fake('claude-code')],
     ]), 'orca')
-    expect(registry.get('claude-cli').id).toBe('claude-cli')
+    expect(registry.get('claude-code').id).toBe('claude-code')
     expect(() => registry.get('nope')).toThrow(WorkerRuntimeError)
-    expect(registry.ids()).toEqual(['orca', 'claude-cli'])
+    expect(registry.ids()).toEqual(['orca', 'claude-code'])
+  })
+
+  it('兼容旧 id：claude-cli 归一到 claude-code', () => {
+    const registry = new RuntimeRegistry(new Map([
+      ['orca', fake('orca')],
+      ['claude-code', fake('claude-code')],
+    ]), 'claude-cli')
+    expect(registry.default().id).toBe('claude-code')
+    expect(registry.get('claude-cli').id).toBe('claude-code')
+    expect(registry.has('claude-cli')).toBe(true)
   })
 
   it('默认运行时未注册时启动失败', () => {
-    expect(() => new RuntimeRegistry(new Map([['orca', fake('orca')]]), 'claude-cli')).toThrow(/未注册/)
+    expect(() => new RuntimeRegistry(new Map([['orca', fake('orca')]]), 'claude-code')).toThrow(/未注册/)
   })
 
-  it('createRuntimes 注册 orca 与 claude-cli，并校验默认值', () => {
+  it('createRuntimes 注册 orca 与 claude-code，并校验默认值', () => {
     const config = defaultConfig()
     const deps = {
       home: '/tmp/ra-home',
@@ -47,8 +57,11 @@ describe('RuntimeRegistry', () => {
       git: runner(),
     }
     expect(createRuntimes(config, deps).default().id).toBe('orca')
-    const claude = { ...config, runtime: { default: 'claude-cli' } }
-    expect(createRuntimes(claude, deps).default().id).toBe('claude-cli')
+    const claude = { ...config, runtime: { default: 'claude-code' } }
+    expect(createRuntimes(claude, deps).default().id).toBe('claude-code')
+    // 旧配置值仍可在启动时兼容。
+    const legacy = { ...config, runtime: { default: 'claude-cli' } }
+    expect(createRuntimes(legacy, deps).default().id).toBe('claude-code')
     const unknown = { ...config, runtime: { default: 'nope' } }
     expect(() => createRuntimes(unknown, deps)).toThrow(/未注册/)
   })

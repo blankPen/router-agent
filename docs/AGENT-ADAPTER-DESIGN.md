@@ -162,7 +162,7 @@ src/worker/
     codex-sessions.ts          # 新增
   runtimes/
     orca/index.ts              # OrcaRuntime（组合内部构件），行为与今天一致
-    claude-cli/index.ts        # Claude Code CLI
+    claude-code/index.ts        # Claude Code CLI
     codex-cli/index.ts         # Codex CLI
 ```
 
@@ -729,7 +729,7 @@ function classifyAgentStatus(s: AgentStatus | null): AgentVerdict {
 - **launch / relaunch**（首次派工还没有 assignment）：用 `registry.default()`，或由 effect payload 显式带 `runtimeId`；`launch-worker` 不适用「从 latestAssignment 反查」；
 - 手工绑定 Assignment 时校验 `runtimeId` 已注册，不允许写入未知运行时；
 - 运行时不存在时抛 `runtime:unknown`，转人工，不回退到默认运行时；
-- `loadConfig` / `ra serve` 启动时校验 `runtime.default` 已注册；P2 只注册 `orca`，因此 P2 阶段配置成 `claude-cli` 必须在启动期 fail-fast，而不是等第一张工单派工时才报错。
+- `loadConfig` / `ra serve` 启动时校验 `runtime.default` 已注册；P2 只注册 `orca`，因此 P2 阶段配置成 `claude-code` 必须在启动期 fail-fast，而不是等第一张工单派工时才报错。
 
 ### D12：默认安全边界：环境变量白名单 + 最小工具权限 + 单实例锁
 
@@ -962,7 +962,7 @@ export interface WorkerMetaV2 {
 
 ### 9.5 前端/CLI 展示
 
-`Assignment.runtimeId` 已存在，`ra ticket` / Web 面板可以显示 `orca / claude-cli / codex-cli`；不需要改状态机。
+`Assignment.runtimeId` 已存在，`ra ticket` / Web 面板可以显示 `orca / claude-code / codex-cli`；不需要改状态机。
 
 ---
 
@@ -999,9 +999,9 @@ export interface WorkerMetaV2 {
 
 ```yaml
 runtime:
-  default: orca            # 兼容旧值；可为 claude-cli / codex-cli（必须已注册，否则启动失败）
+  default: orca            # 兼容旧值；可为 claude-code / codex-cli（必须已注册，否则启动失败）
   options:                 # 只放非安全参数：模型、超时、并发
-    claude-cli:
+    claude-code:
       model: sonnet
       turnTimeoutMs: 7200000
     codex-cli:
@@ -1019,7 +1019,7 @@ worker:
 
 - `src/config.ts` 的 `runtime` 从 `{ default: 'orca' }` 放宽为 `{ default: string; options?: Record<string, unknown> }`。
 - `loadConfig` 必须真正解析 `doc.runtime.default / doc.runtime.options`（当前写死 `{ default: 'orca' }`，见 `config.ts:232/399`）；非法值或未注册值抛 `runtime:unknown`，旧配置缺省仍是 `orca`。
-- `config set runtime.default claude-cli` 不再被 `value !== 'orca'` 拒绝（`config.ts:899-901`）。
+- `config set runtime.default claude-code` 不再被 `value !== 'orca'` 拒绝（`config.ts:899-901`）。
 - `src/router/api.ts:118` 手工绑定 Assignment 时用配置的 runtime，并校验 `runtimeId` 已注册，而不是写死 `'orca'`。
 - `ToolPolicy` 由 `worker.tools` 生成；`allowedTools / permissionMode / sandbox / shellAllow / allowNetwork` 等安全参数只能来自 `worker.tools` 与 adapter 内置安全基线，`runtime.options` 不允许覆盖；`loadConfig` 发现放宽尝试直接拒绝。
 - `shellAllow` 按命令前缀匹配：`ra report` / `ra doc` 可用，`ra config` / `ra stop` / `ra serve` 不在白名单。
@@ -1045,7 +1045,7 @@ export class RuntimeRegistry {
 export function createRuntimes(config: AppConfig, deps: RuntimeDeps): RuntimeRegistry {
   const runtimes = new Map<string, WorkerRuntime>()
   runtimes.set('orca', new OrcaRuntime(deps))
-  // P3: runtimes.set('claude-cli', new ClaudeCliRuntime(deps))
+  // P3: runtimes.set('claude-code', new ClaudeCodeRuntime(deps))
   // P4: runtimes.set('codex-cli', new CodexCliRuntime(deps))
   return new RuntimeRegistry(runtimes, config.runtime.default)
 }
@@ -1106,7 +1106,7 @@ export function createRuntimes(config: AppConfig, deps: RuntimeDeps): RuntimeReg
 
 - `loadConfig` 真正解析 `runtime.default / runtime.options`（当前写死）；启动期校验 default 已注册，未知值 fail-fast；
 - `RuntimeRegistry` 按 id 取运行时；已有 assignment 的生命周期操作按 `assignment.runtimeId` 路由；launch/relaunch 用 `registry.default()` 或 effect 显式 runtimeId；
-- `ra serve` 用注册表；`runtime.default` 只决定新工单；P2 只注册 `orca`，配置其他值直接启动失败；P3 在同一期追加 `claude-cli`；
+- `ra serve` 用注册表；`runtime.default` 只决定新工单；P2 只注册 `orca`，配置其他值直接启动失败；P3 在同一期追加 `claude-code`；
 - doctor/init 改为 runtime 自检/仓库发现；
 - 加 `ra serve` 单实例锁 + 工单 launch lease + repo 级 worktree 串行化。
 - **验收**：旧 Orca 工单与手工绑定继续工作；未知 runtime 明确报错；单实例测试通过。
@@ -1116,16 +1116,16 @@ export function createRuntimes(config: AppConfig, deps: RuntimeDeps): RuntimeReg
 
 - **前置安全项**：`ra report` 支持 `--port` / `RA_PORT`；`ra doc` 走 Router 代理（或使用只读最小 `RA_HOME`），避免 Agent 依赖完整 `config.yaml`；
 - `GitWorktreeProvider`（含 `--`、分支校验、路径约束、失败回滚）；
-- `ClaudeCliRuntime`：`claude --bg` 启动、`claude agents --json --all` 读状态、`claude --bg --resume` 追问、`claude stop` 停止；brief 写文件，env allowlist，单飞 + 按 `(input.id, attempt)` 幂等；
+- `ClaudeCodeRuntime`：`claude --bg` 启动、`claude agents --json --all` 读状态、`claude --bg --resume` 追问、`claude stop` 停止；brief 写文件，env allowlist，单飞 + 按 `(input.id, attempt)` 幂等；
 - `ClaudeSessionActivity` 复用，按 sessionId 精确定位；`claude logs` 仅作兜底且必须清洗 ANSI；
 - 明确语义：追问在当前轮结束后生效；`blocked` 置 attention 等人工，不自动 resume；不实现轮内实时插话。
 - **验收**：在临时仓库跑通「接单 → 改文件 → `ra report` → PR → 闭环」；`ra doctor` 通过；launch 失败无残留；重复 tick 只投递一次；`--resume` 产生新 id 时明确报错；Router 重启后能从 `agents --json --all` 找回 done/stopped 会话。
 - **风险**：权限/认证/模型额度；`blocked` 权限提示；CLI 版本字段变化。
-- **回滚**：不注册 `claude-cli`；默认仍 `orca`。
+- **回滚**：不注册 `claude-code`；默认仍 `orca`。
 
 **一期总验收（P0–P3 一起）**：
 - Orca 路径行为不变，现有测试全绿；
-- `runtime.default` 可在 `orca` / `claude-cli` 间切换，旧工单按 `assignment.runtimeId` 走原运行时；
+- `runtime.default` 可在 `orca` / `claude-code` 间切换，旧工单按 `assignment.runtimeId` 走原运行时；
 - Claude 临时仓库完整链路跑通：接单 → 改文件 → `ra report` → PR → 闭环；
 - 追问在当轮结束后自动送达；`blocked` 能转人工；Router 重启后能找回 done/stopped 会话；
 - `ra doctor` 能同时检查 Orca 与 Claude CLI 的可执行文件、认证与仓库可见性；
@@ -1176,7 +1176,7 @@ Orca 运行时用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.t
   - `isZombie` / `checkIdle` / `recover` / `workerGone` 对 `null` / `lost` / `exited` 的 6.4 矩阵逐项覆盖；
   - `deliver` 抛 `agent:gone` 后转失联；连续 tick 下未 ack 的重投按退避，不每秒执行；
   - `trackPullRequests` 在无 `linkedPr` 时调用 `findByBranch`，本地路径仓库不走 `gh --repo`；
-  - 旧 `runtime_id='orca'` 工单与新 `claude-cli` 工单共存时，各走各的运行时；
+  - 旧 `runtime_id='orca'` 工单与新 `claude-code` 工单共存时，各走各的运行时；
   - capability 降级矩阵逐项覆盖；
   - 环境变量 allowlist、prompt 不进 argv、日志脱敏、路径越界拒绝。
 
@@ -1356,7 +1356,7 @@ Orca 运行时用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.t
 - `src/worker/registry.ts`：`RuntimeRegistry`，按 `assignment.runtimeId` 取运行时；默认运行时启动期校验；
 - `src/service.ts`：去 Orca 类型、按 assignment 路由、`buildWorkerContext`、launch 半成功清理、投递 receipt；
 - `src/worker/orca/*`：Orca 适配新契约（status/output/activity/inspectWorkspace/removeWorkspace/nudge）；
-- `src/worker/runtimes/claude-cli/*`：`claude --bg` + `claude agents --json --all` + `claude --bg --resume`（无 flags）+ `claude stop`；
+- `src/worker/runtimes/claude-code/*`：`claude --bg` + `claude agents --json --all` + `claude --bg --resume`（无 flags）+ `claude stop`；
 - `src/worker/workspaces/git-worktree.ts`：git worktree、分支/路径校验、失败回滚；
 - 配置：`worker.tools`、`runtime.default/options` 解析；`ra init` 在 Claude 运行时下问本地路径；
 - `ra report --port` / `RA_PORT`；`ra serve` 单实例锁；doctor 追加当前运行时自检。

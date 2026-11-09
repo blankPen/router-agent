@@ -1,4 +1,6 @@
+import { existsSync } from 'node:fs'
 import type { AppConfig } from '../config.js'
+import { projectsForRuntime } from '../config.js'
 import type { CommandRunner } from '../infra/process.js'
 import type { WorkerRuntime } from '../worker/port.js'
 import {
@@ -38,7 +40,8 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
   const checks: DoctorCheck[] = []
 
   const missing: string[] = []
-  const projectCount = config.projects.length
+  const projects = projectsForRuntime(config)
+  const projectCount = projects.length
   if (projectCount === 0) missing.push('projects')
   if (config.feishu.chats.length === 0) missing.push('feishu.chats')
   if (config.feishu.allowed.length === 0) missing.push('feishu.allowed')
@@ -47,7 +50,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
     name: '配置必填项',
     status: missing.length === 0 ? 'ok' : 'fail',
     detail: missing.length === 0
-      ? `${projectCount} 个项目（${config.projects.map(project => project.name).join('、')}），群 ${config.feishu.chats.length} 个（绑定 ${config.feishu.chats.filter(chat => chat.repo).length} 个）`
+      ? `${config.runtime.default} 运行时 ${projectCount} 个项目（${projects.map(project => project.name).join('、')}），群 ${config.feishu.chats.length} 个（绑定 ${config.feishu.chats.filter(chat => chat.repo).length} 个）`
       : `缺少 ${missing.join(' / ')}`,
     ...(missing.length > 0 ? { hint: 'ra config set project.<名称> "<repo>@<分支>"，或重新运行 ra init' } : {}),
   })
@@ -70,7 +73,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
     checks.push(await check('Orca 仓库', async () => {
       const res = await deps.orca.run(['repo', 'list', '--json'])
       const repos = res.code === 0 ? parseOrcaRepos(res.stdout) : []
-      const wanted = config.projects.map(project => project.repo)
+      const wanted = projects.map(project => project.repo)
       if (wanted.length === 0) return { status: 'fail', detail: '未配置任何项目', hint: 'ra config set project.<name> <repo>@<分支>' }
       const missingRepos = wanted.filter(repo => {
         const name = repo.replace(/^(id|name|path):/, '')
@@ -80,6 +83,22 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
         ? { status: 'ok', detail: wanted.join(', ') }
         : { status: 'fail', detail: `未找到仓库 ${missingRepos.join(', ')}`, hint: 'orca repo list 查看可选项，或 orca repo add --path <dir>' }
     }))
+  } else {
+    // 非 Orca 运行时（claude-code / acp）：项目 repo 必须是已存在的本地仓库目录。
+    checks.push({
+      name: 'Claude Code 项目路径',
+      status: projects.length === 0
+        ? 'fail'
+        : projects.every(project => existsSync(project.repo.replace(/^path:/, ''))) ? 'ok' : 'fail',
+      detail: projects.length === 0
+        ? '未配置任何项目'
+        : projects
+          .map(project => `${project.name} → ${project.repo.replace(/^path:/, '')}`)
+          .join('，'),
+      ...(projects.length > 0 && projects.some(project => !existsSync(project.repo.replace(/^path:/, '')))
+        ? { hint: 'repo 必须是本地仓库绝对路径；在面板「配置 → 项目清单」或 ra config set project.<名称> 中修正' }
+        : {}),
+    })
   }
 
   checks.push(await check('飞书机器人身份', async () => {

@@ -21,15 +21,14 @@ Tests       291 passed | 4 skipped
 | `tests/worker/orca.test.ts` | 命令构造、返回解析、start/deliver/stop/inspect、工单级 repo/branch 与 `--base-branch`（16） |
 | `tests/worker/report-poller.test.ts` | state.json 增量读取、交付物解析、坏文件容错、idle 判定（17） |
 | `tests/sources/feishu.test.ts` | 事件归一化、@ / 私聊、系统消息与卡片丢弃、附件标记、飞书文档创建、互动卡片与降级、卡片 Markdown 归一化、纯文本/卡片分流、幂等 key 长度（28） |
-| `tests/sources/feishu-backfill.test.ts` | 历史补拉的命令与解析、`--start` 时间窗、首跑基线、游标增量与失败保号（8） |
 | `tests/sources/feishu-directory.test.ts` | 群名目录刷新与持久化（3） |
 | `tests/sources/github.test.ts` | PR 状态归一化、仓库选择器转 gh owner/name（6） |
 | `tests/router/agent-loop.test.ts` | 显式研判、礼貌回复、附件不开单、单条话题开场、工具调用、批处理、扇出、多项目派工追问、会话绑定上下文、群白名单（27） |
-| `tests/router/dispatch.test.ts` | 多项目/多分支解析：项目匹配、群绑定、草稿继承、白名单校验（11） |
+| `tests/router/dispatch.test.ts` | 多项目/多分支解析：项目匹配、群绑定、草稿继承、任意分支放行（11） |
 | `tests/router/api.test.ts` | HTTP API 全端点、`POST /api/reports` 上报入口与旧字段兼容（12） |
 | `tests/service.test.ts` | 派工、并发上限、PR 闭环、停止、重启对账、回复投递、长回复分块、旧上报去重、会话丢失转人工（16） |
 | `tests/service-sender.test.ts` | 出站形态分流：简单消息走纯文本、Markdown 走卡片、非飞书/空正文跳过（5） |
-| `tests/service-runtime.test.ts` | 未 ack 重投、idle 唤醒、stale、Orca linkedPR、补拉（8） |
+| `tests/service-runtime.test.ts` | 未 ack 重投、idle 唤醒、stale、Orca linkedPR（7） |
 | `tests/cli.test.ts` | commander 命令解析：init / tickets / ticket / status / config / help（11） |
 | `tests/cli-init.test.ts` | inquirer 交互初始化：select/checkbox/password、App Secret 走 stdin、新建应用、授权引导（6） |
 | `tests/infra/process.test.ts` | 命令执行器：stdin 传递、错误码透出（3） |
@@ -47,7 +46,7 @@ Tests       291 passed | 4 skipped
 1. **真实 LLM 研判**：用 `.trove/config.json` 的 DeepSeek 配置跑通 `AgentLoop`，推断候选得到可解析决定，未落 `unavailable`。
 2. **真实 HTTP + Web**：`/api/status` 返回 `runtime=orca`；`/` 返回 React 面板 HTML；`/app.js` 可加载。
 3. **真实 Orca CLI**：`terminal list` 解析正常（不存在的 handle 返回 null 不抛错）；`worktree list` 可读。
-4. **真实飞书**：`event consume ... --dry-run` 预检通过；历史补拉真实群返回 6 条并正确过滤机器人自己的消息。
+4. **真实飞书**：`event consume ... --dry-run` 预检通过。
 
 ### 真实 Orca worktree 冒烟（已清理）
 
@@ -158,7 +157,7 @@ ra stop && ra start
 1. **未绑定的群**：@bot 说「把登录超时改成 30 秒」→ Router 应**追问**「要改哪个项目、从哪个分支开始」（列出 router-agent / super-agent），`ra tickets` 里**没有新工单**。
 2. 接着回「router-agent，从 release 开始」→ 开出工单，`ra ticket <id>` 的「派工」一行显示 `name:dsh/router-agent @ release`；`ra logs` 里 `launch` 记录 worktree 带 `--base-branch release`。
 3. **绑定的群**（`oc_xxx`）：直接 @bot 派活 → 不追问，直接开单并派工到 `router-agent @ main`。
-4. 反例：@bot 说「用 feature/x 分支改一下」且项目配了 `branches: [main, release]` → 应回复「该分支不在允许范围」，不开单。
+4. 任意分支：@bot 说「用 feature/x 分支改一下」→ 分支不再做白名单校验，直接按 feature/x 开单（不存在时由 git 报错）。
 
 ## 5. Pi 研判层（2026-11-06 切换为单引擎）
 

@@ -25,7 +25,7 @@ import {
   type WorkspaceRef,
 } from '../../port.js'
 
-export interface ClaudeCliRuntimeOptions {
+export interface ClaudeCodeRuntimeOptions {
   claude: CommandRunner
   git: CommandRunner
   /** ~/.router-agent/workers */
@@ -34,7 +34,6 @@ export interface ClaudeCliRuntimeOptions {
   home: string
   claudeProjectsDir?: string
   model?: string
-  permissionMode?: string
   allowedTools?: string
   /** 额外允许的环境变量；默认只给 PATH/HOME/TMPDIR/LANG。 */
   env?: NodeJS.ProcessEnv
@@ -76,13 +75,13 @@ interface ClaudeMeta {
 /**
  * Claude Code CLI 运行时：用 Claude 自己的后台会话管理（agent view）承载工单。
  *
- * - 首轮：claude --bg "<brief 文件路径>"；
+ * - 首轮：claude --bg --dangerously-skip-permissions "<brief 文件路径>"；
  * - 状态：claude agents --json --all；
  * - 追问：会话 done/stopped 后 claude --bg --resume <sessionId>，**不能带新 flags**；
  * - 停止：claude stop <id>（保留会话）。
  */
-export class ClaudeCliRuntime implements WorkerRuntime {
-  readonly id = 'claude-cli'
+export class ClaudeCodeRuntime implements WorkerRuntime {
+  readonly id = 'claude-code'
   readonly capabilities: RuntimeCapabilities = {
     agent: { liveStatus: true, processExit: false, output: true, activity: true, structuredInput: true, nudge: false },
     workspace: { cleanup: true, prLink: false, discovery: false },
@@ -92,18 +91,16 @@ export class ClaudeCliRuntime implements WorkerRuntime {
   private home: string
   private claudeProjectsDir?: string
   private model?: string
-  private permissionMode: string
   private allowedTools?: string
   private env: NodeJS.ProcessEnv
   private gitProvider: GitWorktreeProvider
 
-  constructor(opts: ClaudeCliRuntimeOptions) {
+  constructor(opts: ClaudeCodeRuntimeOptions) {
     this.claude = opts.claude
     this.workersDir = opts.workersDir
     this.home = opts.home
     this.claudeProjectsDir = opts.claudeProjectsDir ?? defaultClaudeProjectsDir()
     this.model = opts.model
-    this.permissionMode = opts.permissionMode ?? 'acceptEdits'
     this.allowedTools = opts.allowedTools ?? [
       'Read', 'Write', 'Edit', 'Glob', 'Grep',
       'Bash(ra report:*)', 'Bash(ra doc:*)', 'Bash(git:*)', 'Bash(gh:*)',
@@ -164,7 +161,8 @@ export class ClaudeCliRuntime implements WorkerRuntime {
           '--name', name,
           // brief/input 文件在 workers 目录，显式加入可读目录（会被会话保存，resume 时不需要重复传）。
           '--add-dir', dir,
-          ...(this.permissionMode ? ['--permission-mode', this.permissionMode] : []),
+          // worker 在隔离 worktree 里无人值守执行，必须跳过交互式权限确认。
+          '--dangerously-skip-permissions',
           ...(this.model ? ['--model', this.model] : []),
           ...(allowedTools ? ['--allowedTools', allowedTools] : []),
           // --allowedTools 是 variadic；必须用 -- 把 prompt 与工具列表分开。

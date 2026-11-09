@@ -18,6 +18,8 @@ export interface ApiServerOptions {
   onPolicyChange?: (config: AppConfig) => void | Promise<void>
   /** 配置面板保存后回调；服务层可据此提示「哪些项需要重启」。 */
   onConfigChange?: (config: AppConfig, changed: string[]) => void | Promise<void>
+  /** 面板「重启服务」：由服务层关闭当前进程并拉起新的 daemon。 */
+  onRestart?: () => void | Promise<void>
   onEvent?: EventSink
   /** Worker 通过 `ra report` POST 上来的状态；由服务层接到 onWorkerState。 */
   onReport?: (state: WorkerStateFile) => void | Promise<void>
@@ -48,6 +50,8 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       return respond(res, 200, {
         stage: 'running',
         runtime: config.runtime.default,
+        pid: process.pid,
+        startedAt: new Date(Date.now() - process.uptime() * 1_000).toISOString(),
         tickets: {
           open: tickets.filter(t => t.stage !== 'closed').length,
           closed: tickets.filter(t => t.stage === 'closed').length,
@@ -117,7 +121,12 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         const handle = String((body as Record<string, unknown>).handle ?? '')
         const workdir = String((body as Record<string, unknown>).workdir ?? '')
         if (!handle) return respond(res, 400, { error: 'handle-required' })
+        if (ticket.stage === 'closed') return respond(res, 409, { error: 'ticket-closed' })
+        // 手工重绑通常是在恢复丢失的 worker：清掉转人工状态并恢复话题订阅，
+        // 否则工单会停在 person，后续消息也不会再扇出到这张工单。
+        opts.engine.clearAttention(ticketId)
         const assignment = opts.engine.startAssignment(ticketId, { runtimeId: config.runtime.default, handle, workdir })
+        opts.engine.subscribe(ticket.threadId, ticket.id)
         return respond(res, 201, { assignment })
       }
       return respond(res, 405, { error: 'method-not-allowed' })
@@ -248,6 +257,14 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       return respond(res, 405, { error: 'method-not-allowed' })
     }
 
+    if (path === '/api/restart' && req.method === 'POST') {
+      if (!opts.onRestart) return respond(res, 501, { error: 'restart-not-supported' })
+      // 先把 202 刷回浏览器，再关闭端口、拉起新进程；页面不用刷新，轮询状态即可。
+      return respond(res, 202, { ok: true, restarting: true }, () => {
+        setImmediate(() => { void opts.onRestart?.() })
+      })
+    }
+
     if (path.startsWith('/api/')) return respond(res, 404, { error: 'not-found' })
 
     return serveStatic(res, path, opts.webRoot)
@@ -266,6 +283,8 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
     server,
     close: () => new Promise<void>(resolvePromise => {
       server.close(() => resolvePromise())
+      // keep-alive 连接不会自己断，重启时会让 close 一直挂到超时，这里主动断开。
+      server.closeAllConnections?.()
     }),
   }
 }
@@ -283,10 +302,10 @@ function configPayload(config: AppConfig): Record<string, unknown> {
   }
 }
 
-function respond(res: ServerResponse, status: number, body: unknown): void {
+function respond(res: ServerResponse, status: number, body: unknown, after?: () => void): void {
   const payload = JSON.stringify(body)
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(payload) })
-  res.end(payload)
+  res.end(payload, after)
 }
 
 function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {

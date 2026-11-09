@@ -4,6 +4,7 @@
  * 服务端负责最终校验（src/config.ts 的 applyConfigPatch），这里只描述「怎么展示、
  * 默认值怎么取、明显不合法的值提前提示」，避免用户点保存后才被后端打回。
  */
+import { WORKER_RUNTIMES } from '../../worker/runtimes/catalog.js'
 
 export type FieldKind = 'text' | 'number' | 'switch' | 'select' | 'list'
 
@@ -182,7 +183,13 @@ export const SECTIONS: SectionDef[] = [
     description: 'Worker 执行方式、监听端口与模型接入。模型密钥不在此处展示，请用 CLI / 环境变量配置。',
     fields: [
       { path: 'workerSpec.mode', label: 'Worker 规格模式', kind: 'select', options: WORKER_MODE_OPTIONS },
-      { path: 'runtime.default', label: 'Worker 运行时', kind: 'select', options: [{ value: 'orca', label: 'orca' }, { value: 'claude-cli', label: 'claude-cli' }, { value: 'acp', label: 'acp（需先配置 command）' }] },
+      {
+        path: 'runtime.default',
+        label: 'Worker 运行时',
+        kind: 'select',
+        options: WORKER_RUNTIMES.map(runtime => ({ value: runtime.id, label: runtime.label, hint: runtime.hint })),
+        hint: '只影响新工单；已派出的工单继续使用创建时的运行时',
+      },
       { path: 'server.port', label: '面板端口', kind: 'number', min: 1, max: 65_535, unit: '端口' },
       { path: 'llm.baseUrl', label: '模型 Base URL', kind: 'text', placeholder: '留空 = 复用 ~/.trove/config.json' },
       { path: 'llm.model', label: '模型名', kind: 'text', placeholder: '例如 deepseek-v4-flash' },

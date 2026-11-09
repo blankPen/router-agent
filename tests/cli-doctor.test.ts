@@ -5,7 +5,7 @@ import type { CommandRunner } from '../src/infra/process.js'
 
 function healthyConfig(): AppConfig {
   const config = defaultConfig()
-  config.projects = [{ name: 'teamwork-repos', repo: 'teamwork-repos', branches: [], defaultBranch: 'main' }]
+  config.projects = [{ name: 'teamwork-repos', repo: 'teamwork-repos', defaultBranch: 'main' }]
   config.feishu.chats = [chatEntry('oc_dsh')]
   config.feishu.allowed = ['ou_me']
   config.feishu.botOpenIds = ['ou_bot', 'cli_bot']

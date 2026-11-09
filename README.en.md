@@ -29,7 +29,7 @@ If your day is a constant shuffle between repositories — drop a request in a c
 
 router-agent (`ra`) is a resident two-layer agent system: **the Router only triages and dispatches; the Worker only works inside an isolated worktree**. It doesn't write code for you. It turns "who, which project, which base branch, what to do" into a ticket with a clear scope and context, then hands it to Claude Code running in its own Orca worktree.
 
-- **Many repositories, many chats**: projects, branches and chat bindings live in one config, and everything is confirmed before dispatch.
+- **Many repositories, many chats**: projects and chat bindings live in one config, and everything is confirmed before dispatch.
 - **An auditable scope**: every message passes a deterministic gate, then Pi triage; accept, ignore, ask-back and unavailable are all recorded decisions.
 - **No terminal babysitting**: the Worker reports with `ra report`, the Router merges progress back into the original thread, and a merged or closed PR closes the ticket.
 - **Tickets don't collide**: one ticket, one worktree, one branch, one Claude Code terminal.
@@ -130,7 +130,6 @@ Key constraints:
 - Direct messages have their own switch; bot messages, system messages and interactive cards never enter the domain.
 - A non-empty per-chat `allowed` list means only those people can trigger work in that chat; an outsider mentioning the bot is silently ignored.
 - Image messages are downloaded by `image_key`, transcribed to text (including images inside quoted messages and rich-text posts), and then go through the same assessment. If transcription fails, the message falls back to the attachment notice. Other attachments (files, audio) are not downloaded or read multimodally.
-- History backfill is incremental per chat cursor; the first sighting of a chat only records a baseline, so old messages aren't treated as new requests.
 
 ### Decide: gate first, Pi second
 
@@ -181,7 +180,7 @@ Router: Ticket "Adjust login timeout" (tk_1) started. Progress will be updated i
 - While waiting, the request is stored as a **dispatch draft** (per chat + per person, valid for 30 minutes); once the user fills in the gaps, the ticket opens directly without restating the task.
 - Precedence for project / branch: **explicitly stated in this message > chat binding > previous draft > the sole project's `defaultBranch`**.
 - The base branch is passed to `orca worktree create --base-branch <ref>`; the Worker's worktree is cut from it.
-- If the project isn't in `projects` or the branch isn't in the `branches` allowlist, the Router asks again with the available options rather than guessing.
+- If the project isn't in `projects`, the Router asks again with the available options rather than guessing; branches are not restricted by an allowlist.
 
 **Chat binding (no Q&A)**: one chat entry covers both "what to monitor" and "where to dispatch":
 
@@ -190,7 +189,6 @@ Router: Ticket "Adjust login timeout" (tk_1) started. Progress will be updated i
 ra config set project.router-agent "name:dsh/router-agent@main"
 ra config set chatBinding.oc_xxx "router-agent@main"   # binding also means monitoring this chat
 ra config set chatMode.oc_xxx mention                  # optional: only @ messages
-ra config set chatSync.oc_xxx true                     # optional: backfill history on startup
 ```
 
 The equivalent YAML:
@@ -253,7 +251,7 @@ The Router doesn't chat; it only speaks when necessary:
 | Worker delivers a conclusion | Simple one-line replies go as **plain text**; Markdown goes as a **Feishu card** (normalized first) in the thread, with document / PR links |
 | Worker progress (`--state progress` or Router probe) | **Not sent one by one**: reports are merged on `progress.syncMs` into one thread message (follow-up answers excepted). When the Worker goes quiet, the Router probes on `progress.probeMs` (session transcript first, terminal screen as fallback) and posts a semantic summary (assistant text plus a one-line action digest, tool-call noise filtered), rate-limited by `progress.repeatMs` |
 
-- The ack reaction is best-effort: failures only log `feishu:reaction-failed` and never affect triage. It is added only to first-time ingested messages addressed to the bot (@ / direct), never to backfill or replay, and removed after the reply is sent (`feishu:unreact-failed` logs a removal failure). Turn it off with `ra config set feishu.reaction ""`.
+- The ack reaction is best-effort: failures only log `feishu:reaction-failed` and never affect triage. It is added only to first-time ingested messages addressed to the bot (@ / direct), never to replay, and removed after the reply is sent (`feishu:unreact-failed` logs a removal failure). Turn it off with `ra config set feishu.reaction ""`.
 - All `emoji_type` values are in the Feishu "emoji copy" document; note that they are **case-sensitive** (`Typing`, not `TYPING`).
 - Outbound routing is content-based: **single-line, ≤200 characters, no Markdown syntax** goes as a `text` message; everything else is rendered as a Feishu **interactive card**, falling back to a post message if the card fails. Threading rule: an empty `threadId` means a normal message, a non-empty one means a thread reply.
 - Card Markdown is normalized first (`normalizeCardMarkdown`) to downgrade syntax Card 1.0 doesn't support: `#` headings → bold lines, `>` quotes → `▍`, tables → bold header + list rows, `- [x]` → ☑ / ☐, `<br>` → newline, `![image](http...)` → a clickable link; code blocks are preserved verbatim.
@@ -298,13 +296,12 @@ feishu:
   larkHome: ""         # isolated lark-cli config dir for a dedicated bot; empty = reuse the current profile
   appId: ""            # dedicated bot App ID (App Secret lives only in lark-cli's encrypted store)
   reaction: "Typing"   # ack reaction added on receipt (Feishu emoji_type; empty string disables)
-  # Monitored chats: one entry decides "what to receive + where to dispatch + whether to backfill"
+  # Monitored chats: one entry decides "what to receive + where to dispatch"
   chats:
     - chat: oc_xxx     # chat_id
       mode: all        # all=receive everything and reply without @; mention=only @bot
       repo: router-agent   # optional: project bound to this chat (name or repo selector)
       branch: main         # optional: base branch bound to this chat
-      sync: false          # optional: backfill this chat's history on startup
       allowed: [ou_xxx]    # optional: only these people can act here (empty = use global allowed)
   directMessages: true
   allowed: []          # open_ids allowed to start work
@@ -399,7 +396,6 @@ projects: []
 #  - name: router-agent            # name users / the model refer to
 #    repo: name:dsh/router-agent   # repo selector passed to Orca
 #    defaultBranch: main           # used when no branch is given; empty = ask every time
-#    branches: [main, release]     # optional: allowed base branches
 
 server:
   port: 3083
@@ -468,7 +464,7 @@ If a user identity is needed later (searching chats / members by name), `ra init
 
 Commands and options are parsed by `commander`: `ra --help`, `ra init --help`, `ra tickets --help` show usage.
 
-Bot credentials are managed by lark-cli's encrypted store; `router-agent` keeps only `larkHome` and `appId`. At runtime every lark-cli subprocess (event consumption, sending, backfill, chat-name refresh) gets `HOME=<larkHome>`, fully isolated from other agents' lark-cli profiles.
+Bot credentials are managed by lark-cli's encrypted store; `router-agent` keeps only `larkHome` and `appId`. At runtime every lark-cli subprocess (event consumption, sending, chat-name refresh) gets `HOME=<larkHome>`, fully isolated from other agents' lark-cli profiles.
 
 ### Projects and repo selectors
 
@@ -662,8 +658,8 @@ Source layout:
 ```text
 src/core/     domain core (model / stage / policy / engine / effects)
 src/store/    SQLite (node:sqlite)
-src/worker/   WorkerRuntime port, OrcaRuntime / ClaudeCliRuntime / AcpRuntime, state.json polling, worker handbook
-src/sources/  Feishu events, history backfill, GitHub PR tracking
+src/worker/   WorkerRuntime port, OrcaRuntime / ClaudeCodeRuntime / AcpRuntime, state.json polling, worker handbook
+src/sources/  Feishu events, GitHub PR tracking
 src/router/   AgentLoop, tool contracts, prompts, HTTP API
 src/web/      React dashboard
 src/cli/      ra commands
@@ -677,7 +673,6 @@ src/cli/      ra commands
 - Reporting goes through `ra report`; `state.json` is only the fallback when the service is unreachable.
 - Images are downloaded and transcribed by a multimodal model; files / audio and other attachments are only recognized as "this is an attachment message".
 - Image transcription requires a model with image input. If the main model is text-only, configure a vision model via `llm.imageModel`, otherwise images fall back to the attachment notice.
-- History backfill is incremental per chat cursor: the first sighting of a chat only records a baseline (the newest message time), so old messages aren't treated as new requests.
 - Measured Orca behavior: `lastOutputAt` is a millisecond number, and CLI-created terminals may report `orphaned=true` while still usable. The adapter normalizes the former and only treats `connected=false` as dead.
 - `workerSpec.mode: agent` depends on whether the claude launched by Orca loads the global `~/.claude/agents/`; that premise is not yet verified, so the verified `prompt` mode is the default.
 - Dispatch drafts are stored per "chat + person" and valid for 30 minutes; multiple incomplete requests in the same chat overwrite each other (the later question replaces the earlier one).

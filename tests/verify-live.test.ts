@@ -14,8 +14,6 @@ import { defaultConfig, loadConfig, policyOf, chatEntry } from '../src/config.js
 import { createApiServer } from '../src/router/api.js'
 import { OrcaRuntime } from '../src/worker/orca/index.js'
 import { realRunner } from '../src/infra/process.js'
-import { backfillChats, historyCursorKey } from '../src/sources/feishu-backfill.js'
-import type { FeishuConfig } from '../src/sources/feishu.js'
 import type { Trigger } from '../src/core/model.js'
 
 const LIVE = process.env.RA_VERIFY === '1'
@@ -104,37 +102,6 @@ describe.runIf(LIVE)('真实环境验证', () => {
     console.log('Orca worktrees:', worktrees.length)
   }, 60_000)
 
-  it('飞书事件消费预检与历史补拉可用', async () => {
-    const runner = realRunner('lark-cli')
-    const dry = await runner.run(['event', 'consume', 'im.message.receive_v1', '--as', 'bot', '--dry-run'])
-    console.log('lark dry-run:', dry.stdout.slice(0, 300))
-    expect(dry.code).toBe(0)
-
-    const cfg: FeishuConfig = {
-      chats: [chatEntry('oc_8b3cca4baea9469cb04ec6ab198a8c5e')],
-      directMessages: false,
-      botOpenIds: ['ou_fb2410f09780e92091df335d14387897', 'cli_a9225095e04cdbc2'],
-      botNames: ['Pz小助手'],
-    }
-    // 首次运行只记基线：不把整段历史当新需求
-    const cursors = new Map<string, string>()
-    const cursorStore = {
-      get: (key: string) => cursors.get(key) ?? null,
-      set: (key: string, value: string) => { cursors.set(key, value) },
-    }
-    const chatIds = cfg.chats.map(chat => chat.chat)
-    const first = await backfillChats({ runner, chats: chatIds, cfg, cursors: cursorStore })
-    expect(first.baselined).toEqual(chatIds)
-    expect(first.triggers).toHaveLength(0)
-
-    // 把游标回拨 7 天，验证增量通道确实能拉到消息
-    cursors.set(historyCursorKey(chatIds[0]!), String(Date.now() - 7 * 24 * 3600 * 1000))
-    const second = await backfillChats({ runner, chats: chatIds, cfg, cursors: cursorStore })
-    console.log('补拉条数:', second.triggers.length, second.triggers[0]?.text.slice(0, 40))
-    expect(second.triggers.length).toBeGreaterThan(0)
-    // 机器人自己的消息必须被过滤
-    expect(second.triggers.every(t => !cfg.botOpenIds.includes(t.actorId))).toBe(true)
-  }, 60_000)
 })
 
 describe.runIf(!LIVE)('真实环境验证（未开启）', () => {

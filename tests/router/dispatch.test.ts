@@ -6,7 +6,6 @@ import type { DispatchDraft } from '../../src/core/model.js'
 const project = (over: Partial<DispatchSettings['projects'][number]> = {}) => ({
   name: 'router-agent',
   repo: 'name:dsh/router-agent',
-  branches: [] as string[],
   defaultBranch: 'main',
   ...over,
 })
@@ -70,15 +69,14 @@ describe('多项目 / 多分支派工解析', () => {
     expect(result.missing).toContain('repo')
   })
 
-  it('分支不在白名单里时标记 rejectedBranch，且不偷偷回落到默认分支', () => {
+  it('用户指定的分支直接允许，不再做白名单校验', () => {
     const result = resolveDispatch({
-      settings: settings({ projects: [project({ branches: ['main', 'release'] })] }),
+      settings: settings(),
       chatId: 'oc_dev',
       branch: 'feature/x',
     })
-    expect(result.rejectedBranch).toBe('feature/x')
-    expect(result.missing).toContain('branch')
-    expect(result.branch).toBe('')
+    expect(result.branch).toBe('feature/x')
+    expect(result.missing).toEqual([])
   })
 
   it('matchProject 支持项目名、选择器与 basename（大小写不敏感）', () => {
@@ -106,5 +104,33 @@ describe('多项目 / 多分支派工解析', () => {
     }
     expect(dispatchSettingsOf(config).projects).toHaveLength(1)
     expect(dispatchSettingsOf(config).bindings).toHaveLength(1)
+  })
+})
+describe('项目清单按运行时隔离', () => {
+  it('dispatchSettingsOf 跟随默认运行时切换清单', () => {
+    const base = defaultConfig()
+    const orca = { ...base, projects: [project()] }
+    expect(dispatchSettingsOf(orca).projects[0]?.repo).toBe('name:dsh/router-agent')
+
+    const claude = {
+      ...orca,
+      runtime: { default: 'claude-code', projects: { 'claude-code': [project({ repo: '/Users/me/router-agent' })] } },
+    }
+    expect(dispatchSettingsOf(claude).projects[0]?.repo).toBe('/Users/me/router-agent')
+    // orca 清单没有被覆盖
+    expect(claude.projects[0]?.repo).toBe('name:dsh/router-agent')
+  })
+
+  it('群绑定到其它运行时的项目时要求重选，不把选择器当本地路径', () => {
+    const result = resolveDispatch({
+      settings: settings({
+        projects: [project({ name: 'other', repo: '/Users/me/other' })],
+        bindings: [{ chat: 'oc_dev', repo: 'router-agent', branch: 'main' }],
+      }),
+      chatId: 'oc_dev',
+    })
+    expect(result.rejectedRepo).toBe('router-agent')
+    expect(result.missing).toContain('repo')
+    expect(result.repo).toBe('')
   })
 })

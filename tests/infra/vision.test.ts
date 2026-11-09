@@ -74,6 +74,60 @@ describe('createVisionTranscriber', () => {
     await expect(transcriber.transcribe(image)).rejects.toThrow(/vision-empty/)
   })
 
+  it('推理模型把预算花在思考上时，关闭推理重试一次', async () => {
+    const exhausted = jsonResponse({
+      choices: [{ message: { content: '', reasoning_content: '反复分析图片……' }, finish_reason: 'length' }],
+      usage: { completion_tokens: 1500, completion_tokens_details: { reasoning_tokens: 1500 } },
+    })
+    const ok = jsonResponse({ choices: [{ message: { content: '登录页报错：超时 30 秒' }, finish_reason: 'stop' }] })
+    let attempt = 0
+    const { fetchImpl, calls } = fakeFetch(() => {
+      attempt += 1
+      return attempt === 1 ? exhausted : ok
+    })
+    const transcriber = createVisionTranscriber(model, { fetchImpl })
+
+    expect(await transcriber.transcribe(image)).toBe('登录页报错：超时 30 秒')
+    expect(calls).toHaveLength(2)
+    expect(JSON.parse(String(calls[0]!.init.body)).reasoning_effort).toBeUndefined()
+    expect(JSON.parse(String(calls[1]!.init.body)).reasoning_effort).toBe('none')
+  })
+
+  it('确认需要关闭推理后，后续图片直接带 reasoning_effort=none，不再白跑一次', async () => {
+    let attempt = 0
+    const { fetchImpl, calls } = fakeFetch(() => {
+      attempt += 1
+      return attempt === 1
+        ? jsonResponse({
+            choices: [{ message: { content: '' }, finish_reason: 'length' }],
+            usage: { completion_tokens_details: { reasoning_tokens: 1500 } },
+          })
+        : jsonResponse({ choices: [{ message: { content: '图片内容' } }] })
+    })
+    const transcriber = createVisionTranscriber(model, { fetchImpl })
+
+    expect(await transcriber.transcribe(image)).toBe('图片内容')
+    expect(await transcriber.transcribe(image)).toBe('图片内容')
+    expect(calls).toHaveLength(3)
+    expect(JSON.parse(String(calls[2]!.init.body)).reasoning_effort).toBe('none')
+  })
+
+  it('关闭推理的重试失败时保留首次空结果错误，并带上可排查细节', async () => {
+    let attempt = 0
+    const { fetchImpl } = fakeFetch(() => {
+      attempt += 1
+      if (attempt === 1) {
+        return jsonResponse({
+          choices: [{ message: { content: '' }, finish_reason: 'length' }],
+          usage: { completion_tokens_details: { reasoning_tokens: 1500 } },
+        })
+      }
+      return new Response('unknown parameter', { status: 400 })
+    })
+    const transcriber = createVisionTranscriber(model, { fetchImpl })
+    await expect(transcriber.transcribe(image)).rejects.toThrow(/vision-empty\(finish=length, reasoning=1500\)/)
+  })
+
   it('模型不支持图片时熔断，后续调用不再发请求', async () => {
     const { fetchImpl, calls } = fakeFetch(() => new Response('model does not support image', { status: 400 }))
     const transcriber = createVisionTranscriber(model, { fetchImpl })

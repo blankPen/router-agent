@@ -6,14 +6,14 @@ import { homedir } from 'node:os'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { Command, CommanderError } from 'commander'
-import { ensureHome, loadConfig, policyOf, replyAlwaysChatsOf, setConfigValue, writeConfig } from '../config.js'
+import { ensureHome, loadConfig, policyOf, projectsForRuntime, replyAlwaysChatsOf, setConfigValue, writeConfig } from '../config.js'
 import { Store } from '../store/db.js'
 import { Engine } from '../core/engine.js'
 import { createRuntimes } from '../worker/registry.js'
+import { WORKER_RUNTIME_IDS } from '../worker/runtimes/catalog.js'
 import { GitHubTracker } from '../sources/github.js'
 import { FeishuConsumer, FeishuSender, attachQuotedMessage, normalizeFeishuEventDetailed } from '../sources/feishu.js'
 import { attachImageText } from '../sources/feishu-image.js'
-import { backfillChats } from '../sources/feishu-backfill.js'
 import { ChatDirectory } from '../sources/feishu-directory.js'
 import { createLarkRunner, larkEnv, parseAppId } from '../sources/lark.js'
 import { createVisionTranscriber, type ImageTranscriber } from '../infra/vision.js'
@@ -253,8 +253,8 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
     checks.unshift({
       name: 'Worker runtime',
       status: 'fail' as const,
-      detail: `未注册 runtime: ${config.runtime.default}`,
-      hint: 'ra config set runtime.default orca|claude-cli',
+detail: `未注册 runtime: ${config.runtime.default}`,
+      hint: `ra config set runtime.default ${WORKER_RUNTIME_IDS.join('|')}`,
     })
   }
   if (opts.json) {
@@ -680,7 +680,8 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   }
   logger.info('serve:starting', {
     home,
-    projects: config.projects.map(project => `${project.name}@${project.defaultBranch || '(未设默认分支)'}`),
+    projects: projectsForRuntime(config).map(project => `${project.name}@${project.defaultBranch || '(未设默认分支)'}`),
+    runtime: config.runtime.default,
     chats: config.feishu.chats.map(chat => `${chat.chat}:${chat.mode}${chat.repo ? `→${chat.repo}@${chat.branch || '?'}` : ''}`),
     decisionEngine: 'pi',
     timeoutMs: config.router.timeoutMs,
@@ -792,28 +793,11 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     sender: feishuOutbox,
     decisionEngine,
     onDecisionAudit,
-    backfill: async () => {
-      const result = await backfillChats({
-        runner: larkRunner,
-        chats: config.feishu.chats.filter(chat => chat.sync).map(chat => chat.chat),
-        cfg: config.feishu,
-        cursors: {
-          get: key => store.getCursor(key),
-          set: (key, value) => store.setCursor(key, value, new Date().toISOString()),
-        },
-      })
-      if (result.baselined.length > 0) logger.info('backfill:baseline', { chats: result.baselined })
-      // 补拉同样要带上被引用消息的正文，否则引用消息进研判时只剩一句空 @；
-      // 图片消息随后下载 image_key 并转成文本。
-      return Promise.all(
-        result.triggers.map(async t =>
-          withImageText(await attachQuotedMessage({ ...t, chatName: directory.nameOf(t.chatId) }, larkRunner)),
-        ),
-      )
-    },
   })
 
   const webRoot = fileURLToPath(new URL('../web', import.meta.url))
+  // onRestart 需要在 api 创建时注入，真正的重启函数在 service/consumer 就绪后再赋值。
+  let requestRestart: (() => Promise<void>) | null = null
   const api = await createApiServer({
     engine,
     store,
@@ -822,6 +806,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     webRoot: existsSync(webRoot) ? webRoot : undefined,
     onEvent: sink,
     onReport: state => service.onWorkerState(state),
+    onRestart: () => { void requestRestart?.() },
     onPolicyChange: updated => {
       logger.info('policy:updated', { version: engine.policy().version, acceptMode: updated.policy.acceptMode })
     },
@@ -900,15 +885,51 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   await service.start()
   output.stdout(`Router 服务运行中：http://127.0.0.1:${config.server.port}/`)
 
-  const shutdown = (): void => {
-    logger.info('serve:stopping', {})
+  const stopRuntime = (): void => {
     consumer?.stop()
     clearInterval(chatTimer)
     service.stop()
     store.close()
-    void api.close()
+  }
+
+  /** 释放 pid 文件与单实例锁；重启时新进程要能重新接管。 */
+  const releaseHost = (): void => {
     cleanupPid(home)
     rmSync(lockDir, { recursive: true, force: true })
+  }
+
+  requestRestart = async (): Promise<void> => {
+    logger.info('serve:restarting', { pid: process.pid })
+    stopRuntime()
+    // 先让出端口，再拉起新进程，否则会撞 EADDRINUSE。
+    await api.close()
+    releaseHost()
+    const entry = fileURLToPath(new URL('./main.js', import.meta.url))
+    try {
+      const child = spawn(process.execPath, [entry, 'serve', '--home', home], {
+        detached: true,
+        stdio: 'ignore',
+        env: { ...process.env, RA_HOME: home },
+      })
+      await new Promise<void>((resolvePromise, reject) => {
+        child.once('spawn', () => resolvePromise())
+        child.once('error', reject)
+      })
+      child.unref()
+      writeFileSync(join(home, 'router-agent.pid'), String(child.pid ?? ''), 'utf8')
+      logger.info('serve:restarted', { pid: child.pid })
+      process.exit(0)
+    } catch (error) {
+      logger.error('serve:restart-failed', { message: error instanceof Error ? error.message : String(error) })
+      process.exit(1)
+    }
+  }
+
+  const shutdown = (): void => {
+    logger.info('serve:stopping', {})
+    stopRuntime()
+    void api.close()
+    releaseHost()
     process.exit(0)
   }
   process.on('SIGTERM', shutdown)
