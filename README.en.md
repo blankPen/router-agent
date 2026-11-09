@@ -70,10 +70,12 @@ ra init                 # guided: repo → bot → chat → allowed members, all
 **3 · Start**
 
 ```bash
-ra start                # run in the background
+ra start                # background; opens the web setup page when ready
 ra status
-ra web                  # open the dashboard
+ra web                  # reopen the dashboard later
 ```
+
+`ra start` waits for the service to become ready, then opens the dashboard's **Setup** page in your default browser: worker runtime (including one-click ACP extension install), projects, Feishu access, and monitored chats with bindings. Save, then restart the service when the page asks. On a remote or headless machine use `ra start --no-open` to only print the dashboard URL.
 
 **4 · Self-check and simulate**
 
@@ -573,10 +575,10 @@ The legacy `runtime.default: acp` + `runtime.options.acp.command` form is still 
 | `ra init` | Interactive setup (`--yes` skips questions) |
 | `ra doctor` | Preflight: config / Orca / Feishu / model / port (`--json` for machines) |
 | `ra simulate` | Simulate a local message to verify gate + Pi triage, without dispatch (`--infer` runs Pi triage, `--dry-run` doesn't persist) |
-| `ra start [--foreground]` | Start the resident service (background by default) |
+| `ra start [--foreground]` | Start the resident service (background by default) and open the web setup page once ready; `--no-open` only prints the URL |
 | `ra stop` | Stop the service |
 | `ra status` | Service status + ticket overview |
-| `ra web` | Open the web dashboard |
+| `ra web` | Reopen the web dashboard |
 | `ra tickets [--stage]` | List tickets |
 | `ra ticket <id>` | Ticket details (stage / assignment / reports / inputs) |
 | `ra logs` | Last 50 log lines |

@@ -22,6 +22,7 @@ import {
   mergeRuntimeChoices,
   runtimeStatusLabel,
 } from './runtime-model.js'
+import { hashForTab, tabFromHash, type Tab } from './tabs.js'
 import { ACP_RUNTIME_ID, ORCA_RUNTIME_ID, normalizeRuntimeId } from '../../worker/runtimes/catalog.js'
 
 // ---------------------------------------------------------------------------
@@ -196,8 +197,6 @@ const LOG_POLL_MS = 2_000
 // 应用外壳
 // ---------------------------------------------------------------------------
 
-type Tab = 'setup' | 'tickets' | 'logs' | 'config' | 'sources'
-
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
@@ -205,7 +204,8 @@ function sleep(ms: number): Promise<void> {
 type RestartPhase = 'idle' | 'restarting' | 'done' | 'error'
 
 function App(): JSX.Element {
-  const [tab, setTab] = useState<Tab>('tickets')
+  // `ra start` 会带 #setup 打开面板；刷新时也从 hash 恢复当前页签。
+  const [tab, setTab] = useState<Tab>(() => tabFromHash(window.location.hash) ?? 'tickets')
   const [status, setStatus] = useState<ServiceStatus | null>(null)
   const [restartPhase, setRestartPhase] = useState<RestartPhase>('idle')
   const [restartError, setRestartError] = useState<string | null>(null)
@@ -223,6 +223,18 @@ function App(): JSX.Element {
     if (dirtyRef.current && !confirm('有未保存的配置修改，切换页面后将丢失，继续？')) return
     dirtyRef.current = false
     setTab(next)
+    // 让地址栏与当前页签保持同步：刷新页面或分享链接时能回到同一页。
+    window.history.replaceState(null, '', hashForTab(next))
+  }, [tab])
+
+  // 外部直接改 hash（例如再次执行 ra start）时切到对应页签。
+  useEffect(() => {
+    const sync = (): void => {
+      const next = tabFromHash(window.location.hash)
+      if (next && next !== tab) setTab(next)
+    }
+    window.addEventListener('hashchange', sync)
+    return () => window.removeEventListener('hashchange', sync)
   }, [tab])
 
   useEffect(() => {
