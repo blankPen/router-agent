@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Store } from '../src/store/db.js'
@@ -17,6 +17,7 @@ import type {
   DeliveryReceipt,
   AgentStatus,
   WorkspaceInfo,
+  WorkspaceRef,
 } from '../src/worker/port.js'
 import type { Trigger } from '../src/core/model.js'
 import type { DecisionEngine } from '../src/router/decision-engine.js'
@@ -124,6 +125,15 @@ class FakeRuntime implements WorkerRuntime {
   }
   async inspectWorktree() {
     return this.linkedPr
+  }
+  /** 批量清理：记录被回收的目录，并按 removeErrors 模拟脏工作区被 provider 拒绝。 */
+  removed: string[] = []
+  removeErrors = new Map<string, string>()
+  async removeWorkspace(ref: WorkspaceRef): Promise<void> {
+    const message = this.removeErrors.get(ref.workdir)
+    if (message) throw new Error(message)
+    this.removed.push(ref.workdir)
+    rmSync(ref.workdir, { recursive: true, force: true })
   }
 }
 
@@ -585,6 +595,97 @@ describe('运行时机制', () => {
       sessionId: 'sess_orca',
       note: expect.stringContaining('不再由 Orca 托管'),
     })
+  })
+
+  /** 批量清理用：直接开单 + 派工，不经过 launch（避免 FakeRuntime 覆盖 workdir）。 */
+  function makeTicket(suffix: string) {
+    engine.ingest(trigger({ id: `t_${suffix}`, externalId: `om_${suffix}`, threadId: `feishu:oc_dev:om_${suffix}` }))
+    return engine.decide({
+      triggerId: `t_${suffix}`,
+      decision: 'accept',
+      strength: 'explicit',
+      reason: 'ok',
+      title: `任务 ${suffix}`,
+    }).ticket!
+  }
+
+  it('批量清理：按运行时分组列出仍存在的工作区，只把已关闭工单标为可清理', () => {
+    const openDir = mkdtempSync(join(tmpdir(), 'ra-ws-open-'))
+    const closedDir = mkdtempSync(join(tmpdir(), 'ra-ws-closed-'))
+    const goneDir = join(tmpdir(), `ra-ws-gone-${Date.now()}`)
+
+    const open = makeTicket('open')
+    engine.startAssignment(open.id, { runtimeId: 'orca', handle: 'h-open', workdir: openDir })
+    const closed = makeTicket('closed')
+    engine.startAssignment(closed.id, { runtimeId: 'orca', handle: 'h-closed', workdir: closedDir })
+    engine.closeTicket(closed.id, 'test')
+    // 已关单但目录已被回收：不应再出现在清单里。
+    const gone = makeTicket('gone')
+    engine.startAssignment(gone.id, { runtimeId: 'orca', handle: 'h-gone', workdir: goneDir })
+    engine.closeTicket(gone.id, 'test')
+
+    const overview = service.listWorkspaces()
+    expect(overview.runtimes).toHaveLength(1)
+    const group = overview.runtimes[0]!
+    expect(group.runtimeId).toBe('orca')
+    expect(group.label).toBe('orca')
+    expect(group.supported).toBe(true)
+    expect(group.entries.map(entry => entry.ticketId).sort()).toEqual([open.id, closed.id].sort())
+    expect(group.entries.find(entry => entry.ticketId === closed.id)).toMatchObject({ cleanable: true })
+    expect(group.entries.find(entry => entry.ticketId === open.id)).toMatchObject({ cleanable: false })
+    expect(group.cleanableCount).toBe(1)
+    expect(overview.cleanableCount).toBe(1)
+  })
+
+  it('批量清理：按运行时回收已关闭工单的工作区，脏目录跳过并返回原因', async () => {
+    const activeDir = mkdtempSync(join(tmpdir(), 'ra-ws-active-'))
+    const okDir = mkdtempSync(join(tmpdir(), 'ra-ws-ok-'))
+    const dirtyDir = mkdtempSync(join(tmpdir(), 'ra-ws-dirty-'))
+
+    const active = makeTicket('active')
+    engine.startAssignment(active.id, { runtimeId: 'orca', handle: 'h-active', workdir: activeDir })
+    const done = makeTicket('done')
+    engine.startAssignment(done.id, { runtimeId: 'orca', handle: 'h-done', workdir: okDir })
+    engine.closeTicket(done.id, 'test')
+    const dirty = makeTicket('dirty')
+    engine.startAssignment(dirty.id, { runtimeId: 'orca', handle: 'h-dirty', workdir: dirtyDir })
+    engine.closeTicket(dirty.id, 'test')
+    runtime.removeErrors.set(dirtyDir, 'git worktree remove 失败: contains modified or untracked files')
+
+    const result = await service.cleanupWorkspaces('orca')
+    expect(result.runtimeId).toBe('orca')
+    expect(result.removed).toEqual([{ ticketId: done.id, workdir: okDir }])
+    expect(result.skipped).toHaveLength(1)
+    expect(result.skipped[0]).toMatchObject({ ticketId: dirty.id, workdir: dirtyDir })
+    expect(result.skipped[0]?.reason).toContain('modified')
+    expect(runtime.removed).toEqual([okDir])
+    // 在办工单的工作区绝不能动。
+    expect(existsSync(activeDir)).toBe(true)
+
+    // 已回收的目录不再出现；脏目录仍在清单里，等人工处理后可以再点一次。
+    const after = service.listWorkspaces().runtimes[0]!
+    expect(after.entries.map(entry => entry.ticketId).sort()).toEqual([active.id, dirty.id].sort())
+  })
+
+  it('批量清理：目录被在办工单占用时不算可清理', async () => {
+    const sharedDir = mkdtempSync(join(tmpdir(), 'ra-ws-shared-'))
+    const open = makeTicket('shared-open')
+    engine.startAssignment(open.id, { runtimeId: 'orca', handle: 'h-shared-open', workdir: sharedDir })
+    const closed = makeTicket('shared-closed')
+    engine.startAssignment(closed.id, { runtimeId: 'orca', handle: 'h-shared-closed', workdir: sharedDir })
+    engine.closeTicket(closed.id, 'test')
+
+    const entry = service.listWorkspaces().runtimes[0]!.entries.find(item => item.ticketId === closed.id)!
+    expect(entry.cleanable).toBe(false)
+    expect(entry.reason).toContain('占用')
+
+    const result = await service.cleanupWorkspaces('orca')
+    expect(result.removed).toEqual([])
+    expect(existsSync(sharedDir)).toBe(true)
+  })
+
+  it('批量清理：未知运行时直接拒绝', async () => {
+    await expect(service.cleanupWorkspaces('nope')).rejects.toThrow(/未知的 Worker 运行时/)
   })
 
 })

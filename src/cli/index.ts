@@ -941,6 +941,10 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     config,
     runtimeAdmin,
     projectSetup: new ProjectSetup({ home, git: gitRunner, orca: orcaRunner }),
+    workspaceAdmin: {
+      list: async () => service.listWorkspaces(),
+      cleanup: runtimeId => service.cleanupWorkspaces(runtimeId),
+    },
     port: config.server.port,
     webRoot: existsSync(webRoot) ? webRoot : undefined,
     onEvent: sink,

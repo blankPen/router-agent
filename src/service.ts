@@ -19,6 +19,13 @@ import { buildNeutralContract, buildWorkerPrompt } from './worker/spec/index.js'
 import { workBranch } from './worker/naming.js'
 import { buildResumeHint } from './worker/resume.js'
 import { latestClaudeSessionId } from './worker/orca/session.js'
+import {
+  workspaceRuntimeLabel,
+  type WorkspaceCleanupResultView,
+  type WorkspaceEntryView,
+  type WorkspaceOverviewView,
+  type WorkspaceRuntimeGroupView,
+} from './worker/workspaces/overview.js'
 import { EffectsProcessor } from './core/effects.js'
 import { preview } from './core/events.js'
 import { shouldSendAsText } from './sources/feishu.js'
@@ -612,6 +619,156 @@ export class RouterService {
       { workdir, sessionId, handle },
       { workdirExists: existsSync(workdir) },
     )
+  }
+
+  /**
+   * 面板「批量清理工作区」：按运行时分组列出仍存在于磁盘上的工单工作区。
+   *
+   * 只看每张工单最新一次派工，避免已经被重派替换掉的旧目录被误当成在用；
+   * 只有「已关闭工单 + 目录仍在 + 运行时可回收 + 没被其它在办工单占用」才标记为可清理。
+   */
+  listWorkspaces(): WorkspaceOverviewView {
+    const latestByTicket = new Map<string, Assignment>()
+    for (const assignment of this.store.listAssignments()) {
+      if (!assignment.workdir) continue
+      // listAssignments 按派工时间倒序，首条即该工单的最新派工。
+      if (!latestByTicket.has(assignment.ticketId)) latestByTicket.set(assignment.ticketId, assignment)
+    }
+
+    const rows: Array<{ assignment: Assignment; ticket: Ticket; workdir: string }> = []
+    const inUse = new Set<string>()
+    for (const assignment of latestByTicket.values()) {
+      const ticket = this.store.getTicket(assignment.ticketId)
+      if (!ticket) continue
+      const workdir = resolve(assignment.workdir)
+      if (!this.isWorkspaceOnDisk(workdir)) continue
+      if (ticket.stage !== 'done') inUse.add(workdir)
+      rows.push({ assignment, ticket, workdir })
+    }
+
+    const groups = new Map<string, WorkspaceRuntimeGroupView>()
+    for (const { assignment, ticket, workdir } of rows) {
+      const runtimeId = normalizeRuntimeId(assignment.runtimeId)
+      const runtime = this.runtimes.has(runtimeId) ? this.runtimes.get(runtimeId) : null
+      const supported = Boolean(runtime?.removeWorkspace)
+      const cleanable = ticket.stage === 'done' && supported && !inUse.has(workdir)
+      const entry: WorkspaceEntryView = {
+        assignmentId: assignment.id,
+        ticketId: ticket.id,
+        title: ticket.title,
+        stage: ticket.stage,
+        runtimeId,
+        workdir,
+        startedAt: assignment.startedAt,
+        cleanable,
+        ...(cleanable ? {} : {
+          reason: ticket.stage !== 'done'
+            ? '工单未关闭，工作区可能仍在使用'
+            : !runtime
+              ? '当前服务未注册该运行时'
+              : !supported
+                ? '该运行时不支持自动回收工作区'
+                : '目录被其它在办工单占用',
+        }),
+      }
+      const group = groups.get(runtimeId) ?? {
+        runtimeId,
+        label: workspaceRuntimeLabel(runtimeId),
+        isDefault: normalizeRuntimeId(this.config.runtime.default) === runtimeId,
+        supported,
+        entries: [],
+        cleanableCount: 0,
+      }
+      group.entries.push(entry)
+      if (cleanable) group.cleanableCount += 1
+      groups.set(runtimeId, group)
+    }
+
+    // 组顺序跟随运行时注册表（内置 → ACP 目录），历史 / 未注册 id 追加在后。
+    const known = new Map(this.runtimes.ids().map((id, index) => [normalizeRuntimeId(id), index]))
+    const runtimes = [...groups.values()].sort((a, b) => {
+      const left = known.get(a.runtimeId) ?? Number.MAX_SAFE_INTEGER
+      const right = known.get(b.runtimeId) ?? Number.MAX_SAFE_INTEGER
+      return left === right ? a.runtimeId.localeCompare(b.runtimeId) : left - right
+    })
+    for (const group of runtimes) {
+      // 可清理的排前面；其余保持派工时间倒序。
+      group.entries.sort((a, b) => Number(b.cleanable) - Number(a.cleanable))
+    }
+    return {
+      runtimes,
+      cleanableCount: runtimes.reduce((sum, group) => sum + group.cleanableCount, 0),
+    }
+  }
+
+  /**
+   * 按运行时批量回收已关闭工单的遗留工作区。
+   *
+   * 不传 force：脏工作区交给 provider 拒绝，返回的 skipped 里带原因给面板展示。
+   */
+  async cleanupWorkspaces(runtimeId: string): Promise<WorkspaceCleanupResultView> {
+    const id = normalizeRuntimeId(String(runtimeId ?? '').trim())
+    if (!id || !this.runtimes.has(id)) {
+      throw new WorkerRuntimeError('runtime:unknown', `未知的 Worker 运行时: ${runtimeId || '(空)'}`)
+    }
+    const runtime = this.runtimes.get(id)
+    const group = this.listWorkspaces().runtimes.find(item => item.runtimeId === id)
+    const targets = group?.entries.filter(entry => entry.cleanable) ?? []
+    const result: WorkspaceCleanupResultView = { runtimeId: id, removed: [], skipped: [] }
+    if (!runtime.removeWorkspace) {
+      for (const entry of targets) {
+        result.skipped.push({ ticketId: entry.ticketId, workdir: entry.workdir, reason: '该运行时不支持自动回收工作区' })
+      }
+      return result
+    }
+
+    for (const entry of targets) {
+      const assignment = this.store.getAssignment(entry.assignmentId)
+      if (!assignment?.workdir) continue
+      try {
+        // 先关终端再删目录；终端早已不存在时 stop 失败不影响后续回收。
+        if (assignment.handle) {
+          try {
+            await runtime.stop(this.refOf(assignment), 'workspace-cleanup')
+          } catch (error) {
+            this.logger.warn('workspace:bulk-stop-failed', {
+              runtimeId: id,
+              ticketId: entry.ticketId,
+              handle: assignment.handle,
+              message: error instanceof Error ? error.message : String(error),
+            })
+          }
+        }
+        await runtime.removeWorkspace(this.workspaceRefOf(assignment))
+        result.removed.push({ ticketId: entry.ticketId, workdir: entry.workdir })
+        this.log('workspace:bulk-removed', entry.ticketId, { runtimeId: id, workdir: entry.workdir })
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error)
+        result.skipped.push({ ticketId: entry.ticketId, workdir: entry.workdir, reason })
+        this.logger.warn('workspace:bulk-skip', {
+          runtimeId: id,
+          ticketId: entry.ticketId,
+          workdir: entry.workdir,
+          reason,
+        })
+      }
+    }
+    this.logger.info('workspace:bulk-cleanup', {
+      runtimeId: id,
+      removed: result.removed.length,
+      skipped: result.skipped.length,
+    })
+    return result
+  }
+
+  /** 目录存在且不是根目录 / home：避免脏数据把系统目录交给 provider 回收。 */
+  private isWorkspaceOnDisk(workdir: string): boolean {
+    if (!workdir || !workdir.startsWith('/')) return false
+    const abs = resolve(workdir)
+    if (abs === '/') return false
+    if (this.config.home && abs === resolve(this.config.home)) return false
+    if (abs === resolve(homedir())) return false
+    return existsSync(abs)
   }
 
   /** 一个完整周期：研判 → 上报 → Effects → 派工 → 投递。周期之间串行，避免重叠。 */

@@ -287,7 +287,7 @@ worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态�
 `ra start` 自动打开、`ra web` 也可随时打开的面板分五块：
 
 - **初始化**：只放启动必需项——LLM Provider、运行时、项目、飞书接入、群与绑定，顶部有完成度清单；LLM Provider 放在第一位，可直接填 Base URL / 模型 / API Key（密钥只写入 `config.yaml`，保存后不回显），留空则继续复用 `.trove` 或环境变量。运行时用卡片平铺展示（带对应品牌 Logo），每张卡会检测 CLI / 版本 / ACP 依赖 / 登录状态。安装拆成两个按钮：**安装 CLI** 跳转该 Agent 的官方安装文档，**安装 ACP 扩展** 由 ra 把 npm 适配包装到 `~/.router-agent/runtimes`（没有可安装扩展时不显示）；另有真实握手试启动。配好后保存并按提示重启服务即可。
-- **工单**：按阶段分组 + 计数、关键字搜索（标题 / 工单号 / 仓库 / PR）、自动刷新开关与手动刷新；详情页有阶段、派工、PR、授权范围、上报时间线（含完整回复与 `humanAction`）、投递记录，可直接投递 follow-up 或停止工单。
+- **工单**：按阶段分组 + 计数、关键字搜索（标题 / 工单号 / 仓库 / PR）、自动刷新开关与手动刷新；详情页有阶段、派工、PR、授权范围、上报时间线（含完整回复与 `humanAction`）、投递记录，可直接投递 follow-up 或停止工单。页头还有「清理工作区」入口：按 Worker 运行时分组列出仍在磁盘上的 worktree，只清理已关闭工单的遗留目录；有未提交改动的目录会被 provider 拒绝，并在结果里说明原因。
 - **日志**：直接看 `~/.router-agent/logs/router-agent.log`，默认 2 秒增量拉取（只读游标之后的新字节，不重复读整个文件），可开「实时刷新」；按 INFO / WARN / ERROR 过滤、按消息或字段搜索、复制当前结果；停在底部时自动跟随新日志，往上翻后不再打断，点「最新」回到底部。文件不存在或还没写入时给出空状态提示。
 - **配置**：按「LLM Provider / 准入策略 / 研判与人格 / 会话复用 / 进展同步 / 闲置治理 / 飞书接入 / 派工与服务 / 项目与群绑定」分组；每个字段带说明与默认值提示，改动逐项标脏，保存前做前端 + 后端双重校验，保存后写回 `config.yaml`。「派工与服务」里的 Worker 运行时是与初始化页相同的卡片平铺组件（`orca` / `claude-code` / `acp` / `acp-*`），可检测安装状态、分别跳转官方文档安装 CLI 或由 ra 安装 ACP 扩展，并做 ACP 握手试启动；项目清单按后端隔离，切换后端后「项目与群绑定」里的项目清单会切换到该后端自己的一套（Orca 用仓库选择器，Claude Code 必须是本地仓库绝对路径）；「添加本地项目」支持系统目录选择并自动识别 Git / 分支，「添加 Git 项目」支持填写 ssh / http(s) 地址后自动 clone 并登记。群绑定的项目只能从当前清单里选，分支自动跟随项目的默认分支，不能单独自定义。
 - **来源**：服务状态、监控群、接收范围概览。
@@ -737,6 +737,8 @@ ra report \
 | POST | `/api/tickets/:id/input` | 投递 follow-up |
 | POST | `/api/tickets/:id/stop` | 停止工单 |
 | POST | `/api/tickets/:id/assignment` | 手工绑定 Assignment |
+| GET | `/api/workspaces` | 工单页「清理工作区」：按运行时分组列出仍存在的工单工作区 |
+| POST | `/api/workspaces/cleanup` | 按运行时回收已关闭工单的遗留 worktree（`{ runtimeId }`；脏目录跳过并回报原因） |
 | POST | `/api/reports` | Worker 上报状态与回复（`ra report` 的入口） |
 | GET / PUT | `/api/policy` | 读写策略（保存后落盘） |
 | GET / PUT | `/api/config` | 配置面板：读安全快照 / 按点路径提交补丁（白名单校验 + 落盘） |
@@ -751,7 +753,7 @@ ra report \
 ## 开发
 
 ```bash
-pnpm test        # 466 个测试通过（5 个默认跳过，其中包含真实 Pi 验证）
+pnpm test        # 612 个测试通过（4 个默认跳过，其中包含真实 Pi / 服务联调验证）
 pnpm typecheck
 pnpm build       # tsc + esbuild（Web 面板与 Markdown 资产）
 pnpm check       # typecheck + test

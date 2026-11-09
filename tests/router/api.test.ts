@@ -388,6 +388,84 @@ describe('HTTP 管理 API', () => {
     expect(typeof res.json.startedAt).toBe('string')
   })
 
+  it('GET /api/workspaces 返回按运行时分组的工作区，未注入时 501', async () => {
+    const overview = {
+      runtimes: [{
+        runtimeId: 'orca',
+        label: 'orca',
+        isDefault: true,
+        supported: true,
+        entries: [],
+        cleanableCount: 0,
+      }],
+      cleanableCount: 0,
+    }
+    const extra = await createApiServer({
+      engine, store, config,
+      workspaceAdmin: {
+        list: async () => overview,
+        cleanup: async runtimeId => ({ runtimeId, removed: [], skipped: [] }),
+      },
+    })
+    try {
+      const res = await call(extra, 'GET', '/api/workspaces')
+      expect(res.status).toBe(200)
+      expect(res.json).toEqual(overview)
+    } finally {
+      await extra.close()
+    }
+
+    const unsupported = await call(server, 'GET', '/api/workspaces')
+    expect(unsupported.status).toBe(501)
+    expect(unsupported.json.error).toBe('workspace-admin-not-supported')
+  })
+
+  it('POST /api/workspaces/cleanup 按运行时调用清理并回传结果', async () => {
+    const calls: string[] = []
+    const extra = await createApiServer({
+      engine, store, config,
+      onEvent: event => events.push(event),
+      workspaceAdmin: {
+        list: async () => ({ runtimes: [], cleanableCount: 0 }),
+        cleanup: async runtimeId => {
+          calls.push(runtimeId)
+          return { runtimeId, removed: [{ ticketId, workdir: '/tmp/wt' }], skipped: [] }
+        },
+      },
+    })
+    try {
+      const res = await call(extra, 'POST', '/api/workspaces/cleanup', { runtimeId: 'orca' })
+      expect(res.status).toBe(200)
+      expect(calls).toEqual(['orca'])
+      expect(res.json).toEqual({ runtimeId: 'orca', removed: [{ ticketId, workdir: '/tmp/wt' }], skipped: [] })
+      expect(events.some(event => event.event === 'api:workspace-cleanup' && event.runtimeId === 'orca')).toBe(true)
+    } finally {
+      await extra.close()
+    }
+  })
+
+  it('POST /api/workspaces/cleanup 缺 runtimeId 或清理失败返回 400', async () => {
+    const extra = await createApiServer({
+      engine, store, config,
+      workspaceAdmin: {
+        list: async () => ({ runtimes: [], cleanableCount: 0 }),
+        cleanup: async () => { throw new Error('未知的 Worker 运行时: nope') },
+      },
+    })
+    try {
+      const missing = await call(extra, 'POST', '/api/workspaces/cleanup', {})
+      expect(missing.status).toBe(400)
+      expect(missing.json.error).toBe('runtime-required')
+
+      const failed = await call(extra, 'POST', '/api/workspaces/cleanup', { runtimeId: 'nope' })
+      expect(failed.status).toBe(400)
+      expect(failed.json.error).toBe('workspace-cleanup-failed')
+      expect(failed.json.message).toContain('未知的 Worker 运行时')
+    } finally {
+      await extra.close()
+    }
+  })
+
   it('POST /api/restart 未注入回调时返回 501', async () => {
     const res = await call(server, 'POST', '/api/restart')
     expect(res.status).toBe(501)

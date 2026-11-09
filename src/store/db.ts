@@ -700,6 +700,12 @@ export class Store {
     return row ? assignmentFromRow(row) : null
   }
 
+  /** 面板批量清理工作区用：按派工时间倒序列出全部 Assignment（每个工单可能有多条历史）。 */
+  listAssignments(limit = 5_000): Assignment[] {
+    const rows = this.db.prepare('SELECT * FROM assignments ORDER BY started_at DESC LIMIT ?').all(limit) as Row[]
+    return rows.map(assignmentFromRow)
+  }
+
   insertReport(r: Report): boolean {
     const result = this.db.prepare(`INSERT OR IGNORE INTO reports (id, ticket_id, assignment_id, turn, state, summary, human_action, pr_number, pr_url, reply, acked_inputs, at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)

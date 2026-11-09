@@ -11,6 +11,7 @@ import type { AcceptMode } from '../core/policy.js'
 import { noopSink, preview, type EventSink } from '../core/events.js'
 import type { WorkerStateFile } from '../worker/report-poller.js'
 import type { ResumeHint } from '../worker/port.js'
+import type { WorkspaceAdminPort } from '../worker/workspaces/overview.js'
 import { readLogs } from './log-tail.js'
 
 export interface ApiServerOptions {
@@ -36,6 +37,8 @@ export interface ApiServerOptions {
   logPath?: string
   /** 项目登记：目录选择、Git 探测、clone 与 Orca 仓库登记；缺省时端点返回 404。 */
   projectSetup?: ProjectSetupPort
+  /** 工单页「批量清理工作区」：按运行时列出与回收遗留 worktree；缺省时端点返回 501。 */
+  workspaceAdmin?: WorkspaceAdminPort
 }
 
 export interface ApiServer {
@@ -155,6 +158,34 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         return respond(res, 201, { assignment })
       }
       return respond(res, 405, { error: 'method-not-allowed' })
+    }
+
+    // 工作区批量清理：按运行时分组列出 / 回收已关闭工单的遗留 worktree。
+    if (path === '/api/workspaces' && req.method === 'GET') {
+      if (!opts.workspaceAdmin) return respond(res, 501, { error: 'workspace-admin-not-supported' })
+      return respond(res, 200, await opts.workspaceAdmin.list())
+    }
+
+    if (path === '/api/workspaces/cleanup' && req.method === 'POST') {
+      if (!opts.workspaceAdmin) return respond(res, 501, { error: 'workspace-admin-not-supported' })
+      const body = await readJson(req)
+      const runtimeId = typeof body.runtimeId === 'string' ? body.runtimeId.trim() : ''
+      if (!runtimeId) return respond(res, 400, { error: 'runtime-required', message: '请指定要清理的运行时' })
+      try {
+        const result = await opts.workspaceAdmin.cleanup(runtimeId)
+        onEvent({
+          event: 'api:workspace-cleanup',
+          runtimeId: result.runtimeId,
+          removed: result.removed.length,
+          skipped: result.skipped.length,
+        })
+        return respond(res, 200, result)
+      } catch (error) {
+        return respond(res, 400, {
+          error: 'workspace-cleanup-failed',
+          message: error instanceof Error ? error.message : String(error),
+        })
+      }
     }
 
     if (path === '/api/reports' && req.method === 'POST') {
