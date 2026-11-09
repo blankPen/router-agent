@@ -1482,3 +1482,19 @@ Orca 运行时用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.t
 
 - 单测：`tests/worker/acp.test.ts` 用 `tests/fixtures/fake-acp-agent.mjs` 覆盖握手、首轮、追问、忙碌排队、权限放行/拒绝、进程退出后 `session/load` 恢复。
 - 真实 Agent：本机 `opencode 2.1.4` 的 `opencode acp` 完成 `initialize` 与 `session/new`；`session/prompt` 因上游模型不可用返回错误（协议链路正常，环境缺模型配置）。
+
+### D.5 动态运行时与按需安装（2026-11-09 追加）
+
+多 ACP Agent 并行接入后，运行时不再只有一个 `acp`：
+
+- **运行时 id**：目录里的每个 Agent 注册为 `acp-<agent>`（`acp-claude` / `acp-codex` / `acp-opencode` / `acp-gemini` / `acp-copilot` / `acp-cursor` / `acp-goose`）。旧的 `acp` 保留为自定义命令入口。
+- **静态目录**：`src/worker/runtimes/acp/agents.ts`，纯常量，Web 可 import。包含启动命令、默认参数、可在线安装的 npm 包、版本探测参数、外部依赖（如 codex app-server）、登录命令与 `loadSession` 能力。
+- **注册表**：`createRuntimes` 保持同步，注册目录里的全部运行时；命令解析只做文件存在性检查（`runtime.options.<id>.command` → `~/.router-agent/runtimes/<agent>/node_modules/.bin` → PATH），不 spawn。未安装的运行时也注册，`start()` 在创建 worktree 之前抛 `runtime:unavailable`，附原因和 `ra runtime install` 提示。
+- **探测**：`detect.ts` 分三层：
+  - L0：命令 + 版本探测（每项 2.5s，缺失项不 spawn）；
+  - L1：外部依赖能力探测（codex 的 `app-server --help`、`login status`）；
+  - L2：完整 `initialize + session/new`，只在 `ra runtime check` / Web「检查」时执行。
+  启动时先读 `~/.router-agent/runtimes/detect.json` 缓存，HTTP 先 listen，再后台刷新；默认运行时不可用不阻止启动。
+- **安装**：`install.ts` 只接受目录里的包与版本，写到 `.staging` 后校验 bin，再原子换名到 `runtimes/<agent>`；旧目录进 `.backup`，失败回滚。每个 agent 一个原子锁目录，防 CLI / 服务并发安装。
+- **Web**：`/api/config` 与 `/api/runtimes` 下发探测结果；下拉框对未安装 / 不兼容 / 未登录项置灰并显示原因；安装是显式确认 + job 轮询，成功后提示重启。
+- **安全**：`publicConfig` 遮蔽 `runtime.options.*.env` 明文；安装接口只监听 127.0.0.1、只接受目录 id。

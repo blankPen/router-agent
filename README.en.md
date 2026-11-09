@@ -530,20 +530,34 @@ Neither mode modifies the project's own `CLAUDE.md`.
 
 ### ACP runtime (optional)
 
-Any agent that implements the [Agent Client Protocol](https://agentclientprotocol.com) can run through the same `AcpRuntime` — no per-agent adapter needed:
+Any agent that implements the [Agent Client Protocol](https://agentclientprotocol.com) can run through the same `AcpRuntime` — no per-agent adapter needed. ra probes locally available ACP agents after startup; the web panel lists them as selectable cards (with brand logos) under **Setup → Runtime** and **Settings → Worker runtime**, with version / dependency / login checks. Installation is split into **Install CLI**, which opens the vendor's official setup page, and **Install ACP extension**, which lets ra install the npm adapter into `~/.router-agent/runtimes` (shown only when one exists); a real ACP handshake test is available too. Unavailable entries (not installed, incompatible, or not logged in) are disabled with a reason.
+
+Built-in runtime ids: `acp-claude`, `acp-codex`, `acp-opencode`, `acp-gemini`, `acp-copilot`, `acp-cursor`, `acp-goose`. `acp-claude` and `acp-codex` can be installed on demand:
+
+```bash
+ra runtime list
+ra runtime install acp-claude
+ra runtime install acp-codex
+ra runtime check acp-codex
+ra runtime login acp-codex
+```
 
 ```yaml
 runtime:
-  default: acp
-  options:
-    acp:
-      command: opencode        # or claude-agent-acp / codex-acp / copilot ...
-      args: [acp]
+  default: acp-codex
+  # options:
+  #   acp-codex:
+  #     args: ["--message-streaming"]
+  projects:
+    acp-codex:
+      - name: router-agent
+        repo: /Users/me/router-agent   # non-orca runtimes require an absolute local path
+        defaultBranch: main
 ```
 
-Common launch commands: `opencode acp`, `gemini --acp`, `copilot --acp --stdio`, `cursor-agent acp`, `goose acp`. Claude Code (`claude-agent-acp`) and Codex (`codex-acp`) are available through ACP adapters, not natively.
+The legacy `runtime.default: acp` + `runtime.options.acp.command` form is still supported as a custom-command runtime. Common launch commands: `opencode acp`, `gemini --acp`, `copilot --acp --stdio`, `cursor-agent acp`, `goose acp`. Claude Code (`claude-agent-acp`) and Codex (`codex-acp`) are ACP adapters, not native ACP.
 
-`AcpRuntime` spawns the agent, runs `initialize → session/new → session/prompt`, streams `session/update` into activity, answers `session/request_permission` according to `worker.tools`, and restores a session with `session/load` when the agent advertises it. Client-side `fs/*` and `terminal/*` proxying is intentionally not implemented; agents must use their own tools. The agent must be logged in beforehand — `auth_required` surfaces as a launch failure.
+`AcpRuntime` spawns the agent, runs `initialize → session/new → session/prompt`, streams `session/update` into activity, answers `session/request_permission` according to `worker.tools`, and restores a session with `session/load` when the agent advertises it. Client-side `fs/*` and `terminal/*` proxying is intentionally not implemented; agents must use their own tools. The agent must be logged in beforehand — `auth_required` surfaces as a launch failure. `codex-acp` needs `--message-streaming` to emit assistant text (included in the catalog defaults).
 
 ## Commands
 
@@ -559,6 +573,11 @@ Common launch commands: `opencode acp`, `gemini --acp`, `copilot --acp --stdio`,
 | `ra tickets [--stage]` | List tickets |
 | `ra ticket <id>` | Ticket details (stage / assignment / reports / inputs) |
 | `ra logs` | Last 50 log lines |
+| `ra runtime [list]` | Probe local ACP agents: status / version / source (`--json` for machines) |
+| `ra runtime install <id>` | Install an ACP adapter into `~/.router-agent/runtimes/<agent>` |
+| `ra runtime uninstall <id>` | Remove an ra-managed ACP adapter |
+| `ra runtime check <id>` | Full ACP handshake (`initialize` + `session/new`) |
+| `ra runtime login <id>` | Interactive login (currently `codex-acp login`) |
 | `ra config` | View config; `config set <key> <value>` changes one key (including `project.<name>` / `chatBinding.<chat>` / `chatMode.<chat>` / `chatSync.<chat>` / `chatAllow.<chat>` / `progress.syncMs` / `progress.probeMs`); `config edit` edits the whole file |
 
 The global option `--home <dir>` switches the state directory (for tests and multiple instances).

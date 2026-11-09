@@ -4,6 +4,8 @@ import { WorkerRuntimeError, type WorkerRuntime } from './port.js'
 import { OrcaRuntime } from './orca/index.js'
 import { ClaudeCodeRuntime } from './runtimes/claude-code/index.js'
 import { AcpRuntime } from './runtimes/acp/index.js'
+import { ACP_AGENTS } from './runtimes/acp/agents.js'
+import { acpRuntimeConfig, installHintOf, resolveAgentCommand } from './runtimes/acp/detect.js'
 import {
   ACP_RUNTIME_ID,
   CLAUDE_CODE_RUNTIME_ID,
@@ -94,12 +96,34 @@ export function createRuntimes(config: AppConfig, deps: RuntimeDeps): RuntimeReg
       ? Object.fromEntries(Object.entries(acpOptions.env as Record<string, unknown>).filter(([, value]) => typeof value === 'string')) as NodeJS.ProcessEnv
       : undefined
     runtimes.set(ACP_RUNTIME_ID, new AcpRuntime({
+      id: ACP_RUNTIME_ID,
       command: acpCommand,
       args: acpArgs,
       workersDir: deps.workersDir,
       home: deps.home,
       git: deps.git,
       ...(acpEnv ? { env: { ...(deps.env ?? {}), ...acpEnv } } : deps.env ? { env: deps.env } : {}),
+    }))
+  }
+
+  // 目录里的 ACP Agent 全部注册：是否安装只影响可用性，不影响 runtime id 是否存在。
+  // 命令解析只做文件存在性检查，不 spawn 进程；真正探测由 detect.ts 负责。
+  const resolveEnv = { ...process.env, ...(deps.env ?? {}) }
+  for (const agent of ACP_AGENTS) {
+    const resolved = resolveAgentCommand(agent, { home: deps.home, env: resolveEnv, config })
+    const runtimeConfig = acpRuntimeConfig(agent, config)
+    const hint = installHintOf(agent)
+    runtimes.set(agent.runtimeId, new AcpRuntime({
+      id: agent.runtimeId,
+      ...(resolved.command ? { command: resolved.command } : {}),
+      args: runtimeConfig.args,
+      env: { ...(deps.env ?? {}), ...runtimeConfig.env },
+      workersDir: deps.workersDir,
+      home: deps.home,
+      git: deps.git,
+      ...(resolved.reason ? { unavailableReason: resolved.reason } : {}),
+      ...(hint ? { installHint: hint } : {}),
+      probeArgs: [...(agent.probeArgs ?? ['--version'])],
     }))
   }
 

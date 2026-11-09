@@ -55,6 +55,8 @@ function deps(over: Partial<DoctorDeps> & { config?: AppConfig } = {}): DoctorDe
     llm: over.llm ?? (() => ({ ok: true, detail: 'deepseek-v4-flash' })),
     portFree: over.portFree ?? (async () => true),
     servicePid: over.servicePid ?? null,
+    ...(over.runtime ? { runtime: over.runtime } : {}),
+    ...(over.runtimeChoices ? { runtimeChoices: over.runtimeChoices } : {}),
   }
 }
 
@@ -68,8 +70,24 @@ describe('ra doctor', () => {
     expect(checks.find(item => item.name === '运行状态')?.status).toBe('warn')
   })
 
-  it('缺少必填项直接 fail 并给出 hint', async () => {
+  it('ACP 可选运行时未安装只 warn，默认运行时不可用 fail', async () => {
     const config = healthyConfig()
+    config.runtime.default = 'acp-codex'
+    const checks = await runDoctor(deps({
+      config,
+      runtimeChoices: [
+        { id: 'acp-codex', label: 'Codex', hint: '', status: 'needs-auth', installable: true, loginHint: '先运行 codex-acp login' },
+        { id: 'acp-gemini', label: 'Gemini', hint: '', status: 'not-installed', installable: false },
+      ],
+    }))
+    expect(checks.find(check => check.name === 'ACP acp-codex')).toMatchObject({
+      status: 'fail',
+      hint: '先运行 codex-acp login',
+    })
+    expect(checks.find(check => check.name === 'ACP acp-gemini')?.status).toBe('warn')
+  })
+
+  it('缺少必填项直接 fail 并给出 hint', async () => {    const config = healthyConfig()
     config.projects = []
     config.feishu.allowed = []
     const checks = await runDoctor(deps({ config }))

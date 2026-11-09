@@ -1,4 +1,4 @@
-import { copyFileSync, mkdirSync } from 'node:fs'
+import { copyFileSync, cpSync, mkdirSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
@@ -23,6 +23,8 @@ await build({
 
 copyFileSync(join(root, 'src', 'web', 'index.html'), join(distWeb, 'index.html'))
 copyFileSync(join(root, 'src', 'web', 'app.css'), join(distWeb, 'app.css'))
+// 品牌图标等静态资源随面板一起发布。
+cpSync(join(root, 'src', 'web', 'assets'), join(distWeb, 'assets'), { recursive: true })
 
 // tsc 只编译 TS，Markdown 资产需要单独复制到 dist。
 const assets = [

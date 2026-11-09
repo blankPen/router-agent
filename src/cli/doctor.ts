@@ -3,6 +3,7 @@ import type { AppConfig } from '../config.js'
 import { projectsForRuntime } from '../config.js'
 import type { CommandRunner } from '../infra/process.js'
 import type { WorkerRuntime } from '../worker/port.js'
+import type { RuntimeChoice } from '../worker/runtimes/acp/detect.js'
 import {
   parseAuthUser,
   parseBotAvailable,
@@ -32,6 +33,8 @@ export interface DoctorDeps {
   servicePid: number | null
   /** 当前默认运行时；有 doctor() 时追加其运行时自检。 */
   runtime?: WorkerRuntime
+  /** ACP 探测结果；逐项展示，默认运行时的不可用会判 fail。 */
+  runtimeChoices?: RuntimeChoice[]
 }
 
 /** 启动前自检：把“配好了吗、能不能收到消息、能不能派工”一次性查清。 */
@@ -84,9 +87,9 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
         : { status: 'fail', detail: `未找到仓库 ${missingRepos.join(', ')}`, hint: 'orca repo list 查看可选项，或 orca repo add --path <dir>' }
     }))
   } else {
-    // 非 Orca 运行时（claude-code / acp）：项目 repo 必须是已存在的本地仓库目录。
+    // 非 Orca 运行时（claude-code / acp-*）：项目 repo 必须是已存在的本地仓库目录。
     checks.push({
-      name: 'Claude Code 项目路径',
+      name: '本地项目路径',
       status: projects.length === 0
         ? 'fail'
         : projects.every(project => existsSync(project.repo.replace(/^path:/, ''))) ? 'ok' : 'fail',
@@ -98,6 +101,27 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
       ...(projects.length > 0 && projects.some(project => !existsSync(project.repo.replace(/^path:/, '')))
         ? { hint: 'repo 必须是本地仓库绝对路径；在面板「配置 → 项目清单」或 ra config set project.<名称> 中修正' }
         : {}),
+    })
+  }
+
+  // ACP Agent 逐项展示；非默认运行时的不可用只提示，不影响 doctor 退出码。
+  for (const choice of deps.runtimeChoices ?? []) {
+    if (!choice.id.startsWith('acp-')) continue
+    const isDefault = choice.id === config.runtime.default
+    const status: CheckStatus = choice.status === 'ready'
+      ? 'ok'
+      : choice.status === 'unverified' || !isDefault ? 'warn' : 'fail'
+    const detail = [
+      choice.status === 'ready' ? '可用' : choice.status,
+      choice.version ? `版本 ${choice.version}` : '',
+      choice.source ? `来源 ${choice.source}` : '',
+      choice.reason ? choice.reason : '',
+    ].filter(Boolean).join('，')
+    checks.push({
+      name: `ACP ${choice.id}`,
+      status,
+      detail,
+      ...(choice.installHint || choice.loginHint ? { hint: choice.loginHint ?? choice.installHint } : {}),
     })
   }
 

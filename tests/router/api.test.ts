@@ -7,6 +7,8 @@ import type { AddressInfo } from 'node:net'
 import { Store } from '../../src/store/db.js'
 import { Engine } from '../../src/core/engine.js'
 import { createApiServer, type ApiServer } from '../../src/router/api.js'
+import { InstallStartError } from '../../src/worker/runtimes/acp/admin.js'
+import type { ResumeHint } from '../../src/worker/port.js'
 import { defaultConfig, loadConfig, policyOf, projectsForRuntime, type AppConfig, chatEntry } from '../../src/config.js'
 
 function call(server: ApiServer, method: string, path: string, body?: unknown): Promise<{ status: number; json: any }> {
@@ -43,6 +45,8 @@ describe('HTTP 管理 API', () => {
   let assignmentId: string
   let events: { event: string; [key: string]: unknown }[]
   let reports: Record<string, unknown>[]
+  let resumeHints: Record<string, ResumeHint | null>
+  let resumeCalls: string[]
 
   beforeEach(async () => {
     store = new Store(':memory:')
@@ -51,11 +55,17 @@ describe('HTTP 管理 API', () => {
     engine = new Engine({ store, policy: policyOf(config), clock: { now: () => '2026-11-06T10:00:00.000Z' }, ids: { next: p => `${p}_${++n}` } })
     events = []
     reports = []
+    resumeHints = {}
+    resumeCalls = []
     server = await createApiServer({
       engine, store, config,
       clock: { now: () => '2026-11-06T10:00:05.000Z' },
       onEvent: event => events.push(event),
       onReport: state => { reports.push(state as unknown as Record<string, unknown>) },
+      resumeHint: ticketId => {
+        resumeCalls.push(ticketId)
+        return resumeHints[ticketId] ?? null
+      },
     })
 
     engine.ingest({
@@ -89,6 +99,54 @@ describe('HTTP 管理 API', () => {
     expect(res.json.ticket.id).toBe(ticketId)
     expect(res.json.mandate.ticketId).toBe(ticketId)
     expect(res.json.assignment.id).toBe(assignmentId)
+    expect(res.json.resume).toBeNull()
+  })
+
+  it('GET /api/tickets/:id 返回注入的恢复命令', async () => {
+    const hint: ResumeHint = { command: "cd '/tmp/wt' && claude '--resume' 's1'", sessionId: 's1' }
+    resumeHints[ticketId] = hint
+    const res = await call(server, 'GET', `/api/tickets/${ticketId}`)
+    expect(res.status).toBe(200)
+    expect(res.json.resume).toEqual(hint)
+  })
+
+  it('恢复命令回调抛错或未注入时详情仍可用', async () => {
+    const throwing = await createApiServer({
+      engine, store, config,
+      resumeHint: () => { throw new Error('boom') },
+    })
+    try {
+      const res = await call(throwing, 'GET', `/api/tickets/${ticketId}`)
+      expect(res.status).toBe(200)
+      expect(res.json.resume).toBeNull()
+    } finally {
+      await throwing.close()
+    }
+
+    const bare = await createApiServer({ engine, store, config })
+    try {
+      const res = await call(bare, 'GET', `/api/tickets/${ticketId}`)
+      expect(res.status).toBe(200)
+      expect(res.json.resume).toBeNull()
+    } finally {
+      await bare.close()
+    }
+  })
+
+  it('没有派工的工单不调用恢复命令回调', async () => {
+    engine.ingest({
+      id: 't2', source: 'feishu', externalId: 'om_2', threadId: 'feishu:oc_dev:om_root2', chatId: 'oc_dev', chatName: '研发群',
+      actorId: 'ou_alice', actorName: 'Alice', isBot: false, text: '无派工工单', addressed: 'mention',
+      receivedAt: '2026-11-06T09:59:30.000Z', disposition: 'pending',
+    })
+    const outcome = engine.decide({ triggerId: 't2', decision: 'accept', strength: 'explicit', reason: 'ok', title: '无派工工单' })
+    const id = outcome.ticket!.id
+    resumeCalls = []
+    const res = await call(server, 'GET', `/api/tickets/${id}`)
+    expect(res.status).toBe(200)
+    expect(res.json.assignment).toBeNull()
+    expect(res.json.resume).toBeNull()
+    expect(resumeCalls).not.toContain(id)
   })
 
   it('POST /api/tickets/:id/assignment 手工重绑并恢复话题订阅', async () => {
@@ -219,6 +277,66 @@ describe('HTTP 管理 API', () => {
     expect(res.status).toBe(200)
     expect(res.json.changed).toEqual([])
     expect(loadConfig(config.home!).llm?.apiKey).toBeUndefined()
+  })
+
+  it('运行时探测与安装 API', async () => {
+    const choice = { id: 'acp-codex', label: 'Codex (ACP)', hint: 'h', status: 'ready' as const, installable: true, version: '1.11.0' }
+    const job = {
+      id: 'job-1',
+      runtimeId: 'acp-codex',
+      status: 'ok' as const,
+      phase: 'succeeded',
+      lines: ['ok'],
+      startedAt: '2026-11-06T10:00:00.000Z',
+    }
+    const admin = {
+      snapshot: () => ({ detectedAt: '2026-11-06T10:00:00.000Z', choices: [choice] }),
+      isDetecting: () => true,
+      detect: async () => ({ detectedAt: '2026-11-06T10:00:00.000Z', choices: [choice] }),
+      startInstall: (id: string) => {
+        if (id === 'busy') throw new InstallStartError('busy', '正在安装')
+        return { jobId: 'job-1' }
+      },
+      check: async () => ({ ok: true, detail: 'ok', choice }),
+      installJob: (id: string) => (id === 'job-1' ? job : null),
+    }
+    const runtimeServer = await createApiServer({ engine, store, config, runtimeAdmin: admin as never })
+    try {
+      const bundled = await call(runtimeServer, 'GET', '/api/config')
+      expect(bundled.json.runtimeChoices).toEqual([choice])
+      expect(bundled.json.detecting).toBe(true)
+
+      const list = await call(runtimeServer, 'GET', '/api/runtimes')
+      expect(list.status).toBe(200)
+      expect(list.json.choices).toEqual([choice])
+      expect(list.json.detecting).toBe(true)
+
+      const detected = await call(runtimeServer, 'POST', '/api/runtimes/detect', {})
+      expect(detected.status).toBe(200)
+      expect(detected.json.detecting).toBe(false)
+
+      const checked = await call(runtimeServer, 'POST', '/api/runtimes/check', { id: 'acp-codex' })
+      expect(checked.status).toBe(200)
+      expect(checked.json).toMatchObject({ ok: true, choice: { id: 'acp-codex', status: 'ready' } })
+
+      const installed = await call(runtimeServer, 'POST', '/api/runtimes/install', { id: 'acp-codex' })
+      expect(installed.status).toBe(202)
+      expect(installed.json.jobId).toBe('job-1')
+
+      const busy = await call(runtimeServer, 'POST', '/api/runtimes/install', { id: 'busy' })
+      expect(busy.status).toBe(409)
+      expect(busy.json.error).toBe('busy')
+
+      const missing = await call(runtimeServer, 'POST', '/api/runtimes/install', {})
+      expect(missing.status).toBe(400)
+
+      const jobRes = await call(runtimeServer, 'GET', '/api/runtimes/install/job-1')
+      expect(jobRes.status).toBe(200)
+      expect(jobRes.json).toMatchObject({ id: 'job-1', status: 'ok' })
+      expect((await call(runtimeServer, 'GET', '/api/runtimes/install/nope')).status).toBe(404)
+    } finally {
+      await runtimeServer.close()
+    }
   })
 
   it('GET /api/sources/feishu/chats 返回配置的群', async () => {
