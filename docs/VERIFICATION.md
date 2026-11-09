@@ -43,7 +43,7 @@ Tests       291 passed | 4 skipped
 
 `RA_VERIFY=1 npx vitest run tests/verify-live.test.ts` → 4 passed。
 
-1. **真实 LLM 研判**：用 `.trove/config.json` 的 DeepSeek 配置跑通 `AgentLoop`，推断候选得到可解析决定，未落 `unavailable`。
+1. **真实 LLM 研判**：用 `~/.router-agent/config.yaml` 的 `llm` 配置跑通 `AgentLoop`，推断候选得到可解析决定，未落 `unavailable`。
 2. **真实 HTTP + Web**：`/api/status` 返回 `runtime=orca`；`/` 返回 React 面板 HTML；`/app.js` 可加载。
 3. **真实 Orca CLI**：`terminal list` 解析正常（不存在的 handle 返回 null 不抛错）；`worktree list` 可读。
 4. **真实飞书**：`event consume ... --dry-run` 预检通过。
@@ -86,7 +86,6 @@ ra init → 配置 port 3099 → ra start → curl /api/status → curl / → ra
 | `orphaned` 语义 | **CLI 创建的终端可能 `orphaned=true` 但仍 connected+writable** | 只有 `connected=false` 判死；`orphaned && !writable` 才算孤儿 |
 | 命令运行器 | 原先或带或不带二进制名，真实环境报 `ENOENT` | `CommandRunner` 统一绑定二进制，argv 不含命令名 |
 | 飞书幂等 key 超长 | 拼接 turn + updatedAt 后超过 50 字符，飞书直接拒绝发送 | `fitIdempotencyKey()` 截断 + 稳定哈希 |
-| `.trove` 定位 | 传入临时 `--home` 时把 `.trove` 也指到临时目录 | 状态目录与真实用户主目录分离 |
 | worker 会话被删 | 每秒重试 `terminal send`，工单一直挂着 running | 检测到终端不存在后结束派工、转 blocked、取消订阅并只通知一次 |
 | lark-cli 机器人隔离 | 原先只能复用默认 profile | 新增 `feishu.larkHome`，所有 lark-cli 子进程注入独立 HOME |
 | init 依赖手工配置 | 原先要手动跑 lark-cli 并填 4 个 id | 交互式引导 + 内部调用 `lark-cli config init` / `auth login` |

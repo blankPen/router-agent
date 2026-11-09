@@ -139,13 +139,14 @@ describe('全局状态目录与配置', () => {
     expect(policyOf({ ...base, feishu: { ...base.feishu, chats: [chatEntry('oc_a', { mode: 'mention' }), chatEntry('oc_b')] } }).receiveAll).toBe(true)
   })
 
-  it('feishu.larkHome 支持配置文件与环境变量 RA_LARK_HOME（环境变量优先）', () => {
+  it('旧配置里的 feishu.larkHome 被忽略，保存后不再写回', () => {
     const dir = home()
     ensureHome(dir)
-    const { writeFileSync } = require('node:fs') as typeof import('node:fs')
-    writeFileSync(join(dir, 'config.yaml'), ['feishu:', '  larkHome: /from/file'].join('\n'))
-    expect(loadConfig(dir).feishu.larkHome).toBe('/from/file')
-    expect(loadConfig(dir, { RA_LARK_HOME: '/from/env' }).feishu.larkHome).toBe('/from/env')
+    writeFileSync(join(dir, 'config.yaml'), ['feishu:', '  larkHome: /legacy'].join('\n'))
+    const loaded = loadConfig(dir)
+    expect('larkHome' in loaded.feishu).toBe(false)
+    writeConfig(dir, loaded)
+    expect(readFileSync(join(dir, 'config.yaml'), 'utf8')).not.toContain('larkHome')
   })
 
   it('writeConfig 写回后能被 loadConfig 读回，且保留可选字段', () => {
@@ -154,7 +155,6 @@ describe('全局状态目录与配置', () => {
     cfg.feishu.chats = [chatEntry('oc_a', { mode: 'mention', repo: 'router-agent', branch: 'main' })]
     cfg.feishu.allowed = ['ou_me']
     cfg.feishu.botOpenIds = ['ou_bot', 'cli_bot']
-    cfg.feishu.larkHome = '/tmp/lark-home'
     cfg.feishu.appId = 'cli_dedicated'
     cfg.feishu.reaction = 'THUMBSUP'
     cfg.feishu.images = { enabled: false, maxChars: 800, timeoutMs: 15_000 }
@@ -170,7 +170,6 @@ describe('全局状态目录与配置', () => {
     expect(loaded.feishu.chats).toEqual([chatEntry('oc_a', { mode: 'mention', repo: 'router-agent', branch: 'main' })])
     expect(loaded.feishu.allowed).toEqual(['ou_me'])
     expect(loaded.feishu.botOpenIds).toEqual(['ou_bot', 'cli_bot'])
-    expect(loaded.feishu.larkHome).toBe('/tmp/lark-home')
     expect(loaded.feishu.appId).toBe('cli_dedicated')
     expect(loaded.feishu.reaction).toBe('THUMBSUP')
     expect(loaded.feishu.images).toEqual({ enabled: false, maxChars: 800, timeoutMs: 15_000 })

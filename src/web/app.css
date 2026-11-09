@@ -249,6 +249,10 @@ button, input, select {
 }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex-shrink: 0; }
 .status-dot.live { background: var(--positive); }
+.status-dot.ok { background: var(--positive); box-shadow: 0 0 0 3px color-mix(in srgb, var(--positive) 14%, transparent); }
+.status-dot.bad { background: var(--negative); box-shadow: 0 0 0 3px color-mix(in srgb, var(--negative) 14%, transparent); }
+.status-line { display: inline-flex; align-items: center; gap: 7px; }
+.status-value { font-size: 13px; font-weight: 500; color: var(--text); }
 .sidebar-status { display: flex; flex-direction: column; line-height: 1.35; min-width: 0; }
 .sidebar-status strong { font-size: 12px; font-weight: 600; }
 .sidebar-status small { font-size: 11px; color: var(--muted); }

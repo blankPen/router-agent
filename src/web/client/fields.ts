@@ -91,7 +91,7 @@ export const LLM_FIELDS: FieldDef[] = [
     label: '模型 Base URL',
     kind: 'text',
     placeholder: '例如 https://api.deepseek.com/v1',
-    hint: 'OpenAI 兼容接口地址；留空则复用 ~/.trove/config.json',
+    hint: 'OpenAI 兼容接口地址，必填，例如 https://api.deepseek.com/v1',
   },
   {
     path: 'llm.model',
@@ -105,7 +105,7 @@ export const LLM_FIELDS: FieldDef[] = [
     label: 'API Key',
     kind: 'password',
     placeholder: '留空 = 保持已配置的密钥',
-    hint: '只写入 config.yaml，保存后不会回显；环境变量 RA_LLM_API_KEY 优先级更高',
+    hint: '只写入 config.yaml，保存后不会回显；必填，环境变量 RA_LLM_API_KEY 可覆盖',
   },
 ]
 
@@ -113,7 +113,7 @@ export const SECTIONS: SectionDef[] = [
   {
     id: 'llm',
     title: 'LLM Provider',
-    description: 'Router 研判与图片转写使用的大模型接入。密钥只写入 config.yaml，保存后不回显明文。',
+    description: 'Router 研判与图片转写使用的大模型接入，三项均为必填。密钥只写入 config.yaml，保存后不回显明文。',
     fields: LLM_FIELDS,
   },
   {
@@ -204,11 +204,10 @@ export const SECTIONS: SectionDef[] = [
   },
   {
     id: 'feishu',
-    title: '飞书接入',
-    description: '机器人身份、接收范围与图片转文本。修改群列表请用「来源」或 CLI。',
+    title: '飞书消息',
+    description: '机器人 App ID、接收范围与图片转文本。App Secret 与授权状态在顶部「飞书机器人」区块维护。',
     fields: [
-      { path: 'feishu.appId', label: '应用 App ID', kind: 'text', placeholder: '留空 = 复用当前 lark-cli profile' },
-      { path: 'feishu.larkHome', label: 'lark-cli 配置目录', kind: 'text', placeholder: '留空 = 复用当前 profile' },
+      { path: 'feishu.appId', label: '应用 App ID', kind: 'text', placeholder: '飞书开放平台 → 凭证与基础信息' },
       { path: 'feishu.reaction', label: '回执表情', kind: 'text', placeholder: '例如 Typing，留空 = 关闭' },
       { path: 'feishu.directMessages', label: '接收私聊', kind: 'switch' },
       { path: 'feishu.images.enabled', label: '图片转文本', kind: 'switch', hint: '下载 image_key 后交给多模态模型识别' },

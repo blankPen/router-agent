@@ -6,6 +6,7 @@ import { runInitWizard, type InitDeps } from '../src/cli/init.js'
 import type { Prompter } from '../src/cli/prompts.js'
 import { loadConfig, writeConfig, chatEntry } from '../src/config.js'
 import type { CommandRunner } from '../src/infra/process.js'
+import { LARK_PROFILE_HOME } from '../src/sources/lark.js'
 
 const ORCA_REPOS = JSON.stringify({ result: { repos: [
   { displayName: 'teamwork-repos', path: '/p', kind: 'git' },
@@ -61,7 +62,6 @@ function scripted(script: Script): Prompter & { asked: string[] } {
 }
 
 function larkFactory(auth: string = AUTH) {
-  const homes: (string | undefined)[] = []
   const calls: { argv: string[]; input?: string }[] = []
   const run: CommandRunner = {
     async run(argv, opts = {}) {
@@ -74,7 +74,7 @@ function larkFactory(auth: string = AUTH) {
       return { code: 0, stdout: '{}', stderr: '' }
     },
   }
-  return { run, homes, calls }
+  return { run, calls }
 }
 
 function setup(script: Script, over: Partial<InitDeps> = {}) {
@@ -88,17 +88,17 @@ function setup(script: Script, over: Partial<InitDeps> = {}) {
     stdout: line => out.push(line),
     prompts,
     orca: { async run() { return { code: 0, stdout: ORCA_REPOS, stderr: '' } } },
-    lark: homeDir => { lark.homes.push(homeDir); return lark.run },
+    lark: lark.run,
     ...over,
   }
   return { home, out, asked: prompts.asked, lark, deps, prompts }
 }
 
 describe('交互式 ra init', () => {
-  it('按必填项引导：仓库 → 机器人来源 → 群 → 授权成员，并自动识别机器人身份', async () => {
+  it('按必填项引导：仓库 → 飞书凭据 → 群 → 授权成员，并自动识别机器人身份', async () => {
     const script: Script = {
       selects: ['teamwork-repos', 'existing'],
-      inputs: ['main', '/tmp/ra-lark', 'cli_new'],
+      inputs: ['main', 'cli_new'],
       passwords: ['shh'],
       checkboxes: [['oc_dsh'], ['ou_me']],
     }
@@ -109,13 +109,12 @@ describe('交互式 ra init', () => {
     expect(asked.some(q => q.includes('飞书机器人'))).toBe(true)
     expect(asked.some(q => q.includes('监控'))).toBe(true)
     expect(config.projects[0]).toMatchObject({ name: 'teamwork-repos', repo: 'teamwork-repos', defaultBranch: 'main' })
-    expect(config.feishu.larkHome).toBe('/tmp/ra-lark')
+    expect('larkHome' in config.feishu).toBe(false)
     expect(config.feishu.appId).toBe('cli_new')
     expect(config.feishu.chats).toEqual([chatEntry('oc_dsh')])
     expect(config.feishu.allowed).toEqual(['ou_me'])
     expect(config.feishu.botOpenIds).toEqual(['ou_bot', 'cli_bot'])
     expect(config.feishu.botNames).toEqual(['Pz小助手'])
-    expect(lark.homes).toContain('/tmp/ra-lark')
 
     // App Secret 必须走 stdin，不能出现在 argv
     const initCall = lark.calls.find(call => call.argv[0] === 'config' && call.argv[1] === 'init')
@@ -129,9 +128,10 @@ describe('交互式 ra init', () => {
     expect(saved.feishu.botOpenIds).toEqual(['ou_bot', 'cli_bot'])
   })
 
-  it('选择默认项时不覆盖用户已有配置', async () => {
+  it('选择跳过时不写凭据，仍可完成群与成员选择', async () => {
     const { home, deps, prompts } = setup({
-      selects: ['teamwork-repos', 'reuse'],
+      selects: ['teamwork-repos', 'skip'],
+      inputs: ['release'],
       checkboxes: [['oc_dsh'], ['ou_me']],
     })
     const seeded = loadConfig(home)
@@ -142,54 +142,58 @@ describe('交互式 ra init', () => {
 
     const config = await runInitWizard(deps)
     expect(prompts.asked.length).toBeGreaterThan(0)
-    // 已有项目的分支白名单 / 默认分支不被默认项清掉
+    // 已有项目的分支 / 群 / 白名单不被默认项清掉
     expect(config.projects[0]).toMatchObject({ name: 'teamwork-repos', repo: 'teamwork-repos', defaultBranch: 'release' })
     expect(config.feishu.chats).toEqual([chatEntry('oc_dsh')])
     expect(config.feishu.allowed).toEqual(['ou_me'])
-    expect(config.feishu.larkHome).toBe('')
+    expect(config.feishu.appId).toBe('')
   })
 
-  it('读不到群列表时给出明确指引，且不阻塞写配置', async () => {
+  it('读不到群列表时引导去 Web 配置页，且不阻塞写配置', async () => {
     const { home, out, deps } = setup({
-      selects: ['teamwork-repos', 'existing'],
-      inputs: ['main', '/tmp/empty-lark', ''],
-      passwords: [''],
+      selects: ['teamwork-repos', 'skip'],
+      inputs: ['main'],
     }, {
-      lark: () => ({ async run() { return { code: 1, stdout: '', stderr: 'not configured' } } }),
+      lark: { async run() { return { code: 1, stdout: '', stderr: 'not configured' } } },
     })
     const config = await runInitWizard(deps)
-    expect(config.feishu.larkHome).toBe('/tmp/empty-lark')
+    expect('larkHome' in config.feishu).toBe(false)
     const text = out.join('\n')
-    expect(text).toContain('HOME=/tmp/empty-lark lark-cli config show')
+    expect(text).toContain('Web 配置页')
     expect(existsSync(join(home, 'config.yaml'))).toBe(true)
   })
 
-  it('选择「现在新建应用」时内部调用 lark-cli config init --new 并把 HOME 指到专属目录', async () => {
+  it('选择「现在新建应用」时内部调用 config init --new，并使用固定 profile', async () => {
     const streamCalls: { argv: string[]; env: NodeJS.ProcessEnv }[] = []
     const { deps } = setup({
       selects: ['teamwork-repos', 'new'],
-      inputs: ['main', '/tmp/brand-new'],
+      inputs: ['main'],
     }, {
       stream: async (argv, env) => { streamCalls.push({ argv, env }); return 0 },
     })
     await runInitWizard(deps)
     expect(streamCalls[0]?.argv).toEqual(['config', 'init', '--new'])
-    expect(streamCalls[0]?.env.HOME).toBe('/tmp/brand-new')
+    expect(streamCalls[0]?.env.HOME).toBe(LARK_PROFILE_HOME)
   })
 
-  it('缺少用户授权时询问并可内部调用 lark-cli auth login', async () => {
+  it('缺少用户授权时询问并可调用 auth login', async () => {
     const streamCalls: { argv: string[]; env: NodeJS.ProcessEnv }[] = []
     const lark = larkFactory(JSON.stringify({ identities: { user: { available: false } } }))
     const { deps } = setup({
-      selects: ['teamwork-repos', 'reuse'],
+      selects: ['teamwork-repos', 'existing'],
+      inputs: ['main', 'cli_new'],
+      passwords: ['shh'],
       confirms: [true],
       checkboxes: [['oc_dsh'], ['ou_me']],
     }, {
-      lark: () => lark.run,
+      lark: lark.run,
       stream: async (argv, env) => { streamCalls.push({ argv, env }); return 0 },
     })
     await runInitWizard(deps)
-    expect(streamCalls.some(call => call.argv.join(' ') === 'auth login')).toBe(true)
+    const authCall = streamCalls.find(call => call.argv[0] === 'auth' && call.argv[1] === 'login')
+    expect(authCall).toBeTruthy()
+    expect(authCall?.argv).toEqual(['auth', 'login', '--domain', 'im,docs,drive,contact'])
+    expect(authCall?.env.HOME).toBe(LARK_PROFILE_HOME)
   })
 
   it('非交互模式不提问，只写默认配置并提示如何补齐必填项', async () => {

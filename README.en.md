@@ -65,7 +65,7 @@ pnpm build
 ra init                 # guided: repo → bot → chat → allowed members, all in one command
 ```
 
-`ra init` only asks for required fields and fills in sensible defaults. The dedicated bot, chat bindings and allowlists can all be configured in the same walkthrough.
+`ra init` only asks for required fields and fills in sensible defaults. Feishu App ID / App Secret, chat bindings and allowlists can all be configured in the same walkthrough, or filled in later from the web config page.
 
 **3 · Start**
 
@@ -75,7 +75,7 @@ ra status
 ra web                  # reopen the dashboard later
 ```
 
-`ra start` waits for the service to become ready, then opens the dashboard's **Setup** page in your default browser: worker runtime (including one-click ACP extension install), projects, Feishu access, and monitored chats with bindings. Save, then restart the service when the page asks. On a remote or headless machine use `ra start --no-open` to only print the dashboard URL.
+`ra start` waits for the service to become ready, then opens the dashboard's **Setup** page in your default browser: worker runtime (including one-click ACP extension install), projects, Feishu bot (App ID / App Secret and authorization), and monitored chats with bindings. Save, then restart the service when the page asks. On a remote or headless machine use `ra start --no-open` to only print the dashboard URL.
 
 **4 · Self-check and simulate**
 
@@ -280,7 +280,7 @@ The Router doesn't chat; it only speaks when necessary:
 
 Raw terminal output **never enters the logs** (to avoid parsing TUI text); the proactive probe prefers the Claude session transcript and otherwise posts a semantic summary (assistant text plus an action digest), never a replay of tool calls. To see what a Worker did, read the `report` `summary` and `~/.router-agent/workers/<ticketId>/events.log`.
 
-> **Only one event bus may run per bot.** If `ra logs` shows `another event bus is already connected`, stop the other consumer using that app, or give router-agent its own bot via the "dedicated bot" option in `ra init`.
+> **Only one event bus may run per bot.** If `ra logs` shows `another event bus is already connected`, stop the other consumer using that app; give router-agent its own custom app so it does not share a bot with other agents.
 
 ### PR closure
 
@@ -295,8 +295,7 @@ Raw terminal output **never enters the logs** (to avoid parsing TUI text); the p
 
 ```yaml
 feishu:
-  larkHome: ""         # isolated lark-cli config dir for a dedicated bot; empty = reuse the current profile
-  appId: ""            # dedicated bot App ID (App Secret lives only in lark-cli's encrypted store)
+  appId: ""            # dedicated bot App ID; App Secret lives only in lark-cli's encrypted store, profile is fixed at ~/.router-agent-lark
   reaction: "Typing"   # ack reaction added on receipt (Feishu emoji_type; empty string disables)
   # Monitored chats: one entry decides "what to receive + where to dispatch"
   chats:
@@ -427,7 +426,7 @@ ra config edit                            # opens $EDITOR on the whole file (not
 | `workerSpec.mode` | `prompt` / `agent` |
 | `backend.default` | `orca` / `claude-cli` |
 | `server.port` | 1–65535 |
-| `feishu.larkHome` / `appId` / `reaction` / `directMessages` / `allowed` / `bots` / `botOpenIds` / `botNames` | string, boolean or comma-separated list |
+| `feishu.appId` / `reaction` / `directMessages` / `allowed` / `bots` / `botOpenIds` / `botNames` | string, boolean or comma-separated list |
 | `feishu.chats` | comma-separated chat_ids; existing entries keep mode / bindings / sync, new ones default to `all` |
 | `llm.baseUrl` / `llm.model` / `llm.apiKey` | model connection info |
 
@@ -449,24 +448,23 @@ Chats and projects are composite, so they get dedicated forms that register and 
 |-|-|
 | `RA_HOME` | state directory, same as the global `--home` option; defaults to `~/.router-agent` |
 | `RA_PORT` | port `ra report` posts to, overriding `server.port` |
-| `RA_LARK_HOME` | overrides `feishu.larkHome` |
 | `RA_LLM_BASE_URL` / `RA_LLM_API_KEY` / `RA_LLM_MODEL` | override the triage model (highest precedence) |
 | `RA_LLM_IMAGE_BASE_URL` / `RA_LLM_IMAGE_API_KEY` / `RA_LLM_IMAGE_MODEL` | override the image-transcription model |
 
-### Dedicated bot (recommended)
+### Feishu bot (dedicated profile)
 
-The "Feishu bot" step in `ra init` offers two ways to get a dedicated bot, without touching `lark-cli` by hand. The walkthrough uses interactive selectors (arrow keys, space to multi-select, password input hidden):
+router-agent always uses `~/.router-agent-lark` as its lark-cli profile. It does **not** reuse the lark-cli login from your terminal, and the directory is not configurable. There are two places to set credentials and authorization:
 
-| Option | Behavior |
+| Entry point | Behavior |
 |-|-|
-| 2) Existing App ID / App Secret | `ra init` runs `lark-cli config init --app-id ... --app-secret-stdin` and writes into the isolated directory in `feishu.larkHome`; the secret goes through stdin, never argv or `config.yaml` |
-| 3) Create a new app now | `ra init` runs `lark-cli config init --new`; after the browser flow it reads back the appId |
+| Web config page | Fill App ID / App Secret in the **Feishu bot** block; the secret is written via `lark-cli config init --app-secret-stdin` into lark-cli's encrypted store, never argv or `config.yaml`. The same block checks bot / user status and starts a Device Flow authorization. |
+| `ra init` | Choose "existing App ID / App Secret" or "create a new app now"; you can also skip and fill it in later from the web config page. |
 
-If a user identity is needed later (searching chats / members by name), `ra init` detects it and offers to run `lark-cli auth login`.
+If a user identity is needed later (searching chats / members by name, creating documents), click **Start authorization** on the web config page, or let `ra init` offer `lark-cli auth login`. Authorization only requests the **IM (messages / chats / members), Docs, Drive and Contacts** domains — no calendar, mail, approval or other unrelated permissions.
 
 Commands and options are parsed by `commander`: `ra --help`, `ra init --help`, `ra tickets --help` show usage.
 
-Bot credentials are managed by lark-cli's encrypted store; `router-agent` keeps only `larkHome` and `appId`. At runtime every lark-cli subprocess (event consumption, sending, chat-name refresh) gets `HOME=<larkHome>`, fully isolated from other agents' lark-cli profiles.
+Bot credentials are managed by lark-cli's encrypted store; `router-agent` keeps only `appId` in `config.yaml`. At runtime every lark-cli subprocess (event consumption, sending, chat-name refresh, credentials and authorization) gets `HOME=~/.router-agent-lark`, fully isolated from other agents' lark-cli profiles.
 
 ### Projects and repo selectors
 
@@ -498,9 +496,11 @@ Also, the old global `repo` config has been removed (`ra` no longer reads it). M
 
 ### Model configuration
 
-The model config automatically reuses the `llm` section of `~/.trove/config.json` (`baseUrl` / `model` / `apiKey`). You can also fill it in from the dashboard's **LLM Provider** step (the key is write-only and never echoed back), add an `llm:` section to this file, or override with `RA_LLM_BASE_URL` / `RA_LLM_API_KEY` / `RA_LLM_MODEL`.
+The model config is **required**: set `baseUrl` / `model` / `apiKey` in the `llm` section of `~/.router-agent/config.yaml` (or via the dashboard's **LLM Provider** step); all three are mandatory and the service refuses to start without them. The key is write-only and never echoed back. You can override with `RA_LLM_BASE_URL` / `RA_LLM_API_KEY` / `RA_LLM_MODEL`.
 
-Precedence: **environment variables > `config.yaml` > `.trove`**.
+> The dashboard needs a running service, so for a first-time setup write `config.yaml` directly or use `ra config set llm.baseUrl ...`, `ra config set llm.model ...`, `ra config set llm.apiKey ...` before `ra start`.
+
+Precedence: **environment variables > `config.yaml`**.
 
 Image transcription reuses the same model by default. If the main model is text-only, point the image path at a vision model (it does not affect assessment):
 

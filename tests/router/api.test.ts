@@ -10,6 +10,7 @@ import { createApiServer, type ApiServer } from '../../src/router/api.js'
 import { InstallStartError } from '../../src/worker/runtimes/acp/admin.js'
 import type { ResumeHint } from '../../src/worker/port.js'
 import { defaultConfig, loadConfig, policyOf, projectsForRuntime, type AppConfig, chatEntry } from '../../src/config.js'
+import { FeishuBotAdmin } from '../../src/sources/feishu-bot-admin.js'
 
 function call(server: ApiServer, method: string, path: string, body?: unknown): Promise<{ status: number; json: any }> {
   return new Promise((resolve, reject) => {
@@ -443,6 +444,76 @@ describe('HTTP 管理 API', () => {
     expect((await call(server, 'POST', '/api/reports', { ticketId, state: 'done', summary: 'x' })).status).toBe(400)
     expect((await call(server, 'POST', '/api/reports', { ticketId, state: 'ready', summary: '  ' })).status).toBe(400)
     expect((await call(server, 'POST', '/api/reports', { ticketId: 'tk_nope', state: 'ready', summary: 'x' })).status).toBe(404)
+  })
+
+  it('飞书机器人：状态 / 写入凭据 / 发起与完成授权', async () => {
+    const calls: { argv: string[]; input?: string }[] = []
+    const lark = {
+      async run(argv: string[], opts: { input?: string } = {}) {
+        calls.push({ argv, ...(opts.input !== undefined ? { input: opts.input } : {}) })
+        if (argv[0] === 'config' && argv[1] === 'init') {
+          return { code: 0, stdout: 'configuration saved', stderr: '' }
+        }
+        if (argv[0] === 'auth' && argv[1] === 'status') {
+          return {
+            code: 0,
+            stdout: JSON.stringify({
+              appId: 'cli_x',
+              identities: {
+                bot: { available: true, status: 'ready' },
+                user: { available: true, status: 'ready', openId: 'ou_me', userName: '我' },
+              },
+            }),
+            stderr: '',
+          }
+        }
+        if (argv[0] === 'auth' && argv[1] === 'login' && argv.includes('--no-wait')) {
+          return { code: 0, stdout: JSON.stringify({ device_code: 'dc_1', verification_url: 'https://example.com/auth' }), stderr: '' }
+        }
+        return { code: 0, stdout: '{}', stderr: '' }
+      },
+    }
+    const botConfig: AppConfig = { ...defaultConfig(), home: mkdtempSync(join(tmpdir(), 'ra-api-feishu-')) }
+    const botEngine = new Engine({ store, policy: policyOf(botConfig) })
+    const botServer = await createApiServer({
+      engine: botEngine,
+      store,
+      config: botConfig,
+      feishuBot: new FeishuBotAdmin({ lark, profileHome: botConfig.home }),
+    })
+    try {
+      const status = await call(botServer, 'GET', '/api/feishu/status')
+      expect(status.status).toBe(200)
+      expect(status.json).toMatchObject({ profileHome: botConfig.home, bot: { available: true }, user: { available: true } })
+
+      const credentials = await call(botServer, 'POST', '/api/feishu/credentials', { appId: 'cli_x', appSecret: 'shh' })
+      expect(credentials.status).toBe(200)
+      expect(botConfig.feishu.appId).toBe('cli_x')
+      const initCall = calls.find(item => item.argv[0] === 'config' && item.argv[1] === 'init')
+      expect(initCall?.argv).toEqual(['config', 'init', '--app-id', 'cli_x', '--app-secret-stdin'])
+      expect(initCall?.input).toBe('shh\n')
+      const written = readFileSync(join(botConfig.home, 'config.yaml'), 'utf8')
+      expect(written).toContain('cli_x')
+      expect(written).not.toContain('shh')
+
+      const login = await call(botServer, 'POST', '/api/feishu/auth/login')
+      expect(login.status).toBe(200)
+      expect(login.json).toMatchObject({ deviceCode: 'dc_1', verificationUrl: 'https://example.com/auth' })
+      const startCall = calls.find(item => item.argv.includes('--no-wait'))
+      expect(startCall?.argv).toContain('im,docs,drive,contact')
+
+      const complete = await call(botServer, 'POST', '/api/feishu/auth/complete', { deviceCode: 'dc_1' })
+      expect(complete.status).toBe(200)
+      expect(complete.json).toMatchObject({ ok: true, bot: { available: true } })
+      expect(calls.some(item => item.argv.includes('--device-code') && item.argv.includes('dc_1'))).toBe(true)
+    } finally {
+      await botServer.close()
+    }
+  })
+
+  it('未注入飞书机器人能力时相关端点返回 404', async () => {
+    expect((await call(server, 'GET', '/api/feishu/status')).status).toBe(404)
+    expect((await call(server, 'POST', '/api/feishu/credentials', { appId: 'a', appSecret: 'b' })).status).toBe(404)
   })
 
   it('未知路由返回 404 JSON', async () => {

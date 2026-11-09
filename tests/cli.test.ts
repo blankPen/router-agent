@@ -175,22 +175,22 @@ describe('ra CLI', () => {
           return { code: 0, stdout: JSON.stringify({ result: { repos: [{ displayName: 'teamwork-repos', path: '/p', kind: 'git' }] } }), stderr: '' }
         },
       },
-      larkFor: () => ({
+      lark: {
         async run(argv) {
           if (argv[0] === 'auth') return { code: 0, stdout: JSON.stringify({ identities: { bot: { available: true }, user: { available: true } } }), stderr: '' }
           if (argv[0] === 'event') return { code: 0, stdout: JSON.stringify({ data: { decision: { status: 'ready', preconditions: [] } } }), stderr: '' }
           if (argv[1] === '+chat-list') return { code: 0, stdout: JSON.stringify({ data: { chats: [{ chat_id: 'oc_dsh', name: 'DSH' }] } }), stderr: '' }
           return { code: 0, stdout: JSON.stringify({ data: { users: [], bots: [{ member_id: 'ou_bot', app_id: 'cli_bot' }] } }), stderr: '' }
         },
-      }),
+      },
     }
     const ok = io(dir)
-    Object.assign(ok, { orca: healthy.orca, larkFor: healthy.larkFor })
+    Object.assign(ok, { orca: healthy.orca, lark: healthy.lark })
     expect(await runCli(['doctor', '--home', dir], ok)).toBe(0)
     expect(ok.out.join('\n')).toContain('自检通过')
 
     const bad = io(dir)
-    Object.assign(bad, { orca: { async run() { return { code: 1, stdout: '', stderr: 'runtime down' } } }, larkFor: healthy.larkFor })
+    Object.assign(bad, { orca: { async run() { return { code: 1, stdout: '', stderr: 'runtime down' } } }, lark: healthy.lark })
     expect(await runCli(['doctor', '--home', dir], bad)).toBe(1)
     expect(bad.out.join('\n')).toContain('未通过')
   })

@@ -1,18 +1,44 @@
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { resolveImageModelConfig } from '../../src/router/model-config.js'
+import { resolveImageModelConfig, resolvePiModelConfig } from '../../src/router/model-config.js'
 
-function setup(llm: Record<string, unknown>): { configPath: string; trovePath: string; home: string } {
+function setup(llm: Record<string, unknown>): { configPath: string; home: string } {
   const dir = mkdtempSync(join(tmpdir(), 'ra-model-'))
   const configPath = join(dir, 'config.yaml')
   writeFileSync(configPath, [
     'llm:',
     ...Object.entries(llm).map(([key, value]) => `  ${key}: ${value}`),
   ].join('\n'))
-  return { configPath, trovePath: join(dir, 'missing.json'), home: dir }
+  return { configPath, home: dir }
 }
+
+describe('resolvePiModelConfig', () => {
+  it('三项齐全时直接返回 config.yaml 的 llm 段', () => {
+    const opts = setup({ baseUrl: 'https://api.example.com/v1', apiKey: 'sk-main', model: 'text-model' })
+    expect(resolvePiModelConfig({ ...opts, env: {} })).toEqual({
+      baseUrl: 'https://api.example.com/v1',
+      apiKey: 'sk-main',
+      model: 'text-model',
+    })
+  })
+
+  it('缺 apiKey 时直接报错，不再隐式兜底', () => {
+    const opts = setup({ baseUrl: 'https://api.example.com/v1', model: 'text-model' })
+    expect(() => resolvePiModelConfig({ ...opts, env: {} })).toThrow(/pi:model-config-missing/)
+  })
+
+  it('不再读取 ~/.trove/config.json', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ra-model-'))
+    const troveDir = join(dir, '.trove')
+    mkdirSync(troveDir, { recursive: true })
+    writeFileSync(join(troveDir, 'config.json'), JSON.stringify({
+      llm: { baseUrl: 'https://trove.example.com/v1', apiKey: 'sk-trove', model: 'trove-model' },
+    }))
+    expect(() => resolvePiModelConfig({ home: dir, env: {} })).toThrow(/pi:model-config-missing/)
+  })
+})
 
 describe('resolveImageModelConfig', () => {
   it('默认复用研判模型', () => {

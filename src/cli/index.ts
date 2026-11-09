@@ -17,7 +17,8 @@ import { GitHubTracker } from '../sources/github.js'
 import { FeishuConsumer, FeishuSender, attachQuotedMessage, normalizeFeishuEventDetailed } from '../sources/feishu.js'
 import { attachImageText } from '../sources/feishu-image.js'
 import { ChatDirectory } from '../sources/feishu-directory.js'
-import { createLarkRunner, larkEnv, parseAppId } from '../sources/lark.js'
+import { createLarkRunner, larkEnv } from '../sources/lark.js'
+import { FeishuBotAdmin } from '../sources/feishu-bot-admin.js'
 import { createVisionTranscriber, type ImageTranscriber } from '../infra/vision.js'
 import type { Trigger } from '../core/model.js'
 import { runInitWizard } from './init.js'
@@ -27,9 +28,10 @@ import { simulate } from './simulate.js'
 import { runReport, readContentArg, type ReportOptions } from './report.js'
 import type { Prompter } from './prompts.js'
 import { realRunner, type CommandRunner } from '../infra/process.js'
-import { resolveImageModelConfig, resolvePiModelConfig } from '../router/model-config.js'
+import { resolveImageModelConfig, resolvePiModelConfig, type PiModelConfig } from '../router/model-config.js'
 import { createDecisionEngine } from '../router/engine-factory.js'
 import type { DecisionAudit } from '../router/decision-engine.js'
+import type { WorkerStateFile } from '../worker/report-poller.js'
 import { RouterService, createEffectsSender, type Logger } from '../service.js'
 import { EffectsProcessor } from '../core/effects.js'
 import { createApiServer } from '../router/api.js'
@@ -52,7 +54,8 @@ export interface CliIo {
   orca?: CommandRunner
   claude?: CommandRunner
   git?: CommandRunner
-  larkFor?: (home?: string) => CommandRunner
+  /** 已绑定固定 lark-cli profile 的 runner（测试注入点）。 */
+  lark?: CommandRunner
   /** 交互式接管终端的 lark-cli 命令（新建应用、用户授权）。 */
   stream?: (argv: string[], env: NodeJS.ProcessEnv) => Promise<number>
   /** 打开浏览器（测试注入点）；返回是否成功发起，默认按平台调用 open / xdg-open / start。 */
@@ -99,7 +102,7 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
   ra config set chatBinding.oc_xxx "router-agent@main"
   ra config --edit`)
 
-  withHome(program.command('init').description('交互式初始化：仓库 → 机器人 → 群 → 授权成员'))
+  withHome(program.command('init').description('交互式初始化：仓库 → 飞书凭据 → 群 → 授权成员'))
     .option('--yes', '跳过提问，只写默认配置')
     .option('--agents-dir <dir>', 'worker 全局规范目录', join(homedir(), '.claude', 'agents'))
     .action(async (opts: { home?: string; yes?: boolean; agentsDir?: string }) => {
@@ -276,7 +279,7 @@ function homeOf(opts: { home?: string }, output: CliIo): string {
 async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo): Promise<number> {
   ensureHome(home)
   const config = loadConfig(home, output.env as NodeJS.ProcessEnv)
-  const lark = output.larkFor ?? (larkHome => createLarkRunner({ home: larkHome }))
+  const lark = output.lark ?? createLarkRunner()
   let runtime: import('../worker/port.js').WorkerRuntime | undefined
   let runtimeError: string | undefined
   try {
@@ -297,7 +300,7 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
   const checks = await runDoctor({
     config,
     orca: output.orca ?? realRunner('orca'),
-    lark: lark(config.feishu.larkHome),
+    lark,
     ...(runtime ? { runtime } : {}),
     ...(snapshot ? { runtimeChoices: snapshot.choices } : {}),
     llm: () => {
@@ -340,14 +343,13 @@ async function cmdReport(home: string, opts: ReportOptions & { port?: string }, 
   )
 }
 
-async function cmdDoc(home: string, opts: { title: string; content?: string }, output: CliIo): Promise<number> {
-  const config = loadConfig(home)
+async function cmdDoc(_home: string, opts: { title: string; content?: string }, output: CliIo): Promise<number> {
   const content = readContentArg({}, opts.content).trim()
   if (!content) {
     output.stderr('--content 不能为空（可用 @文件 或 - 从 stdin 读）')
     return 2
   }
-  const sender = new FeishuSender(createLarkRunner({ home: config.feishu.larkHome }))
+  const sender = new FeishuSender(output.lark ?? createLarkRunner())
   try {
     const url = await sender.createDocument(opts.title, content)
     output.stdout(url)
@@ -429,7 +431,7 @@ async function cmdInit(home: string, opts: { yes?: boolean; agentsDir?: string }
     stdout: line => output.stdout(line),
     ...(opts.yes || !output.prompts ? {} : { prompts: output.prompts }),
     orca: output.orca ?? realRunner('orca'),
-    lark: output.larkFor ?? (larkHome => createLarkRunner({ home: larkHome })),
+    lark: output.lark ?? createLarkRunner(),
     ...(output.stream ? { stream: output.stream } : {}),
   })
 
@@ -593,7 +595,8 @@ function cmdConfigSet(home: string, key: string, value: string, output: CliIo): 
     return 1
   }
   writeConfig(home, config)
-  output.stdout(`${key} = ${value}`)
+  // 密钥类字段不回显明文，避免进 shell 历史 / 日志。
+  output.stdout(key === 'llm.apiKey' ? `${key} = ******` : `${key} = ${value}`)
   output.stdout(`已写入 ${path}`)
   return 0
 }
@@ -788,7 +791,8 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   }
   if (!acquireLock()) {
     const pid = readPid(home)
-    if (pid && alive(pid)) {
+    // pid 文件可能是父进程拉起本进程时先写下的自身 pid：不能据此判「已在运行」。
+    if (pid && pid !== process.pid && alive(pid)) {
       output.stderr(`Router 已在运行 (pid ${pid})，无需重复启动。`)
       return 1
     }
@@ -833,7 +837,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   const orcaRunner = realRunner('orca')
   const claudeRunner = output.claude ?? realRunner('claude')
   const gitRunner = output.git ?? realRunner('git')
-  const larkRunner = createLarkRunner({ home: config.feishu.larkHome })
+  const larkRunner = output.lark ?? createLarkRunner()
   const ghRunner = realRunner('gh')
   const runtimes = createRuntimes(config, {
     home,
@@ -846,11 +850,21 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   const runtime = runtimes.default()
   const sender = new FeishuSender(larkRunner)
   const prTracker = new GitHubTracker(ghRunner)
-  const model = resolvePiModelConfig({ configPath: join(home, 'config.yaml') })
+  let model: PiModelConfig | null = null
+  try {
+    model = resolvePiModelConfig({ configPath: join(home, 'config.yaml') })
+  } catch (error) {
+    // 初始化阶段 LLM 本来就可能没配：不能让 Web 也起不来，否则用户没有入口去填。
+    // 这里降级为「只跑 Web 配置面板」，配好保存并重启后再接管消息。
+    const message = error instanceof Error ? error.message : String(error)
+    logger.warn('serve:llm-unconfigured', { reason: message, mode: 'web-only' })
+    output.stdout('LLM 未配置：本次只启动 Web 配置面板，Router 不接收消息。')
+    output.stdout('在面板「LLM Provider」填好 baseUrl / model / apiKey 并保存后，点「重启服务」即可。')
+  }
   // 图片转文本：默认复用研判模型；主模型不支持多模态时可在 llm.imageModel 单独指定。
   // 配置解析失败不阻塞启动，图片退回「纯附件」处理。
   let imageTranscriber: ImageTranscriber | null = null
-  if (config.feishu.images.enabled) {
+  if (model && config.feishu.images.enabled) {
     try {
       imageTranscriber = createVisionTranscriber(
         resolveImageModelConfig({ configPath: join(home, 'config.yaml') }),
@@ -865,7 +879,8 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     transcriber: imageTranscriber,
     logger,
   })
-  const decisionEngine = createDecisionEngine({ config, store, model, engine })
+  // 没有模型配置时不装配研判引擎，RouterService 整体跳过，只保留 Web / 配置 API。
+  const decisionEngine = model ? createDecisionEngine({ config, store, model, engine }) : null
   const auditPath = join(home, 'logs', 'decisions.jsonl')
   const onDecisionAudit = (audit: DecisionAudit): void => {
     try {
@@ -918,19 +933,21 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     handlers: {},
     onEvent: sink,
   })
-  const service = new RouterService({
-    config,
-    store,
-    engine,
-    runtime,
-    runtimes,
-    prTracker,
-    logger,
-    effects,
-    sender: feishuOutbox,
-    decisionEngine,
-    onDecisionAudit,
-  })
+  const service = decisionEngine
+    ? new RouterService({
+      config,
+      store,
+      engine,
+      runtime,
+      runtimes,
+      prTracker,
+      logger,
+      effects,
+      sender: feishuOutbox,
+      decisionEngine,
+      onDecisionAudit,
+    })
+    : null
 
   const webRoot = fileURLToPath(new URL('../web', import.meta.url))
   // onRestart 需要在 api 创建时注入，真正的重启函数在 service/consumer 就绪后再赋值。
@@ -940,12 +957,17 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     store,
     config,
     runtimeAdmin,
+    feishuBot: new FeishuBotAdmin({ lark: larkRunner }),
     projectSetup: new ProjectSetup({ home, git: gitRunner, orca: orcaRunner }),
     port: config.server.port,
     webRoot: existsSync(webRoot) ? webRoot : undefined,
     onEvent: sink,
-    onReport: state => service.onWorkerState(state),
-    resumeHint: ticketId => service.resumeHint(ticketId),
+    ...(service
+      ? {
+          onReport: (state: WorkerStateFile) => service.onWorkerState(state),
+          resumeHint: (ticketId: string) => service.resumeHint(ticketId),
+        }
+      : {}),
     onRestart: () => { void requestRestart?.() },
     onPolicyChange: updated => {
       logger.info('policy:updated', { version: engine.policy().version, acceptMode: updated.policy.acceptMode })
@@ -956,17 +978,9 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   })
   logger.info('api:listening', { port: config.server.port })
 
-  if (config.feishu.appId) {
-    const shown = await larkRunner.run(['config', 'show'])
-    const actual = shown.code === 0 ? parseAppId(shown.stdout) : ''
-    if (actual && actual !== config.feishu.appId) {
-      logger.warn('feishu:app-id-mismatch', { configured: config.feishu.appId, actual })
-    }
-  }
-
-  const consumer = config.feishu.chats.length > 0
+  const consumer = service && config.feishu.chats.length > 0
     ? new FeishuConsumer({
-      env: larkEnv(config.feishu.larkHome),
+      env: larkEnv(),
       onEvent: raw => {
         const result = normalizeFeishuEventDetailed(raw, config.feishu, directory.nameOf(String(raw.chat_id ?? '')))
         if (!result.trigger) {
@@ -1018,17 +1032,22 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     : null
   consumer?.start()
   if (consumer) logger.info('feishu:consumer-started', { chats: config.feishu.chats.length })
-  void directory.refresh(larkRunner).then(count => logger.info('chats:refreshed', { count }))
-  const chatTimer = setInterval(() => { void directory.refresh(larkRunner) }, 600_000)
-  chatTimer.unref()
-
-  await service.start()
-  output.stdout(`Router 服务运行中：http://127.0.0.1:${config.server.port}/`)
+  // Web-only 模式下不刷新群目录、也不启动消费循环，等配好 LLM 重启后再跑。
+  const chatTimer = service
+    ? setInterval(() => { void directory.refresh(larkRunner) }, 600_000)
+    : null
+  if (service) {
+    void directory.refresh(larkRunner).then(count => logger.info('chats:refreshed', { count }))
+    await service.start()
+    output.stdout(`Router 服务运行中：http://127.0.0.1:${config.server.port}/`)
+  } else {
+    output.stdout(`Web 配置服务运行中：http://127.0.0.1:${config.server.port}/（LLM 未配置，Router 未启动）`)
+  }
 
   const stopRuntime = (): void => {
     consumer?.stop()
-    clearInterval(chatTimer)
-    service.stop()
+    if (chatTimer) clearInterval(chatTimer)
+    service?.stop()
     store.close()
   }
 

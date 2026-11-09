@@ -65,7 +65,7 @@ pnpm build
 ra init                 # 交互式引导：仓库 → 机器人 → 群 → 授权成员，一条命令装完
 ```
 
-`ra init` 只问必填项，其余参数写成默认值。专属机器人、群绑定、白名单都可以在引导里一次配好。
+`ra init` 只问必填项，其余参数写成默认值。飞书 App ID / App Secret、群绑定、白名单都可以在引导里一次配好，也可以稍后在 Web 配置页补填。
 
 **3 · 启动**
 
@@ -75,7 +75,7 @@ ra status
 ra web                  # 之后想再打开面板
 ```
 
-`ra start` 等服务就绪后会用默认浏览器打开面板的「初始化」页，把启动必需项一次配完：Worker 运行时（含 ACP 扩展一键安装）、项目、飞书接入、监控群与绑定。保存后按页面提示重启服务即可。远程机器或没有图形界面时用 `ra start --no-open`，只打印面板地址。
+`ra start` 等服务就绪后会用默认浏览器打开面板的「初始化」页，把启动必需项一次配完：Worker 运行时（含 ACP 扩展一键安装）、项目、飞书机器人（App ID / App Secret 与授权）、监控群与绑定。保存后按页面提示重启服务即可。远程机器或没有图形界面时用 `ra start --no-open`，只打印面板地址。
 
 **4 · 自检与模拟**
 
@@ -280,16 +280,16 @@ Router 不做对话，只在必要时说话：
 
 worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态）；主动巡检优先读 Claude 会话记录，其次才把终端里的语义摘要（助手文本 + 动作概要）发到话题，不逐条回放工具调用。要看它做了什么，读 `report` 的 `summary` 与 `~/.router-agent/workers/<ticketId>/events.log`。
 
-> **同一机器人只能有一个事件总线在跑。** 如果 `ra logs` 出现 `another event bus is already connected`，先停掉其它占用该应用的消费者，或用 `ra init` 的「专属机器人」选项给 router-agent 单独配一个。
+> **同一机器人只能有一个事件总线在跑。** 如果 `ra logs` 出现 `another event bus is already connected`，先停掉其它占用该应用的消费者；建议给 router-agent 使用独立的自建应用，避免与其它 agent 抢同一个机器人。
 
 #### Web 面板
 
 `ra start` 自动打开、`ra web` 也可随时打开的面板分五块：
 
-- **初始化**：只放启动必需项——LLM Provider、运行时、项目、飞书接入、群与绑定，顶部有完成度清单；LLM Provider 放在第一位，可直接填 Base URL / 模型 / API Key（密钥只写入 `config.yaml`，保存后不回显），留空则继续复用 `.trove` 或环境变量。运行时用卡片平铺展示（带对应品牌 Logo），每张卡会检测 CLI / 版本 / ACP 依赖 / 登录状态。安装拆成两个按钮：**安装 CLI** 跳转该 Agent 的官方安装文档，**安装 ACP 扩展** 由 ra 把 npm 适配包装到 `~/.router-agent/runtimes`（没有可安装扩展时不显示）；另有真实握手试启动。配好后保存并按提示重启服务即可。
+- **初始化**：只放启动必需项——LLM Provider、运行时、项目、飞书机器人、群与绑定，顶部有完成度清单；LLM Provider 放在第一位，Base URL / 模型 / API Key 三项必填（密钥只写入 `config.yaml`，保存后不回显），未配置时服务无法启动。飞书机器人固定使用 `~/.router-agent-lark` profile：App ID / App Secret 直接在本页填写（Secret 只写入 lark-cli 加密存储），并可检查授权状态、发起 Device Flow 授权。运行时用卡片平铺展示（带对应品牌 Logo），每张卡会检测 CLI / 版本 / ACP 依赖 / 登录状态。安装拆成两个按钮：**安装 CLI** 跳转该 Agent 的官方安装文档，**安装 ACP 扩展** 由 ra 把 npm 适配包装到 `~/.router-agent/runtimes`（没有可安装扩展时不显示）；另有真实握手试启动。配好后保存并按提示重启服务即可。
 - **工单**：按阶段分组 + 计数、关键字搜索（标题 / 工单号 / 仓库 / PR）、自动刷新开关与手动刷新；详情页有阶段、派工、PR、授权范围、上报时间线（含完整回复与 `humanAction`）、投递记录，可直接投递 follow-up 或停止工单。
 - **日志**：直接看 `~/.router-agent/logs/router-agent.log`，默认 2 秒增量拉取（只读游标之后的新字节，不重复读整个文件），可开「实时刷新」；按 INFO / WARN / ERROR 过滤、按消息或字段搜索、复制当前结果；停在底部时自动跟随新日志，往上翻后不再打断，点「最新」回到底部。文件不存在或还没写入时给出空状态提示。
-- **配置**：按「LLM Provider / 准入策略 / 研判与人格 / 会话复用 / 进展同步 / 闲置治理 / 飞书接入 / 派工与服务 / 项目与群绑定」分组；每个字段带说明与默认值提示，改动逐项标脏，保存前做前端 + 后端双重校验，保存后写回 `config.yaml`。「派工与服务」里的 Worker 运行时是与初始化页相同的卡片平铺组件（`orca` / `claude-code` / `acp` / `acp-*`），可检测安装状态、分别跳转官方文档安装 CLI 或由 ra 安装 ACP 扩展，并做 ACP 握手试启动；项目清单按后端隔离，切换后端后「项目与群绑定」里的项目清单会切换到该后端自己的一套（Orca 用仓库选择器，Claude Code 必须是本地仓库绝对路径）；「添加本地项目」支持系统目录选择并自动识别 Git / 分支，「添加 Git 项目」支持填写 ssh / http(s) 地址后自动 clone 并登记。群绑定的项目只能从当前清单里选，分支自动跟随项目的默认分支，不能单独自定义。
+- **配置**：按「LLM Provider / 准入策略 / 研判与人格 / 会话复用 / 进展同步 / 闲置治理 / 飞书消息 / 派工与服务 / 项目与群绑定」分组；飞书分组的顶部是「飞书机器人」区块，可直接写入 App Secret、刷新授权状态并引导完成飞书授权。每个字段带说明与默认值提示，改动逐项标脏，保存前做前端 + 后端双重校验，保存后写回 `config.yaml`。「派工与服务」里的 Worker 运行时是与初始化页相同的卡片平铺组件（`orca` / `claude-code` / `acp` / `acp-*`），可检测安装状态、分别跳转官方文档安装 CLI 或由 ra 安装 ACP 扩展，并做 ACP 握手试启动；项目清单按后端隔离，切换后端后「项目与群绑定」里的项目清单会切换到该后端自己的一套（Orca 用仓库选择器，Claude Code 必须是本地仓库绝对路径）；「添加本地项目」支持系统目录选择并自动识别 Git / 分支，「添加 Git 项目」支持填写 ssh / http(s) 地址后自动 clone 并登记。群绑定的项目只能从当前清单里选，分支自动跟随项目的默认分支，不能单独自定义。
 - **来源**：服务状态、监控群、接收范围概览。
 
 配置项会标注生效范围：**策略**（`acceptMode` / `maxWorkers` / `admission`）保存后立即生效；其余配置在服务启动时读入，保存后点侧栏或配置页的「重启服务」即可热重启 daemon（浏览器页面不会刷新），也可以手动 `ra stop && ra start`。面板可以在「初始化 · LLM Provider」或「配置 · LLM Provider」里填写 `llm.apiKey`，密钥只写入 `config.yaml`，保存后不会再回显（`publicConfig` 只返回 `apiKeySet`）；也可以用 CLI / 环境变量配置。保存会重写 `config.yaml`，原文件的注释会丢失。
@@ -307,8 +307,7 @@ worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态�
 
 ```yaml
 feishu:
-  larkHome: ""         # 专属机器人的独立 lark-cli 配置目录；空=复用当前 profile
-  appId: ""            # 专属机器人 App ID（App Secret 只存 lark-cli 加密存储）
+  appId: ""            # 专属机器人 App ID；App Secret 只存 lark-cli 加密存储，lark-cli profile 固定为 ~/.router-agent-lark
   reaction: "Typing"   # 收到消息立即回的确认表情（飞书 emoji_type；空字符串关闭）
   # 监控的群：一条配置同时决定「收什么消息 + 派工绑定」
   chats:
@@ -444,7 +443,7 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 | `workerSpec.mode` | `prompt` / `agent` |
 | `backend.default` | `orca` / `claude-cli` |
 | `server.port` | 1–65535 |
-| `feishu.larkHome` / `appId` / `reaction` / `directMessages` / `allowed` / `bots` / `botOpenIds` / `botNames` | 字符串、布尔或逗号分隔列表 |
+| `feishu.appId` / `reaction` / `directMessages` / `allowed` / `bots` / `botOpenIds` / `botNames` | 字符串、布尔或逗号分隔列表 |
 | `feishu.chats` | 逗号分隔 chat_id；已有条目的 mode / 绑定 / sync 保留，新条目默认 `all` |
 | `llm.baseUrl` / `llm.model` / `llm.apiKey` | 模型连接信息 |
 
@@ -466,26 +465,23 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 |-|-|
 | `RA_HOME` | 状态目录，等价于全局选项 `--home`；默认 `~/.router-agent` |
 | `RA_PORT` | `ra report` 的上报端口，覆盖 `server.port` |
-| `RA_LARK_HOME` | 覆盖 `feishu.larkHome` |
 | `RA_LLM_BASE_URL` / `RA_LLM_API_KEY` / `RA_LLM_MODEL` | 覆盖研判模型连接信息（优先级最高） |
 | `RA_LLM_IMAGE_BASE_URL` / `RA_LLM_IMAGE_API_KEY` / `RA_LLM_IMAGE_MODEL` | 覆盖图片转写模型 |
 
-### 专属机器人（推荐）
+### 飞书机器人（专属 profile）
 
-`ra init` 的「飞书机器人」一步提供两种专属机器人方式，都不需要手动敲 `lark-cli`：
+router-agent 固定使用 `~/.router-agent-lark` 作为 lark-cli profile，**不复用**你终端里其它 lark-cli 的登录态，也不能通过配置修改这个目录。凭据与授权有两个入口：
 
-`ra init` 用交互式选择器引导（方向键选择、空格多选、密码输入不回显）：
-
-| 选项 | 行为 |
+| 入口 | 行为 |
 |-|-|
-| 2) 已有 App ID / App Secret | 输入后 `ra init` 内部执行 `lark-cli config init --app-id ... --app-secret-stdin`，写进 `feishu.larkHome` 指定的独立目录；Secret 走 stdin，不落 argv、不写 config.yaml |
-| 3) 现在新建应用 | `ra init` 内部执行 `lark-cli config init --new`，浏览器完成创建后自动回读 appId |
+| Web 配置页 | 「飞书机器人」区块填写 App ID / App Secret；Secret 走 `lark-cli config init --app-secret-stdin` 写入 lark-cli 加密存储，不落 argv / config.yaml。同页可检查 bot / user 状态，并发起 Device Flow 授权。 |
+| `ra init` | 交互式选择「已有 App ID / App Secret」或「现在新建应用」；也可以选择跳过，稍后在 Web 配置页补填。 |
 
-之后如果需要用户身份（按名字搜索群 / 成员），`ra init` 会检测并询问是否立刻执行 `lark-cli auth login`。
+之后如果需要用户身份（按名字搜索群 / 成员、创建文档），在 Web 配置页点「开始授权」完成授权，或由 `ra init` 询问后执行 `lark-cli auth login`。授权只申请 **IM（消息 / 群 / 成员）、云文档、云空间、通讯录** 四个业务域，不再请求日历、邮箱、审批等无关权限。
 
 命令与选项均由 `commander` 解析：`ra --help`、`ra init --help`、`ra tickets --help` 可查用法。
 
-机器人凭据由 lark-cli 的加密存储管理，`router-agent` 只保存 `larkHome` 与 `appId`。运行期所有 lark-cli 子进程（事件消费、发消息、群名刷新）都会带上 `HOME=<larkHome>`，与其它 agent 的 lark-cli profile 完全隔离。
+机器人凭据由 lark-cli 的加密存储管理，`router-agent` 只在 `config.yaml` 保存 `appId`。运行期所有 lark-cli 子进程（事件消费、发消息、群名刷新、凭据与授权）都会带上 `HOME=~/.router-agent-lark`，与其它 agent 的 lark-cli profile 完全隔离。
 
 ### 项目与仓库选择
 
@@ -517,9 +513,11 @@ Web 面板的「登记项目」提供两种添加方式：
 
 ### 模型配置
 
-模型配置会自动复用 `~/.trove/config.json` 里的 `llm` 段（`baseUrl` / `model` / `apiKey`）；也可以在 Web 面板的「LLM Provider」里填写（密钥只写不回显），或在本文件写 `llm:` 段，或用 `RA_LLM_BASE_URL` / `RA_LLM_API_KEY` / `RA_LLM_MODEL` 覆盖。会话自动压缩依赖 `llm.contextWindow`（默认 128000），换模型时记得同步改。
+模型配置是**必填项**：必须在 `~/.router-agent/config.yaml` 的 `llm` 段（或 Web 面板的「LLM Provider」）配置 `baseUrl` / `model` / `apiKey`，三项缺一不可，否则服务启动直接报错。密钥只写不回显。也可以用 `RA_LLM_BASE_URL` / `RA_LLM_API_KEY` / `RA_LLM_MODEL` 覆盖。
 
-优先级：**环境变量 > `config.yaml` > `.trove`**。
+> 服务未启动时 Web 面板打不开，首次配置可以直接写 `config.yaml`，或用 `ra config set llm.baseUrl ...` / `ra config set llm.model ...` / `ra config set llm.apiKey ...` 先落盘，再 `ra start`。会话自动压缩依赖 `llm.contextWindow`（默认 128000），换模型时记得同步改。
+
+优先级：**环境变量 > `config.yaml`**。
 
 图片消息转文本默认复用同一个模型；如果主模型不支持多模态，单独指定视觉模型即可（只覆盖图片链路，不影响研判）：
 
