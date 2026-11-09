@@ -25,7 +25,15 @@ import {
   runtimeStatusLabel,
 } from './runtime-model.js'
 import { hashForTab, tabFromHash, type Tab } from './tabs.js'
+import { THEME_MODE_LABEL, nextThemeMode, useThemeMode, type ThemeMode } from './theme.js'
 import { ACP_RUNTIME_ID, ORCA_RUNTIME_ID, normalizeRuntimeId } from '../../worker/runtimes/catalog.js'
+
+/** 三态各自一个图标：跟随系统用显示器，亮色用太阳，暗色用月亮。 */
+const THEME_ICON: Record<ThemeMode, 'monitor' | 'sun' | 'moon'> = {
+  system: 'monitor',
+  light: 'sun',
+  dark: 'moon',
+}
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -211,6 +219,9 @@ function App(): JSX.Element {
   const [status, setStatus] = useState<ServiceStatus | null>(null)
   const [restartPhase, setRestartPhase] = useState<RestartPhase>('idle')
   const [restartError, setRestartError] = useState<string | null>(null)
+  // 主题是纯前端偏好：不进配置页，也不写服务端配置，只落在浏览器 localStorage。
+  const theme = useThemeMode()
+  const nextTheme = nextThemeMode(theme.mode, theme.systemDark)
   // 配置页 / 初始化页共享同一个「有未保存修改」标记，切走前提醒一次。
   const dirtyRef = useRef(false)
   // 窄屏下导航横向滚动，切页时把当前项滚进可视区，避免选中项被裁在屏幕外。
@@ -291,6 +302,14 @@ function App(): JSX.Element {
             <strong>router-agent</strong>
             <small>control room</small>
           </span>
+          <button
+            className="icon-btn theme-toggle"
+            title={`主题：${THEME_MODE_LABEL[theme.mode]}，点击切换到${THEME_MODE_LABEL[nextTheme]}`}
+            aria-label={`主题：${THEME_MODE_LABEL[theme.mode]}，点击切换到${THEME_MODE_LABEL[nextTheme]}`}
+            onClick={() => theme.setMode(nextTheme)}
+          >
+            <Icon name={THEME_ICON[theme.mode]} size={15} />
+          </button>
         </div>
 
         <nav className="side-nav" ref={navRef}>
