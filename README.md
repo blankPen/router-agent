@@ -70,10 +70,12 @@ ra init                 # 交互式引导：仓库 → 机器人 → 群 → 授
 **3 · 启动**
 
 ```bash
-ra start                # 后台常驻
+ra start                # 后台常驻，就绪后自动打开 Web 初始化页
 ra status
-ra web                  # 打开面板
+ra web                  # 之后想再打开面板
 ```
+
+`ra start` 等服务就绪后会用默认浏览器打开面板的「初始化」页，把启动必需项一次配完：Worker 运行时（含 ACP 扩展一键安装）、项目、飞书接入、监控群与绑定。保存后按页面提示重启服务即可。远程机器或没有图形界面时用 `ra start --no-open`，只打印面板地址。
 
 **4 · 自检与模拟**
 
@@ -282,7 +284,7 @@ worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态�
 
 #### Web 面板
 
-`ra web` 打开的面板分五块：
+`ra start` 自动打开、`ra web` 也可随时打开的面板分五块：
 
 - **初始化**：只放启动必需项——LLM Provider、运行时、项目、飞书接入、群与绑定，顶部有完成度清单；LLM Provider 放在第一位，可直接填 Base URL / 模型 / API Key（密钥只写入 `config.yaml`，保存后不回显），留空则继续复用 `.trove` 或环境变量。运行时用卡片平铺展示（带对应品牌 Logo），每张卡会检测 CLI / 版本 / ACP 依赖 / 登录状态。安装拆成两个按钮：**安装 CLI** 跳转该 Agent 的官方安装文档，**安装 ACP 扩展** 由 ra 把 npm 适配包装到 `~/.router-agent/runtimes`（没有可安装扩展时不显示）；另有真实握手试启动。配好后保存并按提示重启服务即可。
 - **工单**：按阶段分组 + 计数、关键字搜索（标题 / 工单号 / 仓库 / PR）、自动刷新开关与手动刷新；详情页有阶段、派工、PR、授权范围、上报时间线（含完整回复与 `humanAction`）、投递记录，可直接投递 follow-up 或停止工单。
@@ -612,10 +614,10 @@ runtime:
 | `ra init` | 交互式初始化（`--yes` 跳过提问） |
 | `ra doctor` | 启动前自检：配置 / Orca / 飞书 / 模型 / 端口（`--json` 机器可读） |
 | `ra simulate` | 本地模拟一条消息，验证 Gate + Pi 研判，不派工（`--infer` 走 Pi 研判，`--dry-run` 不落库） |
-| `ra start [--foreground]` | 启动常驻服务（默认后台） |
+| `ra start [--foreground]` | 启动常驻服务（默认后台），就绪后自动打开 Web 初始化页；`--no-open` 只打印地址 |
 | `ra stop` | 停止服务 |
 | `ra status` | 服务状态 + 工单概览 |
-| `ra web` | 打开 Web 面板 |
+| `ra web` | 重新打开 Web 面板 |
 | `ra tickets [--stage]` | 列出工单 |
 | `ra ticket <id>` | 工单详情（状态 / 派工 / 上报 / 输入） |
 | `ra logs` | 最近 50 行日志 |
