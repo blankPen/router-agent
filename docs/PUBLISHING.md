@@ -17,31 +17,47 @@
 
 ## 发版流程
 
-任选一种触发方式：
+**A. 合并到 main（推荐，自动发布）**
 
-**A. 打 tag（推荐）**
+1. 在发版 PR 中升级版本号（不要打 tag）：
+
+   ```bash
+   pnpm version patch --no-git-tag-version   # 或 minor / major，只改版本号不打 tag
+   pnpm check                                # 本地先跑一遍
+   git add -A && git commit -m "chore: 发布 v$(node -p "require('./package.json').version")"
+   git push origin HEAD                      # 发起 PR
+   ```
+
+2. PR 合并进 `main` 后，工作流会自动执行：若 `package.json` 里的版本已存在于 npm 则跳过；
+   否则跑完整校验、构建并发布。
+
+版本号没变时合并到 `main` 不会重复发布，所以日常需求 PR 合并不需要额外操作。
+同一版本只会发布一次，工作流可安全重跑。
+
+**B. 打 tag（兼容原有方式）**
 
 ```bash
-pnpm check                      # 本地先跑一遍
-pnpm version patch              # 或 minor / major，会同时改 package.json 并打 vX.Y.Z tag
-git push --follow-tags          # 推提交 + tag，自动触发发布
+pnpm version patch              # 会同时改 package.json 并打 vX.Y.Z tag
+git push --follow-tags          # 推提交 + tag
 ```
 
 tag 必须与 `package.json` 的 `version` 一致，否则工作流会在发布前报错。
+main 推送和 tag 推送同时触发时会串行执行，后一个看到版本已存在会自动跳过。
 
-**B. 手动触发**
+**C. 手动触发**
 
-Actions → 发布 npm 包 → Run workflow。发布的是当前分支 `package.json` 里的版本。
+Actions → 发布 npm 包 → Run workflow。发布的是所选分支 `package.json` 里的版本。
 
 ## 工作流做了什么
 
-1. 校验 `NPM_TOKEN` 是否存在；
-2. `pnpm install --frozen-lockfile`；
-3. `pnpm check`（类型检查 + 全量测试）；
-4. `pnpm build`（tsc + esbuild，产物在 `dist/`）；
-5. tag 触发时校验 tag 与 `package.json` 版本一致；
-6. 若该版本已存在于 npm 则跳过（可安全重跑）；
-7. `npm publish --provenance`，带构建来源证明（`id-token: write`）。
+1. **判断是否需要发布**：读取 `package.json` 的 `name`/`version`，查询 npm 是否已有该版本；
+   已存在则直接跳过，不跑后续构建（tag 触发时会先校验 tag 与版本一致）；
+2. 校验 `NPM_TOKEN` 是否存在；
+3. `pnpm install --frozen-lockfile`；
+4. `pnpm check`（类型检查 + 全量测试）；
+5. `pnpm build`（tsc + esbuild，产物在 `dist/`）；
+6. `npm publish --provenance`，带构建来源证明（`id-token: write`）；
+7. 发布后回查版本是否真的可从 npm 查询到（防止只有 stage 权限时静默进入暂存区）。
 
 ## 发布内容
 
