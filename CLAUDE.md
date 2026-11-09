@@ -34,7 +34,7 @@
 5. **高频路径降噪**：轮询、重复状态、同一错误的连续重试不要每条都打；在状态变化或首次失败时打一次。同类事件用稳定字段做去重。
 6. **日志失败不能影响主流程**：写日志本身要吞掉 IO 异常（`createLogger` 已处理）；`appendEventLog` 等辅助写盘也要 try/catch。
 7. **模块只依赖 `Logger` 接口**：通过构造参数注入 `src/infra/logger.ts` 的 `Logger`，缺省用 `noopLogger`；不要在业务模块里直接 `console.log`、直接写文件或自己拼时间戳。
-8. **新增事件同步文档**：在 `README.md` 与 `README.en.md` 的日志事件表里补上事件名、来源、关键字段与含义。
+8. **新增事件同步文档**：在 `docs/OPERATIONS.md` 的日志事件表里补上事件名、来源、关键字段与含义（`README.md` / `README.en.md` 只保留入口链接）。
 9. **失败路径要测试**：新增的 warn / error 日志，至少补一条测试断言事件名与关键字段（参考 `tests/config.test.ts`、`tests/router/agent-loop.test.ts`、`tests/router/api.test.ts`）。
 
 ### 查看与排查

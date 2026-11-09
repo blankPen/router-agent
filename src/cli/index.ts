@@ -8,6 +8,7 @@ import { Command, CommanderError } from 'commander'
 import { ensureHome, loadConfig, policyOf, projectsForRuntime, replyAlwaysChatsOf, setConfigValue, writeConfig } from '../config.js'
 import { Store } from '../store/db.js'
 import { Engine } from '../core/engine.js'
+import { shouldAcknowledge } from '../core/policy.js'
 import { createRuntimes } from '../worker/registry.js'
 import { AcpRuntimeAdmin } from '../worker/runtimes/acp/admin.js'
 import { readDetectionSnapshot } from '../worker/runtimes/acp/detect.js'
@@ -1157,7 +1158,9 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
         }
         // 引用消息要先回查被引用正文，异步补齐后再入库；图片消息再下载 image_key 转文本。
         const base = result.trigger
-        const willReply = base.addressed !== 'none' || replyAlwaysChats.has(base.chatId)
+        // 只对「会被处理」的消息加回执表情：@ / 私聊 / 全量接收群，且没被准入拦截。
+        // 被群白名单挡掉的人如果也加表情，就会「有表情、永远没回复」。
+        const willReply = shouldAcknowledge(base, engine.policy(), replyAlwaysChats)
         const react = (messageId: string): void => {
           void reactTo(messageId)
             .catch(error => logger.warn('feishu:reaction-failed', { message: error instanceof Error ? error.message : String(error) }))
@@ -1179,7 +1182,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
           const hasQuote = Boolean(raw?.quote)
           const imageCount = Array.isArray(raw?.images) ? raw.images.length : 0
           logger.info('trigger:ingested', { id: trigger.id, chat: trigger.chatId, addressed: trigger.addressed, quoted: hasQuote, images: imageCount })
-          // 只对「会被回复」的消息加回执表情：@、私聊，或 mode=all 的全量接收群。
+          // 只对「会被处理」的消息加回执表情：口径同上面的 willReply（已排除准入拦截）。
           // 纯附件在入库前已经加过，这里跳过避免重复。
           if (config.feishu.reaction && willReply && !needsImageWork) react(trigger.externalId)
         })().catch(error => logger.warn('trigger:ingest-failed', { message: error instanceof Error ? error.message : String(error) }))
