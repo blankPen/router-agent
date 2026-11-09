@@ -1,10 +1,15 @@
 name: 发布 npm 包
 
 # 触发方式：
-#   1. main 分支收到新提交（通常是 PR 合并）——自动读取 package.json 的版本，
-#      已发布则只做轻量查询后跳过；未发布则跑完整校验并发布。
+#   1. main 分支收到新提交（通常是 PR 合并）——自动判断是否需要发版：
+#      · 本次推送手动改过 package.json 的 version：按该版本发布（minor / major 发版）；
+#      · 否则自动升 patch（跳过 npm 上已占用的版本），发布成功后把版本号回写到 main；
+#      · 只改文档 / 测试 / CI，或提交信息含 [skip release] 时跳过，避免刷无意义的版本号。
 #   2. 推送形如 v0.1.1 的 tag（tag 必须与 package.json 的 version 一致），兼容原有发版方式。
 #   3. 在 Actions 页面手动 Run workflow（发布当前分支 package.json 里的版本）。
+#
+# 说明：GitHub 上的 PR 合并不会触发本地 git hooks，所以「main 合并自动升版」落在
+# push(main) 的 GitHub Actions 上；判断规则抽在 scripts/release-plan.mjs，有单测覆盖。
 on:
   push:
     branches:
@@ -26,14 +31,20 @@ concurrency:
 
 jobs:
   check:
-    name: 判断是否需要发布
+    name: 生成发布计划
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      should_publish: ${{ steps.check.outputs.should_publish }}
+      should_publish: ${{ steps.plan.outputs.should_publish }}
+      release_version: ${{ steps.plan.outputs.release_version }}
+      auto_bump: ${{ steps.plan.outputs.auto_bump }}
+      reason: ${{ steps.plan.outputs.reason }}
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
+        with:
+          # 需要拿到推送前的提交，才能判断本次是否改了版本号、改了哪些文件
+          fetch-depth: 0
 
       - name: 安装 Node
         uses: actions/setup-node@v4
@@ -52,22 +63,48 @@ jobs:
             exit 1
           fi
 
-      - name: 检查该版本是否已发布
-        id: check
+      - name: 生成发布计划
+        id: plan
+        env:
+          PLAN_EVENT_NAME: ${{ github.event_name }}
+          PLAN_REF: ${{ github.ref }}
+          PLAN_SHA: ${{ github.sha }}
+          PLAN_BEFORE: ${{ github.event.before }}
+          PLAN_ACTOR: ${{ github.actor }}
         run: |
-          name="$(node -p "require('./package.json').name")"
-          version="$(node -p "require('./package.json').version")"
-          if npm view "${name}@${version}" version >/dev/null 2>&1; then
-            echo "should_publish=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::${name}@${version} 已存在于 npm，本次跳过发布。"
-            {
-              echo "### npm 发布结果"
-              echo "- ${name}@${version} 已存在，无需重复发布"
-            } >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+
+          if [[ "$PLAN_REF" == refs/tags/* ]]; then
+            export PLAN_EVENT=tag
           else
-            echo "should_publish=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::${name}@${version} 未发布，继续执行构建与发布。"
+            export PLAN_EVENT="$PLAN_EVENT_NAME"
           fi
+
+          changed_file="${RUNNER_TEMP}/release-changed-files.txt"
+          message_file="${RUNNER_TEMP}/release-head-message.txt"
+          : > "$changed_file"
+          : > "$message_file"
+          export PLAN_CHANGED_FILES_FILE="$changed_file"
+          export PLAN_HEAD_MESSAGE_FILE="$message_file"
+
+          if [[ "$PLAN_EVENT" == "push" ]]; then
+            git log -1 --format=%B "$PLAN_SHA" > "$message_file"
+
+            if [[ -n "${PLAN_BEFORE:-}" && ! "$PLAN_BEFORE" =~ ^0+$ ]] \
+              && git cat-file -e "${PLAN_BEFORE}^{commit}" 2>/dev/null; then
+              before_pkg="${RUNNER_TEMP}/release-before-package.json"
+              if git show "${PLAN_BEFORE}:package.json" > "$before_pkg" 2>/dev/null; then
+                PLAN_BEFORE_VERSION="$(node -e "process.stdout.write(JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).version)" "$before_pkg")"
+                export PLAN_BEFORE_VERSION
+              fi
+              if ! git diff --name-only "$PLAN_BEFORE" "$PLAN_SHA" > "$changed_file" 2>/dev/null; then
+                # 比较失败时保守处理：当成有产物改动，避免漏发版
+                echo 'package.json' > "$changed_file"
+              fi
+            fi
+          fi
+
+          node scripts/release-plan.mjs
 
   publish:
     name: 构建并发布
@@ -75,6 +112,10 @@ jobs:
     if: needs.check.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      # 自动升版后需要把版本号提交回 main
+      contents: write
+      id-token: write
     steps:
       - name: 校验 NPM_TOKEN
         env:
@@ -104,6 +145,14 @@ jobs:
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
 
+      - name: 应用自动升级后的版本号
+        if: needs.check.outputs.auto_bump == 'true'
+        env:
+          VERSION: ${{ needs.check.outputs.release_version }}
+        run: |
+          npm version "$VERSION" --no-git-tag-version --force >/dev/null
+          echo "package.json 版本已改为 ${VERSION}"
+
       - name: 类型检查与测试
         run: pnpm check
 
@@ -131,6 +180,41 @@ jobs:
           echo "::error::${name}@${version} 发布后仍不可查询。最常见原因是 NPM_TOKEN 只有 stage 权限：版本被写进了暂存区（npm 上只显示 0.0.0-stage）。请改用 Read and write (publish and stage) 的 token，或在 npm 页面 Staged Packages 中批准该暂存版本。"
           exit 1
 
+      # 回写版本号只是让仓库与 npm 对齐。即使被分支保护拦下，本次发布也已成功；
+      # 下一次发布会以 npm 上最新版本为基准继续升 patch，不会重复发布。
+      - name: 回写版本号到 main
+        if: needs.check.outputs.auto_bump == 'true'
+        env:
+          VERSION: ${{ needs.check.outputs.release_version }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+
+          remote_version="$(git show origin/main:package.json | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync(0, 'utf8')).version)")"
+          if [ "$remote_version" = "$VERSION" ]; then
+            echo "::notice::main 上已经是 v${VERSION}，无需回写。"
+            exit 0
+          fi
+          if [ "$(printf '%s\n%s\n' "$VERSION" "$remote_version" | sort -V | tail -n1)" != "$VERSION" ]; then
+            echo "::warning::main 上的版本 ${remote_version} 不低于本次发布的 ${VERSION}（可能有人同时手动发版），跳过回写。"
+            exit 0
+          fi
+
+          # 以远端 main 为基准重放版本号，避免并发合并导致非快进推送失败。
+          # 此时包已发布，本地未提交的版本改动可以安全丢弃。
+          git reset --hard --quiet origin/main
+          npm version "$VERSION" --no-git-tag-version --force >/dev/null
+          git add package.json
+          git commit -m "chore: 发布 v${VERSION} [skip release]" >/dev/null
+
+          if git push origin HEAD:main; then
+            echo "::notice::版本号已回写到 main：v${VERSION}"
+          else
+            echo "::warning::版本号回写 main 失败（通常是 main 分支保护禁止 Actions 直接推送）。npm 已发布 v${VERSION}，下次合并会以 npm 上最新版本为基准继续升版。"
+          fi
+
       - name: 写入发布结果
         run: |
           name="$(node -p "require('./package.json').name")"
@@ -138,4 +222,5 @@ jobs:
           {
             echo "### npm 发布结果"
             echo "- 已发布并校验：https://www.npmjs.com/package/${name}/v/${version}"
+            echo "- 发布原因：${{ needs.check.outputs.reason }}"
           } >> "$GITHUB_STEP_SUMMARY"
