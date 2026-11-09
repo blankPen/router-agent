@@ -166,18 +166,20 @@ jobs:
 
       # 只有 stage 权限的 token 不会报错，而是把版本写进暂存区（npm 上仅显示 0.0.0-stage）。
       # 这里在发布后回查一次，确保版本真的公开可查，避免「流水线绿了但包没上线」。
+      # npm 发布后到可查询通常要 1~2 分钟（实测 0.3.1 用了约 100 秒），因此最多等 5 分钟。
       - name: 校验发布结果
         run: |
           name="$(node -p "require('./package.json').name")"
           version="$(node -p "require('./package.json').version")"
-          for i in $(seq 1 10); do
+          for i in $(seq 1 30); do
             if npm view "${name}@${version}" version >/dev/null 2>&1; then
-              echo "${name}@${version} 已可从 npm 查询到"
+              echo "${name}@${version} 已可从 npm 查询到（第 ${i} 次查询）"
               exit 0
             fi
-            sleep 6
+            echo "第 ${i} 次查询未命中，npm 可能仍在处理，10 秒后重试"
+            sleep 10
           done
-          echo "::error::${name}@${version} 发布后仍不可查询。最常见原因是 NPM_TOKEN 只有 stage 权限：版本被写进了暂存区（npm 上只显示 0.0.0-stage）。请改用 Read and write (publish and stage) 的 token，或在 npm 页面 Staged Packages 中批准该暂存版本。"
+          echo "::error::${name}@${version} 发布后 5 分钟内仍不可查询。最常见原因是 NPM_TOKEN 只有 stage 权限：版本被写进了暂存区（npm 上只显示 0.0.0-stage）。请改用 Read and write (publish and stage) 的 token，或在 npm 页面 Staged Packages 中批准该暂存版本。"
           exit 1
 
       # 回写版本号只是让仓库与 npm 对齐。即使被分支保护拦下，本次发布也已成功；
