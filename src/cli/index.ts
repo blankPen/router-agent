@@ -846,9 +846,16 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     git: gitRunner,
   })
   const runtime = runtimes.default()
-  const sender = new FeishuSender(larkRunner)
+  const sender = new FeishuSender(larkRunner, logger)
   const prTracker = new GitHubTracker(ghRunner)
-  const model = resolvePiModelConfig({ configPath: join(home, 'config.yaml') })
+  let model
+  try {
+    model = resolvePiModelConfig({ configPath: join(home, 'config.yaml') })
+  } catch (error) {
+    // 模型配置缺失是最常见的启动失败原因，先落日志再交给上层打印。
+    logger.error('llm:model-config-failed', { message: errorMessage(error) })
+    throw error
+  }
   // 图片转文本：默认复用研判模型；主模型不支持多模态时可在 llm.imageModel 单独指定。
   // 配置解析失败不阻塞启动，图片退回「纯附件」处理。
   let imageTranscriber: ImageTranscriber | null = null
@@ -994,7 +1001,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
         const needsImageWork = Boolean(base.mediaOnly) || Array.isArray(rawBase?.imageKeys)
         if (config.feishu.reaction && willReply && needsImageWork && !store.getReaction(base.externalId)) react(base.externalId)
         void (async () => {
-          const quoted = await attachQuotedMessage(base, larkRunner)
+          const quoted = await attachQuotedMessage(base, larkRunner, { logger })
           const trigger = await withImageText(quoted)
           const stored = engine.ingest(trigger)
           if (!stored) {

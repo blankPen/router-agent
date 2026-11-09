@@ -285,6 +285,8 @@ Additional events covering messages, config, and exceptions (same `at` / `level`
 | `trigger:duplicate` | Source | `id` `chat` | Duplicate delivery was de-duplicated, not lost |
 | `feishu:reconnecting` | Source | `attempt` `delayMs` | Event consumer disconnected; backoff reconnect scheduled |
 | `feishu:spawn-failed` | Source | `message` | lark-cli could not be spawned (missing / permission); will retry |
+| `feishu:card-fallback` | Sender | `target` `key` `code` `message` | Interactive card failed; automatically fell back to rich text |
+| `feishu:quote-fetch-failed` / `feishu:quote-parse-failed` | Source | `messageId` `message` | Quoted-message lookup failed; processing the original message |
 | `chats:refresh-failed` / `chats:parse-failed` / `chats:cache-invalid` | Source | `code` / `message` / `path` | Chat directory refresh failed or cache corrupted; old values kept |
 | `loop:trigger-failed` | Agent Loop | `triggerId` `chat` `message` | One message failed; the rest of the batch continues |
 | `decision:engine-failed` | Agent Loop | `triggerId` `message` | Decision engine call failed; handled as unavailable with the reason kept |
@@ -295,8 +297,16 @@ Additional events covering messages, config, and exceptions (same `at` / `level`
 | `config:legacy-backend` | Config | `path` | Legacy `backend` section mapped to `runtime` |
 | `config:invalid-security-override` | Config | `runtime` `keys` | `runtime.options` tried to override security settings; startup rejected |
 | `config:patch-rejected` / `config:write-failed` | HTTP API | `errors` / `message` | Dashboard config validation or persistence failed |
+| `api:config` | HTTP API | `changed` `policyChanged` `restartRequired` | Config saved successfully, and whether a restart is needed |
 | `api:request-failed` | HTTP API | `method` `path` `message` | Unexpected request-level error (client receives 500) |
 | `ticket:resume-failed` | HTTP API | `ticketId` `message` | Resume command generation failed; ticket detail still loads |
+| `effect:done` / `effect:failed` | Effects | `kind` `key` / `error` | Result of internal actions (launch, stop, cleanup) |
+| `outbox:sent` / `outbox:failed` | Outbox | `key` `channel` `text` / `error` | Final delivery result of outbound messages |
+| `worker:status-failed` | Service | `ticketId` `handle` `runtime` `message` | Runtime liveness query failed; treated as unknown |
+| `worker:event-log-failed` | Service | `ticketId` `kind` `message` | Writing the ticket `events.log` failed without blocking the flow |
+| `pr:inspect-failed` / `pr:repo-slug-failed` | Service | `ticketId` `handle` `message` | PR hint lookup failed; falling back to gh |
+| `cursor:invalid` | Service | `key` `message` | Corrupt cursor JSON; treated as no cursor |
+| `llm:model-config-failed` | CLI | `message` | Model config missing or unparsable at startup |
 
 Raw terminal output **never enters the logs** (to avoid parsing TUI text); the proactive probe prefers the Claude session transcript and otherwise posts a semantic summary (assistant text plus an action digest), never a replay of tool calls. To see what a Worker did, read the `report` `summary` and `~/.router-agent/workers/<ticketId>/events.log`.
 

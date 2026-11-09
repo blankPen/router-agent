@@ -231,6 +231,11 @@ describe('HTTP 管理 API', () => {
     expect(res.status).toBe(200)
     expect(res.json.restartRequired).toBe(true)
     expect(res.json.policyChanged).toBe(false)
+    expect(events.find(event => event.event === 'api:config')).toMatchObject({
+      changed: ['progress.syncMs', 'feishu.images.maxChars'],
+      policyChanged: false,
+      restartRequired: true,
+    })
     const saved = loadConfig(config.home!)
     expect(saved.progress.syncMs).toBe(30_000)
     expect(saved.feishu.images.maxChars).toBe(800)

@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline'
 import type { Trigger } from '../core/model.js'
 import type { ChatSettings } from '../config.js'
 import type { CommandRunner } from '../infra/process.js'
+import { noopLogger, errorMessage, type Logger } from '../infra/logger.js'
 import { parseImageKeysFromContent } from './feishu-image.js'
 
 export interface FeishuConfig {
@@ -218,15 +219,22 @@ const QUOTED_MAX_CHARS = 800
 export async function attachQuotedMessage(
   trigger: Trigger,
   runner: CommandRunner,
-  opts: { as?: string; maxChars?: number } = {},
+  opts: { as?: string; maxChars?: number; logger?: Logger } = {},
 ): Promise<Trigger> {
+  const logger = opts.logger ?? noopLogger
   const parentId = readParentId(trigger.raw)
   if (!parentId) return trigger
   try {
     const res = await runner.run(quotedMessageCommand(parentId, opts.as ?? 'bot'))
-    if (res.code !== 0) return trigger
+    if (res.code !== 0) {
+      logger.warn('feishu:quote-fetch-failed', { messageId: parentId, code: res.code, message: res.stderr.slice(0, 200) })
+      return trigger
+    }
     const quoted = parseQuotedMessage(res.stdout, parentId)
-    if (!quoted) return trigger
+    if (!quoted) {
+      logger.warn('feishu:quote-parse-failed', { messageId: parentId, sample: res.stdout.slice(0, 200) })
+      return trigger
+    }
     const max = opts.maxChars ?? QUOTED_MAX_CHARS
     const body = quoted.text.length > max ? `${quoted.text.slice(0, max)}…` : quoted.text
     const who = quoted.author ? ` ${quoted.author}` : ''
@@ -243,7 +251,8 @@ export async function attachQuotedMessage(
         ...(quoteImages.length > 0 ? { quoteImages } : {}),
       },
     }
-  } catch {
+  } catch (error) {
+    logger.warn('feishu:quote-fetch-failed', { messageId: parentId, message: errorMessage(error) })
     return trigger
   }
 }
@@ -577,7 +586,7 @@ export function fitIdempotencyKey(key: string, max = 50): string {
 
 /** 通过 lark-cli 发消息；幂等 key 由 Outbox 提供。 */
 export class FeishuSender {
-  constructor(private runner: CommandRunner) {}
+  constructor(private runner: CommandRunner, private logger: Logger = noopLogger) {}
 
   async reply(messageId: string, text: string, idempotencyKey: string): Promise<void> {
     const res = await this.runner.run(feishuReplyCommand(messageId, text, fitIdempotencyKey(idempotencyKey)))
@@ -594,6 +603,12 @@ export class FeishuSender {
     const key = fitIdempotencyKey(idempotencyKey)
     const res = await this.runner.run(feishuCardSendCommand(chatId, key), { input: feishuCard(markdown) })
     if (res.code === 0) return
+    this.logger.warn('feishu:card-fallback', {
+      target: chatId,
+      key,
+      code: res.code,
+      message: res.stderr.slice(0, 200),
+    })
     const fallback = await this.runner.run(feishuMarkdownSendCommand(chatId, key), { input: markdown })
     if (fallback.code !== 0) throw new Error(`feishu:card-send-failed: ${fallback.stderr.slice(0, 300)}`)
   }
@@ -602,6 +617,12 @@ export class FeishuSender {
     const key = fitIdempotencyKey(idempotencyKey)
     const res = await this.runner.run(feishuCardReplyCommand(messageId, key), { input: feishuCard(markdown) })
     if (res.code === 0) return
+    this.logger.warn('feishu:card-fallback', {
+      target: messageId,
+      key,
+      code: res.code,
+      message: res.stderr.slice(0, 200),
+    })
     const fallback = await this.runner.run(feishuMarkdownReplyCommand(messageId, key), { input: markdown })
     if (fallback.code !== 0) throw new Error(`feishu:card-reply-failed: ${fallback.stderr.slice(0, 300)}`)
   }

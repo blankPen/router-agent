@@ -246,13 +246,14 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         const policyChanged = nextPolicy.version !== beforePolicy.version
         if (policyChanged) await opts.onPolicyChange?.(config)
         await opts.onConfigChange?.(config, result.changed)
-        onEvent({ event: 'api:config', changed: result.changed })
+        const restartRequired = requiresRestart(result.changed)
+        onEvent({ event: 'api:config', changed: result.changed, policyChanged, restartRequired })
         return respond(res, 200, {
           ...configPayload(config, opts.runtimeAdmin),
           ok: true,
           changed: result.changed,
           policyChanged,
-          restartRequired: requiresRestart(result.changed),
+          restartRequired,
         })
       }
       return respond(res, 405, { error: 'method-not-allowed' })

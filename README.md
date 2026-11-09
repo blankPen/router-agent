@@ -285,6 +285,8 @@ Router 不做对话，只在必要时说话：
 | `trigger:duplicate` | Source | `id` `chat` | 重复投递的消息被入库去重，不是消息丢失 |
 | `feishu:reconnecting` | Source | `attempt` `delayMs` | 事件消费者断开，已安排退避重连 |
 | `feishu:spawn-failed` | Source | `message` | lark-cli 无法拉起（未安装 / 无权限），会继续重试 |
+| `feishu:card-fallback` | Sender | `target` `key` `code` `message` | 互动卡片发送失败，已自动降级为富文本 |
+| `feishu:quote-fetch-failed` / `feishu:quote-parse-failed` | Source | `messageId` `message` | 引用消息回查失败，按原消息继续 |
 | `chats:refresh-failed` / `chats:parse-failed` / `chats:cache-invalid` | Source | `code` / `message` / `path` | 群名目录刷新失败或缓存损坏，旧值继续可用 |
 | `loop:trigger-failed` | Agent Loop | `triggerId` `chat` `message` | 单条消息处理异常，同批其它消息不受影响 |
 | `decision:engine-failed` | Agent Loop | `triggerId` `message` | 研判引擎调用失败，按 unavailable 处理并留下原因 |
@@ -295,8 +297,16 @@ Router 不做对话，只在必要时说话：
 | `config:legacy-backend` | Config | `path` | 旧版 `backend` 段已兼容映射到 `runtime` |
 | `config:invalid-security-override` | Config | `runtime` `keys` | `runtime.options` 试图覆盖安全参数，启动被拒绝 |
 | `config:patch-rejected` / `config:write-failed` | HTTP API | `errors` / `message` | 面板保存的配置校验失败或落盘失败 |
+| `api:config` | HTTP API | `changed` `policyChanged` `restartRequired` | 配置保存成功及是否需要重启 |
 | `api:request-failed` | HTTP API | `method` `path` `message` | 请求级未预期异常（客户端会收到 500） |
 | `ticket:resume-failed` | HTTP API | `ticketId` `message` | 工单详情里的恢复命令生成失败，详情页仍可打开 |
+| `effect:done` / `effect:failed` | Effects | `kind` `key` / `error` | 派工、停止、清理等内部动作的执行结果 |
+| `outbox:sent` / `outbox:failed` | Outbox | `key` `channel` `text` / `error` | 对外消息的最终投递结果 |
+| `worker:status-failed` | Service | `ticketId` `handle` `runtime` `message` | 运行时活性查询失败，按未知状态处理 |
+| `worker:event-log-failed` | Service | `ticketId` `kind` `message` | 工单 `events.log` 写入失败，不影响主流程 |
+| `pr:inspect-failed` / `pr:repo-slug-failed` | Service | `ticketId` `handle` `message` | PR 线索获取失败，等待 gh 兜底 |
+| `cursor:invalid` | Service | `key` `message` | 游标 JSON 损坏，按无游标处理 |
+| `llm:model-config-failed` | CLI | `message` | 启动时模型配置缺失或不可解析 |
 
 worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态）；主动巡检优先读 Claude 会话记录，其次才把终端里的语义摘要（助手文本 + 动作概要）发到话题，不逐条回放工具调用。要看它做了什么，读 `report` 的 `summary` 与 `~/.router-agent/workers/<ticketId>/events.log`。
 
