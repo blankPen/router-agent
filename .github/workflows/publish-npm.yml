@@ -1,10 +1,14 @@
 name: 发布 npm 包
 
 # 触发方式：
-#   1. 推送形如 v0.1.1 的 tag（tag 必须与 package.json 的 version 一致）
-#   2. 在 Actions 页面手动 Run workflow（发布当前 package.json 里的版本）
+#   1. main 分支收到新提交（通常是 PR 合并）——自动读取 package.json 的版本，
+#      已发布则只做轻量查询后跳过；未发布则跑完整校验并发布。
+#   2. 推送形如 v0.1.1 的 tag（tag 必须与 package.json 的 version 一致），兼容原有发版方式。
+#   3. 在 Actions 页面手动 Run workflow（发布当前分支 package.json 里的版本）。
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
@@ -14,13 +18,61 @@ permissions:
   # npm provenance（构建来源证明）需要通过 OIDC 换取签名令牌
   id-token: write
 
+# 固定并发组，让所有发布串行执行：
+# 同一次发版可能同时触发 main 推送和 tag 推送，串行后后者会看到版本已存在并跳过，避免并发 E409。
 concurrency:
-  group: npm-publish-${{ github.ref }}
+  group: npm-publish
   cancel-in-progress: false
 
 jobs:
+  check:
+    name: 判断是否需要发布
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      should_publish: ${{ steps.check.outputs.should_publish }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+
+      - name: 校验 tag 与 package.json 版本一致
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          tag_version="${TAG_NAME#v}"
+          pkg_version="$(node -p "require('./package.json').version")"
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "::error::tag ${TAG_NAME} 与 package.json 版本 ${pkg_version} 不一致，请先执行 pnpm version 再推 tag。"
+            exit 1
+          fi
+
+      - name: 检查该版本是否已发布
+        id: check
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${name}@${version} 已存在于 npm，本次跳过发布。"
+            {
+              echo "### npm 发布结果"
+              echo "- ${name}@${version} 已存在，无需重复发布"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${name}@${version} 未发布，继续执行构建与发布。"
+          fi
+
   publish:
     name: 构建并发布
+    needs: check
+    if: needs.check.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -58,32 +110,7 @@ jobs:
       - name: 构建
         run: pnpm build
 
-      - name: 校验 tag 与 package.json 版本一致
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          TAG_NAME: ${{ github.ref_name }}
-        run: |
-          tag_version="${TAG_NAME#v}"
-          pkg_version="$(node -p "require('./package.json').version")"
-          if [ "$tag_version" != "$pkg_version" ]; then
-            echo "::error::tag ${TAG_NAME} 与 package.json 版本 ${pkg_version} 不一致，请先执行 pnpm version 再推 tag。"
-            exit 1
-          fi
-
-      - name: 检查该版本是否已发布
-        id: check
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          name="$(node -p "require('./package.json').name")"
-          version="$(node -p "require('./package.json').version")"
-          if npm view "${name}@${version}" version >/dev/null 2>&1; then
-            echo "::notice::${name}@${version} 已存在于 npm，跳过本次发布。"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: 发布到 npm
-        if: steps.check.outputs.skip != 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --provenance
@@ -91,7 +118,6 @@ jobs:
       # 只有 stage 权限的 token 不会报错，而是把版本写进暂存区（npm 上仅显示 0.0.0-stage）。
       # 这里在发布后回查一次，确保版本真的公开可查，避免「流水线绿了但包没上线」。
       - name: 校验发布结果
-        if: steps.check.outputs.skip != 'true'
         run: |
           name="$(node -p "require('./package.json').name")"
           version="$(node -p "require('./package.json').version")"
@@ -111,9 +137,5 @@ jobs:
           version="$(node -p "require('./package.json').version")"
           {
             echo "### npm 发布结果"
-            if [ "${{ steps.check.outputs.skip }}" = "true" ]; then
-              echo "- ${name}@${version} 已存在，已跳过发布"
-            else
-              echo "- 已发布并校验：https://www.npmjs.com/package/${name}/v/${version}"
-            fi
+            echo "- 已发布并校验：https://www.npmjs.com/package/${name}/v/${version}"
           } >> "$GITHUB_STEP_SUMMARY"
