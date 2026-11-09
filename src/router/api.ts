@@ -9,6 +9,7 @@ import type { AcceptMode } from '../core/policy.js'
 import { noopSink, preview, type EventSink } from '../core/events.js'
 import type { WorkerStateFile } from '../worker/report-poller.js'
 import type { ResumeHint } from '../worker/port.js'
+import { readLogs } from './log-tail.js'
 
 export interface ApiServerOptions {
   engine: Engine
@@ -29,6 +30,8 @@ export interface ApiServerOptions {
   resumeHint?: (ticketId: string) => Promise<ResumeHint | null> | ResumeHint | null
   /** ACP 运行时探测与安装；缺省时新端点返回 404。 */
   runtimeAdmin?: AcpRuntimeAdmin
+  /** 面板「日志」页读取的日志文件；缺省时用 `<home>/logs/router-agent.log`。 */
+  logPath?: string
 }
 
 export interface ApiServer {
@@ -40,6 +43,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
   const clock = opts.clock ?? { now: () => new Date().toISOString() }
   const config = opts.config
   const onEvent = opts.onEvent ?? noopSink
+  const logPath = opts.logPath ?? (config.home ? join(config.home, 'logs', 'router-agent.log') : '')
 
   const server = createServer((req, res) => {
     handle(req, res).catch(error => {
@@ -242,6 +246,20 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         directMessages: config.feishu.directMessages,
         allowed: config.feishu.allowed,
       })
+    }
+
+    if (path === '/api/logs' && req.method === 'GET') {
+      // 首次不带 cursor（回看尾部若干行），之后带上一次返回的 cursor 做增量拉取。
+      const rawCursor = url.searchParams.get('cursor')
+      const cursor = rawCursor === null || rawCursor.trim() === '' ? undefined : Number(rawCursor)
+      if (cursor !== undefined && (!Number.isFinite(cursor) || cursor < 0)) {
+        return respond(res, 400, { error: 'invalid-cursor' })
+      }
+      const limit = Number(url.searchParams.get('limit') ?? 200)
+      return respond(res, 200, readLogs(logPath, {
+        ...(cursor !== undefined ? { cursor } : {}),
+        limit: Number.isFinite(limit) ? limit : undefined,
+      }))
     }
 
     if (path === '/api/policy') {

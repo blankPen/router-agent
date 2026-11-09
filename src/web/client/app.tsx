@@ -120,6 +120,28 @@ interface ServiceStatus {
   now: string
 }
 
+interface LogEntry {
+  at: string
+  level: string
+  message: string
+  data?: Record<string, unknown>
+}
+
+interface LogBatch {
+  path: string
+  exists: boolean
+  size: number
+  cursor: number
+  entries: LogEntry[]
+  more?: boolean
+  reset?: boolean
+}
+
+/** 面板缓冲区里的一行：seq 只用于 React key，保证前插/截断时列表不串位。 */
+interface LogLine extends LogEntry {
+  seq: number
+}
+
 // ---------------------------------------------------------------------------
 // 常量与工具
 // ---------------------------------------------------------------------------
@@ -159,11 +181,24 @@ const PR_STATE_LABEL: Record<string, string> = {
   closed: '已关闭',
 }
 
+const LOG_LEVELS = ['all', 'info', 'warn', 'error', 'raw'] as const
+const LOG_LEVEL_LABEL: Record<string, string> = { all: '全部', info: 'INFO', warn: 'WARN', error: 'ERROR', raw: 'TEXT' }
+const LOG_LEVEL_COLOR: Record<string, string> = {
+  all: 'var(--accent)',
+  info: 'var(--info)',
+  warn: 'var(--warning)',
+  error: 'var(--negative)',
+  raw: 'var(--faint)',
+}
+/** 面板最多保留的日志行数；超出后从最旧的开始丢，避免长时间开着吃内存。 */
+const LOG_BUFFER_MAX = 2_000
+const LOG_POLL_MS = 2_000
+
 // ---------------------------------------------------------------------------
 // 应用外壳
 // ---------------------------------------------------------------------------
 
-type Tab = 'setup' | 'tickets' | 'config' | 'sources'
+type Tab = 'setup' | 'tickets' | 'logs' | 'config' | 'sources'
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -250,6 +285,10 @@ function App(): JSX.Element {
             <span>工单</span>
             {status && status.tickets.open > 0 && <span className="nav-count">{status.tickets.open}</span>}
           </button>
+          <button className={`nav-tab ${tab === 'logs' ? 'active' : ''}`} onClick={() => switchTab('logs')}>
+            <Icon name="file-text" />
+            <span>日志</span>
+          </button>
           <button className={`nav-tab ${tab === 'config' ? 'active' : ''}`} onClick={() => switchTab('config')}>
             <Icon name="sliders" />
             <span>配置</span>
@@ -288,6 +327,7 @@ function App(): JSX.Element {
           />
         )}
         {tab === 'tickets' && <TicketsView />}
+        {tab === 'logs' && <LogsView />}
         {tab === 'config' && (
           <ConfigView
             restarting={restartPhase === 'restarting'}
@@ -1760,6 +1800,265 @@ function SourcesView(): JSX.Element {
       </section>
     </>
   )
+}
+
+// ---------------------------------------------------------------------------
+// 日志
+// ---------------------------------------------------------------------------
+
+function LogsView(): JSX.Element {
+  const [lines, setLines] = useState<LogLine[]>([])
+  const [meta, setMeta] = useState<{ path: string; exists: boolean; size: number } | null>(null)
+  const [live, setLive] = useState(true)
+  const [level, setLevel] = useState<string>('all')
+  const [keyword, setKeyword] = useState('')
+  const [syncedAt, setSyncedAt] = useState<Date | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [following, setFollowing] = useState(true)
+
+  const scrollerRef = useRef<HTMLDivElement | null>(null)
+  // 游标用 ref 保存：轮询回调里要读最新值，放进 state 会让定时器拿到旧闭包。
+  const cursorRef = useRef<number | null>(null)
+  const seqRef = useRef(0)
+  const inflightRef = useRef(false)
+
+  const append = useCallback((batch: LogBatch): void => {
+    // 没有新行时不动 state，避免每 2 秒把整张列表重渲染一遍。
+    if (batch.entries.length === 0 && !batch.reset) return
+    const incoming = batch.entries.map(entry => ({ ...entry, seq: ++seqRef.current }))
+    setLines(prev => {
+      const next = batch.reset ? incoming : [...prev, ...incoming]
+      return next.length > LOG_BUFFER_MAX ? next.slice(next.length - LOG_BUFFER_MAX) : next
+    })
+  }, [])
+
+  const pull = useCallback(async (): Promise<void> => {
+    // 上一次还没回来就跳过，避免网络慢时请求叠在一起把行重复追加。
+    if (inflightRef.current) return
+    inflightRef.current = true
+    try {
+      // 第一次（或服务重启后）不带游标，先回看尾部；之后只拉增量。
+      for (let round = 0; round < 8; round += 1) {
+        const query = cursorRef.current === null ? '?limit=400' : `?cursor=${cursorRef.current}`
+        const batch = await getJson<LogBatch>(`/api/logs${query}`)
+        cursorRef.current = batch.cursor
+        setMeta(prev => prev && prev.path === batch.path && prev.exists === batch.exists && prev.size === batch.size
+          ? prev
+          : { path: batch.path, exists: batch.exists, size: batch.size })
+        append(batch)
+        // 积压超过单次读取上限时继续拉，避免新日志被压在后面。
+        if (!batch.more) break
+      }
+      setSyncedAt(new Date())
+      setError(null)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      inflightRef.current = false
+    }
+  }, [append])
+
+  useEffect(() => {
+    void pull()
+  }, [pull])
+
+  useEffect(() => {
+    if (!live) return
+    const timer = setInterval(() => {
+      // 页面在后台时不轮询，回到前台下一轮会一次补齐。
+      if (!document.hidden) void pull()
+    }, LOG_POLL_MS)
+    return () => clearInterval(timer)
+  }, [live, pull])
+
+  // 停留在底部时跟着新日志滚动；用户往上翻就不再打扰，直到点「最新」。
+  useEffect(() => {
+    if (!following) return
+    const el = scrollerRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [lines, following])
+
+  const onScroll = useCallback((): void => {
+    const el = scrollerRef.current
+    if (!el) return
+    setFollowing(el.scrollHeight - el.scrollTop - el.clientHeight < 48)
+  }, [])
+
+  const jumpToBottom = useCallback((): void => {
+    const el = scrollerRef.current
+    if (el) el.scrollTop = el.scrollHeight
+    setFollowing(true)
+  }, [])
+
+  const counts = useMemo(() => {
+    const map: Record<string, number> = { all: lines.length }
+    for (const line of lines) map[line.level] = (map[line.level] ?? 0) + 1
+    return map
+  }, [lines])
+
+  const visible = useMemo(() => {
+    const query = keyword.trim().toLowerCase()
+    return lines.filter(line => {
+      if (level !== 'all' && line.level !== level) return false
+      if (!query) return true
+      const haystack = `${line.message} ${JSON.stringify(line.data ?? {})}`
+      return haystack.toLowerCase().includes(query)
+    })
+  }, [lines, level, keyword])
+
+  // 行元素按过滤结果缓存：轮询没有新内容时不再重建整张列表。
+  const rows = useMemo(() => visible.map(line => (
+    <div key={line.seq} className={`log-row level-${line.level}`}>
+      <span className="log-time" title={line.at || undefined}>{logClock(line.at)}</span>
+      <span className="log-level">{LOG_LEVEL_LABEL[line.level] ?? line.level.toUpperCase()}</span>
+      <span className="log-message">
+        {line.message}
+        {line.data && (
+          <span className="log-data">
+            {' '}
+            {Object.entries(line.data).map(([key, value]) => (
+              <span key={key} className="log-pair">
+                <span className="log-key">{key}</span>={formatLogValue(value)}
+              </span>
+            ))}
+          </span>
+        )}
+      </span>
+    </div>
+  )), [visible])
+
+  const copyVisible = async (): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(visible.map(formatLogLine).join('\n'))
+      setNotice(`已复制 ${visible.length} 条`)
+      setTimeout(() => setNotice(null), 2_500)
+    } catch {
+      setNotice('复制失败，请手动选择文本')
+      setTimeout(() => setNotice(null), 4_000)
+    }
+  }
+
+  const levels = LOG_LEVELS.filter(item => item !== 'raw' || (counts.raw ?? 0) > 0)
+  const subtitle = meta
+    ? `${meta.path || '未配置日志目录'}${meta.exists ? ` · ${formatBytes(meta.size)}` : ' · 文件尚未生成'}${syncedAt ? ` · 更新于 ${syncedAt.toLocaleTimeString('zh-CN')}` : ''}`
+    : '正在读取日志文件…'
+
+  return (
+    <>
+      <PageHead
+        title="日志"
+        subtitle={subtitle}
+        actions={
+          <>
+            <label className="switch">
+              <input type="checkbox" checked={live} onChange={event => setLive(event.target.checked)} />
+              <span className="switch-track"><span className="switch-knob" /></span>
+              实时刷新
+            </label>
+            <button className="btn" onClick={() => void copyVisible()} disabled={visible.length === 0}>
+              <Icon name="copy" size={14} />
+              复制
+            </button>
+            <button className="btn" onClick={() => void pull()}>
+              <Icon name="refresh" size={14} />
+              刷新
+            </button>
+          </>
+        }
+      />
+
+      {error && <div className="banner danger"><Icon name="alert" /><div><strong>读取日志失败</strong><p>{error}</p></div></div>}
+
+      <div className="filter-bar log-toolbar">
+        <div className="stage-chips">
+          {levels.map(item => (
+            <button
+              key={item}
+              className={`chip ${level === item ? 'active' : ''}`}
+              style={{ ['--stage' as string]: LOG_LEVEL_COLOR[item] }}
+              onClick={() => setLevel(item)}
+            >
+              <span className="chip-dot" />
+              {LOG_LEVEL_LABEL[item]}
+              <span className="chip-count">{counts[item] ?? 0}</span>
+            </button>
+          ))}
+        </div>
+        <div className="search-box log-search">
+          <Icon name="search" size={15} />
+          <input
+            value={keyword}
+            onChange={event => setKeyword(event.target.value)}
+            placeholder="过滤消息或字段…"
+            aria-label="过滤日志"
+          />
+        </div>
+        {notice && <span className="log-notice">{notice}</span>}
+        <button className="btn ghost tiny" onClick={() => setLines([])} disabled={lines.length === 0}>清空视图</button>
+      </div>
+
+      <div className="log-panel">
+        <div className="log-view" ref={scrollerRef} onScroll={onScroll}>
+          {!meta?.exists ? (
+            <div className="log-empty">
+              <Icon name="file-text" size={22} />
+              <p>还没有日志文件</p>
+              <small>{meta?.path ? `服务写入第一条日志后会出现在 ${meta.path}` : '服务启动后这里会显示 RA 的运行日志。'}</small>
+            </div>
+          ) : visible.length === 0 ? (
+            <div className="log-empty">
+              <Icon name="file-text" size={22} />
+              <p>{lines.length === 0 ? '暂无日志' : '没有匹配的日志'}</p>
+              <small>{lines.length === 0 ? '服务产生新日志后会自动出现在这里。' : '换个级别或关键字试试。'}</small>
+            </div>
+          ) : (
+            rows
+          )}
+        </div>
+        {!following && (
+          <button className="log-jump" onClick={jumpToBottom}>
+            <Icon name="chevron" size={12} className="log-jump-icon" />
+            最新
+          </button>
+        )}
+      </div>
+    </>
+  )
+}
+
+function logClock(at: string): string {
+  if (!at) return '—'
+  const date = new Date(at)
+  if (Number.isNaN(date.getTime())) return at
+  return date.toLocaleTimeString('zh-CN', { hour12: false })
+}
+
+function formatLogValue(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (value === null) return 'null'
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value)
+    } catch {
+      return String(value)
+    }
+  }
+  return String(value)
+}
+
+function formatLogLine(line: LogEntry): string {
+  const data = line.data
+    ? ` ${Object.entries(line.data).map(([key, value]) => `${key}=${formatLogValue(value)}`).join(' ')}`
+    : ''
+  return `${line.at || '-'} ${line.level.toUpperCase()} ${line.message}${data}`
+}
+
+function formatBytes(size: number): string {
+  if (!Number.isFinite(size) || size <= 0) return '0 B'
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  return `${(size / 1024 / 1024).toFixed(1)} MB`
 }
 
 const root = document.getElementById('root')

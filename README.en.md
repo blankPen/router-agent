@@ -661,6 +661,7 @@ States:
 | POST | `/api/reports` | Worker state and reply reports (the `ra report` entry) |
 | GET / PUT | `/api/policy` | Read / write policy |
 | GET | `/api/sources/feishu/chats` | Feishu source configuration |
+| GET | `/api/logs?cursor=&limit=` | Dashboard log page: omit `cursor` to tail the file, pass it to fetch only new lines |
 
 ## Development
 
