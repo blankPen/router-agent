@@ -1,4 +1,4 @@
-import { mkdtempSync, existsSync, readFileSync } from 'node:fs'
+import { mkdtempSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -18,13 +18,35 @@ describe('全局状态目录与配置', () => {
     expect(text).toContain('workerSpec')
   })
 
-  it('没有配置时使用默认值：auto + 并发 4 + prompt 模式 + orca 后端', () => {
+  it('没有配置时使用默认值：auto + 并发 4 + prompt 模式 + orca 运行时', () => {
     const cfg = loadConfig(home())
     expect(cfg.policy.acceptMode).toBe('auto')
     expect(cfg.policy.maxWorkers).toBe(4)
     expect(cfg.feishu.reaction).toBe('Typing')
     expect(cfg.workerSpec.mode).toBe('prompt')
-    expect(cfg.backend.default).toBe('orca')
+    expect(cfg.runtime.default).toBe('orca')
+  })
+
+  it('旧版 backend 配置段兼容映射到 runtime', () => {
+    const dir = home()
+    writeFileSync(join(dir, 'config.yaml'), ['backend:', '  default: claude-cli'].join('\n'))
+    expect(loadConfig(dir).runtime.default).toBe('claude-cli')
+  })
+
+  it('图片转文本默认开启，可配置关闭与阈值', () => {
+    expect(loadConfig(home()).feishu.images).toEqual({ enabled: true, maxChars: 2_000, timeoutMs: 60_000 })
+
+    const dir = home()
+    ensureHome(dir)
+    const { writeFileSync } = require('node:fs') as typeof import('node:fs')
+    writeFileSync(join(dir, 'config.yaml'), [
+      'feishu:',
+      '  images:',
+      '    enabled: false',
+      '    maxChars: 500',
+      '    timeoutMs: 30000',
+    ].join('\n'))
+    expect(loadConfig(dir).feishu.images).toEqual({ enabled: false, maxChars: 500, timeoutMs: 30_000 })
   })
 
   it('读取用户配置并覆盖默认值', () => {
@@ -123,6 +145,7 @@ describe('全局状态目录与配置', () => {
     cfg.feishu.larkHome = '/tmp/lark-home'
     cfg.feishu.appId = 'cli_dedicated'
     cfg.feishu.reaction = 'THUMBSUP'
+    cfg.feishu.images = { enabled: false, maxChars: 800, timeoutMs: 15_000 }
     cfg.policy.acceptMode = 'observe'
     cfg.progress.syncMs = 30_000
     cfg.progress.probeMs = 90_000
@@ -138,6 +161,7 @@ describe('全局状态目录与配置', () => {
     expect(loaded.feishu.larkHome).toBe('/tmp/lark-home')
     expect(loaded.feishu.appId).toBe('cli_dedicated')
     expect(loaded.feishu.reaction).toBe('THUMBSUP')
+    expect(loaded.feishu.images).toEqual({ enabled: false, maxChars: 800, timeoutMs: 15_000 })
     expect(loaded.policy.acceptMode).toBe('observe')
     expect(loaded.progress.syncMs).toBe(30_000)
     expect(loaded.progress.probeMs).toBe(90_000)
@@ -333,5 +357,44 @@ describe('Pi 研判层配置', () => {
     const loaded = loadConfig(dir)
     expect(loaded.router.timeoutMs).toBe(45000)
     expect(loaded.router.tokenBudget).toBe(16000)
+  })
+})
+
+describe('会话复用与人格配置', () => {
+  it('默认开启按人隔离、7 天保留、Pi 压缩', () => {
+    const cfg = loadConfig(home())
+    expect(cfg.router.session).toMatchObject({
+      enabled: true,
+      keyScope: 'user',
+      retentionDays: 7,
+      maxActive: 50,
+      compaction: { enabled: true, reserveTokens: 16384, keepRecentTokens: 20000 },
+    })
+    expect(cfg.router.persona).toMatchObject({ name: '阿罗', style: 'friendly', language: 'zh-CN' })
+  })
+
+  it('YAML 覆盖 session / persona 后能读回', () => {
+    const dir = home()
+    ensureHome(dir)
+    const { writeFileSync } = require('node:fs') as typeof import('node:fs')
+    writeFileSync(join(dir, 'config.yaml'), [
+      'router:',
+      '  session:',
+      '    enabled: false',
+      '    keyScope: thread',
+      '    retentionDays: 3',
+      '    compaction:',
+      '      enabled: false',
+      '  persona:',
+      '    name: 小助手',
+      '    style: concise',
+    ].join('\n'))
+    const cfg = loadConfig(dir)
+    expect(cfg.router.session.enabled).toBe(false)
+    expect(cfg.router.session.keyScope).toBe('thread')
+    expect(cfg.router.session.retentionDays).toBe(3)
+    expect(cfg.router.session.compaction.enabled).toBe(false)
+    expect(cfg.router.persona.name).toBe('小助手')
+    expect(cfg.router.persona.style).toBe('concise')
   })
 })

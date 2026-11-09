@@ -115,7 +115,7 @@ describe('Engine', () => {
   it('派工启动后工单进入 assigned，报告 progress 后进入 running', () => {
     engine.ingest(makeTrigger())
     const { ticket } = engine.decide({ triggerId: 'trg_1', decision: 'accept', strength: 'explicit', reason: 'ok' })
-    const assignment = engine.startAssignment(ticket!.id, { backendId: 'orca', handle: 'term-1', workdir: '/tmp/wt' })
+    const assignment = engine.startAssignment(ticket!.id, { runtimeId: 'orca', handle: 'term-1', workdir: '/tmp/wt' })
     expect(store.getTicket(ticket!.id)?.stage).toBe('assigned')
 
     engine.report(assignment.id, {
@@ -131,7 +131,7 @@ describe('Engine', () => {
   it('report ready 携带 PR 时进入 review 并记录 PR 状态', () => {
     engine.ingest(makeTrigger())
     const { ticket } = engine.decide({ triggerId: 'trg_1', decision: 'accept', strength: 'explicit', reason: 'ok' })
-    const assignment = engine.startAssignment(ticket!.id, { backendId: 'orca', handle: 'term-1', workdir: '/tmp/wt' })
+    const assignment = engine.startAssignment(ticket!.id, { runtimeId: 'orca', handle: 'term-1', workdir: '/tmp/wt' })
     engine.report(assignment.id, {
       ticketId: ticket!.id,
       turn: 1,
@@ -150,7 +150,7 @@ describe('Engine', () => {
   it('report 保留完整回复，summary 与正文互不覆盖', () => {
     engine.ingest(makeTrigger())
     const { ticket } = engine.decide({ triggerId: 'trg_1', decision: 'accept', strength: 'explicit', reason: 'ok' })
-    const assignment = engine.startAssignment(ticket!.id, { backendId: 'orca', handle: 'term-1', workdir: '/tmp/wt' })
+    const assignment = engine.startAssignment(ticket!.id, { runtimeId: 'orca', handle: 'term-1', workdir: '/tmp/wt' })
     engine.report(assignment.id, {
       ticketId: ticket!.id,
       turn: 1,
@@ -168,7 +168,7 @@ describe('Engine', () => {
   it('report blocked 携带 humanAction 时进入 person 并登记待答问题', () => {
     engine.ingest(makeTrigger())
     const { ticket } = engine.decide({ triggerId: 'trg_1', decision: 'accept', strength: 'explicit', reason: 'ok' })
-    const assignment = engine.startAssignment(ticket!.id, { backendId: 'orca', handle: 'term-1', workdir: '/tmp/wt' })
+    const assignment = engine.startAssignment(ticket!.id, { runtimeId: 'orca', handle: 'term-1', workdir: '/tmp/wt' })
     engine.report(assignment.id, {
       ticketId: ticket!.id,
       turn: 1,
@@ -184,7 +184,7 @@ describe('Engine', () => {
   it('工单结束要求 PR 不再处于 open', () => {
     engine.ingest(makeTrigger())
     const { ticket } = engine.decide({ triggerId: 'trg_1', decision: 'accept', strength: 'explicit', reason: 'ok' })
-    const assignment = engine.startAssignment(ticket!.id, { backendId: 'orca', handle: 'term-1', workdir: '/tmp/wt' })
+    const assignment = engine.startAssignment(ticket!.id, { runtimeId: 'orca', handle: 'term-1', workdir: '/tmp/wt' })
     engine.report(assignment.id, { ticketId: ticket!.id, turn: 1, state: 'ready', summary: 'ok', prNumber: 3, prUrl: 'u', ackedInputs: [] })
 
     expect(() => engine.closeTicket(ticket!.id, 'done')).toThrow(/pr:open/)
@@ -196,7 +196,7 @@ describe('Engine', () => {
   it('投递输入有单调 seq，ack 后不再重复投递', () => {
     engine.ingest(makeTrigger())
     const { ticket } = engine.decide({ triggerId: 'trg_1', decision: 'accept', strength: 'explicit', reason: 'ok' })
-    const assignment = engine.startAssignment(ticket!.id, { backendId: 'orca', handle: 'term-1', workdir: '/tmp/wt' })
+    const assignment = engine.startAssignment(ticket!.id, { runtimeId: 'orca', handle: 'term-1', workdir: '/tmp/wt' })
     const i1 = engine.deliverInput(ticket!.id, { kind: 'followup', text: '顺便补测试' })
     const i2 = engine.deliverInput(ticket!.id, { kind: 'followup', text: '再补文档' })
     expect([i1.seq, i2.seq]).toEqual([1, 2])
@@ -209,7 +209,7 @@ describe('Engine', () => {
   it('订阅扇出把新消息作为 Input 投给所有活跃工单，并跳过 contextOnly 授权判断', () => {
     engine.ingest(makeTrigger({ id: 't1', externalId: 'e1' }))
     const { ticket } = engine.decide({ triggerId: 't1', decision: 'accept', strength: 'explicit', reason: 'ok' })
-    engine.startAssignment(ticket!.id, { backendId: 'orca', handle: 'term-1', workdir: '/tmp/wt' })
+    engine.startAssignment(ticket!.id, { runtimeId: 'orca', handle: 'term-1', workdir: '/tmp/wt' })
 
     engine.ingest(makeTrigger({ id: 't2', externalId: 'e2', text: '登录超时改成 60 秒', addressed: 'none' }))
     const delivered = engine.fanOut('t2')
@@ -234,7 +234,7 @@ describe('Engine', () => {
     const queued = engine.deliverInput(ticket!.id, { kind: 'followup', text: '开工前补充一句' })
     expect(queued.assignmentId).toBe('')
 
-    const assignment = engine.startAssignment(ticket!.id, { backendId: 'orca', handle: 'h1', workdir: '/w' })
+    const assignment = engine.startAssignment(ticket!.id, { runtimeId: 'orca', handle: 'h1', workdir: '/w' })
     expect(store.listInputs(ticket!.id)[0]?.assignmentId).toBe(assignment.id)
   })
 
@@ -255,6 +255,6 @@ describe('Engine', () => {
   })
 
   it('对未知工单操作会报错而不是静默写入', () => {
-    expect(() => engine.startAssignment('nope', { backendId: 'orca', handle: 'h', workdir: '/w' })).toThrow(/ticket:not-found/)
+    expect(() => engine.startAssignment('nope', { runtimeId: 'orca', handle: 'h', workdir: '/w' })).toThrow(/ticket:not-found/)
   })
 })

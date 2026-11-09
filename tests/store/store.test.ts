@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { rmSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Store } from '../../src/store/db.js'
@@ -59,7 +60,7 @@ const ticket: Ticket = {
 const assignment: Assignment = {
   id: 'as1',
   ticketId: 'tk1',
-  backendId: 'orca',
+  runtimeId: 'orca',
   handle: 'term-1',
   workdir: '/tmp/wt',
   status: 'running',
@@ -107,6 +108,32 @@ describe('Store', () => {
     expect(loaded.stage).toBe('review')
     expect(loaded.prNumber).toBe(9)
     s.close()
+  })
+
+  it('旧库的 backend_id 列自动迁移为 runtime_id', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ra-db-'))
+    const path = join(dir, 'ra.sqlite')
+    const legacy = new DatabaseSync(path)
+    legacy.exec(`
+      CREATE TABLE assignments (
+        id TEXT PRIMARY KEY,
+        ticket_id TEXT NOT NULL,
+        backend_id TEXT NOT NULL,
+        handle TEXT NOT NULL,
+        workdir TEXT NOT NULL,
+        status TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        ended_at TEXT
+      );
+      INSERT INTO assignments VALUES
+        ('as1', 'tk1', 'claude-cli', 'h1', '/tmp/wt', 'running', '2026-11-06T10:00:02.000Z', NULL);
+    `)
+    legacy.close()
+
+    const s = new Store(path)
+    expect(s.getAssignment('as1')).toMatchObject({ runtimeId: 'claude-cli', handle: 'h1' })
+    s.close()
+    rmSync(dir, { recursive: true, force: true })
   })
 
   it('派工、报告与投递记录可以按工单取回，seq 单调递增', () => {
@@ -240,7 +267,7 @@ describe('Store', () => {
 describe('派工草稿', () => {
   it('按群保存、覆盖更新、读取与清除', () => {
     const db = store()
-    expect(db.getDispatchDraft('oc_chat')).toBeNull()
+    expect(db.getDispatchDraft('oc_chat', 'ou_alice')).toBeNull()
 
     db.saveDispatchDraft({
       chatId: 'oc_chat',
@@ -251,7 +278,7 @@ describe('派工草稿', () => {
       branch: '',
       updatedAt: '2026-11-06T10:00:00.000Z',
     })
-    expect(db.getDispatchDraft('oc_chat')?.task).toBe('把登录超时改成 30 秒')
+    expect(db.getDispatchDraft('oc_chat', 'ou_alice')?.task).toBe('把登录超时改成 30 秒')
 
     db.saveDispatchDraft({
       chatId: 'oc_chat',
@@ -262,11 +289,11 @@ describe('派工草稿', () => {
       branch: 'main',
       updatedAt: '2026-11-06T10:01:00.000Z',
     })
-    const draft = db.getDispatchDraft('oc_chat')!
+    const draft = db.getDispatchDraft('oc_chat', 'ou_alice')!
     expect(draft).toMatchObject({ repo: 'name:dsh/router-agent', branch: 'main', threadId: 'feishu:oc_chat:om_2' })
 
-    db.clearDispatchDraft('oc_chat')
-    expect(db.getDispatchDraft('oc_chat')).toBeNull()
+    db.clearDispatchDraft('oc_chat', 'ou_alice')
+    expect(db.getDispatchDraft('oc_chat', 'ou_alice')).toBeNull()
   })
 
   it('工单的 repo/branch 会落库并读回', () => {
@@ -289,5 +316,70 @@ describe('派工草稿', () => {
     rmSync(path, { force: true })
     rmSync(`${path}-wal`, { force: true })
     rmSync(`${path}-shm`, { force: true })
+  })
+})
+
+describe('会话复用存储', () => {
+  it('chat_sessions 按 key 保存、touch、superseded、purged', () => {
+    const db = store()
+    const record = {
+      sessionKey: 'chat:oc_chat:user:ou_alice',
+      chatId: 'oc_chat',
+      actorId: 'ou_alice',
+      threadId: '',
+      sessionFile: '/tmp/session.jsonl',
+      sessionId: 'sid_1',
+      soulVersion: '',
+      policyVersion: '',
+      createdAt: '2026-11-06T10:00:00.000Z',
+      lastUsedAt: '2026-11-06T10:00:00.000Z',
+      status: 'active' as const,
+      resetAt: null,
+      resetBy: null,
+      purgedAt: null,
+    }
+    db.upsertChatSession(record)
+    expect(db.getChatSession(record.sessionKey)?.sessionFile).toBe('/tmp/session.jsonl')
+
+    db.touchChatSession(record.sessionKey, '2026-11-06T11:00:00.000Z')
+    expect(db.getChatSession(record.sessionKey)?.lastUsedAt).toBe('2026-11-06T11:00:00.000Z')
+
+    expect(db.listSupersededChatSessions('2026-11-10T00:00:00.000Z')).toHaveLength(0)
+    db.markChatSessionSuperseded(record.sessionKey, '2026-11-06T12:00:00.000Z', 'ou_alice')
+    expect(db.getChatSession(record.sessionKey)).toBeNull()
+    expect(db.listSupersededChatSessions('2026-11-10T00:00:00.000Z')).toHaveLength(1)
+
+    db.markChatSessionPurged('/tmp/session.jsonl', '2026-11-20T00:00:00.000Z')
+    expect(db.getChatSessionByFile('/tmp/session.jsonl')).toMatchObject({ status: 'purged', purgedAt: '2026-11-20T00:00:00.000Z' })
+    expect(db.listSupersededChatSessions('2026-11-10T00:00:00.000Z')).toHaveLength(0)
+  })
+
+  it('派工草稿按 (chat, actor) 隔离，互不覆盖', () => {
+    const db = store()
+    db.saveDispatchDraft({
+      chatId: 'oc_chat',
+      threadId: 'feishu:oc_chat:om_1',
+      actorId: 'ou_alice',
+      task: '改登录超时',
+      repo: 'router-agent',
+      branch: 'main',
+      updatedAt: '2026-11-06T10:00:00.000Z',
+    })
+    db.saveDispatchDraft({
+      chatId: 'oc_chat',
+      threadId: 'feishu:oc_chat:om_2',
+      actorId: 'ou_bob',
+      task: '改支付回调',
+      repo: 'router-agent',
+      branch: 'release',
+      updatedAt: '2026-11-06T10:01:00.000Z',
+    })
+
+    expect(db.getDispatchDraft('oc_chat', 'ou_alice')?.task).toBe('改登录超时')
+    expect(db.getDispatchDraft('oc_chat', 'ou_bob')?.task).toBe('改支付回调')
+
+    db.clearDispatchDraft('oc_chat', 'ou_alice')
+    expect(db.getDispatchDraft('oc_chat', 'ou_alice')).toBeNull()
+    expect(db.getDispatchDraft('oc_chat', 'ou_bob')?.task).toBe('改支付回调')
   })
 })

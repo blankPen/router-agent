@@ -28,7 +28,7 @@ export function defaultConfig() {
             admission: { ...DEFAULT_ADMISSION },
         },
         workerSpec: { mode: 'prompt' },
-        backend: { default: 'orca' },
+        runtime: { default: 'orca' },
         server: { port: 3083 },
     };
 }
@@ -55,7 +55,7 @@ policy:
 workerSpec:
   mode: prompt         # prompt | agent
 
-backend:
+runtime:
   default: orca
 
 # 项目清单：开单前必须明确「哪个项目 + 哪个起始分支」
@@ -127,7 +127,7 @@ export function loadConfig(home = defaultHome(), env = process.env) {
             admission,
         },
         workerSpec: { mode },
-        backend: { default: 'orca' },
+        runtime: { default: 'orca' },
         server: { port: Number.isFinite(port) && port >= 0 && port < 65536 ? port : base.server.port },
         ...(doc.llm ? { llm: doc.llm } : {}),
     };
@@ -309,7 +309,7 @@ export function writeConfig(home, config) {
             admission: config.policy.admission,
         },
         workerSpec: { mode: config.workerSpec.mode },
-        backend: { default: config.backend.default },
+        runtime: { default: config.runtime.default },
         projects: config.projects,
         server: { port: config.server.port },
     };
@@ -475,10 +475,10 @@ export function setConfigValue(config, path, raw) {
             config.server.port = v;
             return true;
         }
-        case 'backend.default':
+        case 'runtime.default':
             if (value !== 'orca')
                 return false;
-            config.backend.default = 'orca';
+            config.runtime.default = 'orca';
             return true;
         case 'llm.baseUrl':
         case 'llm.apiKey':

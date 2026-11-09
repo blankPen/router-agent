@@ -5,8 +5,21 @@ import { join } from 'node:path'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { DEFAULT_ADMISSION, type AcceptMode, type AdmissionTable, type Policy } from './core/policy.js'
 import type { WorkerSpecMode } from './worker/spec/index.js'
+import type { ToolPolicy } from './worker/port.js'
 
 export type ChatMode = 'all' | 'mention'
+
+/** worker 的默认工具策略：只允许上报/文档/git/gh，默认无网络。 */
+export const DEFAULT_WORKER_TOOLS: ToolPolicy = {
+  fileAccess: 'read-write',
+  shell: 'allowlist',
+  shellAllow: [
+    'ra report', 'ra doc', 'git', 'gh',
+    'pnpm', 'npm', 'npx', 'node', 'yarn', 'bun',
+    'python', 'python3', 'pytest', 'cargo', 'go', 'make', 'mvn', 'gradle',
+  ],
+  allowNetwork: false,
+}
 
 /**
  * 一个被监控的群：接收方式、派工绑定、历史补拉都写在这一条里，
@@ -43,6 +56,17 @@ export interface FeishuSettings {
   bots: string[]
   botOpenIds: string[]
   botNames: string[]
+  images: ImageSettings
+}
+
+/** 飞书图片转文本：下载 image_key 后交给多模态模型识别，再进入研判。 */
+export interface ImageSettings {
+  /** 关闭后图片仍按纯附件处理（回一句请补充文字）。 */
+  enabled: boolean
+  /** 单张图片转写结果的最大字符数。 */
+  maxChars: number
+  /** 单张图片识别的硬超时。 */
+  timeoutMs: number
 }
 
 export interface PolicySettings {
@@ -51,7 +75,44 @@ export interface PolicySettings {
   admission: AdmissionTable
 }
 
-/** 研判层配置：Pi 的超时、预算与独立配置目录。 */
+/** 会话复用：一个飞书会话（按人隔离）对应一个落盘的 Pi session。 */
+export interface SessionSettings {
+  /** false 时退回旧行为：每次研判新建 in-memory session。 */
+  enabled: boolean
+  /** user：chat + 人；thread：chat + 话题 + 人。 */
+  keyScope: 'user' | 'thread'
+  /** session 落盘根目录；空表示 ~/.router-agent/sessions。 */
+  dir: string
+  /** 多久没有新消息就回收内存（文件保留）。 */
+  idleTtlMs: number
+  /** 同时驻留内存的 session 上限，超出按 LRU 回收。 */
+  maxActive: number
+  /** /new 之后旧 session 文件保留天数；0 表示不清理。 */
+  retentionDays: number
+  /** 清理任务间隔（小时）。 */
+  cleanupIntervalHours: number
+  /** 带会话的一轮硬超时（包含压缩耗时）。 */
+  turnTimeoutMs: number
+  /** 会话内的 token 预算；0 表示不限制（交给 compaction）。 */
+  tokenBudget: number
+  /** Pi 自动压缩配置。 */
+  compaction: {
+    enabled: boolean
+    reserveTokens: number
+    keepRecentTokens: number
+  }
+}
+
+/** Router 的人格配置；只影响语气与表达，不影响工具权限。 */
+export interface PersonaSettings {
+  name: string
+  /** 自定义 soul 文件；空表示用内置 prompts/soul.md。 */
+  soulFile: string
+  style: 'friendly' | 'concise' | 'professional'
+  language: string
+}
+
+/** 研判层配置：Pi 的超时、预算、独立配置目录、会话与人格。 */
 export interface RouterSettings {
   /** 每次研判的硬超时。 */
   timeoutMs: number
@@ -59,6 +120,8 @@ export interface RouterSettings {
   tokenBudget: number
   /** Pi 的独立配置目录；空表示 ~/.router-agent/pi。 */
   agentDir: string
+  session: SessionSettings
+  persona: PersonaSettings
 }
 
 /** 一个可派工的项目。name 是用户/模型口中引用的名字，repo 是交给 Orca 的选择器。 */
@@ -116,9 +179,10 @@ export interface AppConfig {
   progress: ProgressSettings
   retention: RetentionSettings
   workerSpec: { mode: WorkerSpecMode }
-  backend: { default: 'orca' }
+  worker: { tools: ToolPolicy }
+  runtime: { default: string; options?: Record<string, unknown> }
   server: { port: number }
-  llm?: { baseUrl?: string; apiKey?: string; model?: string; temperature?: number }
+  llm?: { baseUrl?: string; apiKey?: string; model?: string; temperature?: number; contextWindow?: number }
 }
 
 /**
@@ -145,6 +209,11 @@ export function defaultConfig(): AppConfig {
       bots: [],
       botOpenIds: [],
       botNames: [],
+      images: {
+        enabled: true,
+        maxChars: 2_000,
+        timeoutMs: 60_000,
+      },
     },
     policy: {
       acceptMode: 'auto',
@@ -155,6 +224,24 @@ export function defaultConfig(): AppConfig {
       timeoutMs: 60_000,
       tokenBudget: 32_000,
       agentDir: '',
+      session: {
+        enabled: true,
+        keyScope: 'user',
+        dir: '',
+        idleTtlMs: 30 * 60_000,
+        maxActive: 50,
+        retentionDays: 7,
+        cleanupIntervalHours: 24,
+        turnTimeoutMs: 180_000,
+        tokenBudget: 0,
+        compaction: { enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 },
+      },
+      persona: {
+        name: '阿罗',
+        soulFile: '',
+        style: 'friendly',
+        language: 'zh-CN',
+      },
     },
     progress: {
       syncMs: 60_000,
@@ -172,7 +259,8 @@ export function defaultConfig(): AppConfig {
       sweepMinutes: 5,
     },
     workerSpec: { mode: 'prompt' },
-    backend: { default: 'orca' },
+    worker: { tools: { ...DEFAULT_WORKER_TOOLS } },
+    runtime: { default: 'orca' },
     server: { port: 3083 },
   }
 }
@@ -192,6 +280,11 @@ feishu:
   bots: []             # 允许产生推断候选的机器人 open_id
   botOpenIds: []       # 机器人自己的 open_id
   botNames: []         # 机器人显示名
+  # 图片消息：下载 image_key 后转成文本再进入研判
+  images:
+    enabled: true
+    maxChars: 2000     # 单张图片转写结果的最大字符数
+    timeoutMs: 60000   # 单张图片识别超时（毫秒）
 
 policy:
   acceptMode: auto     # off / observe / auto
@@ -202,6 +295,29 @@ router:
   timeoutMs: 60000
   tokenBudget: 32000
   agentDir: ""             # Pi 独立配置目录；空=~/.router-agent/pi
+
+  # 会话复用：一个飞书会话按人一个 session，落盘、可恢复、自动压缩
+  session:
+    enabled: true
+    keyScope: user         # user=群+人；thread=群+话题+人
+    dir: ""                # 空=~/.router-agent/sessions
+    idleTtlMs: 1800000     # 30 分钟无消息回收内存（文件保留）
+    maxActive: 50          # 同时驻留内存的 session 上限
+    retentionDays: 7       # /new 之后旧 session 文件保留天数；0=不清理
+    cleanupIntervalHours: 24
+    turnTimeoutMs: 180000  # 带会话的一轮硬超时（含压缩）
+    tokenBudget: 0         # 会话 token 预算；0=不限制，交给压缩
+    compaction:
+      enabled: true
+      reserveTokens: 16384
+      keepRecentTokens: 20000
+
+  # 人格：只影响语气与表达，不影响工具权限
+  persona:
+    name: "阿罗"
+    soulFile: ""           # 空=内置 prompts/soul.md
+    style: friendly        # friendly | concise | professional
+    language: zh-CN
 
 progress:
   syncMs: 60000        # 工单进展合并同步间隔（毫秒）；0 = 关闭定时同步
@@ -220,8 +336,14 @@ retention:
 workerSpec:
   mode: prompt         # prompt | agent
 
-backend:
+runtime:
   default: orca
+  # ACP 运行时（可选）：任意实现 ACP 的 Agent 都可通过它接入
+  # options:
+  #   acp:
+  #     command: opencode     # Agent 可执行文件
+  #     args: [acp]           # 传给 Agent 的参数
+  #     env: {}               # 额外环境变量
 
 # 项目清单：开单前必须明确「哪个项目 + 哪个起始分支」
 projects: []
@@ -238,6 +360,7 @@ server:
 #   baseUrl: https://api.deepseek.com/v1
 #   model: deepseek-v4-flash
 #   apiKey: sk-xxx
+#   contextWindow: 128000    # 用于会话自动压缩的阈值计算
 `
 
 /** 创建 ~/.router-agent 目录结构；不覆盖已有配置。 */
@@ -264,6 +387,9 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
     }
   }
 
+  // 旧版配置段名 backend 兼容：等价映射到 runtime，避免升级后静默丢失设置。
+  if (doc.runtime === undefined && doc.backend !== undefined) doc.runtime = doc.backend
+
   const acceptMode = pickAcceptMode(doc.policy?.acceptMode, base.policy.acceptMode)
   const mode = pickMode(doc.workerSpec?.mode, base.workerSpec.mode)
   const port = Number(doc.server?.port)
@@ -281,6 +407,18 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
     unlistedNotAddressed: pickAdmission(admissionDoc.unlistedNotAddressed, base.policy.admission.unlistedNotAddressed, ['inferred', 'ignore']) as never,
   }
 
+  // 安全参数只由 worker.tools 与 adapter 内置基线决定，不允许 runtime.options 放宽。
+  if (doc.runtime?.options && typeof doc.runtime.options === 'object') {
+    const forbidden = new Set(['allowedTools', 'permissionMode', 'sandbox', 'shellAllow', 'allowNetwork', 'fileAccess'])
+    for (const [id, options] of Object.entries(doc.runtime.options as Record<string, unknown>)) {
+      if (!options || typeof options !== 'object') continue
+      const bad = Object.keys(options as Record<string, unknown>).filter(key => forbidden.has(key))
+      if (bad.length > 0) {
+        throw new Error(`runtime.options.${id} 不允许覆盖安全参数: ${bad.join(', ')}`)
+      }
+    }
+  }
+
   return {
     home,
     projects: parseProjects(doc.projects),
@@ -294,6 +432,11 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
       bots: stringArray(doc.feishu?.bots, base.feishu.bots),
       botOpenIds: stringArray(doc.feishu?.botOpenIds, base.feishu.botOpenIds),
       botNames: stringArray(doc.feishu?.botNames, base.feishu.botNames),
+      images: {
+        enabled: booleanOr(doc.feishu?.images?.enabled, base.feishu.images.enabled),
+        maxChars: positiveIntOr(doc.feishu?.images?.maxChars, base.feishu.images.maxChars, 100, 20_000),
+        timeoutMs: positiveIntOr(doc.feishu?.images?.timeoutMs, base.feishu.images.timeoutMs, 1_000, 300_000),
+      },
     },
     policy: {
       acceptMode,
@@ -315,7 +458,20 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
       sweepMinutes: positiveNumberOr(retentionDoc.sweepMinutes, base.retention.sweepMinutes, 1, 24 * 60),
     },
     workerSpec: { mode },
-    backend: { default: 'orca' },
+    worker: {
+      tools: {
+        fileAccess: doc.worker?.tools?.fileAccess === 'read-only' ? 'read-only' : base.worker.tools.fileAccess,
+        shell: (['deny', 'allowlist', 'allow'].includes(String(doc.worker?.tools?.shell))
+          ? String(doc.worker.tools.shell)
+          : base.worker.tools.shell) as ToolPolicy['shell'],
+        shellAllow: stringArray(doc.worker?.tools?.shellAllow, base.worker.tools.shellAllow ?? []),
+        allowNetwork: booleanOr(doc.worker?.tools?.allowNetwork, base.worker.tools.allowNetwork),
+      },
+    },
+    runtime: {
+      default: stringOr(doc.runtime?.default, base.runtime.default),
+      ...(doc.runtime?.options && typeof doc.runtime.options === 'object' ? { options: doc.runtime.options } : {}),
+    },
     server: { port: Number.isFinite(port) && port >= 0 && port < 65536 ? port : base.server.port },
     ...(doc.llm ? { llm: doc.llm } : {}),
   }
@@ -354,11 +510,54 @@ function parseRouter(value: unknown, base: RouterSettings): RouterSettings {
   const doc = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>
   const timeoutMs = Number(doc.timeoutMs)
   const tokenBudget = Number(doc.tokenBudget)
+  const sessionDoc = (doc.session && typeof doc.session === 'object' ? doc.session : {}) as Record<string, unknown>
+  const compactionDoc = (sessionDoc.compaction && typeof sessionDoc.compaction === 'object' ? sessionDoc.compaction : {}) as Record<string, unknown>
+  const personaDoc = (doc.persona && typeof doc.persona === 'object' ? doc.persona : {}) as Record<string, unknown>
+  const baseSession = base.session
   return {
     timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : base.timeoutMs,
     tokenBudget: Number.isFinite(tokenBudget) && tokenBudget >= 0 ? tokenBudget : base.tokenBudget,
     agentDir: stringOr(doc.agentDir, base.agentDir),
+    session: {
+      enabled: booleanOr(sessionDoc.enabled, baseSession.enabled),
+      keyScope: pickKeyScope(sessionDoc.keyScope, baseSession.keyScope),
+      dir: stringOr(sessionDoc.dir, baseSession.dir),
+      idleTtlMs: positiveIntOr(sessionDoc.idleTtlMs, baseSession.idleTtlMs, 0, 86_400_000),
+      maxActive: positiveIntOr(sessionDoc.maxActive, baseSession.maxActive, 1, 1_000),
+      retentionDays: positiveIntOr(sessionDoc.retentionDays, baseSession.retentionDays, 0, 3_650),
+      cleanupIntervalHours: positiveNumberOr(sessionDoc.cleanupIntervalHours, baseSession.cleanupIntervalHours, 1, 24 * 30),
+      turnTimeoutMs: positiveIntOr(sessionDoc.turnTimeoutMs, baseSession.turnTimeoutMs, 1_000, 3_600_000),
+      tokenBudget: positiveIntOr(sessionDoc.tokenBudget, baseSession.tokenBudget, 0, 10_000_000),
+      compaction: {
+        enabled: booleanOr(compactionDoc.enabled, baseSession.compaction.enabled),
+        reserveTokens: positiveIntOr(compactionDoc.reserveTokens, baseSession.compaction.reserveTokens, 1_024, 1_000_000),
+        keepRecentTokens: positiveIntOr(compactionDoc.keepRecentTokens, baseSession.compaction.keepRecentTokens, 1_024, 1_000_000),
+      },
+    },
+    persona: {
+      name: stringOr(personaDoc.name, base.persona.name),
+      soulFile: stringOr(personaDoc.soulFile, base.persona.soulFile),
+      style: pickPersonaStyle(personaDoc.style, base.persona.style),
+      language: stringOr(personaDoc.language, base.persona.language),
+    },
   }
+}
+
+function pickKeyScope(value: unknown, fallback: 'user' | 'thread'): 'user' | 'thread' {
+  return value === 'user' || value === 'thread' ? value : fallback
+}
+
+function pickPersonaStyle(value: unknown, fallback: PersonaSettings['style']): PersonaSettings['style'] {
+  return value === 'friendly' || value === 'concise' || value === 'professional' ? value : fallback
+}
+
+function booleanOr(value: unknown, fallback: boolean): boolean {
+  return typeof value === 'boolean' ? value : fallback
+}
+
+function positiveIntOr(value: unknown, fallback: number, min: number, max: number): number {
+  const n = Number(value)
+  return Number.isInteger(n) && n >= min && n <= max ? n : fallback
 }
 
 function pickAdmission(value: unknown, fallback: string, allowed: string[]): string {
@@ -371,10 +570,6 @@ function stringArray(value: unknown, fallback: string[]): string[] {
 
 function stringOr(value: unknown, fallback: string): string {
   return typeof value === 'string' ? value : fallback
-}
-
-function booleanOr(value: unknown, fallback: boolean): boolean {
-  return typeof value === 'boolean' ? value : fallback
 }
 
 /** 毫秒配置：非法值、越界值都退回默认值；min=0 的字段可以关闭。 */
@@ -514,6 +709,7 @@ export function writeConfig(home: string, config: AppConfig): void {
       bots: config.feishu.bots,
       botOpenIds: config.feishu.botOpenIds,
       botNames: config.feishu.botNames,
+      images: config.feishu.images,
     },
     policy: {
       acceptMode: config.policy.acceptMode,
@@ -524,6 +720,14 @@ export function writeConfig(home: string, config: AppConfig): void {
       timeoutMs: config.router.timeoutMs,
       tokenBudget: config.router.tokenBudget,
       ...(config.router.agentDir ? { agentDir: config.router.agentDir } : {}),
+      session: {
+        ...config.router.session,
+        ...(config.router.session.dir ? { dir: config.router.session.dir } : {}),
+      },
+      persona: {
+        ...config.router.persona,
+        ...(config.router.persona.soulFile ? { soulFile: config.router.persona.soulFile } : {}),
+      },
     },
     progress: {
       syncMs: config.progress.syncMs,
@@ -539,7 +743,11 @@ export function writeConfig(home: string, config: AppConfig): void {
       sweepMinutes: config.retention.sweepMinutes,
     },
     workerSpec: { mode: config.workerSpec.mode },
-    backend: { default: config.backend.default },
+    worker: { tools: config.worker.tools },
+    runtime: {
+      default: config.runtime.default,
+      ...(config.runtime.options ? { options: config.runtime.options } : {}),
+    },
     projects: config.projects,
     server: { port: config.server.port },
   }
@@ -552,10 +760,295 @@ export function writeConfig(home: string, config: AppConfig): void {
   writeFileSync(join(home, 'config.yaml'), `${header}${stringifyYaml(doc, { lineWidth: 0 })}`, 'utf8')
 }
 
+// ---------------------------------------------------------------------------
+// Web 配置面板：安全视图 + 批量补丁
+// ---------------------------------------------------------------------------
+
+/** 配置补丁里的一项校验错误；path 是点路径，前端按它高亮字段。 */
+export interface ConfigPatchError {
+  path: string
+  message: string
+}
+
+export interface ConfigPatchResult {
+  /** 空数组表示全部通过，配置已写入入参对象。 */
+  errors: ConfigPatchError[]
+  /** 实际发生变化的点路径，用于日志与「哪些改动需要重启」提示。 */
+  changed: string[]
+}
+
+/** 立即生效的配置路径前缀；其余改动都需要重启 `ra start`。 */
+export const HOT_CONFIG_PREFIXES = ['policy.'] as const
+
+function clone<T>(value: T): T {
+  return structuredClone(value)
+}
+
+/**
+ * 供 Web 面板读取的安全配置快照：深拷贝 + 去掉/遮蔽敏感字段。
+ * 面板保存时只会提交白名单里的字段，不会把这份快照整体写回。
+ */
+export function publicConfig(config: AppConfig): Record<string, unknown> {
+  const doc = clone(config) as unknown as Record<string, unknown>
+  const llm = (doc.llm ?? {}) as Record<string, unknown>
+  // 明文密钥不下发；apiKeySet 只用来告诉面板「已经配过」。
+  doc.llm = {
+    baseUrl: String(llm.baseUrl ?? ''),
+    model: String(llm.model ?? ''),
+    apiKeySet: Boolean(llm.apiKey),
+  }
+  return doc
+}
+
+/** 面板「恢复默认值」用的基准：只保留可编辑口径，避免泄露模板之外的内容。 */
+export function publicDefaults(): Record<string, unknown> {
+  const base = defaultConfig()
+  return {
+    feishu: {
+      larkHome: base.feishu.larkHome,
+      appId: base.feishu.appId,
+      reaction: base.feishu.reaction,
+      directMessages: base.feishu.directMessages,
+      images: base.feishu.images,
+    },
+    policy: base.policy,
+    router: base.router,
+    progress: base.progress,
+    retention: base.retention,
+    workerSpec: base.workerSpec,
+    runtime: base.runtime,
+    server: base.server,
+  }
+}
+
+function getPath(doc: unknown, path: string): unknown {
+  return path.split('.').reduce<unknown>((node, part) => {
+    if (!node || typeof node !== 'object') return undefined
+    return (node as Record<string, unknown>)[part]
+  }, doc)
+}
+
+function setPath(doc: Record<string, unknown>, path: string, value: unknown): void {
+  const parts = path.split('.')
+  let node: Record<string, unknown> = doc
+  for (const part of parts.slice(0, -1)) {
+    const next = node[part]
+    if (!next || typeof next !== 'object') node[part] = {}
+    node = node[part] as Record<string, unknown>
+  }
+  node[parts.at(-1)!] = value
+}
+
+interface Validator {
+  check(value: unknown): string | null
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+
+const stringValue: Validator = {
+  check: value => (typeof value === 'string' ? null : '需要字符串'),
+}
+
+function enumValue(allowed: readonly string[]): Validator {
+  return { check: value => (typeof value === 'string' && allowed.includes(value) ? null : `只能是 ${allowed.join(' / ')}`) }
+}
+
+function intValue(min: number, max: number, unit = ''): Validator {
+  return {
+    check: value => {
+      if (typeof value !== 'number' || !Number.isInteger(value)) return '需要整数'
+      if (value < min || value > max) return `取值范围 ${min}–${max}${unit}`
+      return null
+    },
+  }
+}
+
+function boolValue(): Validator {
+  return { check: value => (typeof value === 'boolean' ? null : '需要 true / false') }
+}
+
+function stringListValue(): Validator {
+  return {
+    check: value => {
+      if (!Array.isArray(value)) return '需要字符串数组'
+      if (value.some(item => typeof item !== 'string')) return '数组里只能放字符串'
+      return null
+    },
+  }
+}
+
 const ACCEPT_MODES = ['off', 'observe', 'auto']
 const WORKER_MODES = ['prompt', 'agent']
 const ADMISSION_LISTED = ['inferred', 'ignore']
 const ADMISSION_UNLISTED_ADDRESSED = ['explicit', 'inferred', 'ignore']
+
+/**
+ * 一份显式的路径白名单：校验规则跟着路径走，不再让请求体直接 merge 进配置。
+ * 这样做的好处是 API 永远不会因为面板拼错字段名而把 config.yaml 写成垃圾。
+ */
+const CONFIG_VALIDATORS: Record<string, Validator> = {
+  'feishu.larkHome': stringValue,
+  'feishu.appId': stringValue,
+  'feishu.reaction': stringValue,
+  'feishu.directMessages': boolValue(),
+  'feishu.allowed': stringListValue(),
+  'feishu.bots': stringListValue(),
+  'feishu.botOpenIds': stringListValue(),
+  'feishu.botNames': stringListValue(),
+  'feishu.images.enabled': boolValue(),
+  'feishu.images.maxChars': intValue(100, 20_000, ' 字'),
+  'feishu.images.timeoutMs': intValue(1_000, 300_000, ' 毫秒'),
+
+  'policy.acceptMode': enumValue(ACCEPT_MODES),
+  'policy.maxWorkers': intValue(1, 64),
+  'policy.admission.listedNotAddressed': enumValue(ADMISSION_LISTED),
+  'policy.admission.unlistedAddressed': enumValue(ADMISSION_UNLISTED_ADDRESSED),
+  'policy.admission.unlistedNotAddressed': enumValue(ADMISSION_LISTED),
+
+  'router.timeoutMs': intValue(1_000, 600_000, ' 毫秒'),
+  'router.tokenBudget': intValue(0, 10_000_000),
+  'router.agentDir': stringValue,
+  'router.session.enabled': boolValue(),
+  'router.session.keyScope': enumValue(['user', 'thread']),
+  'router.session.dir': stringValue,
+  'router.session.idleTtlMs': intValue(0, 86_400_000, ' 毫秒'),
+  'router.session.maxActive': intValue(1, 1_000),
+  'router.session.retentionDays': intValue(0, 3_650, ' 天'),
+  'router.session.cleanupIntervalHours': intValue(1, 720, ' 小时'),
+  'router.session.turnTimeoutMs': intValue(1_000, 3_600_000, ' 毫秒'),
+  'router.session.tokenBudget': intValue(0, 10_000_000),
+  'router.session.compaction.enabled': boolValue(),
+  'router.session.compaction.reserveTokens': intValue(1_024, 1_000_000),
+  'router.session.compaction.keepRecentTokens': intValue(1_024, 1_000_000),
+  'router.persona.name': stringValue,
+  'router.persona.soulFile': stringValue,
+  'router.persona.style': enumValue(['friendly', 'concise', 'professional']),
+  'router.persona.language': stringValue,
+
+  'progress.syncMs': intValue(0, 3_600_000, ' 毫秒'),
+  'progress.probeMs': intValue(0, 3_600_000, ' 毫秒'),
+  'progress.silenceMs': intValue(1_000, 3_600_000, ' 毫秒'),
+  'progress.repeatMs': intValue(1_000, 3_600_000, ' 毫秒'),
+
+  'retention.enabled': boolValue(),
+  'retention.idleHours': intValue(1, 8_760, ' 小时'),
+  'retention.closeGraceHours': intValue(1, 8_760, ' 小时'),
+  'retention.zombieHours': intValue(1, 8_760, ' 小时'),
+  'retention.sweepMinutes': intValue(1, 1_440, ' 分钟'),
+
+  'workerSpec.mode': enumValue(WORKER_MODES),
+  'runtime.default': enumValue(['orca', 'claude-cli', 'acp']),
+  'server.port': intValue(1, 65_535),
+
+  'llm.baseUrl': stringValue,
+  'llm.model': stringValue,
+}
+
+/** 整段替换的复杂字段（项目、群、白名单这类不适合逐项点路径编辑的配置）。 */
+const LIST_PATHS = ['projects', 'feishu.chats'] as const
+
+function validateProjects(value: unknown): { error: string | null; value: ProjectConfig[] } {
+  if (!Array.isArray(value)) return { error: '需要项目数组', value: [] }
+  const projects: ProjectConfig[] = []
+  const names = new Set<string>()
+  for (const [index, item] of value.entries()) {
+    if (!isRecord(item)) return { error: `第 ${index + 1} 项不是对象`, value: [] }
+    const repo = typeof item.repo === 'string' ? item.repo.trim() : ''
+    const name = typeof item.name === 'string' ? item.name.trim() : ''
+    if (!repo) return { error: `第 ${index + 1} 项缺少 repo`, value: [] }
+    const finalName = name || projectNameOf(repo)
+    if (names.has(finalName)) return { error: `项目名重复：${finalName}`, value: [] }
+    names.add(finalName)
+    const branches = Array.isArray(item.branches) ? item.branches.map(String).map(b => b.trim()).filter(Boolean) : []
+    const defaultBranch = typeof item.defaultBranch === 'string' ? item.defaultBranch.trim() : ''
+    if (defaultBranch && branches.length > 0 && !branches.includes(defaultBranch)) {
+      return { error: `项目 ${finalName} 的默认分支 ${defaultBranch} 不在白名单里`, value: [] }
+    }
+    projects.push({ name: finalName, repo, branches, defaultBranch })
+  }
+  return { error: null, value: projects }
+}
+
+function validateChats(value: unknown): { error: string | null; value: ChatSettings[] } {
+  if (!Array.isArray(value)) return { error: '需要群数组', value: [] }
+  const chats: ChatSettings[] = []
+  const seen = new Set<string>()
+  for (const [index, item] of value.entries()) {
+    if (!isRecord(item)) return { error: `第 ${index + 1} 项不是对象`, value: [] }
+    const chat = typeof item.chat === 'string' ? item.chat.trim() : ''
+    if (!chat) return { error: `第 ${index + 1} 项缺少 chat_id`, value: [] }
+    if (seen.has(chat)) return { error: `群重复：${chat}`, value: [] }
+    seen.add(chat)
+    const mode = item.mode === 'mention' ? 'mention' : 'all'
+    const allowed = Array.isArray(item.allowed) ? item.allowed.map(String).map(id => id.trim()).filter(Boolean) : []
+    chats.push(chatEntry(chat, {
+      mode,
+      repo: typeof item.repo === 'string' ? item.repo.trim() : '',
+      branch: typeof item.branch === 'string' ? item.branch.trim() : '',
+      sync: item.sync === true,
+      allowed,
+    }))
+  }
+  return { error: null, value: chats }
+}
+
+/**
+ * 把面板提交的一批点路径改动写进配置对象。
+ *
+ * - 全部字段先校验，有任意一项不合法就整体拒绝（不会写一半）。
+ * - `projects` / `feishu.chats` 走整段替换，并做去重、默认分支白名单等交叉校验。
+ * - 返回 changed 供调用方判断是否需要刷新策略 / 提示重启。
+ */
+export function applyConfigPatch(config: AppConfig, patch: Record<string, unknown>): ConfigPatchResult {
+  const errors: ConfigPatchError[] = []
+  const accepted: { path: string; value: unknown }[] = []
+
+  for (const [path, value] of Object.entries(patch)) {
+    if ((LIST_PATHS as readonly string[]).includes(path)) {
+      if (path === 'projects') {
+        const result = validateProjects(value)
+        if (result.error) errors.push({ path, message: result.error })
+        else accepted.push({ path, value: result.value })
+      } else {
+        const result = validateChats(value)
+        if (result.error) errors.push({ path, message: result.error })
+        else accepted.push({ path, value: result.value })
+      }
+      continue
+    }
+    if (path === 'llm.apiKey') {
+      // 面板不接收明文密钥；显式忽略而不是写入。
+      continue
+    }
+    const validator = CONFIG_VALIDATORS[path]
+    if (!validator) {
+      errors.push({ path, message: '不是可编辑的配置项' })
+      continue
+    }
+    const message = validator.check(value)
+    if (message) errors.push({ path, message })
+    else accepted.push({ path, value })
+  }
+
+  if (errors.length > 0) return { errors, changed: [] }
+
+  const changed: string[] = []
+  for (const { path, value } of accepted) {
+    const before = getPath(config, path)
+    if (JSON.stringify(before) === JSON.stringify(value)) continue
+    if (path === 'projects') config.projects = value as ProjectConfig[]
+    else if (path === 'feishu.chats') config.feishu.chats = value as ChatSettings[]
+    else setPath(config as unknown as Record<string, unknown>, path, value)
+    changed.push(path)
+  }
+  return { errors: [], changed }
+}
+
+/** 除了策略以外，配置都在服务启动时读入，保存后需要重启 `ra start` 才生效。 */
+export function requiresRestart(changed: string[]): boolean {
+  return changed.some(path => !HOT_CONFIG_PREFIXES.some(prefix => path.startsWith(prefix)))
+}
 
 /** `repo@branch` → [repo, branch]；没有 @ 时分支为空。 */
 function splitBranch(value: string): [string, string] {
@@ -768,9 +1261,9 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
       config.server.port = v
       return true
     }
-    case 'backend.default':
-      if (value !== 'orca') return false
-      config.backend.default = 'orca'
+    case 'runtime.default':
+      if (!value.trim()) return false
+      config.runtime.default = value.trim()
       return true
     case 'llm.baseUrl':
     case 'llm.apiKey':

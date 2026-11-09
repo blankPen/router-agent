@@ -104,22 +104,22 @@ Router（AgentLoop + DecisionEngine(Pi) + HTTP API + Web）
 领域内核（TS 零依赖：Ticket / Mandate / Assignment / Stage / Policy）
         │ Assignment
         ▼
-WorkerBackend 端口 ── OrcaAdapter（默认）── 未来：Codex / Headless Claude
+WorkerRuntime 端口 ── OrcaRuntime（默认）/ ClaudeCliRuntime / AcpRuntime ── 未来：Codex
 ```
 
 一条消息会依次经过四步：
 
 1. **听**：常驻消费飞书群 / 私聊消息，按名单与 `@` 规则做确定性准入。
 2. **判**：未被直接指派的候选交给 Pi 研判（可批量），输出 `accept / stop / ignore / unavailable` 四类决定。
-3. **派**：接单后创建工单与授权（Mandate），先确认「项目 + 起始分支」，再通过 `orca worktree create --repo ... --base-branch ...` 开一个独立 worktree + Claude Code 终端。缺项目或分支时不开单，先在会话里追问（群配置里可固定项目和分支，免问答）。
+3. **派**：接单后创建工单与授权（Mandate），先确认「项目 + 起始分支」，再按 `runtime.default` 选择运行时：Orca 用 `orca worktree create --repo ... --base-branch ...` 开 worktree + Claude Code 终端；Claude CLI 用 `git worktree` + `claude --bg` 后台会话。缺项目或分支时不开单，先在会话里追问（群配置里可固定项目和分支，免问答）。
 4. **跟**：Worker 用 `ra report` 上报（失败自动落盘 `state.json`），Router 刷新工单阶段；PR 合并 / 关闭后闭环并通知发起人。
 
 关键约束：
 
 - **Engine 是唯一状态写入口**：Router、Worker、面板都不直接写 SQLite。
-- **WorkerBackend 是唯一扩展点**：换后端只加一个 adapter，内核与 Router 一行不改。
+- **WorkerRuntime 是唯一扩展点**：换运行时只加一个 adapter，内核与 Router 一行不改。
 - **所有对外通知走 Outbox**：幂等 key + 2s 起步的指数退避（上限 60s）。
-- **状态判定不解析终端屏幕文本**：`checkIdle` 只读 Orca 的结构化字段（`connected` / `orphaned` / `lastOutputAt`）；主动巡检优先读 Agent 自己的会话记录（结构化 JSONL），只有读不到时才退回 `orca terminal read --screen` 并做保守清洗。
+- **状态判定不解析终端屏幕文本**：`checkIdle` 只读中立 `AgentStatus`（Orca 映射自 `connected / orphaned / lastOutputAt`，Claude 映射自 `claude agents --json`）；主动巡检优先读 Agent 自己的会话记录（结构化 JSONL），只有读不到时才退回终端输出并做保守清洗。巡检消息是语义摘要：只保留助手文本与一行动作概要，工具调用回显与状态行会被过滤或折叠。
 - **研判层是 DecisionEngine 端口**：Pi 是唯一实现，研判与礼貌回复都走同一条 Pi 通道；研判工具只产出提案，写库仍由 Engine 统一完成。
 
 ## 它能做什么
@@ -129,7 +129,7 @@ WorkerBackend 端口 ── OrcaAdapter（默认）── 未来：Codex / Headl
 - 群消息默认按配置工作：`mode: all` 收全部消息且不 @ 也回复，`mode: mention` 只收 @机器人。
 - 私聊单独开关；机器人、系统消息、互动卡片不会进入领域。
 - 群级 `allowed` 非空时，这个群只有名单内的人能触发；名单外的人 @ 机器人也会被静默忽略。
-- 只发图片 / 文件、没有文字的消息**不开单**，@ 或私聊时回一句「看不到附件内容，请用文字说明」，不烧模型调用。
+- 图片消息会先下载 `image_key` 并转成文字（含引用消息里的图片、富文本里的图片），再和文字一起进入研判；识别失败时仍按纯附件处理，@ 或私聊回一句「看不到附件内容，请用文字说明」。文件 / 语音等其它附件不下载、不做多模态识别。
 - 历史补拉按群游标增量进行，首次见到某个群只记基线，不会把历史消息当新需求。
 
 ### 判：Gate 在前，Pi 在后
@@ -152,6 +152,20 @@ WorkerBackend 端口 ── OrcaAdapter（默认）── 未来：Codex / Headl
 5. **审计与回放**：`~/.router-agent/logs/decisions.jsonl` 记录 prompt、工具序列、proposal、耗时与 token。
 
 Pi 侧完全隔离：AuthStorage / SettingsManager / SessionManager 全为 in-memory，关闭 extensions / skills / prompts / themes / AGENTS.md，不读写用户 `~/.pi`。
+
+### 记：一个会话一个 session
+
+Router 不再「逐条失忆」：同一个群里的每个人各有一个落盘的 Pi session，所有对话持续累积，直到本人发送 `/new`。
+
+- **按人隔离**：`chat:<chatId>:user:<actorId>`；张三和李四在同一个群互不可见，`/new` 只清自己的上下文；
+- **@ 准入**：`mode: mention` 的群只把 @机器人 / 私聊的消息放进 session；`mode: all` 的群全量进入；名单外成员不进；
+- **落盘与恢复**：session 写在 `~/.router-agent/sessions/`，Router 重启后按映射自动 `SessionManager.open` 恢复；
+- **空闲回收**：30 分钟无消息只释放内存，文件保留，下一条消息重新打开；
+- **自动压缩**：用 Pi 原生 compaction，`contextTokens > contextWindow - reserveTokens` 时保留最近约 20k tokens，把更早的消息总结成结构化摘要；
+- **`/new`**：整条消息精确匹配，只重置发送者自己的 session；旧文件保留 7 天后由清理任务删除；
+- **人格**：`router.persona.soulFile` 可配置 soul；只改语气，不改工具白名单和权限判定。
+
+确定性回复（寒暄短路、附件提示、关闭话题提示等）也会写进 session，保证下一轮模型知道「刚才发生过什么」。
 
 ### 派：每个工单一个 worktree
 
@@ -211,7 +225,7 @@ Worker **不手写状态文件**，统一用 `ra report` 上报。CLI 会 POST �
 - 需要长文档时，Worker 自己执行 `ra doc --title "…" --content @answer.md`，拿到链接后写进 `--reply`。
 - 追问以 `【Router 输入 in_xxx】` 前缀投递；Worker 用 `--ack in_xxx` 确认，否则会被反复重投。
 - `--state progress` 的 `--reply` / `--summary` 默认不即时发送：Router 按 `progress.syncMs` 定时合并后同步到话题，同一内容只发一次；带 `--ack` 的追问回答，以及 ready / blocked / failed 等终态仍即时发送。
-- **不依赖 worker 上报**：worker 超过 `progress.silenceMs` 没有新上报 / 新输入时，Router 按 `progress.probeMs` 主动取进展——优先读 Agent 自己的结构化会话记录（Claude Code 的 `~/.claude/projects/.../*.jsonl`），读不到再退回 `orca terminal read --screen` 的渲染屏幕；把最近活动摘录同步到话题，同一静默期按 `progress.repeatMs` 限流。`review` 之后又收到新输入的工单也会被巡检。
+- **不依赖 worker 上报**：worker 超过 `progress.silenceMs` 没有新上报 / 新输入时，Router 按 `progress.probeMs` 主动取进展——优先读 Agent 自己的结构化会话记录（Claude Code 的 `~/.claude/projects/.../*.jsonl`），读不到再退回 `orca terminal read --screen` 的渲染屏幕；把进展整理成语义摘要（助手文本 + 一行动作概要，工具调用噪音不逐条回放）同步到话题，同一静默期按 `progress.repeatMs` 限流。`review` 之后又收到新输入的工单也会被巡检。
 - Router 每轮按文件变化增量读取（`state.json` 兜底通道），成功后调 `Engine.report()`。
 - 终端长时间无输出 → 主动发 `status?`；仍无响应 → 标记 stale 并通知人。
 - 审计事件追加到同目录 `events.log`。
@@ -229,14 +243,15 @@ Router 不做对话，只在必要时说话：
 | 群里 @机器人，是真需求 | 只发一条**话题**消息：「工单「标题」（id）已开始执行。后续进展会在这个话题里更新。」，不再额外回「我帮你创建了工单」之类的普通消息 ack |
 | 未 @ 的群消息 | 走 Pi 研判；判为闲聊则**完全静默**（不刷屏） |
 | 私聊 | 走 Pi 研判；判为闲聊时用 Pi 礼貌回复（普通消息） |
-| 只发了图片 / 文件（没有文字） | **不开单**：@ 或私聊时回一句「看不到附件内容，请用文字说明」 |
+| 只发了图片 | 先下载 `image_key` 转成文字再走研判；识别失败才回「看不到附件内容，请用文字说明」 |
+| 只发了文件 / 语音等其它附件 | **不开单**：@ 或私聊时回一句「看不到附件内容，请用文字说明」 |
 | 系统消息（建群 / 拉人 / 改群名） | 直接丢弃，不进领域 |
 | 互动卡片消息 | 直接丢弃（`content` 是原始卡片 JSON，不能当需求读） |
 | 研判没完成（unavailable） | 若在跟它说话，用 Pi 追问一句 |
 | `acceptMode: off` 的推断候选 | 固定说明「暂不自动开工」 |
 | worker 卡住 / 有结果 / PR 合并关闭 | 一律作为**话题回复**同步到原消息下 |
 | worker 交付结论 | 简单单行回复走**纯文本**；带 Markdown 的以**飞书卡片**渲染（卡片内 Markdown 先归一化）回话题；有文档 / PR 链接一并展示 |
-| worker 进展（`--state progress` 或 Router 主动巡检） | 上报的进展**不逐条发送**：按 `progress.syncMs` 合并成一条话题消息（追问的回答除外）；worker 静默时 Router 按 `progress.probeMs` 主动取进展（优先会话记录，其次终端屏幕），把最新活动摘录发到话题，同一静默期按 `progress.repeatMs` 限流 |
+| worker 进展（`--state progress` 或 Router 主动巡检） | 上报的进展**不逐条发送**：按 `progress.syncMs` 合并成一条话题消息（追问的回答除外）；worker 静默时 Router 按 `progress.probeMs` 主动取进展（优先会话记录，其次终端屏幕），整理成语义摘要（助手文本 + 一行动作概要，过滤工具调用噪音）发到话题，同一静默期按 `progress.repeatMs` 限流 |
 
 - 确认表情是 best-effort：失败只记 `feishu:reaction-failed`，不影响研判；只对首次入库、且是在跟它说话（@ / 私聊）的消息加；补拉与重放不会重复加；回复发出后自动撤销（`feishu:unreact-failed` 是撤销失败的日志）。`ra config set feishu.reaction ""` 可关闭。
 - 全部 emoji_type 见飞书文档「表情文案」，注意**大小写敏感**（`Typing` 不是 `TYPING`）。
@@ -256,16 +271,26 @@ Router 不做对话，只在必要时说话：
 | `input:delivered` | Service | `ticketId` `count` `text` | 实际投递进 worker 终端 |
 | `report` | Service | `ticketId` `state` `turn` `summary` `reply` `humanAction` `pr` | worker 的 `ra report` 上报 |
 | `progress:synced` / `progress:dedup` | Service | `ticketId` `count` / `skipped` | 进展定时合并同步，或内容重复被跳过 |
-| `progress:probed` | Service | `ticketId` `minutes` `count` `unchanged` | 主动巡检读终端并把进展摘录同步到话题 |
+| `progress:probed` | Service | `ticketId` `minutes` `count` `unchanged` | 主动巡检读会话记录 / 终端并把语义摘要同步到话题 |
 | `outbox:sent` / `outbox:failed` | Outbox | `key` `text` / `error` | 对外通知结果 |
-| `api:input` / `api:stop` / `api:policy` | HTTP API | — | 面板 / CLI 的操作 |
+| `api:input` / `api:stop` / `api:policy` / `api:config` | HTTP API | — | 面板 / CLI 的操作 |
 | `idle:nudge` / `idle:stale` | Service | — | 空闲唤醒与失联标记 |
 | `pr:linked` / `pr:state` | Service | — | PR 跟踪 |
 | `recover:*` | Service | — | 重启对账 |
 
-worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态）；主动巡检优先读 Claude 会话记录，其次才把清洗后的短终端摘录发到话题。要看它做了什么，读 `report` 的 `summary` 与 `~/.router-agent/workers/<ticketId>/events.log`。
+worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态）；主动巡检优先读 Claude 会话记录，其次才把终端里的语义摘要（助手文本 + 动作概要）发到话题，不逐条回放工具调用。要看它做了什么，读 `report` 的 `summary` 与 `~/.router-agent/workers/<ticketId>/events.log`。
 
 > **同一机器人只能有一个事件总线在跑。** 如果 `ra logs` 出现 `another event bus is already connected`，先停掉其它占用该应用的消费者，或用 `ra init` 的「专属机器人」选项给 router-agent 单独配一个。
+
+#### Web 面板
+
+`ra web` 打开的面板分三块：
+
+- **工单**：按阶段分组 + 计数、关键字搜索（标题 / 工单号 / 仓库 / PR）、自动刷新开关与手动刷新；详情页有阶段、派工、PR、授权范围、上报时间线（含完整回复与 `humanAction`）、投递记录，可直接投递 follow-up 或停止工单。
+- **配置**：按「准入策略 / 研判与人格 / 会话复用 / 进展同步 / 闲置治理 / 飞书接入 / 派工与服务 / 项目清单 / 群与绑定」分组；每个字段带说明与默认值提示，改动逐项标脏，保存前做前端 + 后端双重校验，保存后写回 `config.yaml`。
+- **来源**：服务状态、监控群、接收范围概览。
+
+配置项会标注生效范围：**策略**（`acceptMode` / `maxWorkers` / `admission`）保存后立即生效；其余配置在服务启动时读入，保存后需 `ra start` 重启才生效。面板不会展示或接收模型密钥明文（`llm.apiKey` 请用 CLI / 环境变量配置），保存会重写 `config.yaml`，原文件的注释会丢失。
 
 ### PR 闭环
 
@@ -296,16 +321,48 @@ feishu:
   bots: []             # 允许产生推断候选的机器人
   botOpenIds: []       # 机器人自己的 open_id / app_id
   botNames: []         # 机器人显示名
+  images:              # 图片消息：下载 image_key 转文本后进入研判
+    enabled: true
+    maxChars: 2000     # 单张图片转写结果的最大字符数
+    timeoutMs: 60000   # 单张图片识别超时（毫秒）
 
 policy:
   acceptMode: auto     # off / observe / auto
   maxWorkers: 4
+  # 准入表：按「名单内外 × 是否 @」逐格配置，默认值如下（含义见「准入规则」）
+  admission:
+    listedNotAddressed: inferred    # 名单内、未 @：inferred | ignore
+    unlistedAddressed: inferred     # 名单外、@bot：explicit | inferred | ignore
+    unlistedNotAddressed: ignore    # 名单外、未 @：inferred | ignore
 
 # 研判层：Pi 单引擎；超时、token 预算与独立配置目录
 router:
   timeoutMs: 60000         # 单次研判硬超时，超时按 unavailable 落库
   tokenBudget: 32000       # 单次研判 token 预算；0 表示不限制
   agentDir: ""             # Pi 独立配置目录；空=~/.router-agent/pi
+
+  # 会话复用：一个飞书会话按人一个 session，落盘、可恢复、自动压缩
+  session:
+    enabled: true          # false = 回到每次新建 in-memory session
+    keyScope: user         # user=群+人；thread=群+话题+人
+    dir: ""                # 空=~/.router-agent/sessions
+    idleTtlMs: 1800000     # 30 分钟无消息回收内存（文件保留）
+    maxActive: 50          # 同时驻留内存的 session 上限
+    retentionDays: 7       # /new 之后旧 session 文件保留天数；0=不清理
+    cleanupIntervalHours: 24
+    turnTimeoutMs: 180000  # 带会话的一轮硬超时（含压缩）
+    tokenBudget: 0         # 会话 token 预算；0=不限制，交给压缩
+    compaction:            # Pi 原生自动压缩
+      enabled: true
+      reserveTokens: 16384
+      keepRecentTokens: 20000
+
+  # 人格：只影响语气与表达，不影响工具权限
+  persona:
+    name: "阿罗"
+    soulFile: ""           # 空=内置 prompts/soul.md
+    style: friendly        # friendly | concise | professional
+    language: zh-CN
 
 progress:
   # 工单进展定时轮询：把这段时间内的 progress 上报合并成一条消息同步到话题
@@ -326,8 +383,26 @@ retention:
 workerSpec:
   mode: prompt         # prompt | agent
 
-backend:
-  default: orca
+# Worker 工具策略：安全基线，runtime.options 不允许覆盖这些字段
+worker:
+  tools:
+    fileAccess: read-write   # read-only = 只给 Read / Glob / Grep
+    shell: allowlist         # deny=不给 shell | allowlist=只放行 shellAllow | allow=任意 shell
+    shellAllow: [ra report, ra doc, git, gh, pnpm, npm, npx, node, yarn, bun,
+                 python, python3, pytest, cargo, go, make, mvn, gradle]
+    allowNetwork: false      # 预留字段：当前只解析，未用于收窄网络
+
+runtime:
+  default: orca            # orca | claude-cli（claude-cli 对 projects 的本地路径有要求，见「已知限制」）
+  # 运行时专属的非安全参数：目前有 claude-cli.model 与 acp.command/args/env。
+  # 写 allowedTools / permissionMode / sandbox / shellAllow / allowNetwork / fileAccess 会直接启动失败。
+  # options:
+  #   claude-cli:
+  #     model: claude-sonnet-5-5
+  #   acp:
+  #     command: opencode     # Agent 可执行文件
+  #     args: [acp]           # 传给 Agent 的参数
+  #     env: {}               # 额外环境变量
 
 # 项目清单：开单前必须确认「哪个项目 + 哪个起始分支」
 projects: []
@@ -346,8 +421,49 @@ server:
 ra config set policy.acceptMode observe   # 先观察，不开工
 ra config set policy.maxWorkers 2
 ra config set workerSpec.mode agent
-ra config --edit                          # 直接编辑整份配置
+ra config edit                            # 用 $EDITOR 编辑整份配置（不是 --edit）
 ```
+
+### 逐项修改（`ra config set`）
+
+`ra config set <点路径> <值>` 覆盖常用标量配置；路径未知或值非法会直接报「未知配置项或非法值」：
+
+| 点路径 | 取值 |
+|-|-|
+| `policy.acceptMode` | `off` / `observe` / `auto` |
+| `policy.maxWorkers` | 1–64 |
+| `policy.admission.listedNotAddressed` / `unlistedAddressed` / `unlistedNotAddressed` | 见「准入规则」 |
+| `router.timeoutMs` / `router.tokenBudget` / `router.agentDir` | 毫秒（1s–600s） / token（0=不限） / Pi 配置目录 |
+| `progress.syncMs` / `probeMs` / `silenceMs` / `repeatMs` | 毫秒；前两项 0 = 关闭 |
+| `retention.enabled` / `idleHours` / `closeGraceHours` / `zombieHours` / `sweepMinutes` | 见「闲置工单治理」 |
+| `workerSpec.mode` | `prompt` / `agent` |
+| `backend.default` | `orca` / `claude-cli` |
+| `server.port` | 1–65535 |
+| `feishu.larkHome` / `appId` / `reaction` / `directMessages` / `allowed` / `bots` / `botOpenIds` / `botNames` | 字符串、布尔或逗号分隔列表 |
+| `feishu.chats` | 逗号分隔 chat_id；已有条目的 mode / 绑定 / sync 保留，新条目默认 `all` |
+| `llm.baseUrl` / `llm.model` / `llm.apiKey` | 模型连接信息 |
+
+群与项目这类复合结构用专用写法，一次完成「登记 + 绑定」：
+
+| 写法 | 例子 | 说明 |
+|-|-|-|
+| `project.<名>` | `ra config set project.router-agent "name:dsh/router-agent@main"` | `@` 后可带默认起始分支 |
+| `chatBinding.<chatId>` | `ra config set chatBinding.oc_xxx "router-agent@main"` | 绑定群的项目与起始分支 |
+| `chatMode.<chatId>` | `ra config set chatMode.oc_xxx mention` | `all` / `mention` |
+| `chatSync.<chatId>` | `ra config set chatSync.oc_xxx true` | 启动时补拉该群历史 |
+| `chatAllow.<chatId>` | `ra config set chatAllow.oc_xxx ou_a,ou_b` | 空值 = 沿用全局 `feishu.allowed` |
+
+`router.session.*`、`router.persona.*`、`feishu.images.*` 不在 `config set` 的白名单里，用 `ra config edit` 或 Web 面板改；`worker.tools.*` 与 `backend.options.*` 面板不提供，只能 `ra config edit` 直接改文件。
+
+### 环境变量
+
+| 变量 | 作用 |
+|-|-|
+| `RA_HOME` | 状态目录，等价于全局选项 `--home`；默认 `~/.router-agent` |
+| `RA_PORT` | `ra report` 的上报端口，覆盖 `server.port` |
+| `RA_LARK_HOME` | 覆盖 `feishu.larkHome` |
+| `RA_LLM_BASE_URL` / `RA_LLM_API_KEY` / `RA_LLM_MODEL` | 覆盖研判模型连接信息（优先级最高） |
+| `RA_LLM_IMAGE_BASE_URL` / `RA_LLM_IMAGE_API_KEY` / `RA_LLM_IMAGE_MODEL` | 覆盖图片转写模型 |
 
 ### 专属机器人（推荐）
 
@@ -389,9 +505,35 @@ orca repo list --json | jq -r '.result.repos[] | "\(.displayName)\t\(.path)\t\(.
 
 ### 模型配置
 
-模型配置会自动复用 `~/.trove/config.json` 里的 `llm` 段（`baseUrl` / `model` / `apiKey`）；也可以在本文件写 `llm:` 段，或用 `RA_LLM_BASE_URL` / `RA_LLM_API_KEY` / `RA_LLM_MODEL` 覆盖。
+模型配置会自动复用 `~/.trove/config.json` 里的 `llm` 段（`baseUrl` / `model` / `apiKey`）；也可以在本文件写 `llm:` 段，或用 `RA_LLM_BASE_URL` / `RA_LLM_API_KEY` / `RA_LLM_MODEL` 覆盖。会话自动压缩依赖 `llm.contextWindow`（默认 128000），换模型时记得同步改。
 
 优先级：**环境变量 > `config.yaml` > `.trove`**。
+
+图片消息转文本默认复用同一个模型；如果主模型不支持多模态，单独指定视觉模型即可（只覆盖图片链路，不影响研判）：
+
+```yaml
+llm:
+  imageModel: qwen3-vl-plus
+  imageBaseUrl: https://dashscope.aliyuncs.com/compatible-mode/v1
+  imageApiKey: sk-xxx
+```
+
+也可以用 `RA_LLM_IMAGE_MODEL` / `RA_LLM_IMAGE_BASE_URL` / `RA_LLM_IMAGE_API_KEY` 覆盖。`feishu.images.enabled: false` 可关闭图片转文本（回到「只回一句请补充文字」的行为）。
+
+`llm.temperature` 只影响图片转写（默认 `0.1`），不参与研判。
+
+### Worker 工具策略
+
+`worker.tools` 是派给 worker 的工具基线（默认读写 + 白名单 shell）：
+
+| 字段 | 取值 | 说明 |
+|-|-|-|
+| `fileAccess` | `read-only` / `read-write` | 只读时只给 `Read` / `Glob` / `Grep`，读写再加 `Write` / `Edit` |
+| `shell` | `deny` / `allowlist` / `allow` | `allowlist` 时按 `shellAllow` 的命令前缀放行（如 `git` 放行 `git ...`） |
+| `shellAllow` | 命令前缀数组 | 仅在 `shell: allowlist` 时生效 |
+| `allowNetwork` | `true` / `false` | 预留字段：当前只解析，未用于收窄网络 |
+
+它只对 `backend.default: claude-cli` 生效（映射成 Claude 的 `allowedTools`）；`orca` 后端里 worker 的权限由 Orca 启动的 Claude Code 自身决定。安全字段只能由这里和 adapter 内置基线决定，`backend.options` 写了同名键会直接启动失败。
 
 ### Worker 规范注入
 
@@ -401,6 +543,35 @@ orca repo list --json | jq -r '.result.repos[] | "\(.displayName)\t\(.path)\t\(.
 - `agent`：只发工单，由全局 `~/.claude/agents/router-agent-worker.md` 提供规范（`ra init` 会生成）。
 
 两种模式都不改项目自己的 `CLAUDE.md`。
+
+### ACP Runtime（可选）
+
+任何实现了 [Agent Client Protocol](https://agentclientprotocol.com) 的 Agent，都可以用同一套 `AcpRuntime` 接入，不需要为每家写适配器。配置示例：
+
+```yaml
+runtime:
+  default: acp
+  options:
+    acp:
+      command: opencode        # 也可以是 claude-agent-acp / codex-acp / copilot ...
+      args: [acp]
+```
+
+常见启动命令：
+
+| Agent | command + args |
+|-|-|
+| OpenCode | `opencode acp` |
+| Gemini CLI | `gemini --acp` |
+| GitHub Copilot CLI | `copilot --acp --stdio` |
+| Cursor CLI | `cursor-agent acp` |
+| Goose | `goose acp` |
+| Claude Code | `claude-agent-acp`（ACP 适配器，非原生） |
+| Codex CLI | `codex-acp`（ACP 适配器，非原生） |
+
+`AcpRuntime` 负责：spawn Agent 子进程 → `initialize` → `session/new` → `session/prompt`；从 `session/update` 读取助手文本与工具调用；把 Agent 的 `session/request_permission` 按 `worker.tools` 策略自动放行或拒绝；进程退出后，若 Agent 声明 `loadSession`，追问时会用 `session/load` 恢复会话。
+
+当前不做客户端侧的 `fs/*` 与 `terminal/*` 代理：`initialize` 里声明不支持，Agent 需使用自己的文件/命令工具。Agent 必须预先完成登录（ACP 的 `auth_required` 会以启动失败上报）。
 
 ## 命令
 
@@ -416,7 +587,7 @@ orca repo list --json | jq -r '.result.repos[] | "\(.displayName)\t\(.path)\t\(.
 | `ra tickets [--stage]` | 列出工单 |
 | `ra ticket <id>` | 工单详情（状态 / 派工 / 上报 / 输入） |
 | `ra logs` | 最近 50 行日志 |
-| `ra config` | 查看配置；`config set <key> <value>` 改单项（含 `project.<名>` / `chatBinding.<群>` / `progress.syncMs` / `progress.probeMs`）；`config --edit` 编辑全文 |
+| `ra config` | 查看配置；`config set <key> <value>` 改单项（含 `project.<名>` / `chatBinding.<群>` / `chatMode.<群>` / `chatSync.<群>` / `chatAllow.<群>` / `progress.syncMs` / `progress.probeMs`）；`config edit` 编辑全文 |
 
 全局选项 `--home <dir>` 可切换状态目录（测试与多实例用）。
 
@@ -429,7 +600,15 @@ orca repo list --json | jq -r '.result.repos[] | "\(.displayName)\t\(.path)\t\(.
 | 名单外、@bot | 只回复说明 | 研判但不开工 | 研判通过开单 |
 | 名单外、未 @ | 忽略 | 忽略 | 忽略 |
 
-准入表可在 `config.yaml` 的 `policy.admission` 里逐格调整。
+准入表在 `config.yaml` 的 `policy.admission` 里逐格调整：
+
+| 配置项 | 对应场景 | 可取值 | 默认 |
+|-|-|-|-|
+| `policy.admission.listedNotAddressed` | 名单内、未 @ | `inferred` / `ignore` | `inferred` |
+| `policy.admission.unlistedAddressed` | 名单外、@bot | `explicit` / `inferred` / `ignore` | `inferred` |
+| `policy.admission.unlistedNotAddressed` | 名单外、未 @ | `inferred` / `ignore` | `ignore` |
+
+`inferred` 进入研判（再由 `acceptMode` 决定 observe 时是否真的开工），`explicit` 直接按显式请求开单，`ignore` 直接丢弃。这三项属于 `policy.*`：Web 面板保存后立即生效；`ra config set` 写的是文件，重启服务后生效。
 
 ## 工单编号与分支命名
 
@@ -509,13 +688,14 @@ ra report \
 | POST | `/api/tickets/:id/stop` | 停止工单 |
 | POST | `/api/tickets/:id/assignment` | 手工绑定 Assignment |
 | POST | `/api/reports` | Worker 上报状态与回复（`ra report` 的入口） |
-| GET / PUT | `/api/policy` | 读写策略 |
+| GET / PUT | `/api/policy` | 读写策略（保存后落盘） |
+| GET / PUT | `/api/config` | 配置面板：读安全快照 / 按点路径提交补丁（白名单校验 + 落盘） |
 | GET | `/api/sources/feishu/chats` | 飞书来源配置 |
 
 ## 开发
 
 ```bash
-pnpm test        # 341 个测试通过（5 个默认跳过，其中包含真实 Pi 验证）
+pnpm test        # 466 个测试通过（5 个默认跳过，其中包含真实 Pi 验证）
 pnpm typecheck
 pnpm build       # tsc + esbuild（Web 面板与 Markdown 资产）
 pnpm check       # typecheck + test
@@ -529,7 +709,7 @@ RA_PI_VERIFY=1 npx vitest run tests/verify-pi-live.test.ts   # 真实 Pi + 真�
 ```text
 src/core/     领域内核（model / stage / policy / engine / effects）
 src/store/    SQLite（node:sqlite）
-src/worker/   WorkerBackend 端口、OrcaAdapter、state.json 轮询（CLI 兜底通道）、worker 手册
+src/worker/   WorkerRuntime 端口、RuntimeRegistry、OrcaRuntime、ClaudeCliRuntime、state.json 轮询、worker 手册
 src/sources/  飞书事件、历史补拉、GitHub PR 跟踪
 src/router/   AgentLoop、工具契约、提示词、HTTP API
 src/web/      React 面板
@@ -542,10 +722,14 @@ src/cli/      ra 命令
 - 不做自动合并 PR，只跟踪与通知。
 - GitHub Source 只用于 PR 状态跟踪，不消费 Issue / 评论。
 - 上报走 `ra report`，`state.json` 只作为服务不可达时的兜底通道。
-- 图片 / 文件只识别到「这是一条附件消息」，不下载、不做多模态识别；需要内容时请用文字描述。
+- 图片会下载并用多模态模型转成文字；文件 / 语音等其它附件只识别到「这是一条附件消息」，需要内容时请用文字描述。
+- 图片转文本依赖模型支持 image 输入；主模型不支持时请在 `llm.imageModel` 单独配置视觉模型，否则图片仍按纯附件处理。
 - 历史补拉按群游标增量进行：首次见到某个群只记基线（最新一条消息时间），不会把历史消息当新需求。
 - 实测 Orca 的 `lastOutputAt` 是毫秒数字、且 CLI 创建的终端可能 `orphaned=true` 但依然可用；适配层已分别做归一化与「只有 `connected=false` 才判死」的处理。
 - `workerSpec.mode: agent` 依赖 Orca 启动的 claude 是否加载全局 `~/.claude/agents/`；该前提尚未实测，默认使用已验证可行的 `prompt` 模式。
+- Claude CLI 运行时用 `git worktree`，项目的 `repo` 必须是本地仓库绝对路径（`path:/abs` 或 `/abs`）；`ra init` 在 `runtime.default: claude-cli` 时会直接问路径。
+- Claude CLI 的追问在当前轮结束后生效（与 TUI 输入排队一致）；会话 `blocked`（权限/人工输入）时只转人工，不自动 resume。需要轮内实时插话时要改用 `stream-json` 或 SDK/ACP。
+- Claude CLI 依赖 `claude agents --json --all` 的字段（本仓库实测 `2.1.318`）；升级后字段变化时状态会退化为 `null`，需要按版本适配。
 - 派工草稿按「群 + 同一个人」保存，30 分钟有效；同一个群里的多个未补齐请求会互相覆盖（后一次追问覆盖前一次）。
 - Pi SDK 仍在演进，本仓库锁定 `@earendil-works/pi-coding-agent@1.5.0`，升级前先跑 `RA_PI_VERIFY=1` 的真实环境验证。
 - Pi 是唯一研判引擎，没有回退到旧实现的开关；Pi 不可用时候选会按 `unavailable` 落库，不会静默重试。
@@ -555,6 +739,7 @@ src/cli/      ra 命令
 | 文档 | 内容 |
 |-|-|
 | [docs/COMPARISON.md](docs/COMPARISON.md) | 与 dsh-superagent 原型的差距分析与可迁移机制 |
+| [docs/AGENT-ADAPTER-DESIGN.md](docs/AGENT-ADAPTER-DESIGN.md) | Agent 工具适配器接口设计：Orca / Claude CLI / Codex 的契约与迁移方案 |
 | [docs/VERIFICATION.md](docs/VERIFICATION.md) | 真实环境验证记录与需要人工执行的剩余步骤 |
 | [docs/show-me-router-flow.html](docs/show-me-router-flow.html) | 消息 → 研判 → 派工 → 上报 → 闭环的可视化流程 |
 | [README.en.md](README.en.md) | English version |
@@ -563,4 +748,4 @@ src/cli/      ra 命令
 
 ---
 
-问题、建议或想接入新的 WorkerBackend，欢迎提 Issue。
+问题、建议或想接入新的 WorkerRuntime，欢迎提 Issue。

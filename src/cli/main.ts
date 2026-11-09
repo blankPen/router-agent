@@ -20,6 +20,8 @@ const io: CliIo = {
   stderr: line => process.stderr.write(`${line}\n`),
   env: process.env as Record<string, string | undefined>,
   orca: realRunner('orca'),
+  claude: realRunner('claude'),
+  git: realRunner('git'),
   larkFor: home => createLarkRunner({ home }),
   stream: (argv, env) => new Promise<number>(resolve => {
     const child = spawn('lark-cli', argv, { stdio: 'inherit', env })

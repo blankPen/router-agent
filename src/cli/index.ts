@@ -1,4 +1,4 @@
-import { appendFileSync, closeSync, mkdirSync, existsSync, openSync, readFileSync, readSync, statSync, writeFileSync, unlinkSync } from 'node:fs'
+import { appendFileSync, closeSync, mkdirSync, existsSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync, unlinkSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { spawn } from 'node:child_process'
 import { join, resolve } from 'node:path'
@@ -9,19 +9,22 @@ import { Command, CommanderError } from 'commander'
 import { ensureHome, loadConfig, policyOf, replyAlwaysChatsOf, setConfigValue, writeConfig } from '../config.js'
 import { Store } from '../store/db.js'
 import { Engine } from '../core/engine.js'
-import { OrcaAdapter } from '../worker/orca/index.js'
+import { createRuntimes } from '../worker/registry.js'
 import { GitHubTracker } from '../sources/github.js'
 import { FeishuConsumer, FeishuSender, attachQuotedMessage, normalizeFeishuEventDetailed } from '../sources/feishu.js'
+import { attachImageText } from '../sources/feishu-image.js'
 import { backfillChats } from '../sources/feishu-backfill.js'
 import { ChatDirectory } from '../sources/feishu-directory.js'
 import { createLarkRunner, larkEnv, parseAppId } from '../sources/lark.js'
+import { createVisionTranscriber, type ImageTranscriber } from '../infra/vision.js'
+import type { Trigger } from '../core/model.js'
 import { runInitWizard } from './init.js'
 import { formatChecks, runDoctor } from './doctor.js'
 import { simulate } from './simulate.js'
 import { runReport, readContentArg, type ReportOptions } from './report.js'
 import type { Prompter } from './prompts.js'
 import { realRunner, type CommandRunner } from '../infra/process.js'
-import { resolvePiModelConfig } from '../router/model-config.js'
+import { resolveImageModelConfig, resolvePiModelConfig } from '../router/model-config.js'
 import { createDecisionEngine } from '../router/engine-factory.js'
 import type { DecisionAudit } from '../router/decision-engine.js'
 import { RouterService, createEffectsSender, type Logger } from '../service.js'
@@ -41,8 +44,10 @@ export interface CliIo {
   env: Record<string, string | undefined>
   /** 交互式初始化用；不存在时退化为非交互。 */
   prompts?: Prompter
-  /** 测试注入点；默认用真实 orca / lark-cli。 */
+  /** 测试注入点；默认用真实 orca / claude / git / lark-cli。 */
   orca?: CommandRunner
+  claude?: CommandRunner
+  git?: CommandRunner
   larkFor?: (home?: string) => CommandRunner
   /** 交互式接管终端的 lark-cli 命令（新建应用、用户授权）。 */
   stream?: (argv: string[], env: NodeJS.ProcessEnv) => Promise<number>
@@ -122,7 +127,8 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
     .option('--pr-url <url>', 'PR 链接')
     .option('--reply <text>', '要发给发起人的完整回复：字面量 / @文件 / - 读 stdin')
     .option('--ack <id>', '确认已读的输入 ID，可重复', collect, [])
-    .action(async (opts: ReportOptions & { home?: string }) => {
+    .option('--port <n>', 'Router 端口（默认读 config/server.port 或 RA_PORT）')
+    .action(async (opts: ReportOptions & { home?: string; port?: string }) => {
       setCode(await cmdReport(homeOf(opts, output), opts, output))
     })
 
@@ -214,10 +220,24 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
   ensureHome(home)
   const config = loadConfig(home, output.env as NodeJS.ProcessEnv)
   const lark = output.larkFor ?? (larkHome => createLarkRunner({ home: larkHome }))
+  let runtime: import('../worker/port.js').WorkerRuntime | undefined
+  try {
+    runtime = createRuntimes(config, {
+      home,
+      workersDir: join(home, 'workers'),
+      spec: config.workerSpec.mode,
+      orca: output.orca ?? realRunner('orca'),
+      claude: output.claude ?? realRunner('claude'),
+      git: output.git ?? realRunner('git'),
+    }).default()
+  } catch {
+    // 未注册/拼错的 runtime 由配置检查单独报错，不让 doctor 直接崩溃。
+  }
   const checks = await runDoctor({
     config,
     orca: output.orca ?? realRunner('orca'),
     lark: lark(config.feishu.larkHome),
+    ...(runtime ? { runtime } : {}),
     llm: () => {
       try {
         const resolved = resolvePiModelConfig({ configPath: join(home, 'config.yaml') })
@@ -229,6 +249,14 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
     portFree: () => isPortFree(config.server.port),
     servicePid: readPid(home),
   })
+  if (!runtime) {
+    checks.unshift({
+      name: 'Worker runtime',
+      status: 'fail' as const,
+      detail: `未注册 runtime: ${config.runtime.default}`,
+      hint: 'ra config set runtime.default orca|claude-cli',
+    })
+  }
   if (opts.json) {
     output.stdout(JSON.stringify(checks, null, 2))
   } else {
@@ -240,10 +268,12 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
   return checks.some(check => check.status === 'fail') ? 1 : 0
 }
 
-async function cmdReport(home: string, opts: ReportOptions, output: CliIo): Promise<number> {
+async function cmdReport(home: string, opts: ReportOptions & { port?: string }, output: CliIo): Promise<number> {
   const config = loadConfig(home)
+  const envPort = Number(output.env.RA_PORT)
+  const port = Number(opts.port) > 0 ? Number(opts.port) : (Number.isFinite(envPort) && envPort > 0 ? envPort : config.server.port)
   return runReport(
-    { home, port: config.server.port, stdout: output.stdout, stderr: output.stderr },
+    { home, port, stdout: output.stdout, stderr: output.stderr },
     opts,
   )
 }
@@ -470,7 +500,7 @@ function cmdStatus(home: string, output: CliIo): number {
       output.stdout(`  - [${t.stage}] ${t.title}`)
     }
     const config = loadConfig(home)
-    output.stdout(`accept mode: ${config.policy.acceptMode}，并发上限: ${config.policy.maxWorkers}，后端: ${config.backend.default}`)
+    output.stdout(`accept mode: ${config.policy.acceptMode}，并发上限: ${config.policy.maxWorkers}，运行时: ${config.runtime.default}`)
     output.stdout(
       config.retention.enabled
         ? `闲置治理: 开启（${config.retention.idleHours}h 无进展提醒，${config.retention.closeGraceHours}h 未回复自动关闭）`
@@ -619,6 +649,29 @@ function cmdStop(home: string, output: CliIo): number {
 async function cmdServe(home: string, output: CliIo): Promise<number> {
   const config = loadConfig(home)
   ensureHome(home)
+  // 单实例锁：目录创建是原子的，避免两个 ra serve 同时跑循环。
+  const lockDir = join(home, 'router-agent.lock')
+  const acquireLock = (): boolean => {
+    try {
+      mkdirSync(lockDir)
+      return true
+    } catch {
+      return false
+    }
+  }
+  if (!acquireLock()) {
+    const pid = readPid(home)
+    if (pid && alive(pid)) {
+      output.stderr(`Router 已在运行 (pid ${pid})，无需重复启动。`)
+      return 1
+    }
+    // 旧进程已经不在：清掉残留锁后重试一次。
+    rmSync(lockDir, { recursive: true, force: true })
+    if (!acquireLock()) {
+      output.stderr('Router 正在启动中，请稍后重试。')
+      return 1
+    }
+  }
   writeFileSync(join(home, 'router-agent.pid'), String(process.pid), 'utf8')
   const logger = createLogger(home, output)
   const sink = (event: { event: string; [key: string]: unknown }): void => {
@@ -640,16 +693,40 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   if (repaired > 0) logger.warn('outbox:repaired', { count: repaired })
   const engine = new Engine({ store, policy: policyOf(config), onEvent: sink })
   const orcaRunner = realRunner('orca')
+  const claudeRunner = output.claude ?? realRunner('claude')
+  const gitRunner = output.git ?? realRunner('git')
   const larkRunner = createLarkRunner({ home: config.feishu.larkHome })
   const ghRunner = realRunner('gh')
-  const backend = new OrcaAdapter({
-    runner: orcaRunner,
+  const runtimes = createRuntimes(config, {
+    home,
     workersDir: join(home, 'workers'),
     spec: config.workerSpec.mode,
+    orca: orcaRunner,
+    claude: claudeRunner,
+    git: gitRunner,
   })
+  const runtime = runtimes.default()
   const sender = new FeishuSender(larkRunner)
   const prTracker = new GitHubTracker(ghRunner)
   const model = resolvePiModelConfig({ configPath: join(home, 'config.yaml') })
+  // 图片转文本：默认复用研判模型；主模型不支持多模态时可在 llm.imageModel 单独指定。
+  // 配置解析失败不阻塞启动，图片退回「纯附件」处理。
+  let imageTranscriber: ImageTranscriber | null = null
+  if (config.feishu.images.enabled) {
+    try {
+      imageTranscriber = createVisionTranscriber(
+        resolveImageModelConfig({ configPath: join(home, 'config.yaml') }),
+        { timeoutMs: config.feishu.images.timeoutMs, maxChars: config.feishu.images.maxChars },
+      )
+    } catch (error) {
+      logger.warn('feishu:image-vision-disabled', { message: error instanceof Error ? error.message : String(error) })
+    }
+  }
+  const withImageText = (trigger: Trigger): Promise<Trigger> => attachImageText(trigger, {
+    runner: larkRunner,
+    transcriber: imageTranscriber,
+    logger,
+  })
   const decisionEngine = createDecisionEngine({ config, store, model, engine })
   const auditPath = join(home, 'logs', 'decisions.jsonl')
   const onDecisionAudit = (audit: DecisionAudit): void => {
@@ -707,7 +784,8 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     config,
     store,
     engine,
-    backend,
+    runtime,
+    runtimes,
     prTracker,
     logger,
     effects,
@@ -725,9 +803,12 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
         },
       })
       if (result.baselined.length > 0) logger.info('backfill:baseline', { chats: result.baselined })
-      // 补拉同样要带上被引用消息的正文，否则引用消息进研判时只剩一句空 @。
+      // 补拉同样要带上被引用消息的正文，否则引用消息进研判时只剩一句空 @；
+      // 图片消息随后下载 image_key 并转成文本。
       return Promise.all(
-        result.triggers.map(async t => attachQuotedMessage({ ...t, chatName: directory.nameOf(t.chatId) }, larkRunner)),
+        result.triggers.map(async t =>
+          withImageText(await attachQuotedMessage({ ...t, chatName: directory.nameOf(t.chatId) }, larkRunner)),
+        ),
       )
     },
   })
@@ -743,6 +824,9 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     onReport: state => service.onWorkerState(state),
     onPolicyChange: updated => {
       logger.info('policy:updated', { version: engine.policy().version, acceptMode: updated.policy.acceptMode })
+    },
+    onConfigChange: (_updated, changed) => {
+      logger.info('config:updated', { changed })
     },
   })
   logger.info('api:listening', { port: config.server.port })
@@ -770,19 +854,29 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
           })
           return
         }
-        // 引用消息要先回查被引用正文，异步补齐后再入库。
+        // 引用消息要先回查被引用正文，异步补齐后再入库；图片消息再下载 image_key 转文本。
+        const base = result.trigger
+        const willReply = base.addressed !== 'none' || replyAlwaysChats.has(base.chatId)
+        const react = (messageId: string): void => {
+          void reactTo(messageId)
+            .catch(error => logger.warn('feishu:reaction-failed', { message: error instanceof Error ? error.message : String(error) }))
+        }
+        // 图片要下载 + 识别，可能耗时较久；先加回执表情，避免用户以为机器人没收到。
+        const rawBase = base.raw as Record<string, unknown> | undefined
+        const needsImageWork = Boolean(base.mediaOnly) || Array.isArray(rawBase?.imageKeys)
+        if (config.feishu.reaction && willReply && needsImageWork && !store.getReaction(base.externalId)) react(base.externalId)
         void (async () => {
-          const trigger = await attachQuotedMessage(result.trigger!, larkRunner)
+          const quoted = await attachQuotedMessage(base, larkRunner)
+          const trigger = await withImageText(quoted)
           const stored = engine.ingest(trigger)
           if (!stored) return
-          const quoted = Boolean((trigger.raw as Record<string, unknown> | undefined)?.quote)
-          logger.info('trigger:ingested', { id: trigger.id, chat: trigger.chatId, addressed: trigger.addressed, quoted })
+          const raw = trigger.raw as Record<string, unknown> | undefined
+          const hasQuote = Boolean(raw?.quote)
+          const imageCount = Array.isArray(raw?.images) ? raw.images.length : 0
+          logger.info('trigger:ingested', { id: trigger.id, chat: trigger.chatId, addressed: trigger.addressed, quoted: hasQuote, images: imageCount })
           // 只对「会被回复」的消息加回执表情：@、私聊，或 mode=all 的全量接收群。
-          const willReply = trigger.addressed !== 'none' || replyAlwaysChats.has(trigger.chatId)
-          if (config.feishu.reaction && willReply) {
-            void reactTo(trigger.externalId)
-              .catch(error => logger.warn('feishu:reaction-failed', { message: error instanceof Error ? error.message : String(error) }))
-          }
+          // 纯附件在入库前已经加过，这里跳过避免重复。
+          if (config.feishu.reaction && willReply && !needsImageWork) react(trigger.externalId)
         })().catch(error => logger.warn('trigger:ingest-failed', { message: error instanceof Error ? error.message : String(error) }))
       },
       onReady: () => logger.info('feishu:ready', {}),
@@ -814,6 +908,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     store.close()
     void api.close()
     cleanupPid(home)
+    rmSync(lockDir, { recursive: true, force: true })
     process.exit(0)
   }
   process.on('SIGTERM', shutdown)

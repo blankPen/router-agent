@@ -8,9 +8,9 @@ export function defaultClaudeProjectsDir(): string {
   return join(homedir(), '.claude', 'projects')
 }
 
-/** Claude Code 把 cwd 里的路径分隔符替换成 `-` 作为项目目录名。 */
+/** Claude Code 把 cwd 里所有非字母数字字符替换成 `-` 作为项目目录名。 */
 export function claudeProjectSlug(workdir: string): string {
-  return workdir.replace(/[\\/]+/g, '-')
+  return workdir.replace(/[^a-zA-Z0-9]/g, '-')
 }
 
 export interface ReadSessionOptions {
@@ -19,6 +19,8 @@ export interface ReadSessionOptions {
   maxBytes?: number
   /** 最多保留多少条最近活动。 */
   maxEvents?: number
+  /** 精确匹配会话 ID；找不到时返回 null，不退化成「最新文件」。 */
+  sessionId?: string
 }
 
 /**
@@ -26,7 +28,7 @@ export interface ReadSessionOptions {
  *
  * 优先用 Agent 自己的结构化会话记录，而不是终端渲染屏幕：
  * 这里只有 assistant 文本与工具调用，没有 TUI 状态栏、spinner 和输入回显。
- * 找不到会话（非 Claude 后端 / 文件尚未落盘）时返回 null，调用方退回终端读取。
+ * 找不到会话（非 Claude 运行时 / 文件尚未落盘）时返回 null，调用方退回终端读取。
  */
 export function readClaudeSession(workdir: string, opts: ReadSessionOptions = {}): SessionSnapshot | null {
   if (!workdir) return null
@@ -41,6 +43,12 @@ export function readClaudeSession(workdir: string, opts: ReadSessionOptions = {}
     return null
   }
   if (files.length === 0) return null
+
+  if (opts.sessionId) {
+    const exact = files.find(file => file === `${opts.sessionId}.jsonl` || file.includes(opts.sessionId!))
+    if (!exact) return null
+    files = [exact]
+  }
 
   const latest = files
     .map(file => {
@@ -78,7 +86,12 @@ export function readClaudeSession(workdir: string, opts: ReadSessionOptions = {}
         const text = String(block.text ?? '').trim()
         if (text) events.push({ at: timestamp, kind: 'text', text })
       } else if (block.type === 'tool_use') {
-        events.push({ at: timestamp, kind: 'tool', text: describeToolUse(block.name, block.input) })
+        events.push({
+          at: timestamp,
+          kind: 'tool',
+          text: describeToolUse(block.name, block.input),
+          tool: describeToolInfo(block.name, block.input),
+        })
       }
     }
     if (events.length > before) {
@@ -114,27 +127,59 @@ function readTailLines(path: string, maxBytes: number): string[] {
   return lines.filter(line => line.trim().length > 0)
 }
 
-/** 把工具调用压成一行人话；不把完整命令 / 文件内容带进话题。 */
-export function describeToolUse(name: unknown, input: unknown): string {
+/** 工具调用的结构化摘要：只保留「工具名 + 目标」，不把完整命令 / 文件内容带进话题。 */
+export interface ToolInfo {
+  name: string
+  target?: string
+}
+
+/** 从工具名与入参里提炼结构化目标，供进展巡检生成语义摘要。 */
+export function describeToolInfo(name: unknown, input: unknown): ToolInfo {
   const tool = String(name ?? 'tool')
   const args = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
   const file = typeof args.file_path === 'string' ? basename(args.file_path) : ''
+  const target = (value: unknown): { target: string } | Record<string, never> => {
+    const text = oneLine(value)
+    return text ? { target: text } : {}
+  }
   switch (tool) {
     case 'Bash':
-      return `Bash：${oneLine(args.description ?? args.command) || '执行命令'}`
+      return { name: 'Bash', ...target(args.description ?? args.command) }
     case 'Read':
     case 'Edit':
     case 'Write':
     case 'MultiEdit':
     case 'NotebookEdit':
-      return file ? `${tool}(${file})` : tool
+      return { name: tool, ...(file ? { target: file } : {}) }
     case 'Grep':
     case 'Glob':
-      return `${tool}(${oneLine(args.pattern) || '搜索'})`
+      return { name: tool, ...target(args.pattern) }
     case 'Task':
-      return `Task：${oneLine(args.description) || '子任务'}`
+      return { name: 'Task', ...target(args.description) }
     default:
-      return tool
+      return { name: tool }
+  }
+}
+
+/** 把工具调用压成一行人话；不把完整命令 / 文件内容带进话题。 */
+export function describeToolUse(name: unknown, input: unknown): string {
+  const info = describeToolInfo(name, input)
+  switch (info.name) {
+    case 'Bash':
+      return `Bash：${info.target ?? '执行命令'}`
+    case 'Read':
+    case 'Edit':
+    case 'Write':
+    case 'MultiEdit':
+    case 'NotebookEdit':
+      return info.target ? `${info.name}(${info.target})` : info.name
+    case 'Grep':
+    case 'Glob':
+      return `${info.name}(${info.target ?? '搜索'})`
+    case 'Task':
+      return `Task：${info.target ?? '子任务'}`
+    default:
+      return info.name
   }
 }
 

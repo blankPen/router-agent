@@ -4,6 +4,7 @@ import type { Store } from '../store/db.js'
 import type { Engine } from '../core/engine.js'
 import type { PiModelConfig } from './model-config.js'
 import { PiDecisionEngine } from './pi-decision-engine.js'
+import { SqliteSessionPersistence } from './session-persistence.js'
 import { RouterToolbox } from './tools.js'
 
 export interface DecisionEngineFactoryOptions {
@@ -16,6 +17,7 @@ export interface DecisionEngineFactoryOptions {
 
 /** 装配唯一的研判引擎：Pi。 */
 export function createDecisionEngine(opts: DecisionEngineFactoryOptions): PiDecisionEngine {
+  const session = opts.config.router.session
   return new PiDecisionEngine({
     model: opts.model,
     toolbox: new RouterToolbox({
@@ -26,5 +28,17 @@ export function createDecisionEngine(opts: DecisionEngineFactoryOptions): PiDeci
     cwd: opts.config.home,
     timeoutMs: opts.config.router.timeoutMs,
     tokenBudget: opts.config.router.tokenBudget,
+    ...(session.enabled
+      ? {
+          sessionPersistence: new SqliteSessionPersistence(opts.store),
+          sessionDir: session.dir || join(opts.config.home, 'sessions'),
+          sessionIdleTtlMs: session.idleTtlMs,
+          maxActiveSessions: session.maxActive,
+          sessionTimeoutMs: session.turnTimeoutMs,
+          sessionTokenBudget: session.tokenBudget,
+          compaction: session.compaction,
+          contextWindow: opts.config.llm?.contextWindow ?? 128_000,
+        }
+      : {}),
   })
 }

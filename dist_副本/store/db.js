@@ -95,7 +95,7 @@ CREATE TABLE IF NOT EXISTS dispatch_drafts (
 CREATE TABLE IF NOT EXISTS assignments (
   id TEXT PRIMARY KEY,
   ticket_id TEXT NOT NULL,
-  backend_id TEXT NOT NULL,
+  runtime_id TEXT NOT NULL,
   handle TEXT NOT NULL,
   workdir TEXT NOT NULL,
   status TEXT NOT NULL,
@@ -382,9 +382,9 @@ export class Store {
     }
     // ---------- Assignment / Report / Input ----------
     insertAssignment(a) {
-        this.db.prepare(`INSERT INTO assignments (id, ticket_id, backend_id, handle, workdir, status, started_at, ended_at)
+        this.db.prepare(`INSERT INTO assignments (id, ticket_id, runtime_id, handle, workdir, status, started_at, ended_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-            .run(a.id, a.ticketId, a.backendId, a.handle, a.workdir, a.status, a.startedAt, a.endedAt ?? null);
+            .run(a.id, a.ticketId, a.runtimeId, a.handle, a.workdir, a.status, a.startedAt, a.endedAt ?? null);
     }
     updateAssignment(a) {
         this.db.prepare('UPDATE assignments SET handle = ?, workdir = ?, status = ?, ended_at = ? WHERE id = ?')
@@ -608,7 +608,7 @@ function assignmentFromRow(row) {
     return {
         id: String(row.id),
         ticketId: String(row.ticket_id),
-        backendId: String(row.backend_id),
+        runtimeId: String(row.runtime_id),
         handle: String(row.handle),
         workdir: String(row.workdir),
         status: row.status,
