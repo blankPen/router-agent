@@ -475,6 +475,37 @@ describe('Worker 运行时配置', () => {
     expect(JSON.stringify(published)).not.toContain('sk-secret')
     expect(JSON.stringify(published)).not.toContain('token-secret')
   })
+
+  it('面板可以写入 llm.apiKey，写入后落盘但不下发明文', () => {
+    const dir = home()
+    ensureHome(dir)
+    const cfg = defaultConfig()
+    const result = applyConfigPatch(cfg, {
+      'llm.baseUrl': 'https://api.deepseek.com/v1',
+      'llm.model': 'deepseek-v4-flash',
+      'llm.apiKey': 'sk-panel-secret',
+    })
+    expect(result.errors).toEqual([])
+    expect(result.changed).toEqual(['llm.baseUrl', 'llm.model', 'llm.apiKey'])
+    expect(cfg.llm).toMatchObject({
+      baseUrl: 'https://api.deepseek.com/v1',
+      model: 'deepseek-v4-flash',
+      apiKey: 'sk-panel-secret',
+    })
+
+    const published = publicConfig(cfg) as { llm: Record<string, unknown> }
+    expect(published.llm).toEqual({
+      baseUrl: 'https://api.deepseek.com/v1',
+      model: 'deepseek-v4-flash',
+      apiKeySet: true,
+    })
+    expect(JSON.stringify(published)).not.toContain('sk-panel-secret')
+
+    writeConfig(dir, cfg)
+    expect(loadConfig(dir).llm?.apiKey).toBe('sk-panel-secret')
+    expect(applyConfigPatch(cfg, { 'llm.apiKey': 123 }).errors).toHaveLength(1)
+    expect(applyConfigPatch(cfg, { 'llm.apiKey': '   ' }).errors).toHaveLength(1)
+  })
 })
 
 describe('项目清单按运行时隔离', () => {

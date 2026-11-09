@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { createRoot } from 'react-dom/client'
 import {
   FIELD_PATHS,
+  LLM_FIELDS,
   SECTIONS,
   fieldError,
   fromInputValue,
@@ -1193,7 +1194,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
 
   const changed = useMemo(() => {
     if (!draft || !original) return []
-    const paths = ['runtime.default', 'feishu.appId', 'feishu.larkHome', 'feishu.directMessages', 'feishu.chats']
+    const paths = ['llm.baseUrl', 'llm.model', 'llm.apiKey', 'runtime.default', 'feishu.appId', 'feishu.larkHome', 'feishu.directMessages', 'feishu.chats']
     for (const runtime of runtimeCatalog) paths.push(projectPatchPath(runtime.id))
     return paths.filter(path => JSON.stringify(getByPath(draft, path)) !== JSON.stringify(getByPath(original, path)))
   }, [draft, original, runtimeCatalog])
@@ -1206,6 +1207,10 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
     const map = new Map<string, string>()
     if (!draft) return map
     const changedSet = new Set(changed)
+    for (const field of LLM_FIELDS) {
+      const message = fieldError(field, getByPath(draft, field.path))
+      if (message) map.set(field.path, message)
+    }
     for (const field of SETUP_FEISHU_FIELDS) {
       const message = fieldError(field, getByPath(draft, field.path))
       if (message) map.set(field.path, message)
@@ -1299,7 +1304,12 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
   const feishuReady = feishuMode === 'reuse'
     || Boolean(String(draft.feishu?.appId ?? '').trim() || String(draft.feishu?.larkHome ?? '').trim())
   const chatReady = chats.length > 0 && !chatsIssue(chats)
+  const llmConfig = (draft.llm ?? {}) as { baseUrl?: string; model?: string; apiKeySet?: boolean }
+  // 密钥也可能来自 RA_LLM_API_KEY 或 ~/.trove；配置了 baseUrl + model 就算接入完成。
+  const llmReady = Boolean(llmConfig.apiKeySet || (String(llmConfig.baseUrl ?? '').trim() && String(llmConfig.model ?? '').trim()))
+  const keyConfigured = Boolean(llmConfig.apiKeySet)
   const steps = [
+    { label: 'LLM 已配置', hint: llmReady ? '已就绪' : '填写 API Key', done: llmReady },
     { label: '运行时可用', hint: runtimeReady ? '已就绪' : runtimeChoice ? runtimeStatusLabel(runtimeChoice.status) : '未选择', done: runtimeReady },
     { label: '已登记项目', hint: projectReady ? `${activeProjects.length} 个项目` : '至少一个', done: projectReady },
     { label: '飞书已接入', hint: feishuMode === 'reuse' ? '复用当前 profile' : '专属机器人', done: feishuReady },
@@ -1313,7 +1323,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
     <>
       <PageHead
         title="初始化配置"
-        subtitle="只配置服务跑起来必需的四件事；人格、会话复用、闲置治理等高级项仍在「配置」里。"
+        subtitle="只配置服务跑起来必需的五件事；人格、会话复用、闲置治理等高级项仍在「配置」里。"
         actions={
           <>
             <button className="btn tiny" onClick={onOpenConfig}>
@@ -1354,10 +1364,35 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
         ))}
       </div>
 
+      <section className="settings-card" id="setup-llm">
+        <header className="settings-head">
+          <div>
+            <h2>1. LLM Provider</h2>
+            <p>Router 研判与图片转写使用的大模型接入。填写 API Key 后即写入 config.yaml，保存后不回显；也可以继续用环境变量 / ~/.trove/config.json 提供。</p>
+          </div>
+          <div className="settings-badges">
+            {llmReady ? <span className="badge hot">已就绪</span> : <span className="badge cold">未完成</span>}
+            {keyConfigured && <span className="badge cold">密钥已配置</span>}
+          </div>
+        </header>
+        <div className="settings-rows">
+          {LLM_FIELDS.map(field => (
+            <FieldRow
+              key={field.path}
+              field={field}
+              value={getByPath(draft, field.path)}
+              defaultValue={getByPath(defaults, field.path)}
+              error={errors.get(field.path)}
+              onChange={value => setField(field.path, value)}
+            />
+          ))}
+        </div>
+      </section>
+
       <section className="settings-card" id="setup-runtime">
         <header className="settings-head">
           <div>
-            <h2>1. 选择运行时</h2>
+            <h2>2. 选择运行时</h2>
             <p>只能选一个作为 Worker 后端。卡片会检测 CLI 是否安装、ACP 依赖是否齐全，并支持引导安装与握手试启动。</p>
           </div>
           <div className="settings-badges">
@@ -1380,7 +1415,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       <section className="settings-card" id="setup-projects">
         <header className="settings-head">
           <div>
-            <h2>2. 登记项目</h2>
+            <h2>3. 登记项目</h2>
             <p>当前运行时：<strong>{runtimeLabel}</strong>。至少登记一个项目，群绑定才能选；可以选本机已有目录，也可以填 Git 地址自动 clone。</p>
           </div>
           <div className="settings-badges">
@@ -1398,7 +1433,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       <section className="settings-card" id="setup-feishu">
         <header className="settings-head">
           <div>
-            <h2>3. 飞书接入</h2>
+            <h2>4. 飞书接入</h2>
             <p>机器人身份来自 lark-cli profile：可以复用当前登录，也可以给 router-agent 指定专属配置目录。</p>
           </div>
           <div className="settings-badges">
@@ -1452,7 +1487,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       <section className="settings-card" id="setup-chats">
         <header className="settings-head">
           <div>
-            <h2>4. 群与绑定</h2>
+            <h2>5. 群与绑定</h2>
             <p>至少添加一个监控群；绑定项目后 Router 开工不再追问，分支跟随项目默认分支。</p>
           </div>
           <div className="settings-badges">
@@ -1540,6 +1575,19 @@ function control(field: FieldDef, value: unknown, onChange: (value: unknown) => 
         <span className="toggle-track"><span className="toggle-knob" /></span>
         <span className="toggle-label">{on ? '开启' : '关闭'}</span>
       </button>
+    )
+  }
+  if (field.kind === 'password') {
+    return (
+      <input
+        className="text-input"
+        type="password"
+        autoComplete="off"
+        spellCheck={false}
+        value={toInputValue(value, 'text')}
+        onChange={event => onChange(event.target.value)}
+        placeholder={field.placeholder}
+      />
     )
   }
   if (field.kind === 'select') {
