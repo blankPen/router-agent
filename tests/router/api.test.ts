@@ -271,12 +271,15 @@ describe('HTTP 管理 API', () => {
     expect(dup.json.errors[0].message).toContain('群重复')
   })
 
-  it('PUT /api/config 丢弃明文 llm.apiKey，避免面板覆盖密钥', async () => {
+  it('PUT /api/config 写入 llm.apiKey，但响应不回显明文', async () => {
     config.home = mkdtempSync(join(tmpdir(), 'ra-api-config-'))
     const res = await call(server, 'PUT', '/api/config', { patch: { 'llm.apiKey': 'sk-leak' } })
     expect(res.status).toBe(200)
-    expect(res.json.changed).toEqual([])
-    expect(loadConfig(config.home!).llm?.apiKey).toBeUndefined()
+    expect(res.json.changed).toEqual(['llm.apiKey'])
+    expect(loadConfig(config.home!).llm?.apiKey).toBe('sk-leak')
+    expect(res.json.config.llm.apiKey).toBeUndefined()
+    expect(res.json.config.llm.apiKeySet).toBe(true)
+    expect(JSON.stringify(res.json)).not.toContain('sk-leak')
   })
 
   it('运行时探测与安装 API', async () => {
