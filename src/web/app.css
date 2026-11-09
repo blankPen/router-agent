@@ -334,6 +334,7 @@ button, input, select {
   color: var(--muted);
   cursor: pointer;
   user-select: none;
+  white-space: nowrap;
 }
 .switch input { position: absolute; opacity: 0; width: 0; height: 0; }
 .switch-track, .toggle-track {
@@ -1352,50 +1353,118 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 
 /* ---------------------------------------------------------------------------
    日志查看器
+   工具栏、提示与日志流收在同一张卡里：一块工作面，不再散成几条横条。
    --------------------------------------------------------------------------- */
 
-.log-toolbar { padding-bottom: 12px; }
-.log-search { width: 260px; margin-left: auto; }
+.log-console {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 190px);
+  min-height: 420px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.log-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--surface);
+}
+
+/* 级别筛选：一行轻量开关，计数用等宽数字，选中态只加一层中性底。 */
+.log-filters { display: flex; align-items: center; gap: 4px; }
+.log-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.14s, color 0.14s, border-color 0.14s;
+}
+.log-chip:hover { background: var(--raised); color: var(--text); }
+.log-chip.active {
+  border-color: color-mix(in srgb, var(--control) 60%, transparent);
+  background: var(--active);
+  color: var(--text);
+  font-weight: 600;
+}
+.log-chip-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+.log-chip-count { color: var(--faint); font-weight: 500; }
+.log-chip.active .log-chip-count { color: var(--muted); }
+
+.log-search { width: 240px; min-width: 200px; margin-left: auto; }
+/* 路径可以折行，大小与更新时间作为一个整体换行，避免「40.0 / KB」被拆开。 */
+.log-path { overflow-wrap: anywhere; }
+.log-submeta { white-space: nowrap; }
 .log-notice {
   font-size: 12px;
   color: var(--positive);
   white-space: nowrap;
 }
 
-.log-panel { position: relative; }
+/* 错误留在日志卡内部，旧日志继续可读，不整屏打断。 */
+.log-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--surface);
+  font-size: 12px;
+}
+.log-alert > svg { flex: none; margin-top: 1px; color: var(--negative); }
+.log-alert strong { display: block; color: var(--negative); font-weight: 600; }
+.log-alert span { color: var(--muted); overflow-wrap: anywhere; }
+.log-alert .btn { margin-left: auto; flex: none; }
 
 .log-view {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 268px);
-  min-height: 420px;
+  flex: 1;
+  min-height: 0;
   overflow: auto;
-  padding: 8px 0 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
+  padding: 10px 0 16px;
   background: var(--surface);
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 13px;
   /* 跟手滚动：鼠标停在日志区时只滚日志，不带着整页一起滚。 */
   overscroll-behavior: contain;
 }
+.log-view:focus-visible { outline-offset: -2px; }
 
 .log-row {
   display: grid;
-  grid-template-columns: 68px 52px minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: 76px 50px minmax(0, 1fr);
+  gap: 12px;
   align-items: start;
-  padding: 2px 14px 2px 12px;
+  padding: 2px 16px 2px 14px;
   border-left: 2px solid transparent;
-  line-height: 1.65;
+  line-height: 1.6;
 }
 .log-row:hover { background: var(--raised); }
-.log-row.level-warn { border-left-color: var(--warning); background: color-mix(in srgb, var(--warning) 4%, transparent); }
-.log-row.level-error { border-left-color: var(--negative); background: color-mix(in srgb, var(--negative) 5%, transparent); }
+/* 级别色只给 WARN / ERROR：一条左侧色轨 + 极淡底色，扫一眼就能定位。 */
+.log-row.level-warn { border-left-color: var(--warning); background: color-mix(in srgb, var(--warning) 5%, transparent); }
+.log-row.level-error { border-left-color: var(--negative); background: color-mix(in srgb, var(--negative) 6%, transparent); }
 
-.log-time { color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.log-level { font-size: 10.5px; font-weight: 600; letter-spacing: 0.04em; color: var(--faint); padding-top: 1px; }
-.log-row.level-info .log-level { color: var(--info); }
+.log-time { color: var(--faint); font-size: 12px; line-height: 1.75; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.log-level { font-size: 11px; font-weight: 600; letter-spacing: 0.04em; line-height: 1.9; color: var(--faint); }
+/* INFO 是正常态，保持中性；只有 WARN / ERROR 带语义色，正常行不抢视线。 */
+.log-row.level-info .log-level { color: var(--muted); }
 .log-row.level-warn .log-level { color: var(--warning); }
 .log-row.level-error .log-level { color: var(--negative); }
 
@@ -1420,7 +1489,8 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 }
 .log-empty svg { opacity: 0.4; }
 .log-empty p { font-size: 13px; color: var(--muted); }
-.log-empty small { font-size: 11.5px; color: var(--faint); max-width: 420px; line-height: 1.6; overflow-wrap: anywhere; }
+.log-empty small { font-size: 12px; color: var(--faint); max-width: 420px; line-height: 1.6; overflow-wrap: anywhere; }
+.log-empty .btn { margin-top: 8px; }
 
 .log-jump {
   position: absolute;
@@ -1441,6 +1511,38 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 }
 .log-jump:hover { background: var(--raised); }
 .log-jump-icon { transform: rotate(90deg); }
+
+@media (prefers-color-scheme: dark) {
+  /* 深色下淡底几乎看不见，单独把 WARN / ERROR 的底色调亮一档。 */
+  .log-row.level-warn { background: color-mix(in srgb, var(--warning) 9%, transparent); }
+  .log-row.level-error { background: color-mix(in srgb, var(--negative) 10%, transparent); }
+}
+
+@media (max-width: 1120px) {
+  .log-search { width: 200px; min-width: 160px; }
+}
+
+@media (max-width: 940px) {
+  .log-console { height: calc(100vh - 200px); min-height: 380px; }
+}
+
+@media (max-width: 620px) {
+  .log-console { height: min(68vh, 620px); min-height: 320px; }
+  .log-toolbar { padding: 8px 10px; }
+  /* 级别筛选在手机上横向滚动，不把页面撑宽。 */
+  .log-filters { width: 100%; overflow-x: auto; overscroll-behavior-x: contain; padding-bottom: 2px; }
+  .log-search { flex: 1 1 160px; width: auto; min-width: 0; margin-left: 0; }
+  /* 两行一条：时间与级别占首行，消息整行铺开。 */
+  .log-row {
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 0 8px;
+    padding: 4px 12px 4px 10px;
+  }
+  .log-message { grid-column: 1 / -1; }
+  .log-time { line-height: 1.4; }
+  .log-level { line-height: 1.5; padding-top: 1px; }
+  .log-empty { min-height: 200px; padding: 28px 18px; }
+}
 
 /* ---------------------------------------------------------------------------
    响应式
@@ -1487,9 +1589,21 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 
 @media (max-width: 620px) {
   .brand-text { display: none; }
-  .nav-tab { padding: 7px 9px; gap: 7px; }
+  .brand-mark { width: 28px; height: 28px; }
+  .sidebar { gap: 10px; padding: 8px 10px; min-width: 0; }
+  /* 窄屏导航收成一行图标 + 短标签；再窄时导航自身横向滚动，不把页面撑宽。 */
+  .side-nav {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+  .side-nav::-webkit-scrollbar { display: none; }
+  .nav-tab { flex: none; padding: 7px 6px; gap: 5px; font-size: 12px; }
+  .nav-tab svg { width: 15px; height: 15px; }
   .page-head { flex-direction: column; align-items: flex-start; gap: 12px; }
-  .page-actions { width: 100%; }
+  .page-actions { width: 100%; flex-wrap: wrap; }
   .runtime-grid { grid-template-columns: 1fr; }
   .setup-progress { grid-template-columns: 1fr; }
   .restart-banner { flex-wrap: wrap; }
