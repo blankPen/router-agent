@@ -907,6 +907,19 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   const runtimeAdmin = new AcpRuntimeAdmin({ home, env: process.env, config })
   // 版本检查也放后台：启动不被 registry 网络拖慢，面板打开时读缓存。
   const updateService = new UpdateService({ current: PACKAGE_VERSION, logger })
+  // 重启函数在 service / consumer 就绪后才赋值；更新工具只把重启排进 timer，
+  // 等本轮研判结束、回复进入 outbox 后再真正重启。
+  let requestRestart: (() => Promise<void>) | null = null
+  let updateRestartTimer: ReturnType<typeof setTimeout> | null = null
+  const scheduleUpdateRestart = (delayMs = 2_000): void => {
+    if (updateRestartTimer) return
+    logger.info('update:restart-scheduled', { delayMs })
+    updateRestartTimer = setTimeout(() => {
+      updateRestartTimer = null
+      void requestRestart?.()
+    }, delayMs)
+    updateRestartTimer.unref()
+  }
   // 单实例锁：目录创建是原子的，避免两个 ra serve 同时跑循环。
   const lockDir = join(home, 'router-agent.lock')
   const acquireLock = (): boolean => {
@@ -1006,7 +1019,16 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     logger,
   })
   // 没有模型配置时不装配研判引擎，RouterService 整体跳过，只保留 Web / 配置 API。
-  const decisionEngine = model ? createDecisionEngine({ config, store, model, engine }) : null
+  const decisionEngine = model
+    ? createDecisionEngine({
+        config,
+        store,
+        model,
+        engine,
+        updater: updateService,
+        scheduleRestart: scheduleUpdateRestart,
+      })
+    : null
   const auditPath = join(home, 'logs', 'decisions.jsonl')
   const onDecisionAudit = (audit: DecisionAudit): void => {
     try {
@@ -1077,7 +1099,6 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
 
   const webRoot = fileURLToPath(new URL('../web', import.meta.url))
   // onRestart 需要在 api 创建时注入，真正的重启函数在 service/consumer 就绪后再赋值。
-  let requestRestart: (() => Promise<void>) | null = null
   const api = await createApiServer({
     engine,
     store,
@@ -1198,6 +1219,11 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     consumer?.stop()
     if (chatTimer) clearInterval(chatTimer)
     clearInterval(updateTimer)
+    if (updateRestartTimer) {
+      // 手动 ra stop 时不留下「服务已停但几秒后又被拉起」的隐患。
+      clearTimeout(updateRestartTimer)
+      updateRestartTimer = null
+    }
     service?.stop()
     store.close()
   }

@@ -102,11 +102,21 @@ class FakeSession implements PiSessionLike {
 
 function setup(
   behavior: (session: FakeSession) => Promise<void> | void,
-  over: { timeoutMs?: number; tokenBudget?: number } = {},
+  over: {
+    timeoutMs?: number
+    tokenBudget?: number
+    updater?: { check(force?: boolean): Promise<any>; upgrade(options?: { force?: boolean }): Promise<any> }
+    scheduleRestart?: () => void
+  } = {},
 ) {
   const store = new Store(':memory:')
   const engine = new Engine({ store, policy })
-  const toolbox = new RouterToolbox({ store, engine })
+  const toolbox = new RouterToolbox({
+    store,
+    engine,
+    ...(over.updater ? { updater: over.updater } : {}),
+    ...(over.scheduleRestart ? { scheduleRestart: over.scheduleRestart } : {}),
+  })
   engine.ingest(trigger())
   const state: { captured: PiSessionOptions | null; session: FakeSession | null } = { captured: null, session: null }
   const enginePi = new PiDecisionEngine({
@@ -144,8 +154,32 @@ describe('PiDecisionEngine', () => {
     expect(state.captured?.tools.some(tool => /bash|edit|write|shell/i.test(tool.name))).toBe(false)
   })
 
-  it('router_decide 只记录 proposal，不写库', async () => {
-    const { store, enginePi, state } = setup(async s => {
+  it('有更新能力时才暴露 router_update；安装成功后在本轮结束触发重启', async () => {
+    let restarts = 0
+    const { enginePi, state } = setup(async s => {
+      const update = s.opts.tools.find(tool => tool.name === 'router_update')!
+      const outcome = await update.execute('call-1', {})
+      expect(outcome.content[0]?.text).toContain('"updated":true')
+      s.messages = [{ role: 'assistant', content: '已更新到 v0.4.0，服务即将重启。' }]
+      s.finish()
+    }, {
+      updater: {
+        check: async () => ({ current: '0.3.0', latest: '0.4.0', installedVersion: null, hasUpdate: true, checkedAt: null, phase: 'idle', error: null, message: null }),
+        upgrade: async () => ({ current: '0.3.0', latest: '0.4.0', installedVersion: '0.4.0', hasUpdate: false, checkedAt: null, phase: 'updated', error: null, message: '已更新到 v0.4.0，重启后生效' }),
+      },
+      scheduleRestart: () => { restarts += 1 },
+    })
+
+    const result = await enginePi.assess(request())
+
+    expect(state.captured?.toolNames).toContain('router_update')
+    expect(result.reply).toBe('已更新到 v0.4.0，服务即将重启。')
+    // 工具执行完成时不立刻重启；assess 结束、回复已产出后才触发。
+    expect(restarts).toBe(1)
+    expect(result.audit.toolCalls).toEqual([{ name: 'router_update', args: '{}', ok: true }])
+  })
+
+  it('router_decide 只记录 proposal，不写库', async () => {    const { store, enginePi, state } = setup(async s => {
       const decide = s.opts.tools.find(tool => tool.name === 'router_decide')!
       const outcome = await decide.execute('call-1', {
         trigger_id: 't1',

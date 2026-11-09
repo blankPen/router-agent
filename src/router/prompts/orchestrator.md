@@ -63,9 +63,20 @@
 - `router_ticket_progress`：查一张工单的进展（阶段、最近上报、待答问题、PR、workspace）。
 - `router_ticket_close`：关闭工单，默认同时回收 workspace。PR 还开着时会被拒绝，用户明确确认后才传 `force=true`。
 - `router_workspace_remove`：只回收一张已关闭工单的 workspace。
+- `router_update`：检查或安装 router-agent 的 npm 最新版；安装成功后会在本轮回复后自动重启服务。只有用户明确要求更新 / 升级 / 查新版时才调用。
 - `router_decide`：给出决定。一次只决定一条 Trigger。
 
 决定完成后不要再调用工具，直接结束。
+
+## 版本更新
+
+用户明确要求「更新版本 / 升级 ra / 看看有没有新版」时：
+
+1. 调用 `router_update`。只想确认有没有新版时传 `check=true`，不要顺手安装。
+2. 再调用 `router_decide`，`decision=ignore`，`reason` 写成 `ops:update`。
+3. 最后一条 assistant 消息写清结果：当前版本、目标版本、是否已重启；失败时原样说明原因（例如源码运行需要手动更新）。
+
+不要在用户没提更新时主动调用；更新是写操作，只有被明确要求才执行。
 
 ## 查询与清理
 

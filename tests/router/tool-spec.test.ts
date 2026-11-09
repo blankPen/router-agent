@@ -11,6 +11,7 @@ describe('Pi 工具契约（TypeBox）', () => {
       'router_ticket_close',
       'router_ticket_list',
       'router_ticket_progress',
+      'router_update',
       'router_workspace_remove',
     ]
     expect(ROUTER_TOOL_SPECS.map(spec => spec.name).sort()).toEqual(expected)
@@ -50,5 +51,10 @@ describe('Pi 工具契约（TypeBox）', () => {
     const progress = toolSpec('router_ticket_progress')
     expect(Value.Check(progress.parameters, { ticket_id: 'tk-5' })).toBe(true)
     expect(Value.Check(progress.parameters, {})).toBe(false)
+
+    const update = toolSpec('router_update')
+    expect(Value.Check(update.parameters, {})).toBe(true)
+    expect(Value.Check(update.parameters, { check: true })).toBe(true)
+    expect(Value.Check(update.parameters, { check: 'yes' })).toBe(false)
   })
 })

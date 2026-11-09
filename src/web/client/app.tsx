@@ -430,36 +430,39 @@ function App(): JSX.Element {
           </button>
         </nav>
 
-        <div className="sidebar-foot">
-          <span className={`status-dot ${live && restartPhase !== 'restarting' ? 'live' : ''}`} />
-          <span className="sidebar-status">
+        <div className="sidebar-bottom">
+          {/* 更新提示贴在「服务启动状态」上方；窄屏退化为右下角悬浮按钮。 */}
+          {showUpdateBanner && (
+            <UpdateNotice
+              snapshot={updateInfo}
+              phase={updatePhase}
+              error={updateError}
+              updatedTo={updatedTo}
+              onUpdate={() => void runUpdate()}
+              onDismiss={dismissUpdate}
+            />
+          )}
+          <div className="sidebar-foot">
+            <span className={`status-dot ${live && restartPhase !== 'restarting' ? 'live' : ''}`} />
+            <span className="sidebar-status">
 <strong>{restartPhase === 'restarting' ? '正在重启…' : restartPhase === 'done' ? '服务已重启' : restartPhase === 'error' ? '重启失败' : live ? '服务运行中' : status?.stage ?? '未连接'}</strong>
-            <small>{footerDetail}</small>
-          </span>
-          <button
-            className="icon-btn restart-btn"
-            title="重启 ra 服务（页面不刷新）"
-            aria-label="重启 ra 服务"
-            onClick={() => void restartDaemon()}
-            disabled={restartPhase === 'restarting'}
-          >
-            <Icon name="refresh" size={14} className={restartPhase === 'restarting' ? 'spin' : undefined} />
-          </button>
+              <small>{footerDetail}</small>
+            </span>
+            <button
+              className="icon-btn restart-btn"
+              title="重启 ra 服务（页面不刷新）"
+              aria-label="重启 ra 服务"
+              onClick={() => void restartDaemon()}
+              disabled={restartPhase === 'restarting'}
+            >
+              <Icon name="refresh" size={14} className={restartPhase === 'restarting' ? 'spin' : undefined} />
+            </button>
+          </div>
         </div>
       </aside>
 
       {/* key 绑 tab：切页时重建滚动容器，回到页面顶部而不是沿用上一页的滚动位置。 */}
       <div className={`workspace tab-${tab}`} key={tab}>
-        {showUpdateBanner && (
-          <UpdateBanner
-            snapshot={updateInfo}
-            phase={updatePhase}
-            error={updateError}
-            updatedTo={updatedTo}
-            onUpdate={() => void runUpdate()}
-            onDismiss={dismissUpdate}
-          />
-        )}
         {tab === 'setup' && (
           <SetupView
             restarting={restartPhase === 'restarting'}
@@ -483,7 +486,7 @@ function App(): JSX.Element {
   )
 }
 
-function UpdateBanner({ snapshot, phase, error, updatedTo, onUpdate, onDismiss }: {
+function UpdateNotice({ snapshot, phase, error, updatedTo, onUpdate, onDismiss }: {
   snapshot: UpdateSnapshot | null
   phase: UpdateRunPhase
   error: string | null
@@ -492,43 +495,53 @@ function UpdateBanner({ snapshot, phase, error, updatedTo, onUpdate, onDismiss }
   onDismiss: () => void
 }): JSX.Element {
   const target = snapshot?.latest ?? updatedTo
+  const busy = phase === 'updating' || phase === 'restarting'
   const title = phase === 'updating'
-    ? `正在安装 v${target ?? '最新版'}…`
+    ? `正在更新 v${target ?? ''}…`
     : phase === 'restarting'
-      ? '安装完成，正在重启服务…'
+      ? '正在重启服务…'
       : phase === 'done'
-        ? updatedTo ? `已更新到 v${updatedTo}` : snapshot?.message ?? '已是最新版本'
+        ? updatedTo ? `已更新到 v${updatedTo}` : '已是最新版本'
         : phase === 'error'
           ? '更新失败'
-          : `发现新版本 v${target ?? ''}`
-  const subtitle = phase === 'error'
-    ? error ?? '请查看 ra 日志后重试。'
+          : `新版本 v${target ?? ''}`
+  const detail = phase === 'error'
+    ? error ?? '查看 ra 日志后重试'
     : phase === 'done'
-      ? updatedTo ? '服务已按新版本重启，页面无需刷新。' : '当前已经是最新版本。'
+      ? updatedTo ? '服务已按新版本重启' : '无需更新'
       : phase === 'idle'
-        ? `当前 v${snapshot?.current ?? '-'}；更新会执行 npm install -g router-agent@latest 并自动重启服务。`
-        : '安装完成后会自动重启服务，页面无需刷新。'
+        ? `当前 v${snapshot?.current ?? '-'}`
+        : phase === 'updating' ? '安装完成后自动重启' : '等待新进程接管'
   return (
-    <div className={`update-banner ${phase === 'error' ? 'error' : phase === 'done' ? 'done' : ''}`} role="status">
-      <span className="update-icon">
-        <Icon name={phase === 'error' ? 'alert' : phase === 'done' ? 'check' : 'download'} size={16} />
-      </span>
-      <span className="update-text">
-        <strong>{title}</strong>
-        <small>{subtitle}</small>
-      </span>
-      {phase === 'idle' && (
-        <span className="update-actions">
-          <button className="btn primary tiny" onClick={onUpdate}>更新并重启</button>
-          <button className="btn ghost tiny" onClick={onDismiss}>稍后</button>
+    <div className={`update-notice ${phase}`} role="status" title={phase === 'error' ? detail : undefined}>
+      <div className="update-notice-head">
+        <span className="update-notice-icon">
+          <Icon
+            name={phase === 'error' ? 'alert' : phase === 'done' ? 'check' : busy ? 'refresh' : 'download'}
+            size={14}
+            className={busy ? 'spin' : undefined}
+          />
         </span>
+        <span className="update-notice-copy">
+          <strong>{title}</strong>
+          <small>{detail}</small>
+        </span>
+        {phase === 'idle' && (
+          <button className="icon-btn update-dismiss" title="忽略这个版本" aria-label="忽略这个版本" onClick={onDismiss}>
+            <Icon name="close" size={12} />
+          </button>
+        )}
+      </div>
+      {phase === 'idle' && (
+        <button className="btn primary update-now" title="安装最新版本并自动重启服务" onClick={onUpdate}>
+          更新并重启
+        </button>
       )}
-      {(phase === 'updating' || phase === 'restarting') && <Icon name="refresh" size={15} className="spin" />}
       {phase === 'error' && (
-        <span className="update-actions">
+        <div className="update-actions">
           <button className="btn tiny" onClick={onUpdate}>重试</button>
           <button className="btn ghost tiny" onClick={onDismiss}>关闭</button>
-        </span>
+        </div>
       )}
     </div>
   )

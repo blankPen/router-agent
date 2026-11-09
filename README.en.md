@@ -258,7 +258,7 @@ Triage is a `DecisionEngine` port, and **Pi is the only implementation**. AgentL
 
 | Channel | Description |
 |-|-|
-| Triage | Pi `createAgentSession`, in-memory session, Router system prompt only; tool allowlist `router_read / router_ticket / router_ticket_list / router_ticket_progress / router_ticket_close / router_workspace_remove / router_decide` |
+| Triage | Pi `createAgentSession`, in-memory session, Router system prompt only; tool allowlist `router_read / router_ticket / router_ticket_list / router_ticket_progress / router_ticket_close / router_workspace_remove / router_update / router_decide` (`router_update` is only exposed inside the daemon) |
 | Reply | The same Pi engine with zero tools, generating one polite sentence for greetings / follow-up questions; falls back to fixed copy on failure |
 
 Five constraints:
@@ -428,6 +428,7 @@ Additional events covering messages, config, and exceptions (same `at` / `level`
 | `update:check-failed` / `update:skipped` | Update | `message` / `reason` `root` | Registry unreachable, or a source checkout skipped the global install |
 | `update:upgrade-started` / `update:upgraded` / `update:upgrade-failed` | Update | `from` `to` `durationMs` / `code` `message` | npm global install start, success and failure |
 | `update:service-restarted` / `update:service-stop-failed` / `update:restart-failed` | CLI | `pid` / `pid` `reason` `message` | `ra update` auto-restart outcome |
+| `update:restart-scheduled` | Router Tool | `delayMs` | A Feishu-triggered update scheduled the service restart after the reply |
 | `api:update` | HTTP API | `phase` `from` `to` `reason` | Dashboard-triggered update result |
 
 Raw terminal output **never enters the logs** (to avoid parsing TUI text); the proactive probe prefers the Claude session transcript and otherwise posts a semantic summary (assistant text plus an action digest), never a replay of tool calls. To see what a Worker did, read the `report` `summary` and `~/.router-agent/workers/<ticketId>/events.log`.
@@ -444,7 +445,7 @@ The dashboard opens automatically after `ra start` and any time via `ra web`. It
 - **Configuration**: grouped by LLM Provider / admission policy / triage and persona / session reuse / progress sync / idle governance / Feishu access / dispatch and service / projects and chat bindings. Each field carries help text and defaults, changes are marked dirty, and save runs both client and server validation before writing `config.yaml`. The runtime cards are the same component as on the setup page; project lists are isolated per runtime (Orca uses repository selectors, Claude Code / ACP require absolute local paths); add local projects with a system directory picker and Git detection, or Git projects by cloning from an ssh / http(s) URL.
 - **Sources**: service status, monitored chats and receive-scope overview.
 
-When npm has a newer version, an update bar appears at the top of the content area: **Update and restart** runs `npm install -g router-agent@latest` and lets the daemon restart itself once installed (the page stays open); **Later** ignores only that version, and a newer release prompts again. The sidebar footer also shows the running version.
+When npm has a newer version, an update prompt appears above the "service running" status in the sidebar: **Update and restart** runs `npm install -g router-agent@latest` and lets the daemon restart itself once installed (the page stays open); **×** ignores only that version, and a newer release prompts again. On narrow screens the prompt becomes a floating button at the bottom-right. You can also ask the Router in Feishu to update: it calls the `router_update` tool, installs the latest version, and restarts the whole service after replying.
 
 ![Lower half of the setup page: project registration, Feishu access and chat bindings](docs/assets/readme/setup-steps-dark.png)
 
