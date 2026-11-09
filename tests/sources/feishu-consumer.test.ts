@@ -17,16 +17,18 @@ function setup() {
   const events: Record<string, unknown>[] = []
   const ready = vi.fn()
   const errors: string[] = []
+  const reconnects: { attempt: number; delayMs: number }[] = []
   const consumer = new FeishuConsumer({
     onEvent: raw => events.push(raw),
     onReady: ready,
     onError: error => errors.push(error.message),
+    onReconnect: info => reconnects.push(info),
     spawnImpl: (bin, args, opts) => {
       calls.push({ bin, args, opts })
       return child as unknown as ChildProcess
     },
   })
-  return { consumer, child, calls, events, ready, errors }
+  return { consumer, child, calls, events, ready, errors, reconnects }
 }
 
 describe('飞书事件消费者', () => {
@@ -110,5 +112,32 @@ describe('飞书事件消费者', () => {
     expect(larkStderrLevel('[event] listening for events (key=x)')).toBe('ready')
     expect(larkStderrLevel('[event] error: unauthorized')).toBe('error')
     expect(larkStderrLevel('[event] to stop gracefully: send SIGTERM')).toBe('ignore')
+  })
+})
+describe('飞书事件消费者日志', () => {
+  it('异常退出后回调 onReconnect，给出第几次与退避时间', () => {
+    vi.useFakeTimers()
+    try {
+      const { consumer, child, reconnects } = setup()
+      consumer.start()
+      child.emit('exit', 1)
+      expect(reconnects[0]).toEqual({ attempt: 1, delayMs: 5000 })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('lark-cli 无法拉起时记 spawn-failed 并安排重连，不让进程直接崩', () => {
+    vi.useFakeTimers()
+    try {
+      const { consumer, child, errors, reconnects } = setup()
+      consumer.start()
+      child.emit('error', new Error('spawn lark-cli ENOENT'))
+      expect(errors[0]).toContain('feishu:spawn-failed')
+      expect(reconnects).toHaveLength(1)
+      expect(consumer.running).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

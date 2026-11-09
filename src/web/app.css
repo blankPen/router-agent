@@ -20,6 +20,8 @@
   --accent-deep: #146243;
   --accent-soft: #e6f5ec;
   --on-accent: #ffffff;
+  /* 品牌标识固定黑底，脉冲色不随明暗主题反转，始终取亮绿以保证对比度。 */
+  --logo-signal: #58d29b;
   /* 单一重点色：菜单、选中态、主按钮、开关、聚焦框统一走 accent。 */
   --primary: var(--accent);
   --primary-hover: var(--accent-deep);
@@ -193,6 +195,56 @@ button, input, select {
   background: #000000;
 }
 .brand-mark svg { display: block; width: 100%; height: 100%; }
+
+/* 信号流转：外圈节点逐个闪烁，绿色脉冲沿六条辐条依次汇入中心，中心节点在末尾应和。
+   周期 2400ms，相邻信号错开 120ms（与 icons.tsx 的 LOGO_SIGNAL_STEP_MS 对齐）；
+   每条脉冲约 420ms 走完全程，最后一个信号落下后中心闪一下，余下时间静默。 */
+.logo-mark .logo-signal {
+  stroke: var(--logo-signal);
+  /* pathLength=100 已归一化，9/91 即「9% 长的脉冲 + 91% 空档」。 */
+  stroke-dasharray: 9 91;
+  stroke-dashoffset: 100;
+  opacity: 0;
+  animation: logo-signal-flow 2400ms cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+@keyframes logo-signal-flow {
+  0% { stroke-dashoffset: 100; opacity: 0; }
+  3% { opacity: 1; }
+  17.5% { stroke-dashoffset: 0; opacity: 1; }
+  21% { stroke-dashoffset: 0; opacity: 0; }
+  100% { stroke-dashoffset: 0; opacity: 0; }
+}
+
+.logo-mark .logo-node {
+  animation: logo-node-blink 2400ms ease-in-out infinite;
+}
+
+@keyframes logo-node-blink {
+  0% { fill: #ffffff; }
+  3% { fill: var(--logo-signal); }
+  8% { fill: #ffffff; }
+  100% { fill: #ffffff; }
+}
+
+.logo-mark .logo-hub {
+  animation: logo-hub-flash 2400ms ease-in-out infinite;
+}
+
+@keyframes logo-hub-flash {
+  0%, 45% { fill: #ffffff; }
+  51% { fill: var(--logo-signal); }
+  58% { fill: #ffffff; }
+  100% { fill: #ffffff; }
+}
+
+/* 尊重系统的减少动态效果偏好：留住静态标识，不跑循环动画。 */
+@media (prefers-reduced-motion: reduce) {
+  .logo-mark .logo-signal,
+  .logo-mark .logo-node,
+  .logo-mark .logo-hub { animation: none; }
+}
+
 .brand-text { display: flex; flex-direction: column; line-height: 1.35; }
 .brand-text strong { font-size: 14px; font-weight: 600; letter-spacing: -0.005em; }
 .brand-text small { font-size: 11px; color: var(--muted); }
@@ -1664,4 +1716,93 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
   .modal-layer { padding: 12px; }
   .modal-grid { grid-template-columns: 1fr; }
   .modal-inline { flex-wrap: wrap; }
+}
+/* 规范 markdown 编辑器 */
+.spec-layout {
+  display: grid;
+  grid-template-columns: 214px minmax(0, 1fr);
+  gap: 18px;
+  padding-bottom: 20px;
+}
+.spec-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-right: 14px;
+  border-right: 1px solid var(--rule);
+  min-width: 0;
+}
+.spec-nav-group { display: flex; flex-direction: column; gap: 3px; }
+.spec-nav-title {
+  padding: 0 8px 3px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.spec-nav-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 9px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: none;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.spec-nav-item:hover { background: var(--raised); color: var(--text); }
+.spec-nav-item.active {
+  background: var(--pill-positive-bg);
+  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+  color: var(--text);
+  font-weight: 600;
+}
+.spec-nav-dot {
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.spec-panel { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.spec-panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.spec-panel-head h4 { font-size: 14px; font-weight: 600; }
+.spec-panel-head p { margin-top: 3px; font-size: 13px; color: var(--muted); }
+.spec-meta { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--muted); }
+.spec-unsaved { color: var(--pill-warning-ink); }
+.spec-textarea {
+  width: 100%;
+  min-height: 420px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--text);
+  font: 12px/1.7 var(--mono);
+  tab-size: 2;
+  resize: vertical;
+  outline: none;
+}
+.spec-textarea:focus { border-color: var(--accent); }
+.spec-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.spec-notice { display: flex; align-items: center; gap: 5px; font-size: 12px; }
+.spec-notice.ok { color: var(--pill-positive-ink); }
+.spec-notice.error { color: var(--negative); }
+
+@media (max-width: 940px) {
+  .spec-layout { grid-template-columns: 1fr; }
+  .spec-nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    padding-right: 0;
+    padding-bottom: 12px;
+    border-right: 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .spec-nav-group { flex-direction: row; flex-wrap: wrap; align-items: center; }
+  .spec-nav-title { padding: 0 4px; }
 }

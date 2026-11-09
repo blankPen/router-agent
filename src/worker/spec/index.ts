@@ -1,6 +1,5 @@
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
 import type { Attachment, Ticket } from '../../core/model.js'
+import { readWorkerSpec } from '../../specs/index.js'
 
 export type WorkerSpecMode = 'prompt' | 'agent'
 
@@ -18,12 +17,14 @@ export interface WorkerPromptInput {
   workdir?: string
   /** 发起人随消息发来的原始附件；默认取工单上的 attachments。 */
   attachments?: Attachment[]
+  /** 状态目录；传入后优先读 `<home>/specs/worker/` 下的覆盖文件。 */
+  home?: string
 }
 
 /** 注入给 worker 的完整手册（prompt 模式）或简短指令（agent 模式）。 */
 export function buildWorkerPrompt(input: WorkerPromptInput): string {
   const file = input.mode === 'agent' ? 'agent-mode.md' : 'prompt-mode.md'
-  const template = readSpec(file)
+  const template = readSpec(file, input.home)
   return render(template, {
     ticketId: input.ticket.id,
     title: input.ticket.title,
@@ -50,10 +51,12 @@ export interface WorkerContractInput {
   statePath: string
   eventsPath: string
   attachments?: Attachment[]
+  /** 状态目录；传入后优先读 `<home>/specs/worker/` 下的覆盖文件。 */
+  home?: string
 }
 
 export function buildNeutralContract(input: WorkerContractInput): string {
-  const template = readSpec('contract.md')
+  const template = readSpec('contract.md', input.home)
   return render(template, {
     ticketId: input.ticketId,
     title: input.title,
@@ -68,8 +71,8 @@ export function buildNeutralContract(input: WorkerContractInput): string {
   })
 }
 
-function readSpec(file: string): string {
-  return readFileSync(fileURLToPath(new URL(`./${file}`, import.meta.url)), 'utf8')
+function readSpec(file: string, home?: string): string {
+  return readWorkerSpec(home, file)
 }
 
 /**
@@ -94,13 +97,13 @@ function render(template: string, vars: Record<string, string>): string {
 }
 
 /** agent 模式的全局规范文件内容，供 `ra init` 写入 ~/.claude/agents/。 */
-export function agentSpecDocument(): string {
+export function agentSpecDocument(home?: string): string {
   return `---
 name: router-agent-worker
 description: router-agent 派出的工单 worker；按 router-agent 的状态上报协议工作
 tools: Read, Write, Edit, Bash, Glob, Grep
 ---
 
-${readSpec('prompt-mode.md')}
+${readSpec('prompt-mode.md', home)}
 `
 }
