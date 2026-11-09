@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -41,5 +41,45 @@ describe('飞书群名目录', () => {
     await dir.refresh({ run: async () => ({ code: 0, stdout: sample, stderr: '' }) })
     expect(await dir.refresh({ run: async () => ({ code: 1, stdout: '', stderr: 'boom' }) })).toBe(0)
     expect(dir.nameOf('oc_dev')).toBe('研发群')
+  })
+})
+
+describe('群名目录日志', () => {
+  function recorder() {
+    const logs: { level: string; message: string; extra?: Record<string, unknown> }[] = []
+    return {
+      logs,
+      logger: {
+        info: () => {},
+        warn: (message: string, extra?: Record<string, unknown>) => logs.push({ level: 'warn', message, ...(extra ? { extra } : {}) }),
+        error: () => {},
+      },
+    }
+  }
+
+  it('缓存文件损坏时记 chats:cache-invalid，目录按空处理', () => {
+    const file = join(mkdtempSync(join(tmpdir(), 'ra-dir-')), 'chats.json')
+    writeFileSync(file, '{broken', 'utf8')
+    const { logs, logger } = recorder()
+    const dir = new ChatDirectory(file, logger)
+    expect(dir.entries()).toEqual([])
+    expect(logs[0]?.message).toBe('chats:cache-invalid')
+  })
+
+  it('lark-cli 返回非 0 时记 chats:refresh-failed，旧值保留', async () => {
+    const file = join(mkdtempSync(join(tmpdir(), 'ra-dir-')), 'chats.json')
+    const { logs, logger } = recorder()
+    const dir = new ChatDirectory(file, logger)
+    expect(await dir.refresh({ run: async () => ({ code: 2, stdout: '', stderr: 'boom' }) })).toBe(0)
+    expect(logs[0]?.message).toBe('chats:refresh-failed')
+    expect(logs[0]?.extra?.code).toBe(2)
+  })
+
+  it('返回内容不是 JSON 时记 chats:parse-failed', async () => {
+    const file = join(mkdtempSync(join(tmpdir(), 'ra-dir-')), 'chats.json')
+    const { logs, logger } = recorder()
+    const dir = new ChatDirectory(file, logger)
+    expect(await dir.refresh({ run: async () => ({ code: 0, stdout: 'not-json', stderr: '' }) })).toBe(0)
+    expect(logs[0]?.message).toBe('chats:parse-failed')
   })
 })

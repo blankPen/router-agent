@@ -49,6 +49,7 @@ export async function simulate(
     const loop = new AgentLoop({
       engine,
       decisionEngine,
+      home: deps.home,
       batchWindowMs: 0,
       dispatch: dispatchSettingsOf(deps.config),
       replyAlwaysChats: replyAlwaysChatsOf(deps.config),
