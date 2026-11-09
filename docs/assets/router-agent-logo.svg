@@ -2,7 +2,7 @@
   <title>router-agent</title>
   <desc>中央节点向六个方向分发任务，表示 Router 把请求路由到多个独立 worktree。</desc>
 
-  <rect width="720" height="720" fill="#000000"/>
+  <rect width="720" height="720" rx="160" fill="#000000"/>
 
   <g fill="none" stroke="#FFFFFF" stroke-width="16">
     <path d="M360 168V289.5"/>
