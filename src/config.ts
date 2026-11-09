@@ -180,7 +180,7 @@ export interface AppConfig {
   retention: RetentionSettings
   workerSpec: { mode: WorkerSpecMode }
   worker: { tools: ToolPolicy }
-  backend: { default: string; options?: Record<string, unknown> }
+  runtime: { default: string; options?: Record<string, unknown> }
   server: { port: number }
   llm?: { baseUrl?: string; apiKey?: string; model?: string; temperature?: number; contextWindow?: number }
 }
@@ -260,7 +260,7 @@ export function defaultConfig(): AppConfig {
     },
     workerSpec: { mode: 'prompt' },
     worker: { tools: { ...DEFAULT_WORKER_TOOLS } },
-    backend: { default: 'orca' },
+    runtime: { default: 'orca' },
     server: { port: 3083 },
   }
 }
@@ -336,7 +336,7 @@ retention:
 workerSpec:
   mode: prompt         # prompt | agent
 
-backend:
+runtime:
   default: orca
 
 # 项目清单：开单前必须明确「哪个项目 + 哪个起始分支」
@@ -381,6 +381,9 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
     }
   }
 
+  // 旧版配置段名 backend 兼容：等价映射到 runtime，避免升级后静默丢失设置。
+  if (doc.runtime === undefined && doc.backend !== undefined) doc.runtime = doc.backend
+
   const acceptMode = pickAcceptMode(doc.policy?.acceptMode, base.policy.acceptMode)
   const mode = pickMode(doc.workerSpec?.mode, base.workerSpec.mode)
   const port = Number(doc.server?.port)
@@ -398,14 +401,14 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
     unlistedNotAddressed: pickAdmission(admissionDoc.unlistedNotAddressed, base.policy.admission.unlistedNotAddressed, ['inferred', 'ignore']) as never,
   }
 
-  // 安全参数只由 worker.tools 与 adapter 内置基线决定，不允许 backend.options 放宽。
-  if (doc.backend?.options && typeof doc.backend.options === 'object') {
+  // 安全参数只由 worker.tools 与 adapter 内置基线决定，不允许 runtime.options 放宽。
+  if (doc.runtime?.options && typeof doc.runtime.options === 'object') {
     const forbidden = new Set(['allowedTools', 'permissionMode', 'sandbox', 'shellAllow', 'allowNetwork', 'fileAccess'])
-    for (const [id, options] of Object.entries(doc.backend.options as Record<string, unknown>)) {
+    for (const [id, options] of Object.entries(doc.runtime.options as Record<string, unknown>)) {
       if (!options || typeof options !== 'object') continue
       const bad = Object.keys(options as Record<string, unknown>).filter(key => forbidden.has(key))
       if (bad.length > 0) {
-        throw new Error(`backend.options.${id} 不允许覆盖安全参数: ${bad.join(', ')}`)
+        throw new Error(`runtime.options.${id} 不允许覆盖安全参数: ${bad.join(', ')}`)
       }
     }
   }
@@ -459,9 +462,9 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
         allowNetwork: booleanOr(doc.worker?.tools?.allowNetwork, base.worker.tools.allowNetwork),
       },
     },
-    backend: {
-      default: stringOr(doc.backend?.default, base.backend.default),
-      ...(doc.backend?.options && typeof doc.backend.options === 'object' ? { options: doc.backend.options } : {}),
+    runtime: {
+      default: stringOr(doc.runtime?.default, base.runtime.default),
+      ...(doc.runtime?.options && typeof doc.runtime.options === 'object' ? { options: doc.runtime.options } : {}),
     },
     server: { port: Number.isFinite(port) && port >= 0 && port < 65536 ? port : base.server.port },
     ...(doc.llm ? { llm: doc.llm } : {}),
@@ -735,9 +738,9 @@ export function writeConfig(home: string, config: AppConfig): void {
     },
     workerSpec: { mode: config.workerSpec.mode },
     worker: { tools: config.worker.tools },
-    backend: {
-      default: config.backend.default,
-      ...(config.backend.options ? { options: config.backend.options } : {}),
+    runtime: {
+      default: config.runtime.default,
+      ...(config.runtime.options ? { options: config.runtime.options } : {}),
     },
     projects: config.projects,
     server: { port: config.server.port },
@@ -807,7 +810,7 @@ export function publicDefaults(): Record<string, unknown> {
     progress: base.progress,
     retention: base.retention,
     workerSpec: base.workerSpec,
-    backend: base.backend,
+    runtime: base.runtime,
     server: base.server,
   }
 }
@@ -929,7 +932,7 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
   'retention.sweepMinutes': intValue(1, 1_440, ' 分钟'),
 
   'workerSpec.mode': enumValue(WORKER_MODES),
-  'backend.default': enumValue(['orca']),
+  'runtime.default': enumValue(['orca']),
   'server.port': intValue(1, 65_535),
 
   'llm.baseUrl': stringValue,
@@ -1252,9 +1255,9 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
       config.server.port = v
       return true
     }
-    case 'backend.default':
+    case 'runtime.default':
       if (!value.trim()) return false
-      config.backend.default = value.trim()
+      config.runtime.default = value.trim()
       return true
     case 'llm.baseUrl':
     case 'llm.apiKey':

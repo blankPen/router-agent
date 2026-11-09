@@ -47,7 +47,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       const tickets = opts.store.listTickets({ limit: 500 })
       return respond(res, 200, {
         stage: 'running',
-        backend: config.backend.default,
+        runtime: config.runtime.default,
         tickets: {
           open: tickets.filter(t => t.stage !== 'closed').length,
           closed: tickets.filter(t => t.stage === 'closed').length,
@@ -117,7 +117,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         const handle = String((body as Record<string, unknown>).handle ?? '')
         const workdir = String((body as Record<string, unknown>).workdir ?? '')
         if (!handle) return respond(res, 400, { error: 'handle-required' })
-        const assignment = opts.engine.startAssignment(ticketId, { backendId: config.backend.default, handle, workdir })
+        const assignment = opts.engine.startAssignment(ticketId, { runtimeId: config.runtime.default, handle, workdir })
         return respond(res, 201, { assignment })
       }
       return respond(res, 405, { error: 'method-not-allowed' })

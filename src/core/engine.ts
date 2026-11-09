@@ -195,13 +195,13 @@ export class Engine {
     return { decision: record, acceptance, ticket, mandate }
   }
 
-  startAssignment(ticketId: string, opts: { backendId: string; handle: string; workdir: string }): Assignment {
+  startAssignment(ticketId: string, opts: { runtimeId: string; handle: string; workdir: string }): Assignment {
     this.requireTicket(ticketId)
     const now = this.clock.now()
     const assignment: Assignment = {
       id: this.ids.next('as'),
       ticketId,
-      backendId: opts.backendId,
+      runtimeId: opts.runtimeId,
       handle: opts.handle,
       workdir: opts.workdir,
       status: 'pending',

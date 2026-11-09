@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { rmSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Store } from '../../src/store/db.js'
@@ -59,7 +60,7 @@ const ticket: Ticket = {
 const assignment: Assignment = {
   id: 'as1',
   ticketId: 'tk1',
-  backendId: 'orca',
+  runtimeId: 'orca',
   handle: 'term-1',
   workdir: '/tmp/wt',
   status: 'running',
@@ -107,6 +108,32 @@ describe('Store', () => {
     expect(loaded.stage).toBe('review')
     expect(loaded.prNumber).toBe(9)
     s.close()
+  })
+
+  it('旧库的 backend_id 列自动迁移为 runtime_id', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ra-db-'))
+    const path = join(dir, 'ra.sqlite')
+    const legacy = new DatabaseSync(path)
+    legacy.exec(`
+      CREATE TABLE assignments (
+        id TEXT PRIMARY KEY,
+        ticket_id TEXT NOT NULL,
+        backend_id TEXT NOT NULL,
+        handle TEXT NOT NULL,
+        workdir TEXT NOT NULL,
+        status TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        ended_at TEXT
+      );
+      INSERT INTO assignments VALUES
+        ('as1', 'tk1', 'claude-cli', 'h1', '/tmp/wt', 'running', '2026-11-06T10:00:02.000Z', NULL);
+    `)
+    legacy.close()
+
+    const s = new Store(path)
+    expect(s.getAssignment('as1')).toMatchObject({ runtimeId: 'claude-cli', handle: 'h1' })
+    s.close()
+    rmSync(dir, { recursive: true, force: true })
   })
 
   it('派工、报告与投递记录可以按工单取回，seq 单调递增', () => {

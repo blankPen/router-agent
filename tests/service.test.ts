@@ -19,7 +19,7 @@ import type {
 import type { DecisionEngine, DecisionEngineResult, DecisionRequest } from '../src/router/decision-engine.js'
 import type { Trigger } from '../src/core/model.js'
 
-class FakeBackend implements WorkerRuntime {
+class FakeRuntime implements WorkerRuntime {
   readonly id = 'orca'
   readonly capabilities = {
     agent: { liveStatus: true, processExit: false, output: true, activity: true, structuredInput: true, nudge: true },
@@ -110,8 +110,8 @@ class AcceptEngine implements DecisionEngine {
   }
 }
 
-/** 第一次派工失败、之后成功的后端，用来验证「失败 → 用户回复 → 重派」闭环。 */
-class FlakyBackend extends FakeBackend {
+/** 第一次派工失败、之后成功的运行时，用来验证「失败 → 用户回复 → 重派」闭环。 */
+class FlakyRuntime extends FakeRuntime {
   failures = 0
   constructor(private readonly failTimes = 1) {
     super()
@@ -165,7 +165,7 @@ function makeTrigger(over: Partial<Trigger> = {}): Trigger {
 describe('RouterService 编排', () => {
   let store: Store
   let engine: Engine
-  let backend: FakeBackend
+  let runtime: FakeRuntime
   let prTracker: FakePrTracker
   let config: AppConfig
   let service: RouterService
@@ -181,10 +181,10 @@ describe('RouterService 编排', () => {
     config.feishu = { ...config.feishu, chats: [chatEntry('oc_dev')], allowed: ['ou_alice'] }
     let n = 0
     engine = new Engine({ store, policy: policyOf(config), clock: { now: () => '2026-11-06T10:00:00.000Z' }, ids: { next: p => `${p}_${++n}` } })
-    backend = new FakeBackend()
+    runtime = new FakeRuntime()
     prTracker = new FakePrTracker()
     service = new RouterService({
-      config, store, engine, backend, decisionEngine: new AcceptEngine(), prTracker,
+      config, store, engine, runtime, decisionEngine: new AcceptEngine(), prTracker,
       clock: { now: () => '2026-11-06T10:00:10.000Z' },
       logger: {
         info: (message, extra) => logs.push({ level: 'info', message, ...(extra ? { extra } : {}) }),
@@ -199,12 +199,12 @@ describe('RouterService 编排', () => {
     engine.ingest(makeTrigger())
     await service.runOnce()
 
-    expect(backend.starts).toHaveLength(1)
+    expect(runtime.starts).toHaveLength(1)
     const ticket = store.listTickets()[0]!
-    // 派工所需的项目与起始分支随工单一起落库，并交给 backend
+    // 派工所需的项目与起始分支随工单一起落库，并交给 runtime
     expect(ticket.repo).toBe('acme/web')
     expect(ticket.branch).toBe('main')
-    expect(backend.starts[0]?.ticket).toMatchObject({ repo: 'acme/web', branch: 'main' })
+    expect(runtime.starts[0]?.ticket).toMatchObject({ repo: 'acme/web', branch: 'main' })
     const assignment = store.latestAssignment(ticket.id)!
     expect(assignment.handle).toBe('term-1')
     expect(assignment.status).toBe('pending')
@@ -217,7 +217,7 @@ describe('RouterService 编排', () => {
     engine.ingest(makeTrigger({ id: 't2', externalId: 'e2', threadId: 'feishu:oc_dev:om_root2', text: '再修一个分页 bug' }))
 
     await service.runOnce()
-    expect(backend.starts).toHaveLength(1)
+    expect(runtime.starts).toHaveLength(1)
 
     // 让第一个 worker 结束，队列里的第二个才会启动
     const first = store.listTickets()[0]!
@@ -234,13 +234,13 @@ describe('RouterService 编排', () => {
       updatedAt: '2026-11-06T10:01:00.000Z',
     })
     await service.runOnce()
-    expect(backend.starts.length).toBe(2)
+    expect(runtime.starts.length).toBe(2)
   })
 
   it('派工失败：转人工释放并发、记录完整失败日志并回贴话题', async () => {
-    const flaky = new FlakyBackend(99)
+    const flaky = new FlakyRuntime(99)
     service = new RouterService({
-      config, store, engine, backend: flaky, decisionEngine: new AcceptEngine(), prTracker,
+      config, store, engine, runtime: flaky, decisionEngine: new AcceptEngine(), prTracker,
       clock: { now: () => '2026-11-06T10:00:10.000Z' },
       logger: {
         info: (message, extra) => logs.push({ level: 'info', message, ...(extra ? { extra } : {}) }),
@@ -272,9 +272,9 @@ describe('RouterService 编排', () => {
   it('派工失败不会永久占用并发，后续工单能正常派出去', async () => {
     config.policy.maxWorkers = 1
     engine.updatePolicy(policyOf(config))
-    const flaky = new FlakyBackend(1)
+    const flaky = new FlakyRuntime(1)
     service = new RouterService({
-      config, store, engine, backend: flaky, decisionEngine: new AcceptEngine(), prTracker,
+      config, store, engine, runtime: flaky, decisionEngine: new AcceptEngine(), prTracker,
       clock: { now: () => '2026-11-06T10:00:10.000Z' },
       logger: {
         info: (message, extra) => logs.push({ level: 'info', message, ...(extra ? { extra } : {}) }),
@@ -302,7 +302,7 @@ describe('RouterService 编排', () => {
 
     await service.runOnce()
 
-    expect(backend.starts).toHaveLength(1)
+    expect(runtime.starts).toHaveLength(1)
     expect(logs.some(entry => entry.message === 'launch:queued')).toBe(true)
     const outbox = store.claimOutbox('2026-11-06T10:10:00.000Z', 20)
     expect(outbox.some(item => item.text.includes('已排队'))).toBe(true)
@@ -311,9 +311,9 @@ describe('RouterService 编排', () => {
   it('派工失败后，用户回复会重新派工；没有新输入时不会反复重试', async () => {
     config.policy.maxWorkers = 1
     engine.updatePolicy(policyOf(config))
-    const flaky = new FlakyBackend(1)
+    const flaky = new FlakyRuntime(1)
     service = new RouterService({
-      config, store, engine, backend: flaky, decisionEngine: new AcceptEngine(), prTracker,
+      config, store, engine, runtime: flaky, decisionEngine: new AcceptEngine(), prTracker,
       clock: { now: () => '2026-11-06T10:00:10.000Z' },
       logger: {
         info: (message, extra) => logs.push({ level: 'info', message, ...(extra ? { extra } : {}) }),
@@ -342,14 +342,14 @@ describe('RouterService 编排', () => {
   it('服务重启后，失败前积压的旧输入不会再触发重试（水位持久化）', async () => {
     config.policy.maxWorkers = 1
     engine.updatePolicy(policyOf(config))
-    const flaky = new FlakyBackend(99)
+    const flaky = new FlakyRuntime(99)
     const logger = {
       info: (message: string, extra?: Record<string, unknown>) => logs.push({ level: 'info', message, ...(extra ? { extra } : {}) }),
       warn: (message: string, extra?: Record<string, unknown>) => logs.push({ level: 'warn', message, ...(extra ? { extra } : {}) }),
       error: (message: string, extra?: Record<string, unknown>) => logs.push({ level: 'error', message, ...(extra ? { extra } : {}) }),
     }
     const build = () => new RouterService({
-      config, store, engine, backend: flaky, decisionEngine: new AcceptEngine(), prTracker,
+      config, store, engine, runtime: flaky, decisionEngine: new AcceptEngine(), prTracker,
       clock: { now: () => '2026-11-06T10:00:10.000Z' },
       logger,
       agentLoopOptions: { batchWindowMs: 0 },
@@ -459,14 +459,14 @@ describe('RouterService 编排', () => {
     const first = store.latestAssignment(ticket.id)!
 
     // handle 仍然在线：不重开
-    backend.handles.set(first.handle, true)
+    runtime.handles.set(first.handle, true)
     await service.recover()
-    expect(backend.starts).toHaveLength(1)
+    expect(runtime.starts).toHaveLength(1)
 
     // handle 丢失：不偷偷重开新会话，直接转人工
-    backend.handles.delete(first.handle)
+    runtime.handles.delete(first.handle)
     await service.recover()
-    expect(backend.starts).toHaveLength(1)
+    expect(runtime.starts).toHaveLength(1)
     expect(store.latestAssignment(ticket.id)?.status).toBe('ended')
     expect(store.getTicket(ticket.id)?.stage).toBe('person')
 
@@ -481,7 +481,7 @@ describe('RouterService 编排', () => {
     const assignment = store.latestAssignment(ticket.id)!
 
     engine.deliverInput(ticket.id, { kind: 'followup', text: '继续补充一下' })
-    backend.handles.delete(assignment.handle)
+    runtime.handles.delete(assignment.handle)
     await service.runOnce()
 
     expect(store.getTicket(ticket.id)?.stage).toBe('person')
@@ -490,9 +490,9 @@ describe('RouterService 编排', () => {
     expect(outbox.filter(item => item.text.includes('意外删除'))).toHaveLength(1)
 
     // 下一轮不再尝试投递，也不会重复通知
-    const before = backend.delivered.length
+    const before = runtime.delivered.length
     await service.runOnce()
-    expect(backend.delivered.length).toBe(before)
+    expect(runtime.delivered.length).toBe(before)
     expect(store.claimOutbox('2026-11-06T10:11:00.000Z', 20).filter(item => item.text.includes('意外删除'))).toHaveLength(0)
   })
 
@@ -504,7 +504,7 @@ describe('RouterService 编排', () => {
 
     service.stopTicket(ticket.id, '人工停止')
     await service.runOnce()
-    expect(backend.stopped).toContain(assignment.handle)
+    expect(runtime.stopped).toContain(assignment.handle)
     expect(store.getTicket(ticket.id)?.stage).toBe('closed')
   })
 
@@ -515,7 +515,7 @@ describe('RouterService 编排', () => {
 
     service.engine.deliverInput(ticket.id, { kind: 'followup', text: '顺便补个测试' })
     await service.runOnce()
-    expect(backend.delivered.some(d => d.text.includes('补个测试'))).toBe(true)
+    expect(runtime.delivered.some(d => d.text.includes('补个测试'))).toBe(true)
     expect(store.pendingInputs(ticket.id)).toHaveLength(0)
   })
 
@@ -526,7 +526,7 @@ describe('RouterService 编排', () => {
     const assignment = store.latestAssignment(ticket.id)!
     const sender = new FakeSender()
     const svc = new RouterService({
-      config, store, engine, backend, decisionEngine: new AcceptEngine(), prTracker,
+      config, store, engine, runtime, decisionEngine: new AcceptEngine(), prTracker,
       clock: { now: () => '2026-11-06T10:00:10.000Z' },
       logger: { info: () => {}, warn: () => {}, error: () => {} },
       sender,
@@ -553,7 +553,7 @@ describe('RouterService 编排', () => {
     const assignment = store.latestAssignment(ticket.id)!
     const sender = new FakeSender()
     const svc = new RouterService({
-      config, store, engine, backend, decisionEngine: new AcceptEngine(), prTracker,
+      config, store, engine, runtime, decisionEngine: new AcceptEngine(), prTracker,
       clock: { now: () => '2026-11-06T10:00:10.000Z' },
       logger: { info: () => {}, warn: () => {}, error: () => {} },
       sender,
@@ -597,7 +597,7 @@ describe('RouterService 编排', () => {
     const assignment = store.latestAssignment(ticket.id)!
     const sender = new FakeSender()
     const svc = new RouterService({
-      config, store, engine, backend, decisionEngine: new AcceptEngine(), prTracker,
+      config, store, engine, runtime, decisionEngine: new AcceptEngine(), prTracker,
       clock: { now: () => '2026-11-06T10:00:10.000Z' },
       logger: { info: () => {}, warn: () => {}, error: () => {} },
       sender,
@@ -640,7 +640,7 @@ describe('RouterService 编排', () => {
     const assignment = store.latestAssignment(ticket.id)!
     const sender = new FakeSender()
     const svc = new RouterService({
-      config, store, engine, backend, decisionEngine: new AcceptEngine(), prTracker,
+      config, store, engine, runtime, decisionEngine: new AcceptEngine(), prTracker,
       clock: { now: () => '2026-11-06T10:00:10.000Z' },
       logger: { info: () => {}, warn: () => {}, error: () => {} },
       sender,
@@ -734,7 +734,7 @@ describe('RouterService 编排', () => {
         branch: 'main',
       })
       const ticket = outcome.ticket!
-      const assignment = engine.startAssignment(ticket.id, { backendId: 'orca', handle: 'term-1', workdir: '/tmp/tk-1' })
+      const assignment = engine.startAssignment(ticket.id, { runtimeId: 'orca', handle: 'term-1', workdir: '/tmp/tk-1' })
       if (opts.prState === 'open') {
         engine.updatePr(ticket.id, { number: 1, url: 'https://github.com/o/r/pull/1', state: 'open' })
       }
@@ -771,8 +771,8 @@ describe('RouterService 编排', () => {
 
       // 关闭后由 Effects 回收 workspace
       await service.runOnce()
-      expect(backend.stopped).toContain('term-1')
-      expect(backend.removed).toContain('path:/tmp/tk-1')
+      expect(runtime.stopped).toContain('term-1')
+      expect(runtime.removed).toContain('path:/tmp/tk-1')
     })
 
     it('提醒还没发出去时不会自动关闭，避免用户没看到通知就被关单', async () => {
@@ -797,8 +797,8 @@ describe('RouterService 编排', () => {
 
     it('执行中 6 小时无上报且终端无输出：转人工，不自动关闭', async () => {
       const ticketId = seed({ state: 'progress' })
-      backend.handles.set('term-1', true)
-      backend.outputAt = '2026-11-06T10:00:00.000Z'
+      runtime.handles.set('term-1', true)
+      runtime.outputAt = '2026-11-06T10:00:00.000Z'
 
       await service.sweepRetention(T0 + 6 * HOUR + 1000)
       expect(store.getTicket(ticketId)?.stage).toBe('person')
@@ -832,7 +832,7 @@ describe('RouterService 编排', () => {
 
     it('workspace 有未提交改动时不强删，并通知人工处理', async () => {
       const ticketId = seed()
-      backend.removeError = 'worktree has uncommitted changes'
+      runtime.removeError = 'worktree has uncommitted changes'
 
       await service.sweepRetention(T0 + 24 * HOUR + 1000)
       await service.runOnce()
@@ -840,7 +840,7 @@ describe('RouterService 编排', () => {
       expect(store.getTicket(ticketId)?.stage).toBe('closed')
 
       await service.runOnce()
-      expect(backend.removed).toHaveLength(0)
+      expect(runtime.removed).toHaveLength(0)
       expect(store.listOutbox(50).some(item => item.text.includes('未能自动回收'))).toBe(true)
     })
   })
@@ -857,7 +857,7 @@ describe('会话文件清理', () => {
       config,
       store,
       engine,
-      backend: new FakeBackend(),
+      runtime: new FakeRuntime(),
       decisionEngine: new AcceptEngine(),
       prTracker: new FakePrTracker(),
       clock: { now: () => '2026-11-20T00:00:00.000Z' },

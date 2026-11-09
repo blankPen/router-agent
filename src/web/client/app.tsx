@@ -90,7 +90,7 @@ interface ChatDraft {
 
 interface ServiceStatus {
   stage: string
-  backend: string
+  runtime: string
   tickets: { open: number; closed: number; byStage: Record<string, number> }
   now: string
 }
@@ -315,7 +315,7 @@ function App(): JSX.Element {
           <span className={`status-dot ${live ? 'live' : ''}`} />
           <span className="sidebar-status">
             <strong>{live ? '服务运行中' : status?.stage ?? '未连接'}</strong>
-            <small>{status?.backend ? `后端 ${status.backend}` : 'router-agent'}</small>
+            <small>{status?.runtime ? `运行时 ${status.runtime}` : 'router-agent'}</small>
           </span>
         </div>
       </aside>
@@ -1199,7 +1199,7 @@ function SourcesView(): JSX.Element {
     { label: '服务状态', value: status?.stage === 'running' ? '运行中' : status?.stage ?? '—', tone: status?.stage === 'running' ? 'ok' : 'muted' },
     { label: '开放工单', value: String(status?.tickets.open ?? 0), tone: 'ink' },
     { label: '已关闭', value: String(status?.tickets.closed ?? 0), tone: 'muted' },
-    { label: 'Worker 后端', value: status?.backend ?? '—', tone: 'ink' },
+    { label: 'Worker 运行时', value: status?.runtime ?? '—', tone: 'ink' },
   ]
 
   return (

@@ -182,7 +182,7 @@ export const SECTIONS: SectionDef[] = [
     description: 'Worker 执行方式、监听端口与模型接入。模型密钥不在此处展示，请用 CLI / 环境变量配置。',
     fields: [
       { path: 'workerSpec.mode', label: 'Worker 规格模式', kind: 'select', options: WORKER_MODE_OPTIONS },
-      { path: 'backend.default', label: 'Worker 后端', kind: 'select', options: [{ value: 'orca', label: 'orca' }] },
+      { path: 'runtime.default', label: 'Worker 运行时', kind: 'select', options: [{ value: 'orca', label: 'orca' }] },
       { path: 'server.port', label: '面板端口', kind: 'number', min: 1, max: 65_535, unit: '端口' },
       { path: 'llm.baseUrl', label: '模型 Base URL', kind: 'text', placeholder: '留空 = 复用 ~/.trove/config.json' },
       { path: 'llm.model', label: '模型名', kind: 'text', placeholder: '例如 deepseek-v4-flash' },

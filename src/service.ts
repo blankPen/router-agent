@@ -12,7 +12,7 @@ import type { DecisionAudit, DecisionEngine } from './router/decision-engine.js'
 import { dispatchSettingsOf } from './router/dispatch.js'
 import { ReportPoller, appendEvent, type WorkerMeta, type WorkerStateFile } from './worker/report-poller.js'
 import { classifyAgentStatus } from './worker/status.js'
-import { BackendRegistry } from './worker/registry.js'
+import { RuntimeRegistry } from './worker/registry.js'
 import { buildNeutralContract, buildWorkerPrompt } from './worker/spec/index.js'
 import { workBranch } from './worker/naming.js'
 import { EffectsProcessor } from './core/effects.js'
@@ -40,9 +40,9 @@ export interface RouterServiceOptions {
   config: AppConfig
   store: Store
   engine: Engine
-  backend: WorkerRuntime
-  /** 多后端注册表；不传时退化为只含 backend 的单后端注册表。 */
-  backends?: BackendRegistry
+  runtime: WorkerRuntime
+  /** 多运行时注册表；不传时退化为只含 runtime 的单运行时注册表。 */
+  runtimes?: RuntimeRegistry
   /** 唯一研判引擎（Pi）。 */
   decisionEngine: DecisionEngine
   prTracker: PrTracker
@@ -441,7 +441,7 @@ export class RouterService {
   readonly loop: AgentLoop
   readonly config: AppConfig
   private decisionEngine: DecisionEngine
-  private backends: BackendRegistry
+  private runtimes: RuntimeRegistry
   private clock: Clock
   private logger: Logger
   private poller: { scan(): number; reset?: () => void }
@@ -486,7 +486,7 @@ export class RouterService {
     this.store = opts.store
     this.engine = opts.engine
     this.config = opts.config
-    this.backends = opts.backends ?? new BackendRegistry(new Map([[opts.backend.id, opts.backend]]), opts.backend.id)
+    this.runtimes = opts.runtimes ?? new RuntimeRegistry(new Map([[opts.runtime.id, opts.runtime]]), opts.runtime.id)
     this.clock = opts.clock ?? { now: () => new Date().toISOString() }
     this.logger = opts.logger ?? noopLogger
     this.prTracker = opts.prTracker
@@ -539,8 +539,8 @@ export class RouterService {
       const ticketId = String(payload.ticketId ?? '')
       const assignment = this.store.latestAssignment(ticketId)
       if (!assignment?.handle) return
-      const backend = this.backendFor(assignment)
-      await backend.stop(this.refOf(assignment), 'ticket-stopped')
+      const runtime = this.runtimeFor(assignment)
+      await runtime.stop(this.refOf(assignment), 'ticket-stopped')
       this.log('worker:stopped', ticketId, { handle: assignment.handle })
     })
     effects.register('launch-worker', async payload => {
@@ -553,7 +553,7 @@ export class RouterService {
     })
   }
 
-  /** 把 Assignment 折成后端可消费的中立引用。 */
+  /** 把 Assignment 折成运行时可消费的中立引用。 */
   private refOf(assignment: Assignment): WorkerRef {
     return {
       handle: assignment.handle,
@@ -566,17 +566,17 @@ export class RouterService {
     return { ticketId: assignment.ticketId, workdir: assignment.workdir }
   }
 
-  /** 按 assignment 的 backendId 取后端；旧工单不会被新默认后端接管。 */
-  private backendFor(assignment: Assignment): WorkerRuntime {
-    return this.backends.get(assignment.backendId)
+  /** 按 assignment 的 runtimeId 取运行时；旧工单不会被新默认运行时接管。 */
+  private runtimeFor(assignment: Assignment): WorkerRuntime {
+    return this.runtimes.get(assignment.runtimeId)
   }
 
   /** 读一次中立活性；没有能力或查询失败时返回 null。 */
   private async statusOf(assignment: Assignment): Promise<AgentStatus | null> {
-    const backend = this.backendFor(assignment)
-    if (!backend.status) return null
+    const runtime = this.runtimeFor(assignment)
+    if (!runtime.status) return null
     try {
-      return await backend.status(this.refOf(assignment))
+      return await runtime.status(this.refOf(assignment))
     } catch {
       return null
     }
@@ -736,14 +736,14 @@ export class RouterService {
   }
 
   private async launch(ticket: Ticket): Promise<Assignment> {
-    // 旧工单沿用创建时的后端；新工单用默认后端。
+    // 旧工单沿用创建时的运行时；新工单用默认运行时。
     const latest = this.store.latestAssignment(ticket.id)
-    const backendId = latest?.backendId && this.backends.has(latest.backendId)
-      ? latest.backendId
-      : this.backends.default().id
-    const backend = this.backends.get(backendId)
+    const runtimeId = latest?.runtimeId && this.runtimes.has(latest.runtimeId)
+      ? latest.runtimeId
+      : this.runtimes.default().id
+    const runtime = this.runtimes.get(runtimeId)
     const assignment = this.engine.startAssignment(ticket.id, {
-      backendId,
+      runtimeId,
       handle: '',
       workdir: '',
     })
@@ -757,7 +757,7 @@ export class RouterService {
     const statePath = join(workerDir, 'state.json')
     const eventsPath = join(workerDir, 'events.log')
     const branchName = workBranch(ticket)
-    const contract = backend.id === 'orca'
+    const contract = runtime.id === 'orca'
       ? buildWorkerPrompt({
           mode: this.config.workerSpec.mode,
           ticket,
@@ -795,7 +795,7 @@ export class RouterService {
       tools: this.config.worker.tools,
     }
     try {
-      const started = await backend.start(ctx)
+      const started = await runtime.start(ctx)
       const updated: Assignment = { ...assignment, handle: started.handle, workdir: started.workdir }
       this.store.updateAssignment(updated)
       this.engine.refreshStage(ticket.id)
@@ -920,7 +920,7 @@ export class RouterService {
       const batch = [...unacked, ...pending.filter(item => !unacked.some(u => u.id === item.id))]
       try {
         // 用 input.id（而不是 assignmentId:seq）作为投递 id：worker 会原样写进 acked_inputs。
-        const backend = this.backendFor(assignment)
+        const runtime = this.runtimeFor(assignment)
         const lastId = batch.at(-1)?.id
         const attempt = lastId ? (this.deliveryAttempts.get(lastId) ?? 0) + 1 : 1
         if (lastId) this.deliveryAttempts.set(lastId, attempt)
@@ -930,14 +930,14 @@ export class RouterService {
           this.logger.warn('input:redeliver-giveup', { ticketId: ticket.id, inputId: lastId, attempt })
           continue
         }
-        const receipt = await backend.deliver(
+        const receipt = await runtime.deliver(
           this.refOf(assignment),
           batch.map(input => ({ id: input.id, kind: input.kind, text: input.text })),
           { attempt, redeliver: attempt > 1 },
         )
         if (receipt.status === 'queued') {
           this.deliveryCooldown.set(ticket.id, nowMs + 30_000)
-          this.log('input:queued', ticket.id, { count: batch.length, reason: receipt.reason ?? 'backend-busy' })
+          this.log('input:queued', ticket.id, { count: batch.length, reason: receipt.reason ?? 'runtime-busy' })
           continue
         }
         if (receipt.status === 'rejected') {
@@ -996,15 +996,15 @@ export class RouterService {
 
   /**
    * 用中立 AgentStatus 判断 worker 是否空闲：
-   * 长时间无活动 → nudge（仅支持的后端）；仍然无响应 → 标 stale 并通知人。
+   * 长时间无活动 → nudge（仅支持的运行时）；仍然无响应 → 标 stale 并通知人。
    */
   async checkIdle(nowMs: number = Date.parse(this.clock.now())): Promise<void> {
     for (const ticket of this.store.listOpenTickets()) {
       if (ticket.stage !== 'running' && ticket.stage !== 'assigned') continue
       const assignment = this.store.latestAssignment(ticket.id)
       if (!assignment?.handle || assignment.status === 'ended') continue
-      const backend = this.backendFor(assignment)
-      if (!backend.status) continue
+      const runtime = this.runtimeFor(assignment)
+      if (!runtime.status) continue
       const status = await this.statusOf(assignment)
       const verdict = classifyAgentStatus(status)
       if (verdict === 'unknown') continue
@@ -1049,12 +1049,12 @@ export class RouterService {
       if (!Number.isFinite(lastActivity) || nowMs - lastActivity <= this.idleAfterMs) continue
 
       if (!current.nudgedAt) {
-        if (backend.nudge) {
-          await backend.nudge(this.refOf(assignment))
+        if (runtime.nudge) {
+          await runtime.nudge(this.refOf(assignment))
           current.nudgedAt = nowMs
           this.log('idle:nudge', ticket.id, { handle: assignment.handle })
         } else if (nowMs - lastActivity > this.idleAfterMs + this.staleAfterMs) {
-          // 没有唤醒能力的后端（Claude/Codex）：直接按活动时间判 stale。
+          // 没有唤醒能力的运行时（Claude/Codex）：直接按活动时间判 stale。
           this.markIdleStale(ticket, nowMs)
         }
         continue
@@ -1174,8 +1174,8 @@ export class RouterService {
     const assignment = this.store.latestAssignment(ticket.id)
     if (!assignment || assignment.status === 'ended') return false
     if (nowMs - this.lastProgressAt(ticket) < zombieMs) return false
-    const backend = this.backendFor(assignment)
-    if (!assignment.handle || !backend.status) return false
+    const runtime = this.runtimeFor(assignment)
+    if (!assignment.handle || !runtime.status) return false
     const status = await this.statusOf(assignment)
     const verdict = classifyAgentStatus(status)
     if (verdict === 'unknown') return false
@@ -1315,10 +1315,10 @@ export class RouterService {
     const ticket = this.store.getTicket(ticketId)
     const assignment = this.store.latestAssignment(ticketId)
     if (!assignment) return
-    const backend = this.backendFor(assignment)
+    const runtime = this.runtimeFor(assignment)
     if (assignment.handle) {
       try {
-        await backend.stop(this.refOf(assignment), 'workspace-cleanup')
+        await runtime.stop(this.refOf(assignment), 'workspace-cleanup')
       } catch (error) {
         this.logger.warn('cleanup:stop-failed', {
           ticketId,
@@ -1328,13 +1328,13 @@ export class RouterService {
       }
     }
     if (!assignment.workdir) return
-    if (!backend.removeWorkspace) {
+    if (!runtime.removeWorkspace) {
       this.log('cleanup:no-remove-capability', ticketId, { workdir: assignment.workdir })
       return
     }
     try {
       // 不带 force：脏工作区交给 provider 拒绝，避免误删未提交改动。
-      await backend.removeWorkspace(this.workspaceRefOf(assignment))
+      await runtime.removeWorkspace(this.workspaceRefOf(assignment))
       this.log('cleanup:worktree-removed', ticketId, { workdir: assignment.workdir })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -1512,8 +1512,8 @@ export class RouterService {
     const assignment = this.store.latestAssignment(ticket.id)
     if (!assignment?.handle || assignment.status === 'ended') return
     if (!this.awaitingWorker(ticket)) return
-    const backend = this.backendFor(assignment)
-    if (!backend.activity && !backend.output) return
+    const runtime = this.runtimeFor(assignment)
+    if (!runtime.activity && !runtime.output) return
 
     const lastProgress = this.lastProgressAt(ticket)
     if (!lastProgress || nowMs - lastProgress < this.progressSilenceMs) return
@@ -1527,8 +1527,8 @@ export class RouterService {
     if (status?.phase === 'blocked') return
 
     // 首选 Agent 自己的结构化会话记录；没有（非 Claude / 文件未落盘）再退回输出尾部。
-    const snapshot = assignment.workdir && backend.activity
-      ? await backend.activity({ ref: this.refOf(assignment), opts: { maxEvents: 40 } })
+    const snapshot = assignment.workdir && runtime.activity
+      ? await runtime.activity({ ref: this.refOf(assignment), opts: { maxEvents: 40 } })
       : null
     let snippet: string
     let source: 'session' | 'terminal'
@@ -1538,8 +1538,8 @@ export class RouterService {
       source = 'session'
       lastActivityAt = Date.parse(snapshot.at)
     } else {
-      if (!backend.output) return
-      const output = await backend.output(this.refOf(assignment), { limit: 60 })
+      if (!runtime.output) return
+      const output = await runtime.output(this.refOf(assignment), { limit: 60 })
       if (!output || output.status !== 'running') return
       snippet = extractTerminalSnippet(output.lines)
       source = 'terminal'
@@ -1631,15 +1631,15 @@ export class RouterService {
         const assignment = this.store.latestAssignment(ticket.id)
         // 派工已结束或 worktree 被删时 provider 会返回 not-found，静默跳过，不要每 5 秒刷错误。
         if (assignment?.workdir && assignment.status !== 'ended') {
-          const backend = this.backendFor(assignment)
+          const runtime = this.runtimeFor(assignment)
           // 本地路径仓库先解析成 owner/repo，否则 gh --repo 会失败。
-          if ((repo.startsWith('/') || repo.startsWith('path:')) && backend.repoSlug) {
-            const slug = await backend.repoSlug(this.refOf(assignment)).catch(() => null)
+          if ((repo.startsWith('/') || repo.startsWith('path:')) && runtime.repoSlug) {
+            const slug = await runtime.repoSlug(this.refOf(assignment)).catch(() => null)
             if (slug) repo = slug
           }
-          if (backend.inspectWorkspace) {
+          if (runtime.inspectWorkspace) {
             try {
-              const workspace = await backend.inspectWorkspace(this.workspaceRefOf(assignment))
+              const workspace = await runtime.inspectWorkspace(this.workspaceRefOf(assignment))
               branch = workspace?.branch ?? ''
               const linked = workspace?.linkedPr
               if (linked && linked.number > 0) {
@@ -1655,7 +1655,7 @@ export class RouterService {
         }
       }
 
-      // 双保险之二：按实际工作分支反查 PR（没有 linkedPR 的后端）。
+      // 双保险之二：按实际工作分支反查 PR（没有 linkedPR 的运行时）。
       if (!prNumber && branch && repo) {
         const found = await this.prTracker.findByBranch(repo, branch)
         if (found) {
@@ -1689,8 +1689,8 @@ export class RouterService {
   async recover(): Promise<void> {
     for (const ticket of this.store.listOpenTickets()) {
       const assignment = this.store.latestAssignment(ticket.id)
-      const backend = assignment ? this.backendFor(assignment) : null
-      if (assignment && assignment.status !== 'ended' && assignment.handle && backend?.status) {
+      const runtime = assignment ? this.runtimeFor(assignment) : null
+      if (assignment && assignment.status !== 'ended' && assignment.handle && runtime?.status) {
         const status = await this.statusOf(assignment)
         const verdict = classifyAgentStatus(status)
         if (verdict === 'unknown') continue
@@ -1724,8 +1724,8 @@ export class RouterService {
 
   /** 只把「确认丢失/不可恢复」判为 gone；查询失败不误杀。 */
   private async workerGone(assignment: Assignment): Promise<boolean> {
-    const backend = this.backendFor(assignment)
-    if (!backend.status) return false
+    const runtime = this.runtimeFor(assignment)
+    if (!runtime.status) return false
     const status = await this.statusOf(assignment)
     const verdict = classifyAgentStatus(status)
     return verdict === 'lost' || verdict === 'transfer'
@@ -1799,7 +1799,7 @@ export class RouterService {
 export interface CreateServiceDeps {
   config: AppConfig
   runner: CommandRunner
-  backend: WorkerRuntime
+  runtime: WorkerRuntime
   prTracker: GhTracker
   sender: FeishuOutbound
   logger: Logger
@@ -1873,7 +1873,7 @@ interface ProviderFailureDetail {
 }
 
 /**
- * 把后端抛出的错误整理成可读、可审计的结构。
+ * 把运行时抛出的错误整理成可读、可审计的结构。
  * Orca 在 `--json` 模式下把错误体写在 stdout，stderr 通常为空；
  * 只取 stderr 会得到没有信息量的 `code=1`。
  */

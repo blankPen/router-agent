@@ -22,7 +22,7 @@ export function parseCreateResult(stdout) {
     const workdir = result.worktree?.path ?? result.worktreePath ?? result.path;
     return workdir ? { handle: String(handle), workdir: String(workdir) } : { handle: String(handle) };
 }
-export class OrcaAdapter {
+export class OrcaRuntime {
     id = 'orca';
     runner;
     workersDir;
@@ -115,7 +115,7 @@ export class OrcaAdapter {
             eventsPath: extra.eventsPath,
             repo: extra.repo,
             branch: extra.branch,
-            backend: this.id,
+            runtime: this.id,
             startedAt: new Date().toISOString(),
         };
         writeFileSync(metaPath, `${JSON.stringify(meta, null, 2)}\n`, 'utf8');

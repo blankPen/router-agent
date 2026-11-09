@@ -1,12 +1,12 @@
 import type { Assignment, InputKind, Ticket } from '../core/model.js'
 
-/** 工单执行上下文：Router 负责拼装，后端只消费。 */
+/** 工单执行上下文：Router 负责拼装，运行时只消费。 */
 export interface WorkerContext {
   ticket: Ticket
   assignment: Assignment
-  /** 预分配目录；为空表示由后端决定。 */
+  /** 预分配目录；为空表示由运行时决定。 */
   workdir: string
-  /** 后端中立的工单契约；Router 正常都会提供，缺省时 adapter 可自行渲染。 */
+  /** 运行时中立的工单契约；Router 正常都会提供，缺省时 adapter 可自行渲染。 */
   brief?: WorkerBrief
   /** 报告文件路径；缺省时由 adapter 按 workersDir 推导。 */
   report?: ReportPaths
@@ -14,7 +14,7 @@ export interface WorkerContext {
   tools?: ToolPolicy
 }
 
-/** 后端中立的任务契约：只讲“做什么/怎么上报”，不讲某个 CLI 的参数。 */
+/** 运行时中立的任务契约：只讲“做什么/怎么上报”，不讲某个 CLI 的参数。 */
 export interface WorkerBrief {
   ticketId: string
   title: string
@@ -52,7 +52,7 @@ export type ContextItem =
   | { kind: 'env'; key: string; value: string }
   | { kind: 'dir'; path: string }
 
-/** Router 传给后端的引用：handle 不透明，其余字段让后端能定位自己的 meta/会话。 */
+/** Router 传给运行时的引用：handle 不透明，其余字段让运行时能定位自己的 meta/会话。 */
 export interface WorkspaceRequest {
   ticketId: string
   repo: string
@@ -69,7 +69,7 @@ export interface Workspace {
   meta?: Record<string, unknown>
 }
 
-/** 内部构件：工作区生命周期。Orca 等后端可以不严格实现。 */
+/** 内部构件：工作区生命周期。Orca 等运行时可以不严格实现。 */
 export interface WorkspaceProvider {
   readonly id: string
   create(req: WorkspaceRequest): Promise<Workspace>
@@ -82,7 +82,7 @@ export interface WorkerRef {
   handle: string
   ticketId: string
   workdir?: string
-  /** 后端自己的会话 ID（Claude/Codex 用；Orca 可空）。 */
+  /** 运行时自己的会话 ID（Claude/Codex 用；Orca 可空）。 */
   sessionId?: string
 }
 
@@ -99,7 +99,7 @@ export interface StartResult {
   workdir: string
   /** 实际工作分支（可能被 provider 加后缀）；供 PR 兜底查询。 */
   branch?: string
-  /** 会话 ID；写入 backend 的 meta.json，供 resume/活动定位。 */
+  /** 会话 ID；写入 runtime 的 meta.json，供 resume/活动定位。 */
   sessionId?: string
   workspaceRef?: string
 }
@@ -161,7 +161,7 @@ export interface SessionSnapshot {
   filePath?: string
 }
 
-export interface BackendCapabilities {
+export interface RuntimeCapabilities {
   agent: {
     liveStatus: boolean
     processExit: boolean
@@ -207,8 +207,8 @@ export type WorkerErrorCode =
   | 'agent:not-accepting-input'
   | 'agent:gone'
   | 'agent:timeout'
-  | 'backend:unavailable'
-  | 'backend:unknown'
+  | 'runtime:unavailable'
+  | 'runtime:unknown'
 
 export class WorkerRuntimeError extends Error {
   readonly code: WorkerErrorCode
@@ -232,10 +232,10 @@ export class WorkerRuntimeError extends Error {
   }
 }
 
-/** Worker 运行时端口：换后端只加一个 adapter，内核与 Router 不改。 */
+/** Worker 运行时端口：换运行时只加一个 adapter，内核与 Router 不改。 */
 export interface WorkerRuntime {
   readonly id: string
-  readonly capabilities: BackendCapabilities
+  readonly capabilities: RuntimeCapabilities
 
   start(ctx: WorkerContext): Promise<StartResult>
   deliver(ref: WorkerRef, inputs: InboundMessage[], opts?: DeliverOptions): Promise<DeliveryReceipt>
@@ -250,7 +250,7 @@ export interface WorkerRuntime {
   /** 可选：结构化活动；优先于 output。 */
   activity?(query: ActivityQuery): Promise<SessionSnapshot | null>
 
-  /** 可选：工作区查询/回收；不再使用后端私有选择器。 */
+  /** 可选：工作区查询/回收；不再使用运行时私有选择器。 */
   inspectWorkspace?(ref: WorkspaceRef): Promise<WorkspaceInfo | null>
   removeWorkspace?(ref: WorkspaceRef): Promise<void>
   /** 可选：仓库发现（doctor / init）。 */

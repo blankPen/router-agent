@@ -1,10 +1,10 @@
 import type { AppConfig } from '../config.js'
 import type { CommandRunner } from '../infra/process.js'
 import { WorkerRuntimeError, type WorkerRuntime } from './port.js'
-import { OrcaAdapter } from './orca/index.js'
-import { ClaudeCliBackend } from './backends/claude-cli/index.js'
+import { OrcaRuntime } from './orca/index.js'
+import { ClaudeCliRuntime } from './runtimes/claude-cli/index.js'
 
-export interface BackendDeps {
+export interface RuntimeDeps {
   home: string
   workersDir: string
   spec: 'prompt' | 'agent'
@@ -18,29 +18,29 @@ export interface BackendDeps {
   env?: NodeJS.ProcessEnv
 }
 
-/** 按 id 持有后端；内核只通过它取后端，不直接 new OrcaAdapter。 */
-export class BackendRegistry {
+/** 按 id 持有运行时；内核只通过它取运行时，不直接 new OrcaRuntime。 */
+export class RuntimeRegistry {
   constructor(
-    private readonly backends: Map<string, WorkerRuntime>,
+    private readonly runtimes: Map<string, WorkerRuntime>,
     private readonly defaultId: string,
   ) {
-    if (!backends.has(defaultId)) {
-      throw new WorkerRuntimeError('backend:unknown', `默认 backend 未注册: ${defaultId}`)
+    if (!runtimes.has(defaultId)) {
+      throw new WorkerRuntimeError('runtime:unknown', `默认 runtime 未注册: ${defaultId}`)
     }
   }
 
   get(id: string): WorkerRuntime {
-    const backend = this.backends.get(id)
-    if (!backend) throw new WorkerRuntimeError('backend:unknown', `未知 backend: ${id}`)
-    return backend
+    const runtime = this.runtimes.get(id)
+    if (!runtime) throw new WorkerRuntimeError('runtime:unknown', `未知 runtime: ${id}`)
+    return runtime
   }
 
   has(id: string): boolean {
-    return this.backends.has(id)
+    return this.runtimes.has(id)
   }
 
   ids(): string[] {
-    return [...this.backends.keys()]
+    return [...this.runtimes.keys()]
   }
 
   default(): WorkerRuntime {
@@ -48,17 +48,17 @@ export class BackendRegistry {
   }
 }
 
-/** 生产环境装配：只注册已实现的后端；配置了未注册后端会在启动期失败。 */
-export function createBackends(config: AppConfig, deps: BackendDeps): BackendRegistry {
-  const backends = new Map<string, WorkerRuntime>()
-  backends.set('orca', new OrcaAdapter({
+/** 生产环境装配：只注册已实现的运行时；配置了未注册运行时会在启动期失败。 */
+export function createRuntimes(config: AppConfig, deps: RuntimeDeps): RuntimeRegistry {
+  const runtimes = new Map<string, WorkerRuntime>()
+  runtimes.set('orca', new OrcaRuntime({
     runner: deps.orca,
     workersDir: deps.workersDir,
     spec: deps.spec,
   }))
 
-  const claudeOptions = (config.backend.options?.['claude-cli'] ?? {}) as Record<string, unknown>
-  backends.set('claude-cli', new ClaudeCliBackend({
+  const claudeOptions = (config.runtime.options?.['claude-cli'] ?? {}) as Record<string, unknown>
+  runtimes.set('claude-cli', new ClaudeCliRuntime({
     claude: deps.claude,
     git: deps.git,
     workersDir: deps.workersDir,
@@ -69,5 +69,5 @@ export function createBackends(config: AppConfig, deps: BackendDeps): BackendReg
     ...(deps.env ? { env: deps.env } : {}),
   }))
 
-  return new BackendRegistry(backends, config.backend.default)
+  return new RuntimeRegistry(runtimes, config.runtime.default)
 }

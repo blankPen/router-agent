@@ -10,7 +10,7 @@ import {
   type ActivityQuery,
   type AgentOutput,
   type AgentStatus,
-  type BackendCapabilities,
+  type RuntimeCapabilities,
   type DeliverOptions,
   type DeliveryReceipt,
   type DiagnosticCheck,
@@ -25,7 +25,7 @@ import {
   type WorkspaceRef,
 } from '../../port.js'
 
-export interface ClaudeCliBackendOptions {
+export interface ClaudeCliRuntimeOptions {
   claude: CommandRunner
   git: CommandRunner
   /** ~/.router-agent/workers */
@@ -59,7 +59,7 @@ interface ClaudeMeta {
   schemaVersion?: number
   ticketId: string
   assignmentId: string
-  backend: string
+  runtime: string
   handle: string
   workdir: string
   repo: string
@@ -74,16 +74,16 @@ interface ClaudeMeta {
 }
 
 /**
- * Claude Code CLI 后端：用 Claude 自己的后台会话管理（agent view）承载工单。
+ * Claude Code CLI 运行时：用 Claude 自己的后台会话管理（agent view）承载工单。
  *
  * - 首轮：claude --bg "<brief 文件路径>"；
  * - 状态：claude agents --json --all；
  * - 追问：会话 done/stopped 后 claude --bg --resume <sessionId>，**不能带新 flags**；
  * - 停止：claude stop <id>（保留会话）。
  */
-export class ClaudeCliBackend implements WorkerRuntime {
+export class ClaudeCliRuntime implements WorkerRuntime {
   readonly id = 'claude-cli'
-  readonly capabilities: BackendCapabilities = {
+  readonly capabilities: RuntimeCapabilities = {
     agent: { liveStatus: true, processExit: false, output: true, activity: true, structuredInput: true, nudge: false },
     workspace: { cleanup: true, prLink: false, discovery: false },
   }
@@ -97,7 +97,7 @@ export class ClaudeCliBackend implements WorkerRuntime {
   private env: NodeJS.ProcessEnv
   private gitProvider: GitWorktreeProvider
 
-  constructor(opts: ClaudeCliBackendOptions) {
+  constructor(opts: ClaudeCliRuntimeOptions) {
     this.claude = opts.claude
     this.workersDir = opts.workersDir
     this.home = opts.home
@@ -138,13 +138,13 @@ export class ClaudeCliBackend implements WorkerRuntime {
       name,
       workdir,
     })
-    // 中立的 brief 里 workdir 是「由后端决定」，拿到实际路径后替换掉。
-    writeFileSync(briefPath, (ctx.brief?.contract ?? '').replace('(由后端决定)', workspace.workdir), 'utf8')
+    // 中立的 brief 里 workdir 是「由运行时决定」，拿到实际路径后替换掉。
+    writeFileSync(briefPath, (ctx.brief?.contract ?? '').replace('(由运行时决定)', workspace.workdir), 'utf8')
     const meta: ClaudeMeta = {
       schemaVersion: 2,
       ticketId: ticket.id,
       assignmentId: ctx.assignment.id,
-      backend: this.id,
+      runtime: this.id,
       handle: '',
       workdir: workspace.workdir,
       repo,

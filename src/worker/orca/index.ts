@@ -34,7 +34,7 @@ import {
   type CommandResult,
 } from './commands.js'
 
-export interface OrcaAdapterOptions {
+export interface OrcaRuntimeOptions {
   runner: CommandRunner
   /** ~/.router-agent/workers */
   workersDir: string
@@ -188,7 +188,7 @@ export function parseCreateResult(stdout: string): { handle: string; workdir?: s
   }
 }
 
-export class OrcaAdapter implements WorkerRuntime {
+export class OrcaRuntime implements WorkerRuntime {
   readonly id = 'orca'
   readonly capabilities = {
     agent: { liveStatus: true, processExit: false, output: true, activity: true, structuredInput: true, nudge: true },
@@ -199,7 +199,7 @@ export class OrcaAdapter implements WorkerRuntime {
   private spec: 'prompt' | 'agent'
   private claudeProjectsDir?: string
 
-  constructor(opts: OrcaAdapterOptions) {
+  constructor(opts: OrcaRuntimeOptions) {
     this.runner = opts.runner
     this.workersDir = opts.workersDir
     this.spec = opts.spec
@@ -424,7 +424,7 @@ export class OrcaAdapter implements WorkerRuntime {
       branch: extra.branch,
       /** worktree 自己实际使用的工作分支。 */
       workBranch: extra.workBranch,
-      backend: this.id,
+      runtime: this.id,
       status: 'running',
       startedAt: new Date().toISOString(),
     }

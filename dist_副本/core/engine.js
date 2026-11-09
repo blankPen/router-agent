@@ -126,7 +126,7 @@ export class Engine {
         const assignment = {
             id: this.ids.next('as'),
             ticketId,
-            backendId: opts.backendId,
+            runtimeId: opts.runtimeId,
             handle: opts.handle,
             workdir: opts.workdir,
             status: 'pending',

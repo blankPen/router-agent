@@ -35,7 +35,7 @@ export function buildWorkerPrompt(input: WorkerPromptInput): string {
   })
 }
 
-/** 后端中立的工单契约：Claude CLI / Codex 等非 Orca 后端使用。 */
+/** 运行时中立的工单契约：Claude CLI / Codex 等非 Orca 运行时使用。 */
 export interface WorkerContractInput {
   ticketId: string
   title: string
@@ -57,7 +57,7 @@ export function buildNeutralContract(input: WorkerContractInput): string {
     repo: input.repo,
     branch: input.branch ?? '(仓库默认分支)',
     workBranch: input.workBranch ?? `ra/${input.ticketId}`,
-    workdir: input.workdir ?? '(由后端决定)',
+    workdir: input.workdir ?? '(由运行时决定)',
     statePath: input.statePath,
     eventsPath: input.eventsPath,
   })
