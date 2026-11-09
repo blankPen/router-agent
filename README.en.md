@@ -837,6 +837,11 @@ pnpm check       # typecheck + test
 RA_PI_VERIFY=1 npx vitest run tests/verify-pi-live.test.ts   # real Pi + real model (skipped by default)
 ```
 
+Publishing is automated by GitHub Actions: merging into `main` bumps the patch version and publishes
+to npm (merges that only touch docs / tests / CI are skipped; bump the version in the PR for
+minor / major releases). Pushing a `v*` tag or running the workflow manually still works.
+See [docs/PUBLISHING.md](docs/PUBLISHING.md) for details.
+
 Source layout:
 
 ```text
