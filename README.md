@@ -4,11 +4,11 @@
 
 # router-agent
 
-### 在飞书说一句，在 Orca 里干完，在 PR 里闭环。
+### 在飞书说一句，在 Agent 里干完，在 PR 里闭环。
 
-**飞书消息 → 常驻 Router 研判 → 派发到 Orca worktree 里的 Claude Code → PR 跟踪回群。**<br>
+**飞书消息 → 常驻 Router 研判 → 派发到独立 worktree 里的编码 Agent → PR 跟踪回群。**<br>
 准入、开单、派工、追问、进展同步、闭环全自动，<br>
-每张工单都有自己的分支、终端和上下文。
+每张工单都有自己的分支、终端和上下文。支持 Orca、Claude Code 与各类 ACP Agent。
 
 [![Stars](https://img.shields.io/github/stars/blankPen/router-agent?style=flat&color=111111)](https://github.com/blankPen/router-agent/stargazers)
 ![Node](https://img.shields.io/badge/node-%E2%89%A522.19-339933?logo=node.js&logoColor=white)
@@ -27,14 +27,14 @@
 
 如果你每天要在多个仓库之间来回切：在群里丢一句需求，等人开分支、开终端、跑起来，再回来汇报结果——这段流程本来就该由机器接管。
 
-router-agent（`ra`）是一个常驻的双层 Agent 系统：**Router 只做研判与调度，Worker 只在独立 worktree 里干活**。它不替你写代码，它负责把「谁、在哪个项目、从哪个分支、做什么」变成一张有边界、有上下文、可追踪的工单，然后交给 Orca 里独立 worktree 的 Claude Code 执行。
+router-agent（`ra`）是一个常驻的双层 Agent 系统：**Router 只做研判与调度，Worker 只在独立 worktree 里干活**。它不替你写代码，它负责把「谁、在哪个项目、从哪个分支、做什么」变成一张有边界、有上下文、可追踪的工单，然后交给 Orca、Claude Code 或任一 ACP Agent 在各自的独立 worktree 中执行。
 
 - **多个仓库、多个群**：项目、分支、群绑定集中在一份配置里，开工前先确认清楚再派工。
 - **需求边界要留痕**：每条消息都过确定性 Gate，再交 Pi 研判；接单、忽略、追问、不可用都有结论可查。
 - **不想盯终端**：Worker 用 `ra report` 上报，Router 把进展合并后同步回原话题，PR 合并或关闭自动闭环。
-- **每个工单互不打扰**：一个工单一个 worktree、一条分支、一个 Claude Code 终端，做完即隔离。
+- **每个工单互不打扰**：一个工单一个 worktree、一条分支、一个 Agent 终端，做完即隔离。
 
-它面向的是「消息进来、代码出去」的日常研发协作。如果你只是偶尔让 AI 改一个文件，直接打开 Claude Code 会更快。
+它面向的是「消息进来、代码出去」的日常研发协作。如果你只是偶尔让 AI 改一个文件，直接打开你常用的编码 Agent 会更快。
 
 它是对 dsh-superagent 的**绿色重写**，不依赖原型的 tmux / DSE profile。
 
@@ -45,9 +45,8 @@ router-agent（`ra`）是一个常驻的双层 Agent 系统：**Router 只做研
 | 依赖 | 说明 |
 |-|-|
 | Node.js | `>= 22.19.0`（自带 npm；使用内置 `node:sqlite`；项目根目录 `.nvmrc` 已固定 22.19.0） |
-| Orca | 提供 `orca` CLI，负责创建 worktree 与终端（仅 `orca` 运行时需要） |
+| 编码 Agent | 任选其一：Orca（`orca` 运行时，提供 worktree 与终端）、Claude Code（`claude-code` / `acp-claude` 运行时）或其它 ACP Agent（Codex / Gemini / OpenCode 等） |
 | lark-cli | 飞书事件消费、发消息；需要一个飞书自建应用 |
-| Claude Code | Worker 的实际执行者；`orca` / `claude-code` / `acp-claude` 运行时都需要 |
 | pnpm | 仅从源码运行或参与开发时需要（见本节末尾） |
 
 **1 · 安装**
@@ -114,7 +113,7 @@ ra init
 **3 · 自检与模拟**
 
 ```bash
-ra doctor                                              # 配置 / Orca / 飞书 / 模型 / 端口，全绿再往下
+ra doctor                                              # 配置 / 运行时 / 飞书 / 模型 / 端口，全绿再往下
 ra simulate --infer --text "把 README 的端口从 3000 改成 3083" --dry-run
 ra simulate --text "你好，在吗" --dry-run               # 验证回复通道也走 Pi
 ra tickets                                             # 模拟产生的工单会出现在这里
@@ -124,7 +123,7 @@ ra tickets                                             # 模拟产生的工单�
 
 1. `ra logs | grep trigger:ingested` 能看到消息进入；
 2. `ra tickets` 出现工单，`ra ticket <id>` 能看到授权范围与强度；
-3. `orca worktree list --json` 出现 `ra-tk-<编号>-<语义slug>`，分支名为 `ra/tk-<编号>-<语义slug>`（目录名与分支名一一对应，只把 `/` 换成 `-`），Orca 里出现 Claude Code 终端；
+3. `orca worktree list --json`（`orca` 运行时；其它运行时用 `git worktree list`）出现 `ra-tk-<编号>-<语义slug>`，分支名为 `ra/tk-<编号>-<语义slug>`（目录名与分支名一一对应，只把 `/` 换成 `-`），对应运行时里出现 Agent 会话（Orca 为 Claude Code 终端）；
 4. Worker 执行 `ra report` 后，`ra ticket <id>` 的阶段在 `running → review/blocked` 之间变化；
 5. 合并或关闭 PR 后，工单变 `closed`，飞书收到一次闭环通知。
 
@@ -223,7 +222,7 @@ ra config edit                                   # 用 $EDITOR 编辑全文
 | 命令 | 说明 |
 |-|-|
 | `ra init` | 交互式初始化（`--yes` 跳过提问） |
-| `ra doctor` | 启动前自检：配置 / Orca / 飞书 / 模型 / 端口（`--json` 机器可读） |
+| `ra doctor` | 启动前自检：配置 / 运行时 / 飞书 / 模型 / 端口（`--json` 机器可读） |
 | `ra simulate` | 本地模拟一条消息，验证 Gate + Pi 研判，不派工（`--infer` 走 Pi 研判，`--dry-run` 不落库） |
 | `ra start [--foreground]` | 启动常驻服务（默认后台），就绪后自动打开 Web 初始化页；`--no-open` 只打印地址 |
 | `ra stop` | 停止服务 |
@@ -268,20 +267,10 @@ src/cli/      ra 命令
 
 ## 已知限制
 
-- 第一版只支持 macOS（Linux 上裸 `orca` 会撞 GNOME 屏幕阅读器，需要 `orca-ide`）。
+- 第一版只支持 macOS（Orca 运行时在 Linux 上需要 `orca-ide`）。
 - 不做自动合并 PR，只跟踪与通知。
 - GitHub Source 只用于 PR 状态跟踪，不消费 Issue / 评论。
-- 上报走 `ra report`，`state.json` 只作为服务不可达时的兜底通道。
-- 图片会下载并落盘到 `/tmp/ra-images/`，原图路径透传给 Worker（可直接查看）；同时用多模态模型转成文字供研判。文件 / 语音等其它附件只识别到「这是一条附件消息」，需要内容时请用文字描述。
-- 图片转文本依赖模型支持 image 输入；主模型不支持时请在 `llm.imageModel` 单独配置视觉模型。单张转写失败时原图仍会落盘并透传，研判只能看到占位说明；`feishu.images.enabled: false` 则整条图片链路关闭。
-- 实测 Orca 的 `lastOutputAt` 是毫秒数字、且 CLI 创建的终端可能 `orphaned=true` 但依然可用；适配层已分别做归一化与「只有 `connected=false` 才判死」的处理。
-- `workerSpec.mode: agent` 依赖 Orca 启动的 claude 是否加载全局 `~/.claude/agents/`；该前提尚未实测，默认使用已验证可行的 `prompt` 模式。
-- Claude Code 运行时用 `git worktree`，项目清单与 Orca 隔离（`runtime.projects.claude-code`），`repo` 必须是本地仓库绝对路径（`path:/abs` 或 `/abs`）；`ra init` 在 `runtime.default: claude-code` 时会直接问路径。切换运行时后，没有对应清单项目的工单会先追问，不会把 Orca 选择器当路径用。
-- Claude Code 运行时启动时带 `--dangerously-skip-permissions`，正常情况下不会因权限确认阻塞；若仍进入 `blocked`（例如等待人工输入），只转人工，不自动 resume。追问在当前轮结束后生效（与 TUI 输入排队一致）；需要轮内实时插话时要改用 `stream-json` 或 SDK/ACP。
-- Claude Code 依赖 `claude agents --json --all` 的字段（本仓库实测 `2.1.318`）；升级后字段变化时状态会退化为 `null`，需要按版本适配。
-- 派工草稿按「群 + 同一个人」保存，30 分钟有效；同一个群里的多个未补齐请求会互相覆盖（后一次追问覆盖前一次）。
-- Pi SDK 仍在演进，本仓库锁定 `@earendil-works/pi-coding-agent@1.5.0`，升级前先跑 `RA_PI_VERIFY=1` 的真实环境验证。
-- Pi 是唯一研判引擎，没有回退到旧实现的开关；Pi 不可用时候选会按 `unavailable` 落库，不会静默重试。
+- 各运行时的行为差异、附件与模型限制、Pi 版本约束等完整清单见 [docs/OPERATIONS.md](docs/OPERATIONS.md#已知限制)。
 
 ## 文档
 
@@ -290,7 +279,7 @@ src/cli/      ra 命令
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 分层、一条消息的四步、研判 / 会话 / 派工机制、工单阶段与 `ra report` 协议 |
 | [docs/RUNTIME.md](docs/RUNTIME.md) | Worker 运行时对比、ACP Agent 目录、Worker 工具策略与规范注入 |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | 完整 `config.yaml`、`ra config set`、环境变量、模型与飞书接入、准入矩阵、闲置治理 |
-| [docs/OPERATIONS.md](docs/OPERATIONS.md) | 回复策略、Web 面板、日志事件表与排查 |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | 回复策略、Web 面板、日志事件表与排查、已知限制 |
 | [docs/API.md](docs/API.md) | 本地 HTTP API |
 | [docs/COMPARISON.md](docs/COMPARISON.md) | 与 dsh-superagent 原型的差距分析与可迁移机制 |
 | [docs/AGENT-ADAPTER-DESIGN.md](docs/AGENT-ADAPTER-DESIGN.md) | Agent 工具适配器接口设计：Orca / Claude Code / Codex 的契约与迁移方案 |

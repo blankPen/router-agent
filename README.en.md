@@ -4,11 +4,11 @@
 
 # router-agent
 
-### Say it in Feishu, get it done in Orca, close the loop in a PR.
+### Say it in Feishu, get it done in your coding agent, close the loop in a PR.
 
-**Feishu message → resident Router triage → Claude Code in an Orca worktree → PR tracking back to the thread.**<br>
+**Feishu message → resident Router triage → a coding agent in its own worktree → PR tracking back to the thread.**<br>
 Admission, ticketing, dispatch, follow-ups, progress sync and closure are automatic,<br>
-and every ticket gets its own branch, terminal and context.
+and every ticket gets its own branch, terminal and context. Works with Orca, Claude Code and any ACP agent.
 
 [![Stars](https://img.shields.io/github/stars/blankPen/router-agent?style=flat&color=111111)](https://github.com/blankPen/router-agent/stargazers)
 ![Node](https://img.shields.io/badge/node-%E2%89%A522.19-339933?logo=node.js&logoColor=white)
@@ -27,14 +27,14 @@ and every ticket gets its own branch, terminal and context.
 
 If your day is a constant shuffle between repositories — drop a request in a chat, wait for someone to create a branch, open a terminal, get it running, then report back — that loop should belong to a machine.
 
-router-agent (`ra`) is a resident two-layer agent system: **the Router only triages and dispatches; the Worker only works inside an isolated worktree**. It doesn't write code for you. It turns "who, which project, which base branch, what to do" into a ticket with a clear scope and context, then hands it to Claude Code running in its own Orca worktree.
+router-agent (`ra`) is a resident two-layer agent system: **the Router only triages and dispatches; the Worker only works inside an isolated worktree**. It doesn't write code for you. It turns "who, which project, which base branch, what to do" into a ticket with a clear scope and context, then hands it to Orca, Claude Code or any ACP agent running in its own worktree.
 
 - **Many repositories, many chats**: projects and chat bindings live in one config, and everything is confirmed before dispatch.
 - **An auditable scope**: every message passes a deterministic gate, then Pi triage; accept, ignore, ask-back and unavailable are all recorded decisions.
 - **No terminal babysitting**: the Worker reports with `ra report`, the Router merges progress back into the original thread, and a merged or closed PR closes the ticket.
-- **Tickets don't collide**: one ticket, one worktree, one branch, one Claude Code terminal.
+- **Tickets don't collide**: one ticket, one worktree, one branch, one agent terminal.
 
-It is built for everyday "message in, code out" collaboration. If you only need a one-off edit, opening Claude Code directly is faster.
+It is built for everyday "message in, code out" collaboration. If you only need a one-off edit, opening your usual coding agent directly is faster.
 
 It is a **clean rewrite** of dsh-superagent, with no dependency on the prototype's tmux / DSE profile.
 
@@ -45,9 +45,8 @@ It is a **clean rewrite** of dsh-superagent, with no dependency on the prototype
 | Dependency | Notes |
 |-|-|
 | Node.js | `>= 22.19.0` (bundles npm; uses the built-in `node:sqlite`; pinned to 22.19.0 via `.nvmrc`) |
-| Orca | Provides the `orca` CLI that creates worktrees and terminals (only needed by the `orca` runtime) |
+| Coding agent | Pick one: Orca (the `orca` runtime, provides worktrees and terminals), Claude Code (the `claude-code` / `acp-claude` runtimes), or another ACP agent (Codex / Gemini / OpenCode and friends) |
 | lark-cli | Feishu event consumption and messaging; needs a Feishu custom app |
-| Claude Code | The actual Worker; required by the `orca` / `claude-code` / `acp-claude` runtimes |
 | pnpm | Only needed to run from source or contribute (see the end of this section) |
 
 **1 · Install**
@@ -114,7 +113,7 @@ The two paths can hand off to each other: run `ra init` for the bot and chats, t
 **3 · Self-check and simulate**
 
 ```bash
-ra doctor                                              # config / Orca / Feishu / model / port — all green before going further
+ra doctor                                              # config / runtimes / Feishu / model / port — all green before going further
 ra simulate --infer --text "change the README port from 3000 to 3083" --dry-run
 ra simulate --text "hey, are you there" --dry-run      # verifies the reply path also goes through Pi
 ra tickets                                             # simulated tickets show up here
@@ -124,7 +123,7 @@ For a real acceptance run, mention the bot in a chat with a small request, then 
 
 1. `ra logs | grep trigger:ingested` shows the message arriving;
 2. `ra tickets` shows a ticket, and `ra ticket <id>` shows its scope and strength;
-3. `orca worktree list --json` shows `ra-tk-<number>-<semantic slug>` with branch `ra/tk-<number>-<semantic slug>` (the directory name matches the branch, with `/` replaced by `-`), and Orca shows a Claude Code terminal;
+3. `orca worktree list --json` (for the `orca` runtime; use `git worktree list` for other runtimes) shows `ra-tk-<number>-<semantic slug>` with branch `ra/tk-<number>-<semantic slug>` (the directory name matches the branch, with `/` replaced by `-`), and the runtime shows an agent session (a Claude Code terminal for Orca);
 4. after the Worker runs `ra report`, the stage in `ra ticket <id>` moves between `running → review/blocked`;
 5. when the PR is merged or closed, the ticket becomes `closed` and Feishu gets one closure notification.
 
@@ -223,7 +222,7 @@ Every field, the `ra config set` allowlist, environment variables, model / Feish
 | Command | Description |
 |-|-|
 | `ra init` | Interactive setup (`--yes` skips questions) |
-| `ra doctor` | Preflight: config / Orca / Feishu / model / port (`--json` for machines) |
+| `ra doctor` | Preflight: config / runtimes / Feishu / model / port (`--json` for machines) |
 | `ra simulate` | Simulate a local message to verify gate + Pi triage, without dispatch (`--infer` runs Pi triage, `--dry-run` doesn't persist) |
 | `ra start [--foreground]` | Start the resident service (background by default) and open the web setup page once ready; `--no-open` only prints the URL |
 | `ra stop` | Stop the service |
@@ -267,20 +266,10 @@ src/cli/      ra commands
 
 ## Known limitations
 
-- macOS only for now (bare `orca` collides with the GNOME screen reader on Linux; `orca-ide` is required there).
+- macOS only for now (the Orca runtime needs `orca-ide` on Linux).
 - No auto-merge; PRs are tracked and reported, not merged.
 - The GitHub source is only used for PR state tracking; it does not consume issues or comments.
-- Reporting goes through `ra report`; `state.json` is only the fallback when the service is unreachable.
-- Images are downloaded, landed under `/tmp/ra-images/`, and their local paths are passed to the Worker (which can open them directly); a multimodal model also transcribes them for triage. Files / audio and other attachments are only recognized as "this is an attachment message".
-- Image transcription requires a model with image input. If the main model is text-only, configure a vision model via `llm.imageModel`. A failed transcription still keeps and forwards the original, while triage only sees a placeholder; `feishu.images.enabled: false` disables the whole image path.
-- Measured Orca behavior: `lastOutputAt` is a millisecond number, and CLI-created terminals may report `orphaned=true` while still usable. The adapter normalizes the former and only treats `connected=false` as dead.
-- `workerSpec.mode: agent` depends on whether the claude launched by Orca loads the global `~/.claude/agents/`; that premise is not yet verified, so the verified `prompt` mode is the default.
-- The Claude Code runtime uses `git worktree` with its own project list (`runtime.projects.claude-code`); `repo` must be an absolute local path (`path:/abs` or `/abs`). After switching runtimes, tickets without a matching project ask first instead of treating an Orca selector as a path.
-- The Claude Code runtime launches with `--dangerously-skip-permissions`, so permission prompts shouldn't block it; if it still enters `blocked` (e.g. waiting for human input), the ticket is handed to a human rather than resumed automatically. Follow-ups take effect after the current turn (matching TUI input queuing); real-time mid-turn input needs `stream-json` or the SDK/ACP.
-- The Claude Code runtime depends on the `claude agents --json --all` fields (measured with `2.1.318`); if they change after an upgrade the status degrades to `null` and needs a version-specific adapter.
-- Dispatch drafts are stored per "chat + person" and valid for 30 minutes; multiple incomplete requests in the same chat overwrite each other (the later question replaces the earlier one).
-- The Pi SDK is still evolving; this repo pins `@earendil-works/pi-coding-agent@1.5.0`. Run the `RA_PI_VERIFY=1` live check before upgrading.
-- Pi is the only triage engine and there is no fallback switch; when Pi is unavailable, candidates land as `unavailable` rather than being silently retried.
+- Runtime-specific behavior, attachment / model limits and the Pi version constraint are listed in [docs/OPERATIONS.md](docs/OPERATIONS.md#已知限制) (Chinese).
 
 ## Documentation
 
@@ -291,7 +280,7 @@ The detailed docs are currently Chinese-only.
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layering, the four steps, triage / session / dispatch mechanics, ticket stages and the `ra report` protocol |
 | [docs/RUNTIME.md](docs/RUNTIME.md) | Worker runtime comparison, ACP agent catalog, worker tool policy and spec injection |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Full `config.yaml`, `ra config set`, environment variables, model and Feishu setup, admission matrix, idle governance |
-| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Reply policy, web dashboard, log events and troubleshooting |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Reply policy, web dashboard, log events, troubleshooting and known limitations |
 | [docs/API.md](docs/API.md) | Local HTTP API |
 | [docs/COMPARISON.md](docs/COMPARISON.md) | Gap analysis against the dsh-superagent prototype and transferable mechanisms |
 | [docs/AGENT-ADAPTER-DESIGN.md](docs/AGENT-ADAPTER-DESIGN.md) | Agent tool adapter contract design: Orca / Claude Code / Codex |
