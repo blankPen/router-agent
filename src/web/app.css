@@ -1,6 +1,6 @@
 /* ---------------------------------------------------------------------------
    router-agent · control room
-   Framed sheet：染色外框 + 白色工作面；墨色正文，单一 teal 强调色只用于选中态。
+   Framed sheet：染色外框 + 白色工作面；墨色正文，单一绿色强调色用于选中态与主操作。
    阶段、运行时状态等语义色保留。
    --------------------------------------------------------------------------- */
 
@@ -16,13 +16,14 @@
   --text: #131416;
   --muted: #5d5f60;
   --faint: #6b6b6b;
-  --accent: #1b6c80;
-  --accent-deep: #155362;
-  --accent-soft: #e7f1f3;
+  --accent: #1a7f55;
+  --accent-deep: #146243;
+  --accent-soft: #e6f5ec;
   --on-accent: #ffffff;
-  --primary: #1d1f20;
-  --primary-hover: #000000;
-  --on-primary: #ffffff;
+  /* 单一重点色：菜单、选中态、主按钮、开关、聚焦框统一走 accent。 */
+  --primary: var(--accent);
+  --primary-hover: var(--accent-deep);
+  --on-primary: var(--on-accent);
   --positive: #1e7b4f;
   --negative: #c4242a;
   --warning: #92400e;
@@ -44,6 +45,8 @@
   --gap: 24px;
   --card-gap: 16px;
   --card-pad: 20px;
+  /* settings-card 内所有内容块统一的左右留白。 */
+  --card-pad-x: 24px;
   --pad: 24px;
   --sidebar-width: 228px;
   --control-height: 32px;
@@ -94,13 +97,10 @@
     --text: #ffffff;
     --muted: #b4b4b4;
     --faint: #949494;
-    --accent: #5fb3c6;
-    --accent-deep: #7cc8d8;
-    --accent-soft: #172a2e;
-    --on-accent: #000000;
-    --primary: #ffffff;
-    --primary-hover: #e6e6e6;
-    --on-primary: #000000;
+    --accent: #58d29b;
+    --accent-deep: #7be0b2;
+    --accent-soft: #142a1e;
+    --on-accent: #06231a;
     --positive: #3fc07a;
     --negative: #e5566f;
     --warning: #d8b062;
@@ -254,11 +254,10 @@ button, input, select {
 @keyframes ra-spin { to { transform: rotate(360deg); } }
 
 .workspace {
-  width: 100%;
-  margin: 0 8px 8px 0;
+  margin: 16px;
   padding: 24px 32px 120px;
   min-width: 0;
-  min-height: calc(100vh - 8px);
+  min-height: calc(100vh - 32px);
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-sheet);
@@ -360,9 +359,9 @@ button, input, select {
   transition: transform 0.16s;
 }
 .switch input:checked + .switch-track,
-.toggle.on .toggle-track { background: var(--positive); border-color: var(--positive); }
+.toggle.on .toggle-track { background: var(--accent); border-color: var(--accent); }
 .switch input:checked + .switch-track .switch-knob,
-.toggle.on .toggle-knob { transform: translateX(15px); background: var(--surface); border-color: var(--surface); }
+.toggle.on .toggle-knob { transform: translateX(15px); background: var(--on-accent); border-color: var(--on-accent); }
 .toggle {
   display: inline-flex;
   align-items: center;
@@ -396,42 +395,8 @@ button, input, select {
 .search-box.slim { height: 30px; min-width: 0; width: 100%; }
 
 /* ---------------------------------------------------------------------------
-   工单：筛选栏
+   工单：看板 + 抽屉
    --------------------------------------------------------------------------- */
-
-.filter-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-  padding: 0 0 16px;
-  position: sticky;
-  top: 0;
-  z-index: 12;
-  background: var(--surface);
-}
-.stage-chips { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 30px;
-  padding: 0 10px;
-  flex-shrink: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-control);
-  background: var(--surface);
-  color: var(--muted);
-  font-size: 12px;
-  cursor: pointer;
-  transition: background 0.14s, border-color 0.14s, color 0.14s;
-}
-.chip:hover:not(:disabled) { background: var(--raised); color: var(--text); }
-.chip:disabled { opacity: 0.38; cursor: default; }
-.chip-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--stage, var(--faint)); }
-.chip-count { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.chip.active { color: var(--text); border-color: color-mix(in srgb, var(--stage, var(--accent)) 42%, var(--border)); background: color-mix(in srgb, var(--stage, var(--accent)) 8%, var(--surface)); }
-.chip.active .chip-count { color: inherit; opacity: 0.65; }
 
 /* 阶段配色 */
 .stage-draft { --stage: #8b8a82; }
@@ -442,10 +407,6 @@ button, input, select {
 .stage-person { --stage: #bf5b1f; }
 .stage-idle { --stage: #8b8a82; }
 .stage-closed { --stage: #9b998f; }
-
-/* ---------------------------------------------------------------------------
-   工单：看板 + 抽屉
-   --------------------------------------------------------------------------- */
 
 .board {
   display: grid;
@@ -863,12 +824,19 @@ button, input, select {
   overflow: hidden;
   scroll-margin-top: 24px;
 }
+/* settings-card 内直接挂载的模块统一左右留白，避免只有标题对齐、内容贴边。 */
+.settings-card > .runtime-status { margin: 24px var(--card-pad-x) 0; }
+.settings-card > .meta-card { margin-left: var(--card-pad-x); margin-right: var(--card-pad-x); }
+.settings-card > .banner { margin-left: var(--card-pad-x); margin-right: var(--card-pad-x); }
+.settings-card > .segmented { margin-left: var(--card-pad-x); }
+.settings-card > .editor-hint,
+.settings-card > .editor-empty { margin-left: var(--card-pad-x); margin-right: var(--card-pad-x); }
 .settings-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 24px;
-  padding: 20px 24px 12px;
+  padding: 20px var(--card-pad-x) 12px;
 }
 .settings-head h2 { font-size: var(--fs-section); font-weight: 600; letter-spacing: -0.005em; }
 .settings-head p { margin-top: 4px; font-size: 14px; color: var(--muted); max-width: 680px; }
@@ -892,7 +860,7 @@ button, input, select {
   grid-template-columns: minmax(0, 1fr) 320px;
   align-items: center;
   gap: 24px;
-  padding: 16px 24px;
+  padding: 16px var(--card-pad-x);
   border-bottom: 1px solid var(--rule);
 }
 .setting:last-child { border-bottom: 0; }
@@ -997,20 +965,22 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 /* 列表编辑器 */
 .editor { padding: 0 0 20px; }
 .editor-empty { padding: 4px 0 12px; font-size: 13px; color: var(--muted); }
-.editor-block { padding: 0 24px; }
+.editor-block { padding: 0 var(--card-pad-x); }
 .editor-block + .editor-block { position: relative; margin-top: 24px; padding-top: 24px; }
 .editor-block + .editor-block::before {
   content: '';
   position: absolute;
   top: 0;
-  left: -24px;
-  right: -24px;
+  left: calc(-1 * var(--card-pad-x));
+  right: calc(-1 * var(--card-pad-x));
   border-top: 1px solid var(--rule);
 }
+/* 初始化页的编辑器直接挂在 settings-card 下，这里补齐与标题一致的左右留白。 */
+.settings-card > .editor { padding: 0 var(--card-pad-x) 20px; }
 .editor-subtitle { margin: 0 0 6px; font-size: 14px; font-weight: 600; color: var(--text); }
 .editor-hint { margin: 0 0 12px; font-size: 13px; color: var(--muted); }
 .editor-hint strong { color: var(--text); font-weight: 600; }
-.editor-foot { padding: 0 24px 20px; font-size: 12px; color: var(--muted); }
+.editor-foot { padding: 0 var(--card-pad-x) 20px; font-size: 12px; color: var(--muted); }
 .editor-head {
   display: grid;
   grid-template-columns: 1.2fr 1.6fr 0.8fr 30px;
@@ -1106,7 +1076,7 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 .stat-value.muted { color: var(--muted); }
 
 .data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.data-table th, .data-table td { text-align: left; padding: 10px 24px; border-top: 1px solid var(--rule); }
+.data-table th, .data-table td { text-align: left; padding: 10px var(--card-pad-x); border-top: 1px solid var(--rule); }
 .data-table th { font-size: 12px; font-weight: 500; color: var(--muted); padding-top: 0; border-top: 0; }
 .data-table tr:last-child td { padding-bottom: 20px; }
 .data-table .mono { font-size: 12px; }
@@ -1428,7 +1398,6 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
   .workspace { margin: 0; min-height: 0; border: 0; border-radius: 0; padding: 20px 18px 130px; }
   .board { grid-auto-columns: 240px; }
   .drawer { width: min(560px, calc(100vw - 20px)); }
-  .filter-bar { position: static; padding-top: 0; background: none; }
   .config-layout { grid-template-columns: 1fr; gap: 16px; }
   .config-nav { position: static; max-height: none; }
   .config-nav-list { flex-direction: row; flex-wrap: wrap; }
@@ -1451,8 +1420,6 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
   .restart-banner { flex-wrap: wrap; }
   .restart-banner .btn { margin-left: 0; }
   .search-box { min-width: 0; width: 100%; }
-  .filter-bar { align-items: stretch; }
-  .stage-chips { overflow-x: auto; flex-wrap: nowrap; padding-bottom: 2px; }
   .board { grid-auto-columns: 232px; }
   .drawer { width: 100%; }
   .drawer-scroll { padding: 16px 16px 24px; }

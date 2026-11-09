@@ -365,8 +365,6 @@ function TicketsView(): JSX.Element {
   const [tickets, setTickets] = useState<Ticket[]>([])
   const [selected, setSelected] = useState<string | null>(null)
   const [detail, setDetail] = useState<TicketDetail | null>(null)
-  const [keyword, setKeyword] = useState('')
-  const [stage, setStage] = useState<string>('all')
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [lastSync, setLastSync] = useState<Date | null>(null)
   const [detailError, setDetailError] = useState<string | null>(null)
@@ -427,27 +425,11 @@ function TicketsView(): JSX.Element {
     }
   }, [selected, closeDrawer])
 
-  const counts = useMemo(() => {
-    const map = new Map<string, number>()
-    for (const ticket of tickets) map.set(ticket.stage, (map.get(ticket.stage) ?? 0) + 1)
-    return map
-  }, [tickets])
-
   const openCount = tickets.filter(ticket => ticket.stage !== 'closed').length
 
-  const filtered = useMemo(() => {
-    const query = keyword.trim().toLowerCase()
-    return tickets.filter(ticket => {
-      if (stage !== 'all' && ticket.stage !== stage) return false
-      if (!query) return true
-      return [ticket.title, ticket.id, ticket.repo, ticket.branch, ticket.prUrl, String(ticket.prNumber)]
-        .some(value => String(value ?? '').toLowerCase().includes(query))
-    })
-  }, [tickets, keyword, stage])
-
+  // 去掉顶部分类筛选栏后，看板直接展示全部阶段列。
   const columns = STAGE_ORDER
-    .filter(item => stage === 'all' || item === stage)
-    .map(item => ({ stage: item, items: filtered.filter(ticket => ticket.stage === item) }))
+    .map(stage => ({ stage, items: tickets.filter(ticket => ticket.stage === stage) }))
 
   const refresh = (): void => {
     load()
@@ -475,37 +457,6 @@ function TicketsView(): JSX.Element {
           </>
         }
       />
-
-      <div className="filter-bar">
-        <div className="search-box">
-          <Icon name="search" size={15} />
-          <input
-            value={keyword}
-            onChange={event => setKeyword(event.target.value)}
-            placeholder="搜索标题、工单号、仓库或 PR"
-          />
-        </div>
-        <div className="stage-chips">
-          <button className={`chip ${stage === 'all' ? 'active' : ''}`} onClick={() => setStage('all')}>
-            全部<span className="chip-count">{tickets.length}</span>
-          </button>
-          {STAGE_ORDER.map(item => {
-            const count = counts.get(item) ?? 0
-            return (
-              <button
-                key={item}
-                className={`chip stage-${item} ${stage === item ? 'active' : ''}`}
-                onClick={() => setStage(item)}
-                disabled={count === 0 && stage !== item}
-              >
-                <span className="chip-dot" />
-                {STAGE_LABEL[item]}
-                <span className="chip-count">{count}</span>
-              </button>
-            )
-          })}
-        </div>
-      </div>
 
       <div className="board" role="list" aria-label="工单看板">
         {columns.map(column => (
