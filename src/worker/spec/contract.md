@@ -13,6 +13,8 @@
 - 工作分支：{{workBranch}}
 - 工作目录：{{workdir}}
 
+{{attachments}}
+
 ## 先判断怎么回
 
 | 产出 | 怎么交付 |

@@ -129,7 +129,7 @@ Key constraints:
 - Group messages follow the config: `mode: all` receives everything and replies without a mention; `mode: mention` only receives `@bot`.
 - Direct messages have their own switch; bot messages, system messages and interactive cards never enter the domain.
 - A non-empty per-chat `allowed` list means only those people can trigger work in that chat; an outsider mentioning the bot is silently ignored.
-- Image messages are downloaded by `image_key`, transcribed to text (including images inside quoted messages and rich-text posts), and then go through the same assessment. If transcription fails, the message falls back to the attachment notice. Other attachments (files, audio) are not downloaded or read multimodally.
+- Image messages are downloaded by `image_key`; the originals are kept under `/tmp/ra-images/<trigger id>/` and their local paths are passed to the Worker (the worker brief lists them so it can open the originals). A multimodal model also transcribes them for triage, and a failed transcription does not drop the original. Images inside quoted messages and rich-text posts are handled the same way. Other attachments (files, audio) are not downloaded or read multimodally.
 
 ### Decide: gate first, Pi second
 
@@ -241,7 +241,7 @@ The Router doesn't chat; it only speaks when necessary:
 | Mentioned in a group with a real request | A single **thread** message: "Ticket 'title' (id) started. Progress will be updated in this thread." No extra normal-message "I created the ticket" ack |
 | Un-mentioned group message | Pi triage; casual chat is **completely silent** (no noise) |
 | Direct message | Pi triage; casual chat gets a polite Pi reply (normal message) |
-| Image only (no text) | Downloads `image_key`, transcribes it to text, then assesses; only replies "I can't read attachments — please describe it in text" when transcription fails |
+| Image only (no text) | The original is landed to disk and passed to the Worker, and transcribed for triage; a failed transcription keeps the original instead of replying "I can't read attachments" |
 | File / audio / other attachment only | **No ticket**: replies "I can't read attachments — please describe it in text" |
 | System messages (chat created / member added / renamed) | Dropped immediately |
 | Interactive card messages | Dropped (the `content` is raw card JSON, not a request) |
@@ -671,8 +671,8 @@ src/cli/      ra commands
 - No auto-merge; PRs are tracked and reported, not merged.
 - The GitHub source is only used for PR state tracking; it does not consume issues or comments.
 - Reporting goes through `ra report`; `state.json` is only the fallback when the service is unreachable.
-- Images are downloaded and transcribed by a multimodal model; files / audio and other attachments are only recognized as "this is an attachment message".
-- Image transcription requires a model with image input. If the main model is text-only, configure a vision model via `llm.imageModel`, otherwise images fall back to the attachment notice.
+- Images are downloaded, landed under `/tmp/ra-images/`, and their local paths are passed to the Worker (which can open them directly); a multimodal model also transcribes them for triage. Files / audio and other attachments are only recognized as "this is an attachment message".
+- Image transcription requires a model with image input. If the main model is text-only, configure a vision model via `llm.imageModel`. A failed transcription still keeps and forwards the original, while triage only sees a placeholder; `feishu.images.enabled: false` disables the whole image path.
 - Measured Orca behavior: `lastOutputAt` is a millisecond number, and CLI-created terminals may report `orphaned=true` while still usable. The adapter normalizes the former and only treats `connected=false` as dead.
 - `workerSpec.mode: agent` depends on whether the claude launched by Orca loads the global `~/.claude/agents/`; that premise is not yet verified, so the verified `prompt` mode is the default.
 - Dispatch drafts are stored per "chat + person" and valid for 30 minutes; multiple incomplete requests in the same chat overwrite each other (the later question replaces the earlier one).

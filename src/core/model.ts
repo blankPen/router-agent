@@ -20,6 +20,19 @@ export type AddressMode = 'mention' | 'direct' | 'none'
 
 export type TriggerDisposition = 'pending' | 'evaluating' | 'filtered' | 'evaluated' | 'fanned_out' | 'owned'
 
+/**
+ * Router 落盘到本机的原始附件。
+ * 目前只有飞书图片；派工/追问时把本地路径透传给 Worker，让它直接看原图。
+ */
+export interface Attachment {
+  /** Router 本机绝对路径。 */
+  path: string
+  /** image/png、image/jpeg 等，供 Worker 判断文件类型。 */
+  mimeType: string
+  /** 是否来自被引用的消息。 */
+  quoted?: boolean
+}
+
 export interface Trigger {
   id: string
   source: SourceKind
@@ -80,6 +93,8 @@ export interface Ticket {
   repo: string
   /** 派工起始分支（worktree 的 base branch）；开单时必须明确。 */
   branch: string
+  /** 开单消息里随附的原始附件（Router 已落盘），派工时透传给 Worker。 */
+  attachments?: Attachment[]
   prNumber: number
   prUrl: string
   prState: 'none' | 'open' | 'merged' | 'closed'

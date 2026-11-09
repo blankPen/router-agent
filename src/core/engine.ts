@@ -1,4 +1,5 @@
 import type { Store } from '../store/db.js'
+import { attachmentsOf, withAttachmentManifest } from './attachments.js'
 import { negotiateAcceptance, type Policy, type Acceptance } from './policy.js'
 import { computeStage } from './stage.js'
 import { noopSink, preview, type EventSink } from './events.js'
@@ -147,6 +148,7 @@ export class Engine {
       return { decision: record, acceptance }
     }
 
+    const triggerAttachments = attachmentsOf(trigger.raw)
     const ticket: Ticket = {
       id: formatTicketId(this.store.nextTicketSeq()),
       title: input.title?.trim() || deriveTitle(trigger.text),
@@ -157,6 +159,7 @@ export class Engine {
       stage: 'accepted',
       repo: input.repo?.trim() ?? '',
       branch: input.branch?.trim() ?? '',
+      ...(triggerAttachments.length > 0 ? { attachments: triggerAttachments } : {}),
       prNumber: 0,
       prUrl: '',
       prState: 'none',
@@ -291,10 +294,11 @@ export class Engine {
 
     const subscriptions = this.store.listSubscriptions(trigger.threadId)
     const delivered: Ticket[] = []
+    const text = withAttachmentManifest(trigger.text, attachmentsOf(trigger.raw))
     for (const sub of subscriptions) {
       const ticket = this.store.getTicket(sub.ticketId)
       if (!ticket || ticket.stage === 'closed' || ticket.stage === 'draft') continue
-      this.deliverInput(ticket.id, { kind: 'followup', text: trigger.text })
+      this.deliverInput(ticket.id, { kind: 'followup', text })
       delivered.push(ticket)
     }
     this.store.setTriggerDisposition(trigger.id, delivered.length > 0 ? 'fanned_out' : 'pending')

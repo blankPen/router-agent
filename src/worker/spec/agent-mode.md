@@ -7,6 +7,9 @@
 - 仓库：{{repo}}
 - 起始分支：{{branch}}
 - 工作目录：{{workdir}}
+
+{{attachments}}
+
 - 所有状态通过 `ra report` 上报，**不要手写 state.json**：
 
 ```bash

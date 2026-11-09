@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import type {
   Assignment,
+  Attachment,
   DecisionRecord,
   DispatchDraft,
   Input,
@@ -166,6 +167,7 @@ CREATE TABLE IF NOT EXISTS tickets (
   stage TEXT NOT NULL,
   repo TEXT NOT NULL DEFAULT '',
   branch TEXT NOT NULL DEFAULT '',
+  attachments TEXT NOT NULL DEFAULT '[]',
   pr_number INTEGER NOT NULL DEFAULT 0,
   pr_url TEXT NOT NULL DEFAULT '',
   pr_state TEXT NOT NULL DEFAULT 'none',
@@ -370,6 +372,9 @@ export class Store {
     if (!ticketColumns.some(column => column.name === 'branch')) {
       this.db.exec("ALTER TABLE tickets ADD COLUMN branch TEXT NOT NULL DEFAULT ''")
     }
+    if (!ticketColumns.some(column => column.name === 'attachments')) {
+      this.db.exec("ALTER TABLE tickets ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'")
+    }
     // 派工草稿从「一个群一条」改成「一个群 + 一个人一条」：旧库需要重建主键。
     const draftColumns = this.db.prepare('PRAGMA table_info(dispatch_drafts)').all() as Row[]
     const actorPk = Number(draftColumns.find(column => column.name === 'actor_id')?.pk ?? 0)
@@ -525,14 +530,14 @@ export class Store {
   // ---------- Ticket / Mandate ----------
 
   insertTicket(t: Ticket): void {
-    this.db.prepare(`INSERT INTO tickets (id, title, thread_id, source, chat_id, mandate_id, stage, repo, branch, pr_number, pr_url, pr_state, created_at, updated_at, closed_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(t.id, t.title, t.threadId, t.source, t.chatId, t.mandateId, t.stage, t.repo, t.branch, t.prNumber, t.prUrl, t.prState, t.createdAt, t.updatedAt, t.closedAt ?? null)
+    this.db.prepare(`INSERT INTO tickets (id, title, thread_id, source, chat_id, mandate_id, stage, repo, branch, attachments, pr_number, pr_url, pr_state, created_at, updated_at, closed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(t.id, t.title, t.threadId, t.source, t.chatId, t.mandateId, t.stage, t.repo, t.branch, JSON.stringify(t.attachments ?? []), t.prNumber, t.prUrl, t.prState, t.createdAt, t.updatedAt, t.closedAt ?? null)
   }
 
   updateTicket(t: Ticket): void {
-    this.db.prepare(`UPDATE tickets SET title = ?, stage = ?, repo = ?, branch = ?, pr_number = ?, pr_url = ?, pr_state = ?, updated_at = ?, closed_at = ? WHERE id = ?`)
-      .run(t.title, t.stage, t.repo, t.branch, t.prNumber, t.prUrl, t.prState, t.updatedAt, t.closedAt ?? null, t.id)
+    this.db.prepare(`UPDATE tickets SET title = ?, stage = ?, repo = ?, branch = ?, attachments = ?, pr_number = ?, pr_url = ?, pr_state = ?, updated_at = ?, closed_at = ? WHERE id = ?`)
+      .run(t.title, t.stage, t.repo, t.branch, JSON.stringify(t.attachments ?? []), t.prNumber, t.prUrl, t.prState, t.updatedAt, t.closedAt ?? null, t.id)
   }
 
   getTicket(id: string): Ticket | null {
@@ -952,6 +957,7 @@ function triggerFromRow(row: Row): Trigger {
 }
 
 function ticketFromRow(row: Row): Ticket {
+  const attachments = parseAttachments(row.attachments)
   return {
     id: String(row.id),
     title: String(row.title),
@@ -962,12 +968,37 @@ function ticketFromRow(row: Row): Ticket {
     stage: row.stage as Stage,
     repo: String(row.repo ?? ''),
     branch: String(row.branch ?? ''),
+    ...(attachments.length > 0 ? { attachments } : {}),
     prNumber: Number(row.pr_number),
     prUrl: String(row.pr_url),
     prState: row.pr_state as Ticket['prState'],
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     ...(row.closed_at ? { closedAt: String(row.closed_at) } : {}),
+  }
+}
+
+/** tickets.attachments 是 JSON 数组；旧库/脏数据一律退回空数组。 */
+function parseAttachments(value: unknown): Attachment[] {
+  if (!value) return []
+  try {
+    const doc = JSON.parse(String(value)) as unknown
+    if (!Array.isArray(doc)) return []
+    const out: Attachment[] = []
+    for (const item of doc) {
+      if (!item || typeof item !== 'object') continue
+      const record = item as Record<string, unknown>
+      const path = typeof record.path === 'string' ? record.path.trim() : ''
+      if (!path) continue
+      out.push({
+        path,
+        mimeType: typeof record.mimeType === 'string' && record.mimeType ? record.mimeType : 'application/octet-stream',
+        ...(record.quoted === true ? { quoted: true } : {}),
+      })
+    }
+    return out
+  } catch {
+    return []
   }
 }
 

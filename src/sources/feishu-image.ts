@@ -1,7 +1,7 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { extname, join } from 'node:path'
-import type { Trigger } from '../core/model.js'
+import type { Attachment, Trigger } from '../core/model.js'
 import type { CommandRunner } from '../infra/process.js'
 import type { ImageInput, ImageTranscriber } from '../infra/vision.js'
 
@@ -26,8 +26,20 @@ export interface AttachImageTextOptions {
   as?: 'bot' | 'user'
   /** 单条消息最多处理几张图，默认 3。 */
   maxImages?: number
+  /** 原图落盘根目录；默认 /tmp（Windows 用系统临时目录）。 */
+  imagesRoot?: string
   /** 注入日志，失败时记录原因后按纯附件降级。 */
   logger?: ImageLogger
+}
+
+/** 一张已下载并落盘的图片。 */
+interface StagedImage {
+  key: string
+  messageId: string
+  quoted: boolean
+  path: string
+  mimeType: string
+  text?: string
 }
 
 /** `![Image](img_xxx)` / `<img key="img_xxx"/>` / 原始 JSON 三种形态。 */
@@ -181,10 +193,11 @@ function detectMime(bytes: Buffer, path: string): string {
 }
 
 /**
- * 把消息里的图片下载下来、转成文字，拼进 Trigger.text。
+ * 把消息里的图片下载下来、落盘保留，并尽力转成文字拼进 Trigger.text。
  *
- * 任何一步失败都按原样返回：图片仍按「纯附件」处理，由 AgentLoop 回一句请补充文字，
- * 不会因为识图失败把整条消息丢掉。
+ * - 原图落到 /tmp/ra-images/<trigger id>/ 并写进 raw.attachments，派工时透传给 Worker；
+ * - 多模态模型可用时同时生成文字，供研判使用；识别失败不影响原图透传；
+ * - 下载全部失败时按原样返回，图片仍按「纯附件」处理。
  */
 export async function attachImageText(trigger: Trigger, opts: AttachImageTextOptions): Promise<Trigger> {
   if (!opts.transcriber) return trigger
@@ -200,28 +213,36 @@ export async function attachImageText(trigger: Trigger, opts: AttachImageTextOpt
   }
   if (sources.length === 0) return trigger
 
+  const dir = imageStagingDir(opts.imagesRoot, trigger.id)
   const seen = new Set<string>()
-  const pairs: { key: string; messageId: string; quoted: boolean; text: string }[] = []
+  const staged: StagedImage[] = []
   for (const source of sources.slice(0, maxImages)) {
     const identity = `${source.messageId}:${source.key}`
     if (seen.has(identity)) continue
     seen.add(identity)
-    const text = await transcribeOne(source.messageId, source.key, opts, as)
-    if (text) pairs.push({ key: source.key, messageId: source.messageId, quoted: Boolean(source.quoted), text })
+    const item = await stageOne(source.messageId, source.key, Boolean(source.quoted), dir, opts, as)
+    if (item) staged.push(item)
   }
-  if (pairs.length === 0) return trigger
+  if (staged.length === 0) return trigger
 
   const cleaned = stripImageMarkers(trigger.text)
-  const body = pairs
-    .map((pair, index) => {
-      const label = pairs.length === 1
-        ? (pair.quoted ? '引用图片内容' : '图片内容')
-        : `${pair.quoted ? '引用图片' : '图片'}${index + 1}内容`
-      return `[${label}] ${pair.text}`
+  const body = staged
+    .map((item, index) => {
+      const label = staged.length === 1
+        ? (item.quoted ? '引用图片内容' : '图片内容')
+        : `${item.quoted ? '引用图片' : '图片'}${index + 1}内容`
+      // 转写失败也要把原图交给 Worker；这里只给研判一个可读的占位说明。
+      return `[${label}] ${item.text || '（未能识别图片文字，原始图片已保存，可直接查看原图）'}`
     })
     .join('\n\n')
   const parts = [body]
   if (cleaned && !isPlaceholder(cleaned)) parts.push(cleaned)
+
+  const attachments: Attachment[] = staged.map(item => ({
+    path: item.path,
+    mimeType: item.mimeType,
+    ...(item.quoted ? { quoted: true } : {}),
+  }))
 
   return {
     ...trigger,
@@ -229,7 +250,15 @@ export async function attachImageText(trigger: Trigger, opts: AttachImageTextOpt
     mediaOnly: false,
     raw: {
       ...(raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}),
-      images: pairs.map(pair => ({ key: pair.key, messageId: pair.messageId, ...(pair.quoted ? { quoted: true } : {}), text: pair.text })),
+      images: staged.map(item => ({
+        key: item.key,
+        messageId: item.messageId,
+        ...(item.quoted ? { quoted: true } : {}),
+        ...(item.text ? { text: item.text } : {}),
+        path: item.path,
+        mimeType: item.mimeType,
+      })),
+      attachments,
     },
   }
 }
@@ -248,42 +277,78 @@ async function lookupImageKeys(trigger: Trigger, runner: CommandRunner, as: stri
   }
 }
 
-async function transcribeOne(
+async function stageOne(
   messageId: string,
   key: string,
+  quoted: boolean,
+  dir: string,
   opts: AttachImageTextOptions,
   as: string,
-): Promise<string | null> {
-  if (!opts.transcriber) return null
-  const dir = makeTempDir()
+): Promise<StagedImage | null> {
   try {
     // 直接给 key 作文件名，让 lark-cli 按 Content-Type 推断扩展名。
-    const res = await opts.runner.run(imageDownloadCommand(messageId, key, join(dir, key), as), { timeoutMs: 30_000 })
+    const target = join(dir, key)
+    const res = await opts.runner.run(imageDownloadCommand(messageId, key, target, as), { timeoutMs: 30_000 })
     if (res.code !== 0) {
       opts.logger?.warn('feishu:image-download-failed', { id: messageId, key, code: res.code, message: res.stderr.slice(0, 200) })
       return null
     }
     const saved = parseSavedPath(res.stdout)
-    const path = saved || join(dir, key)
-    const input = readImageInput(path)
+    const candidate = saved || target
+    const input = readImageInput(candidate)
     if (!input) {
-      opts.logger?.warn('feishu:image-read-failed', { id: messageId, key, path })
+      opts.logger?.warn('feishu:image-read-failed', { id: messageId, key, path: candidate })
       return null
     }
-    const text = (await opts.transcriber.transcribe(input)).trim()
-    return text || null
+    // Worker 依赖扩展名识别图片；下载器没给或给了非图片扩展名时补一个。
+    const path = ensureImageExtension(candidate, input.mimeType)
+
+    let text: string | undefined
+    try {
+      const value = (await opts.transcriber!.transcribe(input)).trim()
+      if (value) text = value
+    } catch (error) {
+      // 识别失败不丢原图：Worker 仍能直接查看。
+      opts.logger?.warn('feishu:image-transcribe-failed', { id: messageId, key, message: errorText(error) })
+    }
+    return { key, messageId, quoted, path, mimeType: input.mimeType, ...(text ? { text } : {}) }
   } catch (error) {
     opts.logger?.warn('feishu:image-transcribe-failed', { id: messageId, key, message: errorText(error) })
     return null
-  } finally {
-    try { rmSync(dir, { recursive: true, force: true }) } catch { /* 临时目录清理失败不影响主流程 */ }
   }
 }
 
-function makeTempDir(): string {
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp'])
+
+function extensionForMime(mimeType: string): string {
+  const mime = mimeType.toLowerCase()
+  if (mime.includes('png')) return '.png'
+  if (mime.includes('jpeg') || mime.includes('jpg')) return '.jpg'
+  if (mime.includes('gif')) return '.gif'
+  if (mime.includes('webp')) return '.webp'
+  return '.jpg'
+}
+
+/** 保证落盘文件带图片扩展名；失败时退回原路径，不阻断主流程。 */
+function ensureImageExtension(path: string, mimeType: string): string {
+  if (IMAGE_EXTENSIONS.has(extname(path).toLowerCase())) return path
+  const next = `${path}${extensionForMime(mimeType)}`
+  try {
+    if (existsSync(next)) rmSync(next, { force: true })
+    renameSync(path, next)
+    return next
+  } catch {
+    return path
+  }
+}
+
+/** 原图落盘目录：按 Trigger 隔离，多次识别同一张图不会互相覆盖。 */
+function imageStagingDir(root: string | undefined, triggerId: string): string {
   // lark-cli 的 --output 只允许 cwd / /tmp / ~/files；macOS 的 os.tmpdir() 不在白名单内。
-  const root = process.platform === 'win32' ? tmpdir() : '/tmp'
-  return mkdtempSync(join(root, 'ra-image-'))
+  const base = root ?? (process.platform === 'win32' ? tmpdir() : '/tmp')
+  const dir = join(base, 'ra-images', triggerId.replace(/[^A-Za-z0-9._-]/g, '_'))
+  mkdirSync(dir, { recursive: true })
+  return dir
 }
 
 function stripImageMarkers(text: string): string {

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -128,7 +128,7 @@ describe('attachImageText', () => {
     }
   }
 
-  it('下载并转写后，占位文本替换为图片内容，mediaOnly 置 false', async () => {
+  it('下载并转写后，占位文本替换为图片内容，原图落盘并写进 attachments', async () => {
     const dir = tempDir()
     const saved = join(dir, 'img_v3_abc.png')
     writeFileSync(saved, PNG_HEADER)
@@ -140,14 +140,21 @@ describe('attachImageText', () => {
     })
     const transcriber = { async transcribe() { return '报错截图：Timeout 30s' } }
 
-    const out = await attachImageText(trigger(), { runner, transcriber })
+    const out = await attachImageText(trigger(), { runner, transcriber, imagesRoot: dir })
     expect(out.text).toBe('[图片内容] 报错截图：Timeout 30s')
     expect(out.mediaOnly).toBe(false)
-    expect((out.raw as Record<string, any>).images).toEqual([{ key: 'img_v3_abc', messageId: 'om_1', text: '报错截图：Timeout 30s' }])
+    expect((out.raw as Record<string, any>).images).toEqual([{
+      key: 'img_v3_abc',
+      messageId: 'om_1',
+      text: '报错截图：Timeout 30s',
+      path: saved,
+      mimeType: 'image/png',
+    }])
+    expect((out.raw as Record<string, any>).attachments).toEqual([{ path: saved, mimeType: 'image/png' }])
     expect(runner.calls[0]!.argv).toEqual(messageImageKeysCommand('om_1'))
     const download = runner.calls[1]!.argv
     expect(download.slice(0, 8)).toEqual(['im', '+messages-resources-download', '--message-id', 'om_1', '--file-key', 'img_v3_abc', '--type', 'image'])
-    expect(download[9]).toMatch(/^\/tmp\/ra-image-.*\/img_v3_abc$/)
+    expect(download[9]).toBe(join(dir, 'ra-images', 't1', 'img_v3_abc'))
   })
 
   it('已有 imageKeys 时不再回查 mget，并保留用户补充的文字', async () => {
@@ -161,7 +168,7 @@ describe('attachImageText', () => {
       text: '看下这个图 ![Image](img_v3_abc)',
       mediaOnly: false,
       raw: { messageType: 'post', imageKeys: ['img_v3_abc'] },
-    }), { runner, transcriber })
+    }), { runner, transcriber, imagesRoot: dir })
 
     expect(runner.calls).toHaveLength(1)
     expect(out.text).toBe('[图片内容] 登录页面截图\n\n看下这个图')
@@ -180,7 +187,7 @@ describe('attachImageText', () => {
       mediaOnly: false,
       raw: { messageType: 'post', imageKeys: ['img_a', 'img_b'] },
       text: '两张图',
-    }), { runner, transcriber })
+    }), { runner, transcriber, imagesRoot: dir })
 
     expect(out.text).toBe('[图片1内容] 图1\n\n[图片2内容] 图2\n\n两张图')
   })
@@ -196,13 +203,46 @@ describe('attachImageText', () => {
       text: '照这个改',
       mediaOnly: false,
       raw: { messageType: 'text', quoteImages: [{ key: 'img_v3_quote', messageId: 'om_parent' }] },
-    }), { runner, transcriber })
+    }), { runner, transcriber, imagesRoot: dir })
 
     expect(out.text).toBe('[引用图片内容] 设计稿里按钮是蓝色的\n\n照这个改')
-    expect((out.raw as Record<string, any>).images).toEqual([
-      { key: 'img_v3_quote', messageId: 'om_parent', quoted: true, text: '设计稿里按钮是蓝色的' },
-    ])
+    expect((out.raw as Record<string, any>).images).toEqual([{
+      key: 'img_v3_quote',
+      messageId: 'om_parent',
+      quoted: true,
+      text: '设计稿里按钮是蓝色的',
+      path: saved,
+      mimeType: 'image/png',
+    }])
+    expect((out.raw as Record<string, any>).attachments).toEqual([{ path: saved, mimeType: 'image/png', quoted: true }])
     expect(runner.calls[0]!.argv).toEqual(imageDownloadCommand('om_parent', 'img_v3_quote', runner.calls[0]!.argv[9]!, 'bot'))
+  })
+
+  it('转写失败仍保留原图给 Worker，只把说明替换进正文', async () => {
+    const dir = tempDir()
+    const saved = join(dir, 'img_v3_abc.png')
+    writeFileSync(saved, PNG_HEADER)
+    const runner = new ScriptedRunner(() => ({ code: 0, stdout: JSON.stringify({ data: { saved_path: saved } }), stderr: '' }))
+    const transcriber = { async transcribe(): Promise<string> { throw new Error('model down') } }
+
+    const out = await attachImageText(trigger({ raw: { messageType: 'image', imageKeys: ['img_v3_abc'] } }), { runner, transcriber, imagesRoot: dir })
+    expect(out.mediaOnly).toBe(false)
+    expect(out.text).toContain('原始图片已保存')
+    expect((out.raw as Record<string, any>).attachments).toEqual([{ path: saved, mimeType: 'image/png' }])
+    expect((out.raw as Record<string, any>).images[0]).not.toHaveProperty('text')
+  })
+
+  it('下载器没给扩展名时按 MIME 补成 .png，Worker 才能按图片读取', async () => {
+    const dir = tempDir()
+    const saved = join(dir, 'img_v3_noext')
+    writeFileSync(saved, PNG_HEADER)
+    const runner = new ScriptedRunner(() => ({ code: 0, stdout: JSON.stringify({ data: { saved_path: saved } }), stderr: '' }))
+    const transcriber = { async transcribe() { return '截图' } }
+
+    const out = await attachImageText(trigger({ raw: { messageType: 'image', imageKeys: ['img_v3_noext'] } }), { runner, transcriber, imagesRoot: dir })
+    const attachment = (out.raw as Record<string, any>).attachments[0]
+    expect(attachment.path).toBe(`${saved}.png`)
+    expect(existsSync(attachment.path)).toBe(true)
   })
 
   it('下载或识别失败时原样返回，仍按纯附件处理', async () => {
@@ -210,7 +250,7 @@ describe('attachImageText', () => {
     const transcriber = { async transcribe() { throw new Error('should not run') } }
     const input = trigger()
 
-    const out = await attachImageText(input, { runner, transcriber })
+    const out = await attachImageText(input, { runner, transcriber, imagesRoot: tempDir() })
     expect(out).toBe(input)
     expect(out.mediaOnly).toBe(true)
   })
@@ -225,7 +265,7 @@ describe('attachImageText', () => {
   it('非图片消息不触发下载', async () => {
     const runner = new ScriptedRunner(() => ({ code: 0, stdout: '{}', stderr: '' }))
     const input = trigger({ text: '改下登录超时', mediaOnly: false, raw: { messageType: 'text' } })
-    expect(await attachImageText(input, { runner, transcriber: { async transcribe() { return 'x' } } })).toBe(input)
+    expect(await attachImageText(input, { runner, transcriber: { async transcribe() { return 'x' } }, imagesRoot: tempDir() })).toBe(input)
     expect(runner.calls).toHaveLength(0)
   })
 
