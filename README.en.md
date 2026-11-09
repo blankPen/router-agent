@@ -474,7 +474,14 @@ Each `projects[].repo` decides the target of `orca worktree create --repo`. See 
 orca repo list --json | jq -r '.result.repos[] | "\(.displayName)\t\(.path)\t\(.kind)"'
 ```
 
-All three forms are supported:
+The **Projects** editor in the web dashboard offers two ways to add one:
+
+| Entry | Behavior |
+|-|-|
+| Add local project | Opens the native folder picker; detects the Git root, current branch and origin. Non-Git folders are rejected because worktrees need a Git repo |
+| Add Git project | Takes an ssh / http(s) URL, clones it to `<RA_HOME>/repos/<name>` (default `~/.router-agent/repos`), and for the Orca runtime runs `orca repo add --path ... --kind git`; the config stores `path:<absolute path>` |
+
+All three selector forms are supported:
 
 | Form | Example | Notes |
 |-|-|-|
@@ -672,6 +679,11 @@ States:
 | POST | `/api/reports` | Worker state and reply reports (the `ra report` entry) |
 | GET / PUT | `/api/policy` | Read / write policy |
 | GET | `/api/sources/feishu/chats` | Feishu source configuration |
+| GET | `/api/logs?cursor=&limit=` | Dashboard log page: omit `cursor` to tail the file, pass it to fetch only new lines |
+| POST | `/api/projects/pick-directory` | Open the native folder picker (add a local project) |
+| POST | `/api/projects/inspect` | Detect Git root, current branch and origin |
+| POST | `/api/projects/register` | Register a local project (`orca repo add` for the Orca runtime) |
+| POST | `/api/projects/clone` | Git project: clone into `<RA_HOME>/repos` and register with Orca if needed |
 
 ## Development
 

@@ -33,6 +33,7 @@ import type { DecisionAudit } from '../router/decision-engine.js'
 import { RouterService, createEffectsSender, type Logger } from '../service.js'
 import { EffectsProcessor } from '../core/effects.js'
 import { createApiServer } from '../router/api.js'
+import { ProjectSetup } from '../router/project-setup.js'
 import { agentSpecDocument } from '../worker/spec/index.js'
 
 // 版本号以 package.json 为唯一来源，避免发版后 `ra -v` 与实际包版本漂移。
@@ -888,6 +889,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     store,
     config,
     runtimeAdmin,
+    projectSetup: new ProjectSetup({ home, git: gitRunner, orca: orcaRunner }),
     port: config.server.port,
     webRoot: existsSync(webRoot) ? webRoot : undefined,
     onEvent: sink,
