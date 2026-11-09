@@ -2,10 +2,11 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'nod
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import type { Clock, Engine } from './core/engine.js'
-import type { Assignment, Report, Stage, Ticket, Trigger } from './core/model.js'
+import type { Assignment, Report, Ticket, Trigger } from './core/model.js'
 import type { Store } from './store/db.js'
 import type { AppConfig, RetentionSettings } from './config.js'
 import { replyAlwaysChatsOf } from './config.js'
+import { STAGE_LABELS } from './core/stage.js'
 import { WorkerRuntimeError, type WorkerRuntime, type WorkerContext, type SessionEvent, type WorkerRef, type AgentStatus, type ResumeHint } from './worker/port.js'
 import { AgentLoop } from './router/agent-loop.js'
 import type { DecisionAudit, DecisionEngine } from './router/decision-engine.js'
@@ -173,17 +174,6 @@ function clockOf(at: string): string {
   if (!Number.isFinite(ts)) return ''
   const date = new Date(ts)
   return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
-}
-
-const STAGE_LABELS: Record<Stage, string> = {
-  draft: '草稿',
-  accepted: '已接单',
-  assigned: '已派工',
-  running: '执行中',
-  review: '待验收',
-  person: '等人处理',
-  idle: '空闲',
-  closed: '已关闭',
 }
 
 /** 巡检时不在摘要里展开的纯流程工具：只影响 agent 内部节奏，对用户没有信息量。 */
@@ -390,7 +380,7 @@ export function formatProbeMessage(ticket: Ticket, info: {
   silenceMs: number
 }): string {
   const minutes = Math.max(0, Math.round((info.nowMs - info.lastProgress) / 60_000))
-  const activeStage = ticket.stage === 'assigned' || ticket.stage === 'running'
+  const activeStage = ticket.stage === 'running'
   const sourceLabel = info.source === 'session' ? 'Claude 会话记录' : '终端屏幕'
   const lines = [
     `**工单「${ticket.title}」进展巡检（${ticket.id}）**`,
@@ -550,7 +540,7 @@ export class RouterService {
     })
     effects.register('launch-worker', async payload => {
       const ticket = this.store.getTicket(String(payload.ticketId ?? ''))
-      if (!ticket || ticket.stage === 'closed') return
+      if (!ticket || ticket.stage === 'done') return
       await this.launch(ticket)
     })
     effects.register('cleanup-workspace', async (payload, item) => {
@@ -710,7 +700,7 @@ export class RouterService {
 
   // ---------- 派工 ----------
 
-  /** 把所有 accepted 阶段、且还有并发额度的工单派出去。 */
+  /** 把所有 todo 阶段、且还有并发额度的工单派出去。 */
   async launchPending(): Promise<Ticket[]> {
     const launched: Ticket[] = []
     const open = this.store.listOpenTickets()
@@ -721,7 +711,7 @@ export class RouterService {
     }
     for (const ticket of open) {
       if (capacity <= 0) break
-      if (ticket.stage !== 'accepted') continue
+      if (ticket.stage !== 'todo') continue
       const latest = this.store.latestAssignment(ticket.id)
       if (latest && latest.status !== 'ended') continue
       try {
@@ -742,7 +732,7 @@ export class RouterService {
    */
   private reportQueue(capacity: number): void {
     // 重新查库：调用方手里的快照可能是派工前的，会把已派出的工单误报成排队。
-    const waiting = this.store.listOpenTickets().filter(ticket => ticket.stage === 'accepted')
+    const waiting = this.store.listOpenTickets().filter(ticket => ticket.stage === 'todo')
     if (waiting.length === 0) {
       this.queueSignature = ''
       return
@@ -851,7 +841,7 @@ export class RouterService {
 
   /**
    * 派工失败统一收口：完整日志 + 转人工（释放并发额度）+ 飞书话题反馈。
-   * 此前只把 assignment 标记 ended，工单会永远停在 assigned：既不再重试，又一直占着 maxWorkers。
+   * 此前只把 assignment 标记 ended，工单会永远停在 running：既不再重试，又一直占着 maxWorkers。
    */
   private reportLaunchFailure(ticket: Ticket, error: unknown): void {
     const failure = describeLaunchError(error)
@@ -930,12 +920,12 @@ export class RouterService {
   }
 
   private activeWorkers(): number {
-    return this.store.listOpenTickets().filter(t => t.stage === 'assigned' || t.stage === 'running').length
+    return this.store.listOpenTickets().filter(t => t.stage === 'running').length
   }
 
   async deliverPendingInputs(): Promise<void> {
     for (const ticket of this.store.listOpenTickets()) {
-      if (ticket.stage === 'closed') continue
+      if (ticket.stage === 'done') continue
       const assignment = this.store.latestAssignment(ticket.id)
       const pending = this.store.pendingInputs(ticket.id)
       const unacked = this.store.unackedInputs(ticket.id)
@@ -956,24 +946,26 @@ export class RouterService {
         // 用 input.id（而不是 assignmentId:seq）作为投递 id：worker 会原样写进 acked_inputs。
         const runtime = this.runtimeFor(assignment)
         const lastId = batch.at(-1)?.id
-        const attempt = lastId ? (this.deliveryAttempts.get(lastId) ?? 0) + 1 : 1
-        if (lastId) this.deliveryAttempts.set(lastId, attempt)
-        if (attempt > 5) {
-          this.engine.setAttention(ticket.id, `输入 ${lastId ?? ''} 已重投 ${attempt - 1} 次仍未 ack，请人工确认`)
+        const prevAttempt = lastId ? (this.deliveryAttempts.get(lastId) ?? 0) : 0
+        if (prevAttempt >= 5) {
+          this.engine.setAttention(ticket.id, `输入 ${lastId ?? ''} 已重投 ${prevAttempt} 次仍未 ack，请人工确认`)
           this.deliveryCooldown.set(ticket.id, nowMs + 10 * 60_000)
-          this.logger.warn('input:redeliver-giveup', { ticketId: ticket.id, inputId: lastId, attempt })
+          this.logger.warn('input:redeliver-giveup', { ticketId: ticket.id, inputId: lastId, attempt: prevAttempt + 1 })
           continue
         }
+        const attempt = prevAttempt + 1
         const receipt = await runtime.deliver(
           this.refOf(assignment),
           batch.map(input => ({ id: input.id, kind: input.kind, text: input.text })),
           { attempt, redeliver: attempt > 1 },
         )
         if (receipt.status === 'queued') {
+          // worker 只是忙，不算一次失败的投递尝试；否则长回合会被误判 giveup。
           this.deliveryCooldown.set(ticket.id, nowMs + 30_000)
           this.log('input:queued', ticket.id, { count: batch.length, reason: receipt.reason ?? 'runtime-busy' })
           continue
         }
+        if (lastId) this.deliveryAttempts.set(lastId, attempt)
         if (receipt.status === 'rejected') {
           if (receipt.retryable === false) {
             this.handleLostWorker(ticket, `input-rejected:${receipt.reason}`)
@@ -1034,7 +1026,7 @@ export class RouterService {
    */
   async checkIdle(nowMs: number = Date.parse(this.clock.now())): Promise<void> {
     for (const ticket of this.store.listOpenTickets()) {
-      if (ticket.stage !== 'running' && ticket.stage !== 'assigned') continue
+      if (ticket.stage !== 'running') continue
       const assignment = this.store.latestAssignment(ticket.id)
       if (!assignment?.handle || assignment.status === 'ended') continue
       const runtime = this.runtimeFor(assignment)
@@ -1141,15 +1133,13 @@ export class RouterService {
   }
 
   private async checkRetention(ticket: Ticket, nowMs: number): Promise<void> {
-    // 草稿还没进入派工流程，不参与闲置治理。
-    if (ticket.stage === 'draft') return
     const idleMs = this.retention.idleHours * 3_600_000
     const graceMs = this.retention.closeGraceHours * 3_600_000
     const zombieMs = this.retention.zombieHours * 3_600_000
     const lastProgress = this.lastProgressAt(ticket)
 
     // 1) 僵尸进程：先转人工，明确不自动关闭。
-    if ((ticket.stage === 'assigned' || ticket.stage === 'running') && (await this.isZombie(ticket, nowMs, zombieMs))) {
+    if ((ticket.stage === 'running') && (await this.isZombie(ticket, nowMs, zombieMs))) {
       this.markZombie(ticket)
       return
     }
@@ -1520,8 +1510,8 @@ export class RouterService {
    * 并把最近进展整理成语义摘要同步到工单话题。
    *
    * 覆盖两类场景：
-   * - 执行中（assigned/running）但长时间没上报；
-   * - 已 ready 进入 review/person 后，用户又发了新输入，worker 重新开工但阶段还没变。
+   * - 执行中（running）但长时间没上报；
+   * - 已 ready 进入 review/blocked 后，用户又发了新输入，worker 重新开工但阶段还没变。
    */
   async probeProgress(nowMs: number = Date.parse(this.clock.now())): Promise<void> {
     if (this.progressProbeMs <= 0 || this.probing) return
@@ -1617,7 +1607,7 @@ export class RouterService {
 
   /** worker 是否应该在工作：执行中，或 ready / blocked 之后又收到了新输入。 */
   private awaitingWorker(ticket: Ticket): boolean {
-    if (ticket.stage === 'assigned' || ticket.stage === 'running') return true
+    if (ticket.stage === 'running') return true
     const latest = this.store.latestReport(ticket.id)
     const newestInput = this.store.listInputs(ticket.id).at(-1)
     if (!newestInput) return false
@@ -1713,7 +1703,7 @@ let repo = ticket.repo
       const updated = this.engine.updatePr(ticket.id, { number: info.number, url: info.url || ticket.prUrl, state: info.state })
       if (before !== info.state) this.log('pr:state', ticket.id, { from: before, to: info.state })
 
-      if ((info.state === 'merged' || info.state === 'closed') && updated.stage !== 'closed') {
+      if ((info.state === 'merged' || info.state === 'closed') && updated.stage !== 'done') {
         const closed = this.engine.closeTicket(ticket.id, `pr:${info.state}`)
         appendEvent(join(this.config.home, 'workers', ticket.id, 'events.log'), { kind: 'pr', state: info.state, at: this.clock.now() })
         const label = info.state === 'merged' ? '已合并' : '已关闭'
@@ -1741,11 +1731,18 @@ let repo = ticket.repo
           this.notify(ticket, `工单「${ticket.title}」的 worker 已退出且无法自动恢复，已转人工处理。`, `recover:transfer:${ticket.id}`)
           continue
         }
+        // ACP 等运行时的会话只存在内存里，重启后先接回；接不回才沿用 idle/stale 兜底。
+        if (status?.phase === 'exited' && status.acceptingInput && runtime?.reattach) {
+          const attached = await runtime.reattach(this.refOf(assignment)).catch(() => false)
+          // 连接已恢复，重启前留下的 stale 提示不再成立；真闲置会在下一个巡检周期重新判。
+          if (attached) this.engine.clearAttention(ticket.id)
+          this.log('recover:reattach', ticket.id, { attached })
+        }
         this.log('recover:reuse', ticket.id, { handle: assignment.handle, phase: status?.phase })
         continue
       }
-      if (ticket.stage !== 'closed' && (!assignment || assignment.status === 'ended')) {
-        if (ticket.stage === 'accepted' || ticket.stage === 'assigned' || ticket.stage === 'running') {
+      if (ticket.stage !== 'done' && (!assignment || assignment.status === 'ended')) {
+        if (ticket.stage === 'todo' || ticket.stage === 'running') {
           try {
             await this.launch(ticket)
             this.log('recover:relaunch', ticket.id, {})

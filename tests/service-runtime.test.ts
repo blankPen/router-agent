@@ -61,6 +61,9 @@ class FakeRuntime implements WorkerRuntime {
   }
   starts: WorkerContext[] = []
   delivered: { handle: string; text: string }[] = []
+  reattachCalls: string[] = []
+  /** 模拟 ACP 回合未结束：始终返回 queued。 */
+  deliverQueue = false
   handles = new Map<string, { lastOutputAt: string }>()
   linkedPr: Record<string, unknown> | null = null
   /** 主动巡检读取的终端渲染屏幕。 */
@@ -76,9 +79,14 @@ class FakeRuntime implements WorkerRuntime {
     return { handle, workdir: `/tmp/${ctx.ticket.id}`, branch: `ra/${ctx.ticket.id}` }
   }
   async deliver(ref: WorkerRef | string, inputs: { text: string; id: string }[]): Promise<DeliveryReceipt> {
+    if (this.deliverQueue) return { status: 'queued', inputIds: inputs.map(input => input.id), reason: 'acp:busy' }
     const handle = typeof ref === 'string' ? ref : ref.handle
     for (const input of inputs) this.delivered.push({ handle, text: input.text })
     return { status: 'accepted', inputIds: inputs.map(input => input.id) }
+  }
+  async reattach(ref: WorkerRef | string) {
+    this.reattachCalls.push(typeof ref === 'string' ? ref : ref.handle)
+    return true
   }
   async registerContext() {}
   async stop() {}
@@ -179,6 +187,17 @@ describe('运行时机制', () => {
     expect(runtime.delivered.length).toBe(afterFirst)
   })
 
+  it('worker 忙时 queued 不累计重投次数，长回合不会被误判为未 ack', async () => {
+    const { ticketId } = await launchOne()
+    runtime.deliverQueue = true
+    engine.deliverInput(ticketId, { kind: 'followup', text: '长任务' })
+    for (let i = 0; i < 8; i++) {
+      now += 31_000
+      await service.deliverPendingInputs()
+    }
+    expect(store.getAttention(ticketId)?.question ?? '').not.toContain('仍未 ack')
+  })
+
   it('有新输入时，把未 ack 的旧输入一并重投（去重靠 id）', async () => {
     const { ticketId, handle } = await launchOne()
     const first = engine.deliverInput(ticketId, { kind: 'followup', text: '第一件事' })
@@ -252,12 +271,12 @@ describe('运行时机制', () => {
 
     const probe = store.listOutbox(200).find(item => item.text.includes('进展巡检'))
     expect(probe).toBeTruthy()
-    expect(probe!.text).toContain('assigned')
+    expect(probe!.text).toContain('running')
     expect(probe!.text).toContain('正在修改登录超时配置')
     expect(probe!.text).not.toContain('pnpm test 进行中')
     expect(probe!.text).not.toContain('Cascading')
     expect(probe!.threadId).toBe('om_root')
-    expect(store.getTicket(ticketId)?.stage).toBe('assigned')
+    expect(store.getTicket(ticketId)?.stage).toBe('running')
   })
 
   it('同一静默期按 repeatMs 限流，避免重复刷屏', async () => {
@@ -458,6 +477,22 @@ describe('运行时机制', () => {
     await service.recover()
     expect(runtime.starts).toHaveLength(1)
     expect(store.latestAssignment(ticketId)!.id).toBe(assignment.id)
+    expect(runtime.reattachCalls).toHaveLength(0)
+  })
+
+  it('重启对账：exited 但可恢复的会话先 reattach 接回，不重新派工', async () => {
+    const { ticketId } = await launchOne()
+    engine.setAttention(ticketId, 'worker 无响应：长时间没有新的 state.json 上报，已标记 stale，请人工确认')
+    runtime.status = async () => ({
+      alive: false,
+      phase: 'exited',
+      acceptingInput: true,
+      lastActivityAt: new Date(now).toISOString(),
+    })
+    await service.recover()
+    expect(runtime.reattachCalls).toHaveLength(1)
+    expect(runtime.starts).toHaveLength(1)
+    expect(store.getAttention(ticketId)).toBeNull()
   })
 
   it('worktree 已被删除时 PR 跟踪静默跳过，不抛错也不刷日志', async () => {

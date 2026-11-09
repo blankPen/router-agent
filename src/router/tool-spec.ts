@@ -1,4 +1,5 @@
 import { Type, type TSchema } from 'typebox'
+import { STAGE_VALUES } from '../core/stage.js'
 
 /**
  * 研判工具的单一事实来源。
@@ -16,7 +17,7 @@ export interface RouterToolSpec {
 
 const stringEnum = (values: string[]): TSchema => Type.Unsafe({ type: 'string', enum: values })
 
-const STAGES = ['draft', 'accepted', 'assigned', 'running', 'review', 'person', 'idle', 'closed']
+const STAGES = [...STAGE_VALUES]
 
 export const ROUTER_TOOL_SPECS: RouterToolSpec[] = [
   {

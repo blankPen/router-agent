@@ -121,21 +121,40 @@ interface ServiceStatus {
   now: string
 }
 
+interface LogEntry {
+  at: string
+  level: string
+  message: string
+  data?: Record<string, unknown>
+}
+
+interface LogBatch {
+  path: string
+  exists: boolean
+  size: number
+  cursor: number
+  entries: LogEntry[]
+  more?: boolean
+  reset?: boolean
+}
+
+/** 面板缓冲区里的一行：seq 只用于 React key，保证前插/截断时列表不串位。 */
+interface LogLine extends LogEntry {
+  seq: number
+}
+
 // ---------------------------------------------------------------------------
 // 常量与工具
 // ---------------------------------------------------------------------------
 
-const STAGE_ORDER = ['draft', 'accepted', 'assigned', 'running', 'review', 'person', 'idle', 'closed']
+const STAGE_ORDER = ['todo', 'running', 'review', 'blocked', 'done']
 
 const STAGE_LABEL: Record<string, string> = {
-  draft: '草稿',
-  accepted: '已接单',
-  assigned: '已派工',
-  running: '执行中',
-  review: '待评审',
-  person: '等人',
-  idle: '空闲',
-  closed: '已关闭',
+  todo: '待办',
+  running: '进行中',
+  review: '审核中',
+  blocked: '已阻塞',
+  done: '已完成',
 }
 
 const REPORT_STATE_LABEL: Record<string, string> = {
@@ -160,11 +179,25 @@ const PR_STATE_LABEL: Record<string, string> = {
   closed: '已关闭',
 }
 
+const LOG_LEVELS = ['all', 'info', 'warn', 'error', 'raw'] as const
+const LOG_LEVEL_LABEL: Record<string, string> = { all: '全部', info: 'INFO', warn: 'WARN', error: 'ERROR', raw: 'TEXT' }
+const LOG_LEVEL_COLOR: Record<string, string> = {
+  // 颜色只落在状态上：总数用中性灰，其余按级别取语义色。
+  all: 'var(--muted)',
+  info: 'var(--info)',
+  warn: 'var(--warning)',
+  error: 'var(--negative)',
+  raw: 'var(--faint)',
+}
+/** 面板最多保留的日志行数；超出后从最旧的开始丢，避免长时间开着吃内存。 */
+const LOG_BUFFER_MAX = 2_000
+const LOG_POLL_MS = 2_000
+
 // ---------------------------------------------------------------------------
 // 应用外壳
 // ---------------------------------------------------------------------------
 
-type Tab = 'setup' | 'tickets' | 'config' | 'sources'
+type Tab = 'setup' | 'tickets' | 'logs' | 'config' | 'sources'
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -179,6 +212,12 @@ function App(): JSX.Element {
   const [restartError, setRestartError] = useState<string | null>(null)
   // 配置页 / 初始化页共享同一个「有未保存修改」标记，切走前提醒一次。
   const dirtyRef = useRef(false)
+  // 窄屏下导航横向滚动，切页时把当前项滚进可视区，避免选中项被裁在屏幕外。
+  const navRef = useRef<HTMLElement | null>(null)
+
+  useEffect(() => {
+    navRef.current?.querySelector<HTMLElement>('.nav-tab.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }, [tab])
 
   const switchTab = useCallback((next: Tab): void => {
     if (next === tab) return
@@ -241,7 +280,7 @@ function App(): JSX.Element {
           </span>
         </div>
 
-        <nav className="side-nav">
+        <nav className="side-nav" ref={navRef}>
           <button className={`nav-tab ${tab === 'setup' ? 'active' : ''}`} onClick={() => switchTab('setup')}>
             <Icon name="zap" />
             <span>初始化</span>
@@ -258,6 +297,11 @@ function App(): JSX.Element {
           <button className={`nav-tab ${tab === 'sources' ? 'active' : ''}`} onClick={() => switchTab('sources')}>
             <Icon name="radio" />
             <span>来源</span>
+          </button>
+          {/* 日志是排障时的末位入口，放在菜单最后，日常操作优先。 */}
+          <button className={`nav-tab ${tab === 'logs' ? 'active' : ''}`} onClick={() => switchTab('logs')}>
+            <Icon name="file-text" />
+            <span>日志</span>
           </button>
         </nav>
 
@@ -289,6 +333,7 @@ function App(): JSX.Element {
           />
         )}
         {tab === 'tickets' && <TicketsView />}
+        {tab === 'logs' && <LogsView />}
         {tab === 'config' && (
           <ConfigView
             restarting={restartPhase === 'restarting'}
@@ -326,8 +371,6 @@ function TicketsView(): JSX.Element {
   const [tickets, setTickets] = useState<Ticket[]>([])
   const [selected, setSelected] = useState<string | null>(null)
   const [detail, setDetail] = useState<TicketDetail | null>(null)
-  const [keyword, setKeyword] = useState('')
-  const [stage, setStage] = useState<string>('all')
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [lastSync, setLastSync] = useState<Date | null>(null)
   const [detailError, setDetailError] = useState<string | null>(null)
@@ -388,27 +431,11 @@ function TicketsView(): JSX.Element {
     }
   }, [selected, closeDrawer])
 
-  const counts = useMemo(() => {
-    const map = new Map<string, number>()
-    for (const ticket of tickets) map.set(ticket.stage, (map.get(ticket.stage) ?? 0) + 1)
-    return map
-  }, [tickets])
+  const openCount = tickets.filter(ticket => ticket.stage !== 'done').length
 
-  const openCount = tickets.filter(ticket => ticket.stage !== 'closed').length
-
-  const filtered = useMemo(() => {
-    const query = keyword.trim().toLowerCase()
-    return tickets.filter(ticket => {
-      if (stage !== 'all' && ticket.stage !== stage) return false
-      if (!query) return true
-      return [ticket.title, ticket.id, ticket.repo, ticket.branch, ticket.prUrl, String(ticket.prNumber)]
-        .some(value => String(value ?? '').toLowerCase().includes(query))
-    })
-  }, [tickets, keyword, stage])
-
+  // 去掉顶部分类筛选栏后，看板直接展示全部阶段列。
   const columns = STAGE_ORDER
-    .filter(item => stage === 'all' || item === stage)
-    .map(item => ({ stage: item, items: filtered.filter(ticket => ticket.stage === item) }))
+    .map(stage => ({ stage, items: tickets.filter(ticket => ticket.stage === stage) }))
 
   const refresh = (): void => {
     load()
@@ -420,7 +447,7 @@ function TicketsView(): JSX.Element {
       <PageHead
         title="工单"
         subtitle={lastSync
-          ? `${openCount} 张进行中 · ${tickets.length - openCount} 张已关闭 · 更新于 ${lastSync.toLocaleTimeString('zh-CN')}`
+          ? `${openCount} 张在办 · ${tickets.length - openCount} 张已完成 · 更新于 ${lastSync.toLocaleTimeString('zh-CN')}`
           : '正在读取工单…'}
         actions={
           <>
@@ -436,37 +463,6 @@ function TicketsView(): JSX.Element {
           </>
         }
       />
-
-      <div className="filter-bar">
-        <div className="search-box">
-          <Icon name="search" size={15} />
-          <input
-            value={keyword}
-            onChange={event => setKeyword(event.target.value)}
-            placeholder="搜索标题、工单号、仓库或 PR"
-          />
-        </div>
-        <div className="stage-chips">
-          <button className={`chip ${stage === 'all' ? 'active' : ''}`} onClick={() => setStage('all')}>
-            全部<span className="chip-count">{tickets.length}</span>
-          </button>
-          {STAGE_ORDER.map(item => {
-            const count = counts.get(item) ?? 0
-            return (
-              <button
-                key={item}
-                className={`chip stage-${item} ${stage === item ? 'active' : ''}`}
-                onClick={() => setStage(item)}
-                disabled={count === 0 && stage !== item}
-              >
-                <span className="chip-dot" />
-                {STAGE_LABEL[item]}
-                <span className="chip-count">{count}</span>
-              </button>
-            )
-          })}
-        </div>
-      </div>
 
       <div className="board" role="list" aria-label="工单看板">
         {columns.map(column => (
@@ -526,7 +522,7 @@ function TicketsView(): JSX.Element {
                 />
               )}
             </div>
-            {detail && detail.ticket.stage !== 'closed' && (
+            {detail && detail.ticket.stage !== 'done' && (
               <FollowupComposer
                 ticketId={detail.ticket.id}
                 onSent={() => {
@@ -549,7 +545,7 @@ function StagePill({ stage }: { stage: string }): JSX.Element {
 function TicketDetailView({ detail, onChanged }: { detail: TicketDetail; onChanged: () => void }): JSX.Element {
   const [copied, setCopied] = useState('')
   const { ticket } = detail
-  const open = ticket.stage !== 'closed'
+  const open = ticket.stage !== 'done'
   const resume = detail.resume
 
   const copy = async (label: string, value: string): Promise<void> => {
@@ -763,7 +759,7 @@ const CUSTOM_SECTIONS: SectionDef[] = [
   {
     id: 'projects',
     title: '项目与群绑定',
-    description: '维护可派工的项目，以及每个群绑定到哪个项目 / 分支。项目清单按 Worker 后端隔离。',
+    description: '维护可派工的项目，以及每个群绑定到哪个项目 / 分支。项目清单按 Worker 后端隔离；支持添加本地项目或从 Git 地址 clone。',
     fields: [],
   },
 ]
@@ -1396,7 +1392,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
         <header className="settings-head">
           <div>
             <h2>3. 登记项目</h2>
-            <p>当前运行时：<strong>{runtimeLabel}</strong>。至少登记一个项目，群绑定才能选；非 orca 运行时填本地仓库绝对路径。</p>
+            <p>当前运行时：<strong>{runtimeLabel}</strong>。至少登记一个项目，群绑定才能选；可以选本机已有目录，也可以填 Git 地址自动 clone。</p>
           </div>
           <div className="settings-badges">
             {projectReady ? <span className="badge hot">已完成</span> : <span className="badge cold">未完成</span>}
@@ -1611,6 +1607,37 @@ function control(field: FieldDef, value: unknown, onChange: (value: unknown) => 
   )
 }
 
+interface ProjectInspectionView {
+  path: string
+  name: string
+  isGit: boolean
+  branch: string
+  detached: boolean
+  remoteUrl: string
+  error?: string
+  repo?: string
+  reused?: boolean
+  orca?: { registered: boolean; repo: string; displayName: string; error?: string }
+}
+
+interface ProjectDialogState {
+  mode: 'local' | 'git'
+  url: string
+  path: string
+  busy: boolean
+  info: ProjectInspectionView | null
+  name: string
+  defaultBranch: string
+  error: string | null
+  notice: string | null
+  /** Orca 登记失败时先提示，再点一次「仍然添加」才落配置。 */
+  force: boolean
+}
+
+function dialogError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 function ProjectsEditor({ runtimeId, projects, error, onChange }: {
   runtimeId: string
   projects: ProjectDraft[]
@@ -1618,9 +1645,160 @@ function ProjectsEditor({ runtimeId, projects, error, onChange }: {
   onChange: (value: ProjectDraft[]) => void
 }): JSX.Element {
   const isOrca = runtimeId === ORCA_RUNTIME_ID
+  const [dialog, setDialog] = useState<ProjectDialogState | null>(null)
   const update = (index: number, patch: Partial<ProjectDraft>): void => {
     onChange(projects.map((project, i) => (i === index ? { ...project, ...patch } : project)))
   }
+
+  const baseDialog = (mode: 'local' | 'git', busy = false): ProjectDialogState => ({
+    mode,
+    url: '',
+    path: '',
+    busy,
+    info: null,
+    name: '',
+    defaultBranch: '',
+    error: null,
+    notice: null,
+    force: false,
+  })
+
+  const inspectPath = async (target: string): Promise<void> => {
+    const path = target.trim()
+    if (!path) {
+      setDialog(current => (current ? { ...current, error: '请先选择或填写本地目录' } : current))
+      return
+    }
+    setDialog(current => (current ? { ...current, busy: true, error: null, notice: null, info: null } : current))
+    try {
+      const info = await sendJson<ProjectInspectionView>('/api/projects/inspect', 'POST', { path })
+      setDialog(current => (current
+        ? {
+          ...current,
+          busy: false,
+          info,
+          path: info.path,
+          name: info.name,
+          defaultBranch: info.branch,
+          error: info.isGit ? null : (info.error ?? '该目录不是 Git 仓库'),
+          force: false,
+        }
+        : current))
+    } catch (failure) {
+      setDialog(current => (current ? { ...current, busy: false, info: null, error: dialogError(failure) } : current))
+    }
+  }
+
+  /** 「添加本地项目」：先弹系统目录选择框，选中后自动识别 Git 与分支。 */
+  const startLocal = async (): Promise<void> => {
+    const initial = baseDialog('local', true)
+    setDialog(initial)
+    try {
+      const picked = await sendJson<{ canceled: boolean; path: string }>('/api/projects/pick-directory', 'POST', {})
+      if (picked.canceled || !picked.path) {
+        setDialog(null)
+        return
+      }
+      setDialog({ ...initial, path: picked.path, busy: false })
+      await inspectPath(picked.path)
+    } catch (failure) {
+      setDialog({
+        ...initial,
+        busy: false,
+        error: `无法打开目录选择框：${dialogError(failure)}。可以直接填写绝对路径后点「识别」。`,
+      })
+    }
+  }
+
+  const pickIntoDialog = async (): Promise<void> => {
+    setDialog(current => (current ? { ...current, busy: true, error: null, notice: null } : current))
+    try {
+      const picked = await sendJson<{ canceled: boolean; path: string }>('/api/projects/pick-directory', 'POST', {})
+      if (picked.canceled || !picked.path) {
+        setDialog(current => (current ? { ...current, busy: false } : current))
+        return
+      }
+      await inspectPath(picked.path)
+    } catch (failure) {
+      setDialog(current => (current
+        ? { ...current, busy: false, error: `无法打开目录选择框：${dialogError(failure)}。可以直接填写绝对路径。` }
+        : current))
+    }
+  }
+
+  const cloneGit = async (): Promise<void> => {
+    if (!dialog) return
+    const url = dialog.url.trim()
+    if (!url) {
+      setDialog({ ...dialog, error: '请填写 Git 地址' })
+      return
+    }
+    setDialog({ ...dialog, busy: true, error: null, notice: null, info: null, force: false })
+    try {
+      const info = await sendJson<ProjectInspectionView>('/api/projects/clone', 'POST', { url, runtimeId })
+      const orcaFailed = info.orca && !info.orca.registered
+      setDialog(current => (current
+        ? {
+          ...current,
+          busy: false,
+          info,
+          path: info.path,
+          name: info.name,
+          defaultBranch: info.branch,
+          error: info.isGit ? null : (info.error ?? '该目录不是 Git 仓库'),
+          notice: orcaFailed ? `已 clone 到 ${info.path}，但登记到 Orca 失败：${info.orca?.error ?? '未知原因'}` : null,
+        }
+        : current))
+    } catch (failure) {
+      setDialog(current => (current ? { ...current, busy: false, error: dialogError(failure) } : current))
+    }
+  }
+
+  const addFromDialog = async (): Promise<void> => {
+    if (!dialog || !dialog.info) return
+    const name = dialog.name.trim()
+    if (!name) {
+      setDialog({ ...dialog, error: '请填写项目名' })
+      return
+    }
+    if (!dialog.info.isGit) {
+      setDialog({ ...dialog, error: '该目录不是 Git 仓库，无法创建 worktree' })
+      return
+    }
+    if (projects.some(project => project.name === name)) {
+      setDialog({ ...dialog, error: `项目名已存在：${name}` })
+      return
+    }
+
+    let repo = dialog.info.repo ?? dialog.info.path
+    if (dialog.mode === 'local') {
+      setDialog({ ...dialog, busy: true, error: null })
+      try {
+        const prepared = await sendJson<ProjectInspectionView>('/api/projects/register', 'POST', { path: dialog.info.path, runtimeId })
+        repo = prepared.repo ?? prepared.path
+        if (prepared.orca && !prepared.orca.registered && !dialog.force) {
+          setDialog(current => (current
+            ? {
+              ...current,
+              busy: false,
+              force: true,
+              notice: `登记到 Orca 失败：${prepared.orca?.error ?? '未知原因'}。仍可先加入项目清单，开工前需要在 Orca 里补登记。`,
+            }
+            : current))
+          return
+        }
+      } catch (failure) {
+        setDialog(current => (current ? { ...current, busy: false, error: dialogError(failure) } : current))
+        return
+      }
+    }
+
+    onChange([...projects, { name, repo, defaultBranch: dialog.defaultBranch.trim() }])
+    setDialog(null)
+  }
+
+  const canAdd = Boolean(dialog?.info?.isGit && dialog.name.trim())
+
   return (
     <div className="editor">
       {projects.length === 0 && <p className="editor-empty">该运行时还没有项目。没有项目时开单会先追问仓库。</p>}
@@ -1647,9 +1825,129 @@ function ProjectsEditor({ runtimeId, projects, error, onChange }: {
         </div>
       ))}
       {error && <p className="field-error">{error}</p>}
-      <button className="btn add" onClick={() => onChange([...projects, { name: '', repo: '', defaultBranch: '' }])}>
-        <Icon name="plus" size={13} />添加项目
-      </button>
+      <div className="project-add-actions">
+        <button className="btn add" onClick={() => void startLocal()}>
+          <Icon name="folder" size={13} />添加本地项目
+        </button>
+        <button className="btn add" onClick={() => setDialog(baseDialog('git'))}>
+          <Icon name="git" size={13} />添加 Git 项目
+        </button>
+      </div>
+
+      {dialog && (
+        <div className="modal-layer">
+          <button className="modal-backdrop" aria-label="关闭" onClick={() => { if (!dialog.busy) setDialog(null) }} />
+          <div className="modal" role="dialog" aria-modal="true" aria-label={dialog.mode === 'local' ? '添加本地项目' : '添加 Git 项目'}>
+            <header className="modal-head">
+              <div>
+                <h3>{dialog.mode === 'local' ? '添加本地项目' : '添加 Git 项目'}</h3>
+                <p>
+                  {dialog.mode === 'local'
+                    ? '选择本机已有目录，自动识别是否为 Git 仓库以及当前分支。'
+                    : `填写 ssh 或 http(s) 地址，自动 clone 到 RA_HOME/repos 下${isOrca ? '，并用 orca repo add 登记' : ''}。`}
+                </p>
+              </div>
+              <button className="icon-btn" title="关闭" onClick={() => setDialog(null)} disabled={dialog.busy}>
+                <Icon name="close" size={14} />
+              </button>
+            </header>
+            <div className="modal-body">
+              {dialog.mode === 'local' ? (
+                <label className="modal-field">
+                  <span>本地目录</span>
+                  <div className="modal-inline">
+                    <input
+                      value={dialog.path}
+                      placeholder="/Users/me/project"
+                      onChange={event => setDialog(current => (current
+                        ? { ...current, path: event.target.value, info: null, error: null, notice: null, force: false }
+                        : current))}
+                    />
+                    <button className="btn tiny" onClick={() => void pickIntoDialog()} disabled={dialog.busy}>
+                      <Icon name="folder" size={12} />选择目录…
+                    </button>
+                    <button
+                      className="btn tiny"
+                      onClick={() => void inspectPath(dialog.path)}
+                      disabled={dialog.busy || !dialog.path.trim()}
+                    >
+                      识别
+                    </button>
+                  </div>
+                </label>
+              ) : (
+                <label className="modal-field">
+                  <span>Git 地址</span>
+                  <input
+                    value={dialog.url}
+                    placeholder="git@gitlab.example.com:group/repo.git 或 https://gitlab.example.com/group/repo.git"
+                    onChange={event => setDialog(current => (current
+                      ? { ...current, url: event.target.value, info: null, error: null, notice: null, force: false }
+                      : current))}
+                  />
+                </label>
+              )}
+
+              {dialog.busy && <p className="modal-hint"><Icon name="refresh" size={13} className="spin" />正在处理…</p>}
+
+              {dialog.info && (
+                <div className={`project-detect ${dialog.info.isGit ? 'ok' : 'bad'}`}>
+                  <div><span>目录</span><code>{dialog.info.path}</code></div>
+                  <div><span>Git</span><strong>{dialog.info.isGit ? '是' : '否'}</strong></div>
+                  {dialog.info.isGit && (
+                    <div><span>当前分支</span><strong>{dialog.info.detached ? '游离 HEAD' : dialog.info.branch || '未知'}</strong></div>
+                  )}
+                  {dialog.info.remoteUrl && <div><span>origin</span><code>{dialog.info.remoteUrl}</code></div>}
+                  {dialog.info.reused && <div><span>目录</span><strong>已存在同远程仓库，直接复用</strong></div>}
+                  {dialog.info.orca && (
+                    <div>
+                      <span>Orca</span>
+                      <strong>{dialog.info.orca.registered ? `已登记为 ${dialog.info.orca.displayName}` : '登记失败'}</strong>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {dialog.info?.isGit && (
+                <div className="modal-grid">
+                  <label className="modal-field">
+                    <span>项目名</span>
+                    <input
+                      value={dialog.name}
+                      placeholder="router-agent"
+                      onChange={event => setDialog(current => (current ? { ...current, name: event.target.value, error: null } : current))}
+                    />
+                  </label>
+                  <label className="modal-field">
+                    <span>默认起始分支</span>
+                    <input
+                      value={dialog.defaultBranch}
+                      placeholder="main"
+                      onChange={event => setDialog(current => (current ? { ...current, defaultBranch: event.target.value } : current))}
+                    />
+                  </label>
+                </div>
+              )}
+
+              {dialog.error && <p className="modal-error">{dialog.error}</p>}
+              {dialog.notice && <p className="modal-notice">{dialog.notice}</p>}
+            </div>
+            <footer className="modal-foot">
+              <button className="btn tiny" onClick={() => setDialog(null)} disabled={dialog.busy}>取消</button>
+              {dialog.mode === 'git' && !dialog.info && (
+                <button className="btn primary" onClick={() => void cloneGit()} disabled={dialog.busy || !dialog.url.trim()}>
+                  {dialog.busy ? '克隆中…' : '克隆并识别'}
+                </button>
+              )}
+              {canAdd && (
+                <button className="btn primary" onClick={() => void addFromDialog()} disabled={dialog.busy}>
+                  {dialog.busy ? '处理中…' : dialog.force ? '仍然添加' : '添加项目'}
+                </button>
+              )}
+            </footer>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -1808,6 +2106,305 @@ function SourcesView(): JSX.Element {
       </section>
     </>
   )
+}
+
+// ---------------------------------------------------------------------------
+// 日志
+// ---------------------------------------------------------------------------
+
+function LogsView(): JSX.Element {
+  const [lines, setLines] = useState<LogLine[]>([])
+  const [meta, setMeta] = useState<{ path: string; exists: boolean; size: number } | null>(null)
+  const [live, setLive] = useState(true)
+  const [level, setLevel] = useState<string>('all')
+  const [keyword, setKeyword] = useState('')
+  const [syncedAt, setSyncedAt] = useState<Date | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [following, setFollowing] = useState(true)
+
+  const scrollerRef = useRef<HTMLDivElement | null>(null)
+  // 游标用 ref 保存：轮询回调里要读最新值，放进 state 会让定时器拿到旧闭包。
+  const cursorRef = useRef<number | null>(null)
+  const seqRef = useRef(0)
+  const inflightRef = useRef(false)
+
+  const append = useCallback((batch: LogBatch): void => {
+    // 没有新行时不动 state，避免每 2 秒把整张列表重渲染一遍。
+    if (batch.entries.length === 0 && !batch.reset) return
+    const incoming = batch.entries.map(entry => ({ ...entry, seq: ++seqRef.current }))
+    setLines(prev => {
+      const next = batch.reset ? incoming : [...prev, ...incoming]
+      return next.length > LOG_BUFFER_MAX ? next.slice(next.length - LOG_BUFFER_MAX) : next
+    })
+  }, [])
+
+  const pull = useCallback(async (): Promise<void> => {
+    // 上一次还没回来就跳过，避免网络慢时请求叠在一起把行重复追加。
+    if (inflightRef.current) return
+    inflightRef.current = true
+    try {
+      // 第一次（或服务重启后）不带游标，先回看尾部；之后只拉增量。
+      for (let round = 0; round < 8; round += 1) {
+        const query = cursorRef.current === null ? '?limit=400' : `?cursor=${cursorRef.current}`
+        const batch = await getJson<LogBatch>(`/api/logs${query}`)
+        cursorRef.current = batch.cursor
+        setMeta(prev => prev && prev.path === batch.path && prev.exists === batch.exists && prev.size === batch.size
+          ? prev
+          : { path: batch.path, exists: batch.exists, size: batch.size })
+        append(batch)
+        // 积压超过单次读取上限时继续拉，避免新日志被压在后面。
+        if (!batch.more) break
+      }
+      setSyncedAt(new Date())
+      setError(null)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      inflightRef.current = false
+    }
+  }, [append])
+
+  useEffect(() => {
+    void pull()
+  }, [pull])
+
+  useEffect(() => {
+    if (!live) return
+    const timer = setInterval(() => {
+      // 页面在后台时不轮询，回到前台下一轮会一次补齐。
+      if (!document.hidden) void pull()
+    }, LOG_POLL_MS)
+    return () => clearInterval(timer)
+  }, [live, pull])
+
+  // 停留在底部时跟着新日志滚动；用户往上翻就不再打扰，直到点「最新」。
+  useEffect(() => {
+    if (!following) return
+    const el = scrollerRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [lines, following])
+
+  const onScroll = useCallback((): void => {
+    const el = scrollerRef.current
+    if (!el) return
+    setFollowing(el.scrollHeight - el.scrollTop - el.clientHeight < 48)
+  }, [])
+
+  const jumpToBottom = useCallback((): void => {
+    const el = scrollerRef.current
+    if (el) el.scrollTop = el.scrollHeight
+    setFollowing(true)
+  }, [])
+
+  const counts = useMemo(() => {
+    const map: Record<string, number> = { all: lines.length }
+    for (const line of lines) map[line.level] = (map[line.level] ?? 0) + 1
+    return map
+  }, [lines])
+
+  const visible = useMemo(() => {
+    const query = keyword.trim().toLowerCase()
+    return lines.filter(line => {
+      if (level !== 'all' && line.level !== level) return false
+      if (!query) return true
+      const haystack = `${line.message} ${JSON.stringify(line.data ?? {})}`
+      return haystack.toLowerCase().includes(query)
+    })
+  }, [lines, level, keyword])
+
+  // 行元素按过滤结果缓存：轮询没有新内容时不再重建整张列表。
+  const rows = useMemo(() => visible.map(line => (
+    <div key={line.seq} className={`log-row level-${line.level}`}>
+      <span className="log-time" title={line.at || undefined}>{logClock(line.at)}</span>
+      <span className="log-level">{LOG_LEVEL_LABEL[line.level] ?? line.level.toUpperCase()}</span>
+      <span className="log-message">
+        {line.message}
+        {line.data && (
+          <span className="log-data">
+            {' '}
+            {Object.entries(line.data).map(([key, value]) => (
+              <span key={key} className="log-pair">
+                <span className="log-key">{key}</span>={formatLogValue(value)}
+              </span>
+            ))}
+          </span>
+        )}
+      </span>
+    </div>
+  )), [visible])
+
+  const copyVisible = async (): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(visible.map(formatLogLine).join('\n'))
+      setNotice(`已复制 ${visible.length} 条`)
+      setTimeout(() => setNotice(null), 2_500)
+    } catch {
+      setNotice('复制失败，请手动选择文本')
+      setTimeout(() => setNotice(null), 4_000)
+    }
+  }
+
+  const clearFilters = useCallback((): void => {
+    setLevel('all')
+    setKeyword('')
+  }, [])
+
+  const levels = LOG_LEVELS.filter(item => item !== 'raw' || (counts.raw ?? 0) > 0)
+  const loading = meta === null
+  const subtitle = meta ? (
+    <>
+      <span className="log-path">{meta.path || '未配置日志目录'}</span>
+      <span className="log-submeta">
+        {meta.exists ? ` · ${formatBytes(meta.size)}` : ' · 文件尚未生成'}
+        {syncedAt ? ` · 更新于 ${syncedAt.toLocaleTimeString('zh-CN')}` : ''}
+      </span>
+    </>
+  ) : '正在读取日志文件…'
+
+  return (
+    <>
+      <PageHead
+        title="日志"
+        subtitle={subtitle}
+        actions={
+          <>
+            <label className="switch">
+              <input type="checkbox" checked={live} onChange={event => setLive(event.target.checked)} />
+              <span className="switch-track"><span className="switch-knob" /></span>
+              实时刷新
+            </label>
+            <button className="btn" onClick={() => void copyVisible()} disabled={visible.length === 0}>
+              <Icon name="copy" size={14} />
+              复制
+            </button>
+            <button className="btn" onClick={() => void pull()}>
+              <Icon name="refresh" size={14} />
+              刷新
+            </button>
+          </>
+        }
+      />
+
+      <section className="log-console" aria-busy={loading || undefined}>
+        <div className="log-toolbar">
+          <div className="log-filters" role="group" aria-label="按级别过滤">
+            {levels.map(item => (
+              <button
+                key={item}
+                type="button"
+                className={`log-chip ${level === item ? 'active' : ''}`}
+                aria-pressed={level === item}
+                onClick={() => setLevel(item)}
+              >
+                <span className="log-chip-dot" style={{ background: LOG_LEVEL_COLOR[item] }} />
+                <span>{LOG_LEVEL_LABEL[item]}</span>
+                <span className="log-chip-count">{counts[item] ?? 0}</span>
+              </button>
+            ))}
+          </div>
+          <div className="search-box log-search">
+            <Icon name="search" size={15} />
+            <input
+              value={keyword}
+              onChange={event => setKeyword(event.target.value)}
+              placeholder="过滤消息或字段…"
+              aria-label="过滤日志"
+            />
+          </div>
+          {notice && <span className="log-notice" role="status">{notice}</span>}
+          <button className="btn ghost tiny" onClick={() => setLines([])} disabled={lines.length === 0}>清空视图</button>
+        </div>
+
+        {error && (
+          <div className="log-alert" role="alert">
+            <Icon name="alert" size={14} />
+            <div>
+              <strong>读取日志失败</strong>
+              <span>{error}{syncedAt ? ` · 上次成功 ${syncedAt.toLocaleTimeString('zh-CN')}` : ''}</span>
+            </div>
+            <button className="btn ghost tiny" onClick={() => void pull()}>重试</button>
+          </div>
+        )}
+
+        <div
+          className="log-view"
+          ref={scrollerRef}
+          onScroll={onScroll}
+          role="log"
+          aria-label="运行日志"
+          // 每 2 秒都有新行，交给读屏实时播报会变成噪音，按需浏览即可。
+          aria-live="off"
+          tabIndex={0}
+        >
+          {loading ? (
+            <div className="log-empty">
+              <Icon name="file-text" size={22} />
+              <p>正在读取日志…</p>
+              <small>连接本机日志文件，读取完成后会从最新内容开始显示。</small>
+            </div>
+          ) : !meta?.exists ? (
+            <div className="log-empty">
+              <Icon name="file-text" size={22} />
+              <p>还没有日志文件</p>
+              <small>{meta?.path ? `服务写入第一条日志后会出现在 ${meta.path}` : '服务启动后这里会显示 RA 的运行日志。'}</small>
+            </div>
+          ) : visible.length === 0 ? (
+            <div className="log-empty">
+              <Icon name="file-text" size={22} />
+              <p>{lines.length === 0 ? '暂无日志' : '没有匹配的日志'}</p>
+              <small>{lines.length === 0 ? '服务产生新日志后会自动出现在这里。' : '换个级别或关键字试试。'}</small>
+              {(level !== 'all' || keyword.trim()) && (
+                <button className="btn ghost tiny" onClick={clearFilters}>清除筛选</button>
+              )}
+            </div>
+          ) : (
+            rows
+          )}
+        </div>
+        {!following && (
+          <button className="log-jump" onClick={jumpToBottom}>
+            <Icon name="chevron" size={12} className="log-jump-icon" />
+            最新
+          </button>
+        )}
+      </section>
+    </>
+  )
+}
+
+function logClock(at: string): string {
+  if (!at) return '—'
+  const date = new Date(at)
+  if (Number.isNaN(date.getTime())) return at
+  return date.toLocaleTimeString('zh-CN', { hour12: false })
+}
+
+function formatLogValue(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (value === null) return 'null'
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value)
+    } catch {
+      return String(value)
+    }
+  }
+  return String(value)
+}
+
+function formatLogLine(line: LogEntry): string {
+  const data = line.data
+    ? ` ${Object.entries(line.data).map(([key, value]) => `${key}=${formatLogValue(value)}`).join(' ')}`
+    : ''
+  return `${line.at || '-'} ${line.level.toUpperCase()} ${line.message}${data}`
+}
+
+function formatBytes(size: number): string {
+  if (!Number.isFinite(size) || size <= 0) return '0 B'
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  return `${(size / 1024 / 1024).toFixed(1)} MB`
 }
 
 const root = document.getElementById('root')

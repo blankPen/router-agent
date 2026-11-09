@@ -5,10 +5,13 @@ import type { Store } from '../store/db.js'
 import type { Engine } from '../core/engine.js'
 import { applyConfigPatch, policyOf, publicConfig, publicDefaults, requiresRestart, writeConfig, type AppConfig } from '../config.js'
 import { InstallStartError, type AcpRuntimeAdmin } from '../worker/runtimes/acp/admin.js'
+import { isWorkerRuntimeId, normalizeRuntimeId } from '../worker/runtimes/catalog.js'
+import { ProjectSetupError, type ProjectSetupPort } from './project-setup.js'
 import type { AcceptMode } from '../core/policy.js'
 import { noopSink, preview, type EventSink } from '../core/events.js'
 import type { WorkerStateFile } from '../worker/report-poller.js'
 import type { ResumeHint } from '../worker/port.js'
+import { readLogs } from './log-tail.js'
 
 export interface ApiServerOptions {
   engine: Engine
@@ -29,6 +32,10 @@ export interface ApiServerOptions {
   resumeHint?: (ticketId: string) => Promise<ResumeHint | null> | ResumeHint | null
   /** ACP 运行时探测与安装；缺省时新端点返回 404。 */
   runtimeAdmin?: AcpRuntimeAdmin
+  /** 面板「日志」页读取的日志文件；缺省时用 `<home>/logs/router-agent.log`。 */
+  logPath?: string
+  /** 项目登记：目录选择、Git 探测、clone 与 Orca 仓库登记；缺省时端点返回 404。 */
+  projectSetup?: ProjectSetupPort
 }
 
 export interface ApiServer {
@@ -40,6 +47,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
   const clock = opts.clock ?? { now: () => new Date().toISOString() }
   const config = opts.config
   const onEvent = opts.onEvent ?? noopSink
+  const logPath = opts.logPath ?? (config.home ? join(config.home, 'logs', 'router-agent.log') : '')
 
   const server = createServer((req, res) => {
     handle(req, res).catch(error => {
@@ -59,8 +67,8 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         pid: process.pid,
         startedAt: new Date(Date.now() - process.uptime() * 1_000).toISOString(),
         tickets: {
-          open: tickets.filter(t => t.stage !== 'closed').length,
-          closed: tickets.filter(t => t.stage === 'closed').length,
+          open: tickets.filter(t => t.stage !== 'done').length,
+          closed: tickets.filter(t => t.stage === 'done').length,
           byStage: groupByStage(tickets.map(t => t.stage)),
         },
         policy: { version: opts.engine.policy().version, acceptMode: opts.engine.policy().acceptMode },
@@ -138,9 +146,9 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         const handle = String((body as Record<string, unknown>).handle ?? '')
         const workdir = String((body as Record<string, unknown>).workdir ?? '')
         if (!handle) return respond(res, 400, { error: 'handle-required' })
-        if (ticket.stage === 'closed') return respond(res, 409, { error: 'ticket-closed' })
+        if (ticket.stage === 'done') return respond(res, 409, { error: 'ticket-closed' })
         // 手工重绑通常是在恢复丢失的 worker：清掉转人工状态并恢复话题订阅，
-        // 否则工单会停在 person，后续消息也不会再扇出到这张工单。
+        // 否则工单会停在 blocked，后续消息也不会再扇出到这张工单。
         opts.engine.clearAttention(ticketId)
         const assignment = opts.engine.startAssignment(ticketId, { runtimeId: config.runtime.default, handle, workdir })
         opts.engine.subscribe(ticket.threadId, ticket.id)
@@ -242,6 +250,70 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         directMessages: config.feishu.directMessages,
         allowed: config.feishu.allowed,
       })
+    }
+
+    if (path === '/api/logs' && req.method === 'GET') {
+      // 首次不带 cursor（回看尾部若干行），之后带上一次返回的 cursor 做增量拉取。
+      const rawCursor = url.searchParams.get('cursor')
+      const cursor = rawCursor === null || rawCursor.trim() === '' ? undefined : Number(rawCursor)
+      if (cursor !== undefined && (!Number.isFinite(cursor) || cursor < 0)) {
+        return respond(res, 400, { error: 'invalid-cursor' })
+      }
+      const limit = Number(url.searchParams.get('limit') ?? 200)
+      return respond(res, 200, readLogs(logPath, {
+        ...(cursor !== undefined ? { cursor } : {}),
+        limit: Number.isFinite(limit) ? limit : undefined,
+      }))
+    }
+
+    // 项目登记：本地目录选择 / Git 探测 / Git 地址 clone / Orca 仓库登记。
+    if (path === '/api/projects/pick-directory' && req.method === 'POST') {
+      if (!opts.projectSetup) return respond(res, 404, { error: 'project-setup-not-available' })
+      try {
+        return respond(res, 200, await opts.projectSetup.pickDirectory())
+      } catch (error) {
+        return respondProjectSetupError(res, error)
+      }
+    }
+
+    if (path === '/api/projects/inspect' && req.method === 'POST') {
+      if (!opts.projectSetup) return respond(res, 404, { error: 'project-setup-not-available' })
+      const body = await readJson(req)
+      const target = typeof body.path === 'string' ? body.path.trim() : ''
+      if (!target) return respond(res, 400, { error: 'path-required', message: '请先选择或填写本地目录' })
+      try {
+        return respond(res, 200, await opts.projectSetup.inspectDirectory(target))
+      } catch (error) {
+        return respondProjectSetupError(res, error)
+      }
+    }
+
+    if (path === '/api/projects/register' && req.method === 'POST') {
+      if (!opts.projectSetup) return respond(res, 404, { error: 'project-setup-not-available' })
+      const body = await readJson(req)
+      const target = typeof body.path === 'string' ? body.path.trim() : ''
+      if (!target) return respond(res, 400, { error: 'path-required', message: '请先选择或填写本地目录' })
+      const runtimeId = readRuntimeId(body, config.runtime.default)
+      if (runtimeId === null) return respond(res, 400, { error: 'invalid-runtime', message: '未知的 Worker 运行时' })
+      try {
+        return respond(res, 200, await opts.projectSetup.prepareLocal(target, runtimeId))
+      } catch (error) {
+        return respondProjectSetupError(res, error)
+      }
+    }
+
+    if (path === '/api/projects/clone' && req.method === 'POST') {
+      if (!opts.projectSetup) return respond(res, 404, { error: 'project-setup-not-available' })
+      const body = await readJson(req)
+      const url = typeof body.url === 'string' ? body.url.trim() : ''
+      if (!url) return respond(res, 400, { error: 'url-required', message: '请填写 Git 地址' })
+      const runtimeId = readRuntimeId(body, config.runtime.default)
+      if (runtimeId === null) return respond(res, 400, { error: 'invalid-runtime', message: '未知的 Worker 运行时' })
+      try {
+        return respond(res, 200, await opts.projectSetup.cloneRepository(url, runtimeId))
+      } catch (error) {
+        return respondProjectSetupError(res, error)
+      }
     }
 
     if (path === '/api/policy') {
@@ -374,6 +446,25 @@ function respond(res: ServerResponse, status: number, body: unknown, after?: () 
   const payload = JSON.stringify(body)
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(payload) })
   res.end(payload, after)
+}
+
+/** 项目登记的可预期失败统一返回 400；未知异常继续抛给外层兜底。 */
+function respondProjectSetupError(res: ServerResponse, error: unknown): void {
+  if (error instanceof ProjectSetupError) {
+    respond(res, 400, { error: error.code, message: error.message, ...(error.detail ?? {}) })
+    return
+  }
+  throw error
+}
+
+/**
+ * 面板里切换运行时后未必已经保存，所以允许请求显式带 runtimeId；
+ * 不传时沿用当前默认运行时，传了未知值则返回 null 让调用方报 400。
+ */
+function readRuntimeId(body: Record<string, unknown>, fallback: string): string | null {
+  if (typeof body.runtimeId !== 'string' || !body.runtimeId.trim()) return fallback
+  const id = normalizeRuntimeId(body.runtimeId)
+  return isWorkerRuntimeId(id) ? id : null
 }
 
 function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {

@@ -3,6 +3,7 @@
 export type IconName =
   | 'inbox' | 'sliders' | 'radio' | 'search' | 'refresh' | 'copy' | 'external'
   | 'stop' | 'alert' | 'plus' | 'trash' | 'branch' | 'terminal' | 'clock' | 'check' | 'chevron' | 'close'
+  | 'folder' | 'git' | 'file-text'
   | 'zap' | 'play'
 
 export function Icon({ name, size = 16, className }: { name: IconName; size?: number; className?: string }): JSX.Element {
@@ -71,6 +72,17 @@ export function Icon({ name, size = 16, className }: { name: IconName; size?: nu
         <path d="M18 9a9 9 0 0 1-9 9" />
       </>
     ),
+    folder: (
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />
+    ),
+    git: (
+      <>
+        <circle cx="6" cy="6" r="2.5" />
+        <circle cx="6" cy="18" r="2.5" />
+        <circle cx="18" cy="12" r="2.5" />
+        <path d="M6 8.5v7M8.5 6h4a3 3 0 0 1 3 3v1M8.5 18h4a3 3 0 0 0 3-3v-1" />
+      </>
+    ),
     terminal: (
       <>
         <path d="m4 17 6-6-6-6" />
@@ -88,6 +100,12 @@ export function Icon({ name, size = 16, className }: { name: IconName; size?: nu
     close: <path d="M18 6 6 18M6 6l12 12" />,
     zap: <path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z" />,
     play: <path d="M7 4l13 8-13 8V4Z" />,
+    'file-text': (
+      <>
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" />
+        <path d="M14 2v6h6M9 13h6M9 17h6" />
+      </>
+    ),
   }
   return (
     <svg

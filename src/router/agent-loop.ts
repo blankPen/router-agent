@@ -590,7 +590,7 @@ export class AgentLoop {
   private hasLiveSubscription(threadId: string): boolean {
     return this.store.listSubscriptions(threadId).some(sub => {
       const ticket = this.store.getTicket(sub.ticketId)
-      return Boolean(ticket && ticket.stage !== 'closed')
+      return Boolean(ticket && ticket.stage !== 'done')
     })
   }
 
@@ -602,7 +602,7 @@ export class AgentLoop {
     const subscriptions = this.store.listSubscriptions(threadId)
     for (let i = subscriptions.length - 1; i >= 0; i -= 1) {
       const ticket = this.store.getTicket(subscriptions[i]!.ticketId)
-      if (ticket?.stage !== 'closed') continue
+      if (ticket?.stage !== 'done') continue
       const mandate = this.store.getMandate(ticket.mandateId)
       if (mandate?.actorId === actorId) return ticket
     }

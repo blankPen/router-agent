@@ -15,6 +15,7 @@ import type {
   TriggerDisposition,
 } from '../core/model.js'
 import type { Policy } from '../core/policy.js'
+import { normalizeStage, stageAliases } from '../core/stage.js'
 
 export interface OutboxItem {
   id: string
@@ -548,13 +549,18 @@ export class Store {
   listTickets(filter: { stage?: Stage; limit?: number } = {}): Ticket[] {
     const limit = filter.limit ?? 200
     if (filter.stage) {
-      return (this.db.prepare('SELECT * FROM tickets WHERE stage = ? ORDER BY created_at DESC LIMIT ?').all(filter.stage, limit) as Row[]).map(ticketFromRow)
+      // 查询参数可能来自旧脚本 / 旧文档（如 --stage accepted），先归一化再加旧别名。
+      const normalized = normalizeStage(filter.stage)
+      const aliases = normalized ? stageAliases(normalized) : [String(filter.stage)]
+      const placeholders = aliases.map(() => '?').join(', ')
+      return (this.db.prepare(`SELECT * FROM tickets WHERE stage IN (${placeholders}) ORDER BY created_at DESC LIMIT ?`).all(...aliases, limit) as Row[]).map(ticketFromRow)
     }
     return (this.db.prepare('SELECT * FROM tickets ORDER BY created_at DESC LIMIT ?').all(limit) as Row[]).map(ticketFromRow)
   }
 
   listOpenTickets(): Ticket[] {
-    return (this.db.prepare("SELECT * FROM tickets WHERE stage != 'closed' ORDER BY created_at").all() as Row[]).map(ticketFromRow)
+    // 'closed' 是迁移前的旧终态值；读侧先兼容，避免部署后旧单被当成在办工单。
+    return (this.db.prepare("SELECT * FROM tickets WHERE stage NOT IN ('done', 'closed') ORDER BY created_at").all() as Row[]).map(ticketFromRow)
   }
 
   // ---------- 派工草稿（多项目 / 多分支补齐） ----------
@@ -965,7 +971,7 @@ function ticketFromRow(row: Row): Ticket {
     source: row.source as SourceKind,
     chatId: String(row.chat_id),
     mandateId: String(row.mandate_id),
-    stage: row.stage as Stage,
+    stage: normalizeStage(row.stage) ?? 'todo',
     repo: String(row.repo ?? ''),
     branch: String(row.branch ?? ''),
     ...(attachments.length > 0 ? { attachments } : {}),

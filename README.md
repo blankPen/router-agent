@@ -89,7 +89,7 @@ ra tickets                                             # 模拟产生的工单�
 1. `ra logs | grep trigger:ingested` 能看到消息进入；
 2. `ra tickets` 出现工单，`ra ticket <id>` 能看到授权范围与强度；
 3. `orca worktree list --json` 出现 `ra-tk-<编号>-<语义slug>`，分支名为 `ra/tk-<编号>-<语义slug>`（目录名与分支名一一对应，只把 `/` 换成 `-`），Orca 里出现 Claude Code 终端；
-4. Worker 执行 `ra report` 后，`ra ticket <id>` 的阶段在 `running → review/person` 之间变化；
+4. Worker 执行 `ra report` 后，`ra ticket <id>` 的阶段在 `running → review/blocked` 之间变化；
 5. 合并或关闭 PR 后，工单变 `closed`，飞书收到一次闭环通知。
 
 ## 它怎么工作
@@ -282,11 +282,12 @@ worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态�
 
 #### Web 面板
 
-`ra web` 打开的面板分四块：
+`ra web` 打开的面板分五块：
 
 - **初始化**：只放启动必需项——LLM Provider、运行时、项目、飞书接入、群与绑定，顶部有完成度清单；LLM Provider 放在第一位，可直接填 Base URL / 模型 / API Key（密钥只写入 `config.yaml`，保存后不回显），留空则继续复用 `.trove` 或环境变量。运行时用卡片平铺展示（带对应品牌 Logo），每张卡会检测 CLI / 版本 / ACP 依赖 / 登录状态。安装拆成两个按钮：**安装 CLI** 跳转该 Agent 的官方安装文档，**安装 ACP 扩展** 由 ra 把 npm 适配包装到 `~/.router-agent/runtimes`（没有可安装扩展时不显示）；另有真实握手试启动。配好后保存并按提示重启服务即可。
 - **工单**：按阶段分组 + 计数、关键字搜索（标题 / 工单号 / 仓库 / PR）、自动刷新开关与手动刷新；详情页有阶段、派工、PR、授权范围、上报时间线（含完整回复与 `humanAction`）、投递记录，可直接投递 follow-up 或停止工单。
-- **配置**：按「LLM Provider / 准入策略 / 研判与人格 / 会话复用 / 进展同步 / 闲置治理 / 飞书接入 / 派工与服务 / 项目与群绑定」分组；每个字段带说明与默认值提示，改动逐项标脏，保存前做前端 + 后端双重校验，保存后写回 `config.yaml`。「派工与服务」里的 Worker 运行时是与初始化页相同的卡片平铺组件（`orca` / `claude-code` / `acp` / `acp-*`），可检测安装状态、分别跳转官方文档安装 CLI 或由 ra 安装 ACP 扩展，并做 ACP 握手试启动；项目清单按后端隔离，切换后端后「项目与群绑定」里的项目清单会切换到该后端自己的一套（Orca 用仓库选择器，Claude Code 必须是本地仓库绝对路径）。群绑定的项目只能从当前清单里选，分支自动跟随项目的默认分支，不能单独自定义。
+- **日志**：直接看 `~/.router-agent/logs/router-agent.log`，默认 2 秒增量拉取（只读游标之后的新字节，不重复读整个文件），可开「实时刷新」；按 INFO / WARN / ERROR 过滤、按消息或字段搜索、复制当前结果；停在底部时自动跟随新日志，往上翻后不再打断，点「最新」回到底部。文件不存在或还没写入时给出空状态提示。
+- **配置**：按「LLM Provider / 准入策略 / 研判与人格 / 会话复用 / 进展同步 / 闲置治理 / 飞书接入 / 派工与服务 / 项目与群绑定」分组；每个字段带说明与默认值提示，改动逐项标脏，保存前做前端 + 后端双重校验，保存后写回 `config.yaml`。「派工与服务」里的 Worker 运行时是与初始化页相同的卡片平铺组件（`orca` / `claude-code` / `acp` / `acp-*`），可检测安装状态、分别跳转官方文档安装 CLI 或由 ra 安装 ACP 扩展，并做 ACP 握手试启动；项目清单按后端隔离，切换后端后「项目与群绑定」里的项目清单会切换到该后端自己的一套（Orca 用仓库选择器，Claude Code 必须是本地仓库绝对路径）；「添加本地项目」支持系统目录选择并自动识别 Git / 分支，「添加 Git 项目」支持填写 ssh / http(s) 地址后自动 clone 并登记。群绑定的项目只能从当前清单里选，分支自动跟随项目的默认分支，不能单独自定义。
 - **来源**：服务状态、监控群、接收范围概览。
 
 配置项会标注生效范围：**策略**（`acceptMode` / `maxWorkers` / `admission`）保存后立即生效；其余配置在服务启动时读入，保存后点侧栏或配置页的「重启服务」即可热重启 daemon（浏览器页面不会刷新），也可以手动 `ra stop && ra start`。面板可以在「初始化 · LLM Provider」或「配置 · LLM Provider」里填写 `llm.apiKey`，密钥只写入 `config.yaml`，保存后不会再回显（`publicConfig` 只返回 `apiKeySet`）；也可以用 CLI / 环境变量配置。保存会重写 `config.yaml`，原文件的注释会丢失。
@@ -492,6 +493,13 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 orca repo list --json | jq -r '.result.repos[] | "\(.displayName)\t\(.path)\t\(.kind)"'
 ```
 
+Web 面板的「登记项目」提供两种添加方式：
+
+| 入口 | 行为 |
+|-|-|
+| 添加本地项目 | 弹出系统目录选择框；选中后自动识别 Git 根目录、当前分支与 origin。不是 Git 仓库时直接提示，不能用于创建 worktree |
+| 添加 Git 项目 | 填写 ssh / http(s) 地址，自动 clone 到 `<RA_HOME>/repos/<项目名>`（默认 `~/.router-agent/repos`）；Orca 运行时再执行 `orca repo add --path ... --kind git` 登记，配置里写 `path:<绝对路径>` |
+
 三种写法都支持：
 
 | 写法 | 例子 | 说明 |
@@ -650,7 +658,18 @@ runtime:
 
 ## 工单阶段
 
-`draft → accepted → assigned → running → review → closed`，可在 `person`（等人）与 `idle`（空闲）之间来回。PR 仍处于 open 时禁止结束工单。
+工单只有五种阶段：
+
+| 阶段 | 含义 |
+| --- | --- |
+| `todo` 待办 | 已接单，尚未派工 |
+| `running` 进行中 | 已派工，worker 正在执行 |
+| `review` 审核中 | worker 已交付，等待发起人验收 |
+| `blocked` 已阻塞 | 等待人工回答、worker 失败/退出，或需要人工推动 |
+| `done` 已完成 | 工单闭环（PR 合并/关闭或人工结束） |
+
+`done` 是终态；其余四种阶段之间可以互相流转。PR 仍处于 open 时禁止结束工单。
+旧版本八阶段（`draft/accepted/assigned/running/review/person/idle/closed`）的历史数据迁移见 [docs/TICKET-STAGE-MIGRATION.md](docs/TICKET-STAGE-MIGRATION.md)。
 
 ## 闲置工单治理
 
@@ -721,6 +740,11 @@ ra report \
 | GET / PUT | `/api/config` | 配置面板：读安全快照 / 按点路径提交补丁（白名单校验 + 落盘） |
 | POST | `/api/restart` | 热重启 daemon：先返回 202，再释放端口并拉起新进程（页面不刷新） |
 | GET | `/api/sources/feishu/chats` | 飞书来源配置 |
+| GET | `/api/logs?cursor=&limit=` | 面板日志页：不带 `cursor` 回看尾部若干行，带上后只返回新增行 |
+| POST | `/api/projects/pick-directory` | 打开系统目录选择框（添加本地项目） |
+| POST | `/api/projects/inspect` | 识别目录是否为 Git 仓库、当前分支与 origin |
+| POST | `/api/projects/register` | 本地项目登记（Orca 运行时执行 `orca repo add`） |
+| POST | `/api/projects/clone` | Git 项目：clone 到 `<RA_HOME>/repos` 并按需登记 Orca |
 
 ## 开发
 

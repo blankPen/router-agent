@@ -167,7 +167,7 @@ export class RouterToolbox {
     if (!before) return { error: 'ticket:not-found' }
 
     let ticket = before
-    if (before.stage !== 'closed') {
+    if (before.stage !== 'done') {
       try {
         ticket = force
           ? this.engine.stopTicket(ticketId, `ops:${reason}`)
@@ -196,8 +196,8 @@ export class RouterToolbox {
         prUrl: ticket.prUrl,
         closedAt: ticket.closedAt,
       },
-      alreadyClosed: before.stage === 'closed',
-      forced: force && before.stage !== 'closed',
+      alreadyClosed: before.stage === 'done',
+      forced: force && before.stage !== 'done',
       queued,
     }
   }
@@ -209,7 +209,7 @@ export class RouterToolbox {
     if (!ticketId) return { error: 'router_workspace_remove:missing-ticket_id' }
     const ticket = this.store.getTicket(ticketId)
     if (!ticket) return { error: 'ticket:not-found' }
-    if (ticket.stage !== 'closed') {
+    if (ticket.stage !== 'done') {
       return { error: 'ticket:not-closed', hint: '先关闭工单（router_ticket_close），再回收 workspace。' }
     }
     const assignment = this.store.latestAssignment(ticket.id)

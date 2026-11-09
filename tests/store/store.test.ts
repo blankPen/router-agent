@@ -47,7 +47,7 @@ const ticket: Ticket = {
   source: 'feishu',
   chatId: 'oc_chat',
   mandateId: 'md1',
-  stage: 'accepted',
+  stage: 'todo',
   repo: 'dsh/router-agent',
   branch: 'main',
   prNumber: 0,
@@ -107,6 +107,22 @@ describe('Store', () => {
     const loaded = s.getTicket('tk1')!
     expect(loaded.stage).toBe('review')
     expect(loaded.prNumber).toBe(9)
+    s.close()
+  })
+
+  it('旧库阶段值读时归一化，查询兼容旧别名且旧终态不算在办', () => {
+    const s = store()
+    s.insertTicket({ ...ticket, id: 'old1', stage: 'accepted' as never })
+    s.insertTicket({ ...ticket, id: 'old2', stage: 'closed' as never })
+    s.insertTicket({ ...ticket, id: 'new1', stage: 'todo' })
+
+    expect(s.getTicket('old1')?.stage).toBe('todo')
+    expect(s.getTicket('old2')?.stage).toBe('done')
+    expect(s.listTickets({ stage: 'todo' }).map(t => t.id).sort()).toEqual(['new1', 'old1'])
+    // 旧查询值也能命中（CLI --stage accepted 等历史用法）。
+    expect(s.listTickets({ stage: 'accepted' as never }).map(t => t.id)).toContain('old1')
+    // 迁移脚本执行前，旧 closed 也不能被当成在办工单。
+    expect(s.listOpenTickets().map(t => t.id)).not.toContain('old2')
     s.close()
   })
 

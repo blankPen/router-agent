@@ -73,7 +73,7 @@ describe('RouterToolbox 查询工具', () => {
     const byChat = toolbox.list({ chat_id: 'oc_other' }) as { tickets: { id: string }[] }
     expect(byChat.tickets.map(item => item.id)).toEqual(['tk-2'])
 
-    const byStage = toolbox.list({ stage: 'accepted' }) as { count: number }
+    const byStage = toolbox.list({ stage: 'todo' }) as { count: number }
     expect(byStage.count).toBe(2)
 
     const limited = toolbox.list({ limit: 1 }) as { count: number }
@@ -124,7 +124,7 @@ describe('RouterToolbox 清理工具', () => {
     const { toolbox, store, ticket } = setup()
     const denied = toolbox.close({ ticket_id: ticket.id, reason: '清理' }, { canMutate: false })
     expect(denied).toMatchObject({ error: 'permission:not-authorized' })
-    expect(store.getTicket(ticket.id)?.stage).not.toBe('closed')
+    expect(store.getTicket(ticket.id)?.stage).not.toBe('done')
     expect(effectKinds(store)).toEqual([])
   })
 
@@ -136,10 +136,10 @@ describe('RouterToolbox 清理工具', () => {
       queued: string[]
     }
 
-    expect(result.ticket.stage).toBe('closed')
+    expect(result.ticket.stage).toBe('done')
     expect(result.alreadyClosed).toBe(false)
     expect(result.queued).toEqual(['cleanup-workspace'])
-    expect(store.getTicket(ticket.id)?.stage).toBe('closed')
+    expect(store.getTicket(ticket.id)?.stage).toBe('done')
     expect(effectKinds(store)).toEqual(['cleanup-workspace'])
   })
 
@@ -155,13 +155,13 @@ describe('RouterToolbox 清理工具', () => {
 
     const refused = toolbox.close({ ticket_id: ticket.id, reason: '清理' }, { canMutate: true }) as { error?: string }
     expect(refused.error).toBe('pr:open')
-    expect(store.getTicket(ticket.id)?.stage).not.toBe('closed')
+    expect(store.getTicket(ticket.id)?.stage).not.toBe('done')
 
     const forced = toolbox.close({ ticket_id: ticket.id, reason: '用户确认连 PR 一起关', force: true }, { canMutate: true }) as {
       ticket: { stage: string }
       forced: boolean
     }
-    expect(forced.ticket.stage).toBe('closed')
+    expect(forced.ticket.stage).toBe('done')
     expect(forced.forced).toBe(true)
   })
 

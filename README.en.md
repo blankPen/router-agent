@@ -89,7 +89,7 @@ For a real acceptance run, mention the bot in a chat with a small request, then 
 1. `ra logs | grep trigger:ingested` shows the message arriving;
 2. `ra tickets` shows a ticket, and `ra ticket <id>` shows its scope and strength;
 3. `orca worktree list --json` shows `ra-tk-<number>-<semantic slug>` with branch `ra/tk-<number>-<semantic slug>` (the directory name matches the branch, with `/` replaced by `-`), and Orca shows a Claude Code terminal;
-4. after the Worker runs `ra report`, the stage in `ra ticket <id>` moves between `running → review/person`;
+4. after the Worker runs `ra report`, the stage in `ra ticket <id>` moves between `running → review/blocked`;
 5. when the PR is merged or closed, the ticket becomes `closed` and Feishu gets one closure notification.
 
 ## How it works
@@ -474,7 +474,14 @@ Each `projects[].repo` decides the target of `orca worktree create --repo`. See 
 orca repo list --json | jq -r '.result.repos[] | "\(.displayName)\t\(.path)\t\(.kind)"'
 ```
 
-All three forms are supported:
+The **Projects** editor in the web dashboard offers two ways to add one:
+
+| Entry | Behavior |
+|-|-|
+| Add local project | Opens the native folder picker; detects the Git root, current branch and origin. Non-Git folders are rejected because worktrees need a Git repo |
+| Add Git project | Takes an ssh / http(s) URL, clones it to `<RA_HOME>/repos/<name>` (default `~/.router-agent/repos`), and for the Orca runtime runs `orca repo add --path ... --kind git`; the config stores `path:<absolute path>` |
+
+All three selector forms are supported:
 
 | Form | Example | Notes |
 |-|-|-|
@@ -612,7 +619,18 @@ The table is tuned cell by cell under `policy.admission` in `config.yaml`:
 
 ## Ticket stages
 
-`draft → accepted → assigned → running → review → closed`, moving back and forth between `person` (waiting on someone) and `idle` (idle). A ticket cannot close while its PR is still open.
+A ticket has exactly five stages:
+
+| Stage | Meaning |
+| --- | --- |
+| `todo` | Accepted, not yet dispatched |
+| `running` | Dispatched; the worker is executing |
+| `review` | Delivered; waiting for the requester to review |
+| `blocked` | Waiting on a human answer, the worker failed/exited, or manual action is needed |
+| `done` | Ticket closed (PR merged/closed, or stopped manually) |
+
+`done` is terminal; the other four stages may transition into each other. A ticket cannot close while its PR is still open.
+See [docs/TICKET-STAGE-MIGRATION.md](docs/TICKET-STAGE-MIGRATION.md) for migrating historical data from the old eight-stage model (`draft/accepted/assigned/running/review/person/idle/closed`).
 
 ## Worker report protocol
 
@@ -661,6 +679,11 @@ States:
 | POST | `/api/reports` | Worker state and reply reports (the `ra report` entry) |
 | GET / PUT | `/api/policy` | Read / write policy |
 | GET | `/api/sources/feishu/chats` | Feishu source configuration |
+| GET | `/api/logs?cursor=&limit=` | Dashboard log page: omit `cursor` to tail the file, pass it to fetch only new lines |
+| POST | `/api/projects/pick-directory` | Open the native folder picker (add a local project) |
+| POST | `/api/projects/inspect` | Detect Git root, current branch and origin |
+| POST | `/api/projects/register` | Register a local project (`orca repo add` for the Orca runtime) |
+| POST | `/api/projects/clone` | Git project: clone into `<RA_HOME>/repos` and register with Orca if needed |
 
 ## Development
 

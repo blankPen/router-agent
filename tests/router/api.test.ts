@@ -87,10 +87,10 @@ describe('HTTP 管理 API', () => {
     const all = await call(server, 'GET', '/api/tickets')
     expect(all.status).toBe(200)
     expect(all.json.tickets).toHaveLength(1)
-    const none = await call(server, 'GET', '/api/tickets?stage=running')
+    const none = await call(server, 'GET', '/api/tickets?stage=todo')
     expect(none.json.tickets).toHaveLength(0)
-    const accepted = await call(server, 'GET', '/api/tickets?stage=assigned')
-    expect(accepted.json.tickets[0].id).toBe(ticketId)
+    const running = await call(server, 'GET', '/api/tickets?stage=running')
+    expect(running.json.tickets[0].id).toBe(ticketId)
   })
 
   it('GET /api/tickets/:id 返回工单、Mandate、派工与输入', async () => {
@@ -153,12 +153,12 @@ describe('HTTP 管理 API', () => {
     const ticket = store.getTicket(ticketId)!
     engine.unsubscribe(ticket.threadId, ticketId)
     engine.setAttention(ticketId, '执行会话已不存在')
-    expect(store.getTicket(ticketId)?.stage).toBe('person')
+    expect(store.getTicket(ticketId)?.stage).toBe('blocked')
 
     const res = await call(server, 'POST', `/api/tickets/${ticketId}/assignment`, { handle: 'h2', workdir: '/tmp/wt2' })
     expect(res.status).toBe(201)
     expect(store.latestAssignment(ticketId)?.handle).toBe('h2')
-    expect(store.getTicket(ticketId)?.stage).toBe('assigned')
+    expect(store.getTicket(ticketId)?.stage).toBe('running')
     expect(store.getAttention(ticketId)).toBeFalsy()
     expect(store.listSubscriptions(ticket.threadId).some(sub => sub.ticketId === ticketId)).toBe(true)
   })
@@ -174,7 +174,7 @@ describe('HTTP 管理 API', () => {
   it('POST /api/tickets/:id/stop 结束工单', async () => {
     const res = await call(server, 'POST', `/api/tickets/${ticketId}/stop`, { reason: '人工停止' })
     expect(res.status).toBe(200)
-    expect(store.getTicket(ticketId)?.stage).toBe('closed')
+    expect(store.getTicket(ticketId)?.stage).toBe('done')
     expect(events.find(event => event.event === 'api:stop')).toMatchObject({ ticketId })
   })
 
