@@ -57,7 +57,7 @@ npm install -g router-agent   # install globally from npm, then use `ra` directl
 ra --help                     # verify the command is available
 ```
 
-Upgrading is the same: `npm install -g router-agent@latest`.
+Upgrading is one command: `ra update` checks npm for the latest version, runs the global install, and restarts the running service automatically. Use `ra update --check` to only check. It is equivalent to `npm install -g router-agent@latest` followed by `ra stop && ra start`.
 
 <details>
 <summary>Run from source or contribute?</summary>
@@ -424,6 +424,11 @@ Additional events covering messages, config, and exceptions (same `at` / `level`
 | `pr:inspect-failed` / `pr:repo-slug-failed` | Service | `ticketId` `handle` `message` | PR hint lookup failed; falling back to gh |
 | `cursor:invalid` | Service | `key` `message` | Corrupt cursor JSON; treated as no cursor |
 | `llm:model-config-failed` | CLI | `message` | Model config missing or unparsable at startup |
+| `update:checked` | Update | `current` `latest` `hasUpdate` | Version check result (every 6 hours) |
+| `update:check-failed` / `update:skipped` | Update | `message` / `reason` `root` | Registry unreachable, or a source checkout skipped the global install |
+| `update:upgrade-started` / `update:upgraded` / `update:upgrade-failed` | Update | `from` `to` `durationMs` / `code` `message` | npm global install start, success and failure |
+| `update:service-restarted` / `update:service-stop-failed` / `update:restart-failed` | CLI | `pid` / `pid` `reason` `message` | `ra update` auto-restart outcome |
+| `api:update` | HTTP API | `phase` `from` `to` `reason` | Dashboard-triggered update result |
 
 Raw terminal output **never enters the logs** (to avoid parsing TUI text); the proactive probe prefers the Claude session transcript and otherwise posts a semantic summary (assistant text plus an action digest), never a replay of tool calls. To see what a Worker did, read the `report` `summary` and `~/.router-agent/workers/<ticketId>/events.log`.
 
@@ -438,6 +443,8 @@ The dashboard opens automatically after `ra start` and any time via `ra web`. It
 - **Logs**: reads `~/.router-agent/logs/router-agent.log` with incremental 2-second polling (only bytes after the cursor), optional live refresh, INFO / WARN / ERROR filters, message or field search, and copy; it follows new lines while pinned to the bottom and stops interrupting after you scroll up. Empty states cover a missing or not-yet-written file.
 - **Configuration**: grouped by LLM Provider / admission policy / triage and persona / session reuse / progress sync / idle governance / Feishu access / dispatch and service / projects and chat bindings. Each field carries help text and defaults, changes are marked dirty, and save runs both client and server validation before writing `config.yaml`. The runtime cards are the same component as on the setup page; project lists are isolated per runtime (Orca uses repository selectors, Claude Code / ACP require absolute local paths); add local projects with a system directory picker and Git detection, or Git projects by cloning from an ssh / http(s) URL.
 - **Sources**: service status, monitored chats and receive-scope overview.
+
+When npm has a newer version, an update bar appears at the top of the content area: **Update and restart** runs `npm install -g router-agent@latest` and lets the daemon restart itself once installed (the page stays open); **Later** ignores only that version, and a newer release prompts again. The sidebar footer also shows the running version.
 
 ![Lower half of the setup page: project registration, Feishu access and chat bindings](docs/assets/readme/setup-steps-dark.png)
 
@@ -720,6 +727,7 @@ These spec markdown files live under `specs/` in the state directory and can be 
 | `ra tickets [--stage]` | List tickets |
 | `ra ticket <id>` | Ticket details (stage / assignment / reports / inputs) |
 | `ra logs` | Last 50 log lines |
+| `ra update [--check]` | Check and upgrade to the latest npm version: runs `npm install -g router-agent@latest` and restarts the running service; `--no-restart` installs only, `--registry` picks a registry, `--force` installs globally even from a source / linked checkout, `--json` for machines |
 | `ra runtime [list]` | Probe local ACP agents: status / version / source (`--json` for machines) |
 | `ra runtime install <id>` | Install an ACP adapter into `~/.router-agent/runtimes/<agent>` |
 | `ra runtime uninstall <id>` | Remove an ra-managed ACP adapter |
@@ -820,6 +828,9 @@ States:
 | POST | `/api/workspaces/cleanup` | Batch-clean workspaces (`{ ticketIds }` per ticket, or `{ runtimeId }` for everything cleanable in that runtime; dirty worktrees are skipped with a reason) |
 | POST | `/api/reports` | Worker state and reply reports (the `ra report` entry) |
 | GET / PUT | `/api/policy` | Read / write policy |
+| GET | `/api/update` | Version snapshot: current / latest version, update availability, last check time and failure reason |
+| POST | `/api/update/check` | Force a fresh npm check (skips the server-side 6-hour cache) |
+| POST | `/api/update` | Install the latest version; on success it responds and restarts the daemon (`{ force: true }` installs globally from a source checkout) |
 | GET | `/api/sources/feishu/chats` | Feishu source configuration |
 | GET | `/api/logs?cursor=&limit=` | Dashboard log page: omit `cursor` to tail the file, pass it to fetch only new lines |
 | POST | `/api/projects/pick-directory` | Open the native folder picker (add a local project) |

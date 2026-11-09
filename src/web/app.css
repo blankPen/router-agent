@@ -355,6 +355,51 @@ button, input, select {
 .page-actions { display: flex; align-items: center; gap: 8px; padding-bottom: 0; }
 
 /* ---------------------------------------------------------------------------
+   版本更新提示
+   --------------------------------------------------------------------------- */
+
+/* 横跨内容区顶部，只在新版本可用 / 正在更新时出现，不挤占页面标题的层级。 */
+.update-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+  padding: 12px 16px;
+  border: 1px solid color-mix(in srgb, var(--primary) 30%, var(--border));
+  border-radius: var(--radius-card);
+  background: color-mix(in srgb, var(--primary) 8%, var(--surface));
+}
+.update-banner.error {
+  border-color: color-mix(in srgb, var(--negative) 32%, var(--border));
+  background: var(--pill-negative-bg);
+}
+.update-banner.done {
+  border-color: color-mix(in srgb, var(--positive) 32%, var(--border));
+  background: var(--pill-positive-bg);
+}
+.update-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--raised);
+  color: var(--primary);
+}
+.update-banner.error .update-icon { color: var(--negative); }
+.update-banner.done .update-icon { color: var(--positive); }
+.update-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.update-text strong { font-size: 13px; font-weight: 600; }
+.update-text small { font-size: 12px; color: var(--muted); }
+.update-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+
+@media (max-width: 640px) {
+  .update-banner { flex-wrap: wrap; }
+  .update-actions { width: 100%; justify-content: flex-end; }
+}
+
+/* ---------------------------------------------------------------------------
    控件
    --------------------------------------------------------------------------- */
 

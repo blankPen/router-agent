@@ -27,6 +27,13 @@ import {
 } from './runtime-model.js'
 import { hashForTab, tabFromHash, type Tab } from './tabs.js'
 import { THEME_MODE_LABEL, nextThemeMode, useThemeMode, type ThemeMode } from './theme.js'
+import {
+  readSkippedVersion,
+  updateBannerVisible,
+  writeSkippedVersion,
+  type UpdateRunPhase,
+  type UpdateSnapshot,
+} from './update.js'
 import { ACP_RUNTIME_ID, ORCA_RUNTIME_ID, normalizeRuntimeId } from '../../worker/runtimes/catalog.js'
 import type {
   WorkspaceCleanupResultView,
@@ -131,6 +138,8 @@ interface ChatDraft {
 
 interface ServiceStatus {
   stage: string
+  /** 当前服务进程实际运行的版本；旧版服务没有该字段。 */
+  version?: string
   runtime: string
   pid?: number
   startedAt?: string
@@ -226,6 +235,12 @@ function App(): JSX.Element {
   const [status, setStatus] = useState<ServiceStatus | null>(null)
   const [restartPhase, setRestartPhase] = useState<RestartPhase>('idle')
   const [restartError, setRestartError] = useState<string | null>(null)
+  // 版本更新是独立于「重启服务」的流程：安装成功后服务会自动重启，面板轮询到新 pid 再收尾。
+  const [updateInfo, setUpdateInfo] = useState<UpdateSnapshot | null>(null)
+  const [skippedVersion, setSkippedVersion] = useState<string | null>(readSkippedVersion)
+  const [updatePhase, setUpdatePhase] = useState<UpdateRunPhase>('idle')
+  const [updateError, setUpdateError] = useState<string | null>(null)
+  const [updatedTo, setUpdatedTo] = useState<string | null>(null)
   // 主题是纯前端偏好：不进配置页，也不写服务端配置，只落在浏览器 localStorage。
   const theme = useThemeMode()
   const nextTheme = nextThemeMode(theme.mode, theme.systemDark)
@@ -266,6 +281,16 @@ function App(): JSX.Element {
     return () => clearInterval(timer)
   }, [])
 
+  // 版本状态由服务端缓存（启动查一次 + 每 6 小时刷新）；面板只低频读快照，避免每次开页都打 registry。
+  useEffect(() => {
+    const load = (): void => {
+      void getJson<UpdateSnapshot>('/api/update').then(setUpdateInfo).catch(() => undefined)
+    }
+    load()
+    const timer = setInterval(load, 30 * 60_000)
+    return () => clearInterval(timer)
+  }, [])
+
   const restartDaemon = useCallback(async (): Promise<void> => {
     if (restartPhase === 'restarting') return
     const beforePid = status?.pid
@@ -298,7 +323,68 @@ function App(): JSX.Element {
     }
   }, [restartPhase, status?.pid])
 
+  /** 安装最新版；成功后服务由后端在响应结束后自动重启，这里只负责把界面跟进到新版本。 */
+  const runUpdate = useCallback(async (): Promise<void> => {
+    if (updatePhase === 'updating' || updatePhase === 'restarting') return
+    const beforePid = status?.pid
+    const target = updateInfo?.latest ?? null
+    setUpdatePhase('updating')
+    setUpdateError(null)
+    try {
+      const result = await sendJson<UpdateSnapshot & { restarting?: boolean }>('/api/update', 'POST', {})
+      setUpdateInfo(result)
+      if (result.phase === 'failed') throw new Error(result.message ?? result.error ?? '更新失败')
+      if (!result.restarting) {
+        // 已是最新版本，或服务没在运行：不需要等重启。
+        setUpdatedTo(result.installedVersion ?? null)
+        setUpdatePhase('done')
+        setTimeout(() => setUpdatePhase(current => current === 'done' ? 'idle' : current), 6_000)
+        return
+      }
+      setUpdatePhase('restarting')
+      const deadline = Date.now() + 60_000
+      let dropped = false
+      while (Date.now() < deadline) {
+        await sleep(800)
+        try {
+          const next = await getJson<ServiceStatus>('/api/status')
+          if (dropped || !beforePid || next.pid !== beforePid) {
+            setStatus(next)
+            setUpdatedTo(next.version ?? target)
+            setSkippedVersion(null)
+            writeSkippedVersion(null)
+            setUpdatePhase('done')
+            // 新进程的检查缓存可能还是空的；读不到就先本地隐藏提示，避免又弹旧版本。
+            void getJson<UpdateSnapshot>('/api/update').then(setUpdateInfo).catch(() => {
+              setUpdateInfo(previous => (previous ? { ...previous, hasUpdate: false } : previous))
+            })
+            setTimeout(() => setUpdatePhase(current => current === 'done' ? 'idle' : current), 6_000)
+            return
+          }
+        } catch {
+          dropped = true
+        }
+      }
+      throw new Error('更新已安装，但服务重启超时；请手动执行 ra stop && ra start')
+    } catch (error) {
+      setUpdateError(error instanceof Error ? error.message : String(error))
+      setUpdatePhase('error')
+      setTimeout(() => setUpdatePhase(current => current === 'error' ? 'idle' : current), 10_000)
+    }
+  }, [updatePhase, status?.pid, updateInfo?.latest])
+
+  /** 忽略当前版本：下次 npm 上出现更高版本还会再提示。 */
+  const dismissUpdate = useCallback((): void => {
+    const version = updateInfo?.latest ?? null
+    writeSkippedVersion(version)
+    setSkippedVersion(version)
+  }, [updateInfo?.latest])
+
   const live = status?.stage === 'running'
+  const showUpdateBanner = updateBannerVisible(updateInfo, skippedVersion, updatePhase)
+  const footerDetail = restartError ?? (status
+    ? [status.version ? `v${status.version}` : null, status.runtime ? `运行时 ${status.runtime}` : null].filter(Boolean).join(' · ') || 'router-agent'
+    : 'router-agent')
 
   return (
     <div className="shell">
@@ -348,7 +434,7 @@ function App(): JSX.Element {
           <span className={`status-dot ${live && restartPhase !== 'restarting' ? 'live' : ''}`} />
           <span className="sidebar-status">
 <strong>{restartPhase === 'restarting' ? '正在重启…' : restartPhase === 'done' ? '服务已重启' : restartPhase === 'error' ? '重启失败' : live ? '服务运行中' : status?.stage ?? '未连接'}</strong>
-            <small>{restartError ?? (status?.runtime ? `运行时 ${status.runtime}` : 'router-agent')}</small>
+            <small>{footerDetail}</small>
           </span>
           <button
             className="icon-btn restart-btn"
@@ -364,6 +450,16 @@ function App(): JSX.Element {
 
       {/* key 绑 tab：切页时重建滚动容器，回到页面顶部而不是沿用上一页的滚动位置。 */}
       <div className={`workspace tab-${tab}`} key={tab}>
+        {showUpdateBanner && (
+          <UpdateBanner
+            snapshot={updateInfo}
+            phase={updatePhase}
+            error={updateError}
+            updatedTo={updatedTo}
+            onUpdate={() => void runUpdate()}
+            onDismiss={dismissUpdate}
+          />
+        )}
         {tab === 'setup' && (
           <SetupView
             restarting={restartPhase === 'restarting'}
@@ -383,6 +479,57 @@ function App(): JSX.Element {
         )}
         {tab === 'sources' && <SourcesView />}
       </div>
+    </div>
+  )
+}
+
+function UpdateBanner({ snapshot, phase, error, updatedTo, onUpdate, onDismiss }: {
+  snapshot: UpdateSnapshot | null
+  phase: UpdateRunPhase
+  error: string | null
+  updatedTo: string | null
+  onUpdate: () => void
+  onDismiss: () => void
+}): JSX.Element {
+  const target = snapshot?.latest ?? updatedTo
+  const title = phase === 'updating'
+    ? `正在安装 v${target ?? '最新版'}…`
+    : phase === 'restarting'
+      ? '安装完成，正在重启服务…'
+      : phase === 'done'
+        ? updatedTo ? `已更新到 v${updatedTo}` : snapshot?.message ?? '已是最新版本'
+        : phase === 'error'
+          ? '更新失败'
+          : `发现新版本 v${target ?? ''}`
+  const subtitle = phase === 'error'
+    ? error ?? '请查看 ra 日志后重试。'
+    : phase === 'done'
+      ? updatedTo ? '服务已按新版本重启，页面无需刷新。' : '当前已经是最新版本。'
+      : phase === 'idle'
+        ? `当前 v${snapshot?.current ?? '-'}；更新会执行 npm install -g router-agent@latest 并自动重启服务。`
+        : '安装完成后会自动重启服务，页面无需刷新。'
+  return (
+    <div className={`update-banner ${phase === 'error' ? 'error' : phase === 'done' ? 'done' : ''}`} role="status">
+      <span className="update-icon">
+        <Icon name={phase === 'error' ? 'alert' : phase === 'done' ? 'check' : 'download'} size={16} />
+      </span>
+      <span className="update-text">
+        <strong>{title}</strong>
+        <small>{subtitle}</small>
+      </span>
+      {phase === 'idle' && (
+        <span className="update-actions">
+          <button className="btn primary tiny" onClick={onUpdate}>更新并重启</button>
+          <button className="btn ghost tiny" onClick={onDismiss}>稍后</button>
+        </span>
+      )}
+      {(phase === 'updating' || phase === 'restarting') && <Icon name="refresh" size={15} className="spin" />}
+      {phase === 'error' && (
+        <span className="update-actions">
+          <button className="btn tiny" onClick={onUpdate}>重试</button>
+          <button className="btn ghost tiny" onClick={onDismiss}>关闭</button>
+        </span>
+      )}
     </div>
   )
 }

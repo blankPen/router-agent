@@ -57,7 +57,7 @@ npm install -g router-agent   # 从 npm 全局安装，装完直接用 ra
 ra --help                     # 确认命令可用
 ```
 
-升级到最新版同样是 `npm install -g router-agent@latest`。
+升级到最新版用 `ra update`：检查 npm 上的最新版、执行 `npm install -g`，服务在跑时自动重启到新版本；只想看有没有新版用 `ra update --check`。等价于手动 `npm install -g router-agent@latest` 后 `ra stop && ra start`。
 
 <details>
 <summary>需要从源码运行或参与开发？</summary>
@@ -424,6 +424,11 @@ Router 不做对话，只在必要时说话：
 | `pr:inspect-failed` / `pr:repo-slug-failed` | Service | `ticketId` `handle` `message` | PR 线索获取失败，等待 gh 兜底 |
 | `cursor:invalid` | Service | `key` `message` | 游标 JSON 损坏，按无游标处理 |
 | `llm:model-config-failed` | CLI | `message` | 启动时模型配置缺失或不可解析 |
+| `update:checked` | Update | `current` `latest` `hasUpdate` | 每 6 小时的版本检查结果 |
+| `update:check-failed` / `update:skipped` | Update | `message` / `reason` `root` | registry 不可达，或源码运行时跳过全局安装 |
+| `update:upgrade-started` / `update:upgraded` / `update:upgrade-failed` | Update | `from` `to` `durationMs` / `code` `message` | npm 全局安装的开始、成功与失败 |
+| `update:service-restarted` / `update:service-stop-failed` / `update:restart-failed` | CLI | `pid` / `pid` `reason` `message` | `ra update` 自动重启的结果 |
+| `api:update` | HTTP API | `phase` `from` `to` `reason` | 面板触发的更新结果 |
 
 worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态）；主动巡检优先读 Claude 会话记录，其次才把终端里的语义摘要（助手文本 + 动作概要）发到话题，不逐条回放工具调用。要看它做了什么，读 `report` 的 `summary` 与 `~/.router-agent/workers/<ticketId>/events.log`。
 
@@ -440,6 +445,8 @@ worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态�
 - **来源**：服务状态、监控群、接收范围概览。
 
 侧栏品牌行末尾有全局主题切换图标：**跟随系统 / 亮色 / 暗色** 三态循环，默认跟随系统；选择只存在浏览器本地，不写入 `config.yaml`，所有页签即时生效。
+
+发现 npm 上有新版本时，内容区顶部会出现更新提示条：点「更新并重启」会执行 `npm install -g router-agent@latest` 并在安装成功后自动重启 daemon，页面无需刷新；点「稍后」只忽略当前版本，出现更高版本时会再次提示。侧栏底部同时显示当前运行版本。
 
 初始化页的下半部分（项目 / 飞书 / 群绑定）：
 
@@ -724,6 +731,7 @@ llm:
 | `ra tickets [--stage]` | 列出工单 |
 | `ra ticket <id>` | 工单详情（状态 / 派工 / 上报 / 输入） |
 | `ra logs` | 最近 50 行日志 |
+| `ra update [--check]` | 检查并升级到 npm 最新版：默认执行 `npm install -g router-agent@latest`，服务在跑时自动重启；`--no-restart` 只安装、`--registry` 指定源、`--force` 在源码 / link 运行时仍装全局版、`--json` 机器可读 |
 | `ra runtime [list]` | 探测本机 ACP Agent：状态、版本、来源；`--json` 机器可读 |
 | `ra runtime install <id>` | 按需安装 ACP 适配器到 `~/.router-agent/runtimes/<agent>` |
 | `ra runtime uninstall <id>` | 卸载 ra 托管的 ACP 适配器 |
@@ -846,6 +854,9 @@ ra report \
 | GET / PUT | `/api/policy` | 读写策略（保存后落盘） |
 | GET / PUT | `/api/config` | 配置面板：读安全快照 / 按点路径提交补丁（白名单校验 + 落盘） |
 | POST | `/api/restart` | 热重启 daemon：先返回 202，再释放端口并拉起新进程（页面不刷新） |
+| GET | `/api/update` | 版本快照：当前 / 最新版本、是否有更新、检查时间与最近一次失败原因 |
+| POST | `/api/update/check` | 强制重新检查 npm 最新版（跳过服务端 6 小时缓存） |
+| POST | `/api/update` | 安装最新版；成功后回包并自动重启 daemon（`{ force: true }` 用于源码运行时强制全局安装） |
 | GET | `/api/sources/feishu/chats` | 飞书来源配置 |
 | GET | `/api/logs?cursor=&limit=` | 面板日志页：不带 `cursor` 回看尾部若干行，带上后只返回新增行 |
 | POST | `/api/projects/pick-directory` | 打开系统目录选择框（添加本地项目） |
