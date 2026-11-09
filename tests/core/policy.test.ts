@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { gate, negotiateAcceptance, revalidateMandate, type Policy } from '../../src/core/policy.js'
+import { gate, negotiateAcceptance, revalidateMandate, shouldAcknowledge, type Policy } from '../../src/core/policy.js'
 import type { Mandate, Trigger } from '../../src/core/model.js'
 
 const policy: Policy = {
@@ -172,5 +172,39 @@ describe('群级白名单', () => {
     }
     expect(revalidateMandate(mandate, scoped)).toEqual({ valid: false, reason: 'sender:not-allowed' })
     expect(revalidateMandate({ ...mandate, actorId: 'ou_bob' }, scoped)).toEqual({ valid: true })
+  })
+})
+
+describe('回执表情', () => {
+  const replyAll = new Set(['oc_chat'])
+
+  it('被群白名单拦截的人 @ 机器人：不加表情（否则有表情、永远没回复）', () => {
+    const scoped: Policy = { ...policy, allowedByChat: { oc_chat: ['ou_bob'] } }
+    expect(shouldAcknowledge(trigger({ actorId: 'ou_alice' }), scoped, new Set())).toBe(false)
+  })
+
+  it('群白名单内的人 @ 机器人：加表情', () => {
+    const scoped: Policy = { ...policy, allowedByChat: { oc_chat: ['ou_bob'] } }
+    expect(shouldAcknowledge(trigger({ actorId: 'ou_bob' }), scoped, new Set())).toBe(true)
+  })
+
+  it('全量接收群里，名单外未 @ 的消息会被 admission 忽略：不加表情', () => {
+    expect(shouldAcknowledge(trigger({ actorId: 'ou_bob', addressed: 'none' }), policy, replyAll)).toBe(false)
+  })
+
+  it('全量接收群里，名单内未 @ 的消息：会进研判，加表情', () => {
+    expect(shouldAcknowledge(trigger({ addressed: 'none' }), policy, replyAll)).toBe(true)
+  })
+
+  it('非全量接收群里未 @ 的消息：不加表情', () => {
+    expect(shouldAcknowledge(trigger({ addressed: 'none' }), policy, new Set())).toBe(false)
+  })
+
+  it('名单外但准入允许研判的 @ 消息：仍加表情', () => {
+    expect(shouldAcknowledge(trigger({ actorId: 'ou_bob' }), policy, new Set())).toBe(true)
+  })
+
+  it('私聊消息加表情', () => {
+    expect(shouldAcknowledge(trigger({ actorId: 'ou_bob', addressed: 'direct' }), policy, new Set())).toBe(true)
   })
 })

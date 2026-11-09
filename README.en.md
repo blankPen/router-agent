@@ -355,7 +355,7 @@ The Router doesn't chat; it only speaks when necessary:
 
 | Scenario | Behavior |
 |-|-|
-| **Any monitored message** | Immediately adds an ack reaction (default `Typing` ⌨️), removed once the reply is sent |
+| **Addressed messages that will be processed** (@ / direct / reply-always chats) | Immediately adds an ack reaction (default `Typing` ⌨️), removed once the reply is sent; admission-blocked messages get none |
 | Mentioned in a group, but it's just a greeting / probe | **Pi generates** one polite reply as a **normal message**; no ticket |
 | Mentioned in a group with a real request | A single **thread** message: "Ticket 'title' (id) started. Progress will be updated in this thread." No extra normal-message "I created the ticket" ack |
 | Un-mentioned group message | Pi triage; casual chat is **completely silent** (no noise) |
@@ -370,7 +370,7 @@ The Router doesn't chat; it only speaks when necessary:
 | Worker delivers a conclusion | Simple one-line replies go as **plain text**; Markdown goes as a **Feishu card** (normalized first) in the thread, with document / PR links |
 | Worker progress (`--state progress` or Router probe) | **Not sent one by one**: reports are merged on `progress.syncMs` into one thread message (follow-up answers excepted). When the Worker goes quiet, the Router probes on `progress.probeMs` (session transcript first, terminal screen as fallback) and posts a semantic summary (assistant text plus a one-line action digest, tool-call noise filtered), rate-limited by `progress.repeatMs` |
 
-- The ack reaction is best-effort: failures only log `feishu:reaction-failed` and never affect triage. It is added only to first-time ingested messages addressed to the bot (@ / direct), never to replay, and removed after the reply is sent (`feishu:unreact-failed` logs a removal failure). Turn it off with `ra config set feishu.reaction ""`.
+- The ack reaction is best-effort: failures only log `feishu:reaction-failed` and never affect triage. It is added only to first-time ingested messages addressed to the bot (@ / direct / reply-always chats), never to replay, and removed after the reply is sent (`feishu:unreact-failed` logs a removal failure). Admission-blocked messages (outside a chat allowlist, `admission: ignore`) get no reaction, so users never see an ack with no reply. Turn it off with `ra config set feishu.reaction ""`.
 - All `emoji_type` values are in the Feishu "emoji copy" document; note that they are **case-sensitive** (`Typing`, not `TYPING`).
 - Outbound routing is content-based: **single-line, ≤200 characters, no Markdown syntax** goes as a `text` message; everything else is rendered as a Feishu **interactive card**, falling back to a post message if the card fails. Threading rule: an empty `threadId` means a normal message, a non-empty one means a thread reply.
 - Card Markdown is normalized first (`normalizeCardMarkdown`) to downgrade syntax Card 1.0 doesn't support: `#` headings → bold lines, `>` quotes → `▍`, tables → bold header + list rows, `- [x]` → ☑ / ☐, `<br>` → newline, `![image](http...)` → a clickable link; code blocks are preserved verbatim.
