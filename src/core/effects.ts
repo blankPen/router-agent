@@ -62,7 +62,13 @@ export class EffectsProcessor {
         result.sent += 1
       } catch (error) {
         this.store.failOutbox(item.id, errorText(error), this.clock.now())
-        this.onEvent({ event: 'outbox:failed', key: item.key, attempt: item.attempts, error: errorText(error).slice(0, 200) })
+        this.onEvent({
+          event: 'outbox:failed',
+          key: item.key,
+          channel: `${item.channelKind}:${item.channelId}`,
+          attempt: item.attempts,
+          error: errorText(error).slice(0, 200),
+        })
         result.failed += 1
       }
     }
@@ -70,7 +76,9 @@ export class EffectsProcessor {
     for (const item of this.store.claimEffects(now, this.limit)) {
       const handler = this.handlers[item.kind]
       if (!handler) {
-        this.store.failEffect(item.id, `effect:no-handler:${item.kind}`, this.clock.now())
+        const error = `effect:no-handler:${item.kind}`
+        this.store.failEffect(item.id, error, this.clock.now())
+        this.onEvent({ event: 'effect:failed', kind: item.kind, key: item.key, error })
         result.effectsFailed += 1
         continue
       }
@@ -81,6 +89,7 @@ export class EffectsProcessor {
         result.effects += 1
       } catch (error) {
         this.store.failEffect(item.id, errorText(error), this.clock.now())
+        this.onEvent({ event: 'effect:failed', kind: item.kind, key: item.key, error: errorText(error).slice(0, 200) })
         result.effectsFailed += 1
       }
     }

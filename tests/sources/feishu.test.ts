@@ -359,3 +359,42 @@ describe('引用消息', () => {
     expect(runner.calls).toHaveLength(0)
   })
 })
+
+describe('飞书通信日志', () => {
+  function recorder() {
+    const logs: { level: string; message: string; extra?: Record<string, unknown> }[] = []
+    return {
+      logs,
+      logger: {
+        info: () => {},
+        warn: (message: string, extra?: Record<string, unknown>) => logs.push({ level: 'warn', message, ...(extra ? { extra } : {}) }),
+        error: () => {},
+      },
+    }
+  }
+
+  it('卡片发送失败并降级为富文本时记 feishu:card-fallback', async () => {
+    const { logs, logger } = recorder()
+    let n = 0
+    const sender = new FeishuSender({
+      async run() {
+        n += 1
+        return n === 1 ? { code: 1, stdout: '', stderr: 'bad card' } : { code: 0, stdout: '{}', stderr: '' }
+      },
+    }, logger)
+    await sender.sendCard('oc_dev', '内容', 'k')
+    expect(logs[0]).toMatchObject({ level: 'warn', message: 'feishu:card-fallback' })
+    expect(logs[0]?.extra).toMatchObject({ target: 'oc_dev', code: 1, message: 'bad card' })
+  })
+
+  it('引用消息回查失败时记 feishu:quote-fetch-failed，并保持原消息', async () => {
+    const { logs, logger } = recorder()
+    const runner = new RecordingRunner()
+    runner.fail = true
+    const base = normalizeFeishuEvent(evt({ parent_id: 'om_parent' }), cfg)!
+    const t = await attachQuotedMessage(base, runner as never, { logger })
+    expect(t).toBe(base)
+    expect(logs[0]).toMatchObject({ level: 'warn', message: 'feishu:quote-fetch-failed' })
+    expect(logs[0]?.extra).toMatchObject({ messageId: 'om_parent', code: 1 })
+  })
+})

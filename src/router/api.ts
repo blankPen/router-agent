@@ -9,6 +9,7 @@ import { isWorkerRuntimeId, normalizeRuntimeId } from '../worker/runtimes/catalo
 import { ProjectSetupError, type ProjectSetupPort } from './project-setup.js'
 import type { AcceptMode } from '../core/policy.js'
 import { noopSink, preview, type EventSink } from '../core/events.js'
+import { noopLogger, errorMessage, type Logger } from '../infra/logger.js'
 import type { WorkerStateFile } from '../worker/report-poller.js'
 import type { ResumeHint } from '../worker/port.js'
 import { readLogs } from './log-tail.js'
@@ -37,6 +38,8 @@ export interface ApiServerOptions {
   logPath?: string
   /** 项目登记：目录选择、Git 探测、clone 与 Orca 仓库登记；缺省时端点返回 404。 */
   projectSetup?: ProjectSetupPort
+  /** 请求级异常与配置写入失败的日志出口。 */
+  logger?: Logger
 }
 
 export interface ApiServer {
@@ -48,11 +51,18 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
   const clock = opts.clock ?? { now: () => new Date().toISOString() }
   const config = opts.config
   const onEvent = opts.onEvent ?? noopSink
+  const logger = opts.logger ?? noopLogger
   const logPath = opts.logPath ?? (config.home ? join(config.home, 'logs', 'router-agent.log') : '')
 
   const server = createServer((req, res) => {
     handle(req, res).catch(error => {
-      respond(res, 500, { error: 'internal', message: error instanceof Error ? error.message : String(error) })
+      // 详情接口 / 配置保存等路径可能抛出未预期异常：先写日志，避免只看到一个 500。
+      logger.error('api:request-failed', {
+        method: req.method,
+        path: req.url,
+        message: errorMessage(error),
+      })
+      respond(res, 500, { error: 'internal', message: errorMessage(error) })
     })
   })
 
@@ -92,8 +102,9 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       if (assignment && opts.resumeHint) {
         try {
           resume = await opts.resumeHint(ticket.id)
-        } catch {
+        } catch (error) {
           // 恢复命令只是详情页的辅助信息，失败不能拖垮整个详情接口。
+          logger.warn('ticket:resume-failed', { ticketId: ticket.id, message: errorMessage(error) })
           resume = null
         }
       }
@@ -213,15 +224,17 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         const preview = structuredClone(config)
         const result = applyConfigPatch(preview, patch)
         if (result.errors.length > 0) {
+          logger.warn('config:patch-rejected', { errors: result.errors })
           return respond(res, 400, { error: 'invalid-config', errors: result.errors })
         }
         if (config.home && result.changed.length > 0) {
           try {
             writeConfig(config.home, preview)
           } catch (error) {
+            logger.error('config:write-failed', { home: config.home, message: errorMessage(error) })
             return respond(res, 500, {
               error: 'config-write-failed',
-              message: error instanceof Error ? error.message : String(error),
+              message: errorMessage(error),
             })
           }
         }
@@ -233,13 +246,14 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         const policyChanged = nextPolicy.version !== beforePolicy.version
         if (policyChanged) await opts.onPolicyChange?.(config)
         await opts.onConfigChange?.(config, result.changed)
-        onEvent({ event: 'api:config', changed: result.changed })
+        const restartRequired = requiresRestart(result.changed)
+        onEvent({ event: 'api:config', changed: result.changed, policyChanged, restartRequired })
         return respond(res, 200, {
           ...configPayload(config, opts.runtimeAdmin),
           ok: true,
           changed: result.changed,
           policyChanged,
-          restartRequired: requiresRestart(result.changed),
+          restartRequired,
         })
       }
       return respond(res, 405, { error: 'method-not-allowed' })

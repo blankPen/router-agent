@@ -7,6 +7,7 @@ import { DEFAULT_ADMISSION, type AcceptMode, type AdmissionTable, type Policy } 
 import type { WorkerSpecMode } from './worker/spec/index.js'
 import type { ToolPolicy } from './worker/port.js'
 import { ORCA_RUNTIME_ID, isWorkerRuntimeId, normalizeRuntimeId } from './worker/runtimes/catalog.js'
+import { noopLogger, errorMessage, type Logger } from './infra/logger.js'
 
 export type ChatMode = 'all' | 'mention'
 
@@ -402,21 +403,36 @@ export function defaultHome(): string {
   return process.env.RA_HOME ?? join(homedir(), '.router-agent')
 }
 
-export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv = process.env): AppConfig {
-  ensureHome(home)
-  const base = defaultConfig()
+/** loadConfig 的可选依赖；不传时所有诊断静默，兼容测试与嵌入用法。 */
+export interface ConfigLoadOptions {
+  /** 配置创建 / 解析失败 / 旧配置迁移 / 非法配置的日志出口。 */
+  logger?: Logger
+}
+
+export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv = process.env, options: ConfigLoadOptions = {}): AppConfig {
+  const logger = options.logger ?? noopLogger
   const configPath = join(home, 'config.yaml')
+  const configExisted = existsSync(configPath)
+  ensureHome(home)
+  // 首次启动会写一份默认配置；显式记一条，避免用户以为「我明明配过」。
+  if (!configExisted) logger.info('config:created', { path: configPath })
+  const base = defaultConfig()
   let doc: Record<string, any> = {}
   if (existsSync(configPath)) {
     try {
       doc = (parseYaml(readFileSync(configPath, 'utf8')) as Record<string, any>) ?? {}
-    } catch {
+    } catch (error) {
+      // YAML 写坏时继续用默认值启动，但不能静默：否则配置看起来「没生效」却查不到原因。
       doc = {}
+      logger.warn('config:parse-failed', { path: configPath, message: errorMessage(error) })
     }
   }
 
   // 旧版配置段名 backend 兼容：等价映射到 runtime，避免升级后静默丢失设置。
-  if (doc.runtime === undefined && doc.backend !== undefined) doc.runtime = doc.backend
+  if (doc.runtime === undefined && doc.backend !== undefined) {
+    doc.runtime = doc.backend
+    logger.info('config:legacy-backend', { path: configPath })
+  }
 
   const acceptMode = pickAcceptMode(doc.policy?.acceptMode, base.policy.acceptMode)
   const mode = pickMode(doc.workerSpec?.mode, base.workerSpec.mode)
@@ -443,6 +459,7 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
       if (!options || typeof options !== 'object') continue
       const bad = Object.keys(options as Record<string, unknown>).filter(key => forbidden.has(key))
       if (bad.length > 0) {
+        logger.error('config:invalid-security-override', { path: configPath, runtime: id, keys: bad })
         throw new Error(`runtime.options.${id} 不允许覆盖安全参数: ${bad.join(', ')}`)
       }
     }

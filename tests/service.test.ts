@@ -883,6 +883,19 @@ describe('RouterService 编排', () => {
       expect(store.listOutbox(50).some(item => item.text.includes('未能自动回收'))).toBe(true)
     })
   })
+
+  it('运行时活性查询失败时记 worker:status-failed，不阻塞主循环', async () => {
+    engine.ingest(makeTrigger())
+    await service.runOnce()
+    const ticket = store.listTickets()[0]!
+    runtime.status = async () => { throw new Error('status down') }
+
+    await service.checkIdle()
+
+    const entry = logs.find(item => item.message === 'worker:status-failed')
+    expect(entry?.level).toBe('warn')
+    expect(entry?.extra).toMatchObject({ ticketId: ticket.id, runtime: 'orca', message: 'status down' })
+  })
 })
 
 describe('会话文件清理', () => {

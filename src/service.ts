@@ -23,13 +23,11 @@ import { EffectsProcessor } from './core/effects.js'
 import { preview } from './core/events.js'
 import { shouldSendAsText } from './sources/feishu.js'
 import type { CommandRunner } from './infra/process.js'
+import { noopLogger, type Logger } from './infra/logger.js'
 import type { GitHubTracker as GhTracker } from './sources/github.js'
 
-export interface Logger {
-  info(message: string, extra?: Record<string, unknown>): void
-  warn(message: string, extra?: Record<string, unknown>): void
-  error(message: string, extra?: Record<string, unknown>): void
-}
+// Logger 的实现放在 infra/logger.ts；这里保留 re-export，兼容既有 import。
+export type { Logger } from './infra/logger.js'
 
 export interface PrTracker {
   /** hint 用于把项目名/path 选择器解析成真实仓库：优先 PR 链接，其次 workdir。 */
@@ -67,8 +65,6 @@ export interface RouterServiceOptions {
   /** Claude Code 会话记录目录；默认 ~/.claude/projects，测试可注入。 */
   claudeProjectsDir?: string
 }
-
-const noopLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} }
 
 /** 进展游标的起点标记：表示「从派工这一刻开始」，之前没有需要同步的报告。 */
 const PROGRESS_FROM_START = '@start'
@@ -508,6 +504,7 @@ export class RouterService {
       engine: opts.engine,
       decisionEngine: opts.decisionEngine,
       clock: this.clock,
+      logger: this.logger,
       home: opts.config.home,
       batchWindowMs: opts.agentLoopOptions?.batchWindowMs ?? 8000,
       dispatch: dispatchSettingsOf(opts.config),
@@ -575,7 +572,14 @@ export class RouterService {
     if (!runtime.status) return null
     try {
       return await runtime.status(this.refOf(assignment))
-    } catch {
+    } catch (error) {
+      // 查询失败按「未知」处理，但必须留痕：否则空闲判定会静默失效。
+      this.logger.warn('worker:status-failed', {
+        ticketId: assignment.ticketId,
+        handle: assignment.handle,
+        runtime: assignment.runtimeId,
+        message: error instanceof Error ? error.message : String(error),
+      })
       return null
     }
   }
@@ -909,7 +913,8 @@ export class RouterService {
       }
       this.launchFailures.set(ticketId, record)
       return record
-    } catch {
+    } catch (error) {
+      this.logger.warn('cursor:invalid', { key: launchFailureCursorKey(ticketId), message: error instanceof Error ? error.message : String(error) })
       return undefined
     }
   }
@@ -1265,7 +1270,8 @@ export class RouterService {
         closeAt: parsed.closeAt,
         ...(typeof parsed.outboxKey === 'string' ? { outboxKey: parsed.outboxKey } : {}),
       }
-    } catch {
+    } catch (error) {
+      this.logger.warn('cursor:invalid', { key: reminderCursorKey(ticketId), message: error instanceof Error ? error.message : String(error) })
       return null
     }
   }
@@ -1632,7 +1638,8 @@ export class RouterService {
         count: typeof parsed.count === 'number' ? parsed.count : 0,
         snippetHash: typeof parsed.snippetHash === 'string' ? parsed.snippetHash : '',
       }
-    } catch {
+    } catch (error) {
+      this.logger.warn('cursor:invalid', { key: probeCursorKey(ticketId), message: error instanceof Error ? error.message : String(error) })
       return null
     }
   }
@@ -1664,7 +1671,14 @@ let repo = ticket.repo
           const runtime = this.runtimeFor(assignment)
           // 本地路径仓库先解析成 owner/repo，否则 gh --repo 会失败。
           if ((repo.startsWith('/') || repo.startsWith('path:')) && runtime.repoSlug) {
-            const slug = await runtime.repoSlug(this.refOf(assignment)).catch(() => null)
+            const slug = await runtime.repoSlug(this.refOf(assignment)).catch(error => {
+              this.logger.warn('pr:repo-slug-failed', {
+                ticketId: ticket.id,
+                handle: assignment.handle,
+                message: error instanceof Error ? error.message : String(error),
+              })
+              return null
+            })
             if (slug) repo = slug
           }
           if (runtime.inspectWorkspace) {
@@ -1678,8 +1692,13 @@ let repo = ticket.repo
                 this.engine.updatePr(ticket.id, { number: prNumber, url: prUrl, state: 'open' })
                 this.log('pr:linked', ticket.id, { number: prNumber, source: 'provider' })
               }
-            } catch {
-              // worktree 不在了：等 gh 兜底或人工处理
+            } catch (error) {
+              // worktree 不在了：等 gh 兜底或人工处理。
+              this.logger.warn('pr:inspect-failed', {
+                ticketId: ticket.id,
+                handle: assignment.handle,
+                message: error instanceof Error ? error.message : String(error),
+              })
             }
           }
         }
@@ -1828,9 +1847,18 @@ let repo = ticket.repo
   }
 
   private appendEventLog(ticketId: string, event: Record<string, unknown>): void {
-    const dir = join(this.config.home, 'workers', ticketId)
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-    appendFileSync(join(dir, 'events.log'), `${JSON.stringify(event)}\n`, 'utf8')
+    // 事件日志是辅助排查用的，写不进去不能影响上报、派工与关单。
+    try {
+      const dir = join(this.config.home, 'workers', ticketId)
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+      appendFileSync(join(dir, 'events.log'), `${JSON.stringify(event)}\n`, 'utf8')
+    } catch (error) {
+      this.logger.warn('worker:event-log-failed', {
+        ticketId,
+        kind: String(event.kind ?? ''),
+        message: error instanceof Error ? error.message : String(error),
+      })
+    }
   }
 
   private log(kind: string, ticketId: string, extra: Record<string, unknown>): void {
