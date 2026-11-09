@@ -9,9 +9,11 @@ import { isWorkerRuntimeId, normalizeRuntimeId } from '../worker/runtimes/catalo
 import { ProjectSetupError, type ProjectSetupPort } from './project-setup.js'
 import type { AcceptMode } from '../core/policy.js'
 import { noopSink, preview, type EventSink } from '../core/events.js'
+import { noopLogger, errorMessage, type Logger } from '../infra/logger.js'
 import type { WorkerStateFile } from '../worker/report-poller.js'
 import type { ResumeHint } from '../worker/port.js'
 import { readLogs } from './log-tail.js'
+import { getSpec, listSpecs, resetSpec, saveSpec, SpecError } from '../specs/index.js'
 
 export interface ApiServerOptions {
   engine: Engine
@@ -36,6 +38,8 @@ export interface ApiServerOptions {
   logPath?: string
   /** 项目登记：目录选择、Git 探测、clone 与 Orca 仓库登记；缺省时端点返回 404。 */
   projectSetup?: ProjectSetupPort
+  /** 请求级异常与配置写入失败的日志出口。 */
+  logger?: Logger
 }
 
 export interface ApiServer {
@@ -47,11 +51,18 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
   const clock = opts.clock ?? { now: () => new Date().toISOString() }
   const config = opts.config
   const onEvent = opts.onEvent ?? noopSink
+  const logger = opts.logger ?? noopLogger
   const logPath = opts.logPath ?? (config.home ? join(config.home, 'logs', 'router-agent.log') : '')
 
   const server = createServer((req, res) => {
     handle(req, res).catch(error => {
-      respond(res, 500, { error: 'internal', message: error instanceof Error ? error.message : String(error) })
+      // 详情接口 / 配置保存等路径可能抛出未预期异常：先写日志，避免只看到一个 500。
+      logger.error('api:request-failed', {
+        method: req.method,
+        path: req.url,
+        message: errorMessage(error),
+      })
+      respond(res, 500, { error: 'internal', message: errorMessage(error) })
     })
   })
 
@@ -91,8 +102,9 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       if (assignment && opts.resumeHint) {
         try {
           resume = await opts.resumeHint(ticket.id)
-        } catch {
+        } catch (error) {
           // 恢复命令只是详情页的辅助信息，失败不能拖垮整个详情接口。
+          logger.warn('ticket:resume-failed', { ticketId: ticket.id, message: errorMessage(error) })
           resume = null
         }
       }
@@ -212,15 +224,17 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         const preview = structuredClone(config)
         const result = applyConfigPatch(preview, patch)
         if (result.errors.length > 0) {
+          logger.warn('config:patch-rejected', { errors: result.errors })
           return respond(res, 400, { error: 'invalid-config', errors: result.errors })
         }
         if (config.home && result.changed.length > 0) {
           try {
             writeConfig(config.home, preview)
           } catch (error) {
+            logger.error('config:write-failed', { home: config.home, message: errorMessage(error) })
             return respond(res, 500, {
               error: 'config-write-failed',
-              message: error instanceof Error ? error.message : String(error),
+              message: errorMessage(error),
             })
           }
         }
@@ -232,13 +246,14 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         const policyChanged = nextPolicy.version !== beforePolicy.version
         if (policyChanged) await opts.onPolicyChange?.(config)
         await opts.onConfigChange?.(config, result.changed)
-        onEvent({ event: 'api:config', changed: result.changed })
+        const restartRequired = requiresRestart(result.changed)
+        onEvent({ event: 'api:config', changed: result.changed, policyChanged, restartRequired })
         return respond(res, 200, {
           ...configPayload(config, opts.runtimeAdmin),
           ok: true,
           changed: result.changed,
           policyChanged,
-          restartRequired: requiresRestart(result.changed),
+          restartRequired,
         })
       }
       return respond(res, 405, { error: 'method-not-allowed' })
@@ -264,6 +279,44 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         ...(cursor !== undefined ? { cursor } : {}),
         limit: Number.isFinite(limit) ? limit : undefined,
       }))
+    }
+
+    // 规范 markdown：列表 / 读取 / 保存 / 恢复默认。内容落在 `<home>/specs/`，不再配置外部路径。
+    if (path === '/api/specs' && req.method === 'GET') {
+      return respond(res, 200, { specs: listSpecs(config.home) })
+    }
+
+    const specDetail = path.match(/^\/api\/specs\/([^/]+)$/)
+    if (specDetail) {
+      const id = decodeURIComponent(specDetail[1]!)
+      if (req.method === 'GET') {
+        const spec = getSpec(config.home, id)
+        if (!spec) return respond(res, 404, { error: 'spec-not-found', message: `未知规范：${id}` })
+        return respond(res, 200, { spec })
+      }
+      if (req.method === 'PUT' || req.method === 'POST') {
+        const body = await readJson(req)
+        try {
+          const spec = saveSpec(config.home, id, body.content)
+          onEvent({ event: 'api:spec', spec: id, action: 'save' })
+          return respond(res, 200, { ok: true, spec })
+        } catch (error) {
+          return respondSpecError(res, error)
+        }
+      }
+      return respond(res, 405, { error: 'method-not-allowed' })
+    }
+
+    const specReset = path.match(/^\/api\/specs\/([^/]+)\/reset$/)
+    if (specReset && req.method === 'POST') {
+      const id = decodeURIComponent(specReset[1]!)
+      try {
+        const spec = resetSpec(config.home, id)
+        onEvent({ event: 'api:spec', spec: id, action: 'reset' })
+        return respond(res, 200, { ok: true, spec })
+      } catch (error) {
+        return respondSpecError(res, error)
+      }
     }
 
     // 项目登记：本地目录选择 / Git 探测 / Git 地址 clone / Orca 仓库登记。
@@ -452,6 +505,15 @@ function respond(res: ServerResponse, status: number, body: unknown, after?: () 
 function respondProjectSetupError(res: ServerResponse, error: unknown): void {
   if (error instanceof ProjectSetupError) {
     respond(res, 400, { error: error.code, message: error.message, ...(error.detail ?? {}) })
+    return
+  }
+  throw error
+}
+
+/** 规范存储的可预期失败：未知规范 404，其余（空内容 / 过大 / 无状态目录）400。 */
+function respondSpecError(res: ServerResponse, error: unknown): void {
+  if (error instanceof SpecError) {
+    respond(res, error.code === 'unknown-spec' ? 404 : 400, { error: error.code, message: error.message })
     return
   }
   throw error

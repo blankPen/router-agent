@@ -19,6 +19,7 @@ import {
 import { getJson, saveConfigPatch, sendJson, type ConfigBundle, type ConfigDoc } from './api.js'
 import { Icon, LogoMark } from './icons.js'
 import { RuntimeCards, type RuntimeNotice } from './runtime-cards.js'
+import { SpecsEditor } from './specs-editor.js'
 import {
   mergeRuntimeChoices,
   runtimeStatusLabel,
@@ -770,6 +771,12 @@ function MetaItem({ label, value, href, mono, wide, title }: {
 
 const CUSTOM_SECTIONS: SectionDef[] = [
   {
+    id: 'specs',
+    title: '规范文件',
+    description: 'Router 与 Worker 的提示词规范统一存放在内置存储里，可直接查看、编辑、保存或恢复默认；不再需要指定外部文件路径。',
+    fields: [],
+  },
+  {
     id: 'projects',
     title: '项目与群绑定',
     description: '维护可派工的项目，以及每个群绑定到哪个项目 / 分支。项目清单按 Worker 后端隔离；支持添加本地项目或从 Git 地址 clone。',
@@ -1033,12 +1040,16 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
                     <p>{section.description}</p>
                   </div>
                   <div className="settings-badges">
-                    {section.hot
-                      ? <span className="badge hot">立即生效</span>
-                      : <span className="badge cold">重启生效</span>}
+                    {section.id === 'specs'
+                      ? <span className="badge cold">保存后按项生效</span>
+                      : section.hot
+                        ? <span className="badge hot">立即生效</span>
+                        : <span className="badge cold">重启生效</span>}
                     {dirty && <span className="badge dirty">已修改</span>}
                   </div>
                 </header>
+
+                {section.id === 'specs' && <SpecsEditor />}
 
                 {section.id === 'projects' && (
                   <>

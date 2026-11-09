@@ -117,6 +117,7 @@ function setup(
   replyAlwaysChats?: string[],
   sessions = false,
   policyOverride?: Policy,
+  logger?: { info(message: string, extra?: Record<string, unknown>): void; warn(message: string, extra?: Record<string, unknown>): void; error(message: string, extra?: Record<string, unknown>): void },
 ) {
   const store = new Store(':memory:')
   const clock = { now: () => '2026-11-06T10:00:10.000Z' }
@@ -133,6 +134,7 @@ function setup(
     ...(dispatch ? { dispatch } : {}),
     ...(replyAlwaysChats ? { replyAlwaysChats } : {}),
     ...(sessions ? { sessionsEnabled: true, sessionKeyScope: 'user' as const } : {}),
+    ...(logger ? { logger } : {}),
   })
   return { store, engine, llm: fake, loop }
 }
@@ -750,5 +752,88 @@ describe('/new 命令识别', () => {
     expect(parseSessionResetCommand('/new chat')).toBe(false)
     expect(parseSessionResetCommand('帮我 /new 一下')).toBe(false)
     expect(parseSessionResetCommand('/newer')).toBe(false)
+  })
+})
+
+describe('关键链路日志', () => {
+  function recorder() {
+    const logs: { level: string; message: string; extra?: Record<string, unknown> }[] = []
+    const logger = {
+      info: (message: string, extra?: Record<string, unknown>) => logs.push({ level: 'info', message, ...(extra ? { extra } : {}) }),
+      warn: (message: string, extra?: Record<string, unknown>) => logs.push({ level: 'warn', message, ...(extra ? { extra } : {}) }),
+      error: (message: string, extra?: Record<string, unknown>) => logs.push({ level: 'error', message, ...(extra ? { extra } : {}) }),
+    }
+    return { logs, logger }
+  }
+
+  it('单条消息处理抛错时记 loop:trigger-failed，不吞掉原因', async () => {
+    const { logs, logger } = recorder()
+    const { engine, loop } = setup([], undefined, undefined, false, undefined, logger)
+    engine.ingest(trigger())
+    // 让 handle 抛出，模拟队列 / 状态读写在处理中途失败。
+    ;(loop as unknown as { handle: () => Promise<void> }).handle = async () => { throw new Error('store broken') }
+
+    await loop.tick()
+
+    const entry = logs.find(log => log.message === 'loop:trigger-failed')
+    expect(entry?.level).toBe('error')
+    expect(entry?.extra?.triggerId).toBe('t1')
+    expect(entry?.extra?.message).toBe('store broken')
+  })
+
+  it('研判引擎抛错时记 decision:engine-failed，仍按 unavailable 处理', async () => {
+    const { logs, logger } = recorder()
+    const { engine, loop } = setup([], undefined, undefined, false, undefined, logger)
+    loop.decisionEngine = {
+      async assess() { throw new Error('llm down') },
+      async reply() { throw new Error('llm down') },
+    }
+    engine.ingest(trigger({ addressed: 'none' }))
+
+    expect((await loop.tick()).unavailable).toBe(1)
+    const entry = logs.find(log => log.message === 'decision:engine-failed')
+    expect(entry?.level).toBe('warn')
+    expect(entry?.extra?.message).toBe('llm down')
+  })
+
+  it('回复模型失败时记 chat:reply-failed，并回固定话术', async () => {
+    const { logs, logger } = recorder()
+    const { engine, loop, llm, store } = setup([], undefined, undefined, false, undefined, logger)
+    llm.reply = async () => { throw new Error('reply down') }
+    engine.ingest(trigger({ text: '你好', addressed: 'mention' }))
+
+    await loop.tick()
+
+    const entry = logs.find(log => log.message === 'chat:reply-failed')
+    expect(entry?.level).toBe('warn')
+    expect(entry?.extra?.message).toBe('reply down')
+    expect(store.claimOutbox('2026-11-06T10:00:20.000Z', 10)[0]?.text).toBe('收到。我还没看出具体要做什么，能说一下要改哪个模块、期望的结果吗？')
+  })
+
+  it('会话转录失败记 session:transcript-failed，不影响正常回复', async () => {
+    const { logs, logger } = recorder()
+    const { engine, loop, llm } = setup([], undefined, undefined, true, undefined, logger)
+    llm.recordTranscript = async () => { throw new Error('session disk full') }
+    engine.ingest(trigger({ mediaOnly: true, text: '看下这个图' }))
+
+    await loop.tick()
+
+    const entry = logs.find(log => log.message === 'session:transcript-failed')
+    expect(entry?.level).toBe('warn')
+    expect(entry?.extra?.key).toBe('chat:oc_dev:user:ou_alice')
+  })
+
+  it('/new 重置会话失败时记 session:reset-failed', async () => {
+    const { logs, logger } = recorder()
+    const { engine, loop, llm, store } = setup([], undefined, undefined, true, undefined, logger)
+    llm.resetSession = async () => { throw new Error('reset down') }
+    engine.ingest(trigger({ text: '/new' }))
+
+    await loop.tick()
+
+    const entry = logs.find(log => log.message === 'session:reset-failed')
+    expect(entry?.level).toBe('warn')
+    expect(entry?.extra?.message).toBe('reset down')
+    expect(store.claimOutbox('2026-11-06T10:00:20.000Z', 10)[0]?.text).toContain('重置没成功')
   })
 })

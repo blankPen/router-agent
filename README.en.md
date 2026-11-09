@@ -267,7 +267,7 @@ Each person in a chat gets their own persisted Pi session, so Router no longer l
 - **Idle eviction**: after 30 minutes the in-memory session is released; the file stays and is reopened on the next message.
 - **Compaction**: Pi's native compaction keeps the recent ~20k tokens and summarizes older context.
 - **`/new`**: exact-match command; old files are deleted after 7 days by a cleanup job.
-- **Persona**: `router.persona.soulFile` changes tone only, never the tool whitelist or authorization.
+- **Persona & specs**: the Router soul, Router execution specs and Worker specs live in `~/.router-agent/specs/` and can be viewed, edited, saved or reset to built-in defaults in the dashboard under **Config → Specs**. Persona changes tone only, never the tool whitelist or authorization.
 
 Deterministic replies (small talk, attachment notices, closed-thread notices) are also appended to the session so the next model turn knows what happened.
 
@@ -381,6 +381,36 @@ The Router doesn't chat; it only speaks when necessary:
 | `pr:linked` / `pr:state` | Service | — | PR tracking |
 | `recover:*` | Service | — | Restart reconciliation |
 
+Additional events covering messages, config, and exceptions (same `at` / `level` / `message` + business fields format):
+
+| Event | Source | Key fields | Meaning |
+|-|-|-|-|
+| `trigger:duplicate` | Source | `id` `chat` | Duplicate delivery was de-duplicated, not lost |
+| `feishu:reconnecting` | Source | `attempt` `delayMs` | Event consumer disconnected; backoff reconnect scheduled |
+| `feishu:spawn-failed` | Source | `message` | lark-cli could not be spawned (missing / permission); will retry |
+| `feishu:card-fallback` | Sender | `target` `key` `code` `message` | Interactive card failed; automatically fell back to rich text |
+| `feishu:quote-fetch-failed` / `feishu:quote-parse-failed` | Source | `messageId` `message` | Quoted-message lookup failed; processing the original message |
+| `chats:refresh-failed` / `chats:parse-failed` / `chats:cache-invalid` | Source | `code` / `message` / `path` | Chat directory refresh failed or cache corrupted; old values kept |
+| `loop:trigger-failed` | Agent Loop | `triggerId` `chat` `message` | One message failed; the rest of the batch continues |
+| `decision:engine-failed` | Agent Loop | `triggerId` `message` | Decision engine call failed; handled as unavailable with the reason kept |
+| `chat:reply-failed` | Agent Loop | `triggerId` `chat` `reason` `message` | Reply model failed; fell back to the fixed wording |
+| `session:transcript-failed` / `session:reset-failed` | Agent Loop | `key` `message` | Session transcript / `/new` reset failed without breaking the reply |
+| `config:created` | Config | `path` | Default `config.yaml` written on first start |
+| `config:parse-failed` | Config | `path` `message` | YAML parse failed; started with defaults |
+| `config:legacy-backend` | Config | `path` | Legacy `backend` section mapped to `runtime` |
+| `config:invalid-security-override` | Config | `runtime` `keys` | `runtime.options` tried to override security settings; startup rejected |
+| `config:patch-rejected` / `config:write-failed` | HTTP API | `errors` / `message` | Dashboard config validation or persistence failed |
+| `api:config` | HTTP API | `changed` `policyChanged` `restartRequired` | Config saved successfully, and whether a restart is needed |
+| `api:request-failed` | HTTP API | `method` `path` `message` | Unexpected request-level error (client receives 500) |
+| `ticket:resume-failed` | HTTP API | `ticketId` `message` | Resume command generation failed; ticket detail still loads |
+| `effect:done` / `effect:failed` | Effects | `kind` `key` / `error` | Result of internal actions (launch, stop, cleanup) |
+| `outbox:sent` / `outbox:failed` | Outbox | `key` `channel` `text` / `error` | Final delivery result of outbound messages |
+| `worker:status-failed` | Service | `ticketId` `handle` `runtime` `message` | Runtime liveness query failed; treated as unknown |
+| `worker:event-log-failed` | Service | `ticketId` `kind` `message` | Writing the ticket `events.log` failed without blocking the flow |
+| `pr:inspect-failed` / `pr:repo-slug-failed` | Service | `ticketId` `handle` `message` | PR hint lookup failed; falling back to gh |
+| `cursor:invalid` | Service | `key` `message` | Corrupt cursor JSON; treated as no cursor |
+| `llm:model-config-failed` | CLI | `message` | Model config missing or unparsable at startup |
+
 Raw terminal output **never enters the logs** (to avoid parsing TUI text); the proactive probe prefers the Claude session transcript and otherwise posts a semantic summary (assistant text plus an action digest), never a replay of tool calls. To see what a Worker did, read the `report` `summary` and `~/.router-agent/workers/<ticketId>/events.log`.
 
 > **Only one event bus may run per bot.** If `ra logs` shows `another event bus is already connected`, stop the other consumer using that app, or give router-agent its own bot via the "dedicated bot" option in `ra init`.
@@ -466,7 +496,6 @@ router:
   # Persona only affects tone; tool permissions are unchanged
   persona:
     name: "A-Luo"
-    soulFile: ""           # empty = built-in prompts/soul.md
     style: friendly        # friendly | concise | professional
     language: zh-CN
 
@@ -661,6 +690,8 @@ It applies to `claude-code` (mapped to Claude's `allowedTools`); ACP `session/re
 
 Neither mode modifies the project's own `CLAUDE.md`.
 
+These spec markdown files live under `specs/` in the state directory and can be edited or reset to built-in defaults in the dashboard under **Config → Specs**. In `agent` mode the global spec file is still written by `ra init`; re-run `ra init` after editing the Worker handbook to sync it.
+
 ## Commands
 
 | Command | Description |
@@ -783,7 +814,7 @@ States:
 ## Development
 
 ```bash
-pnpm test        # 605 tests pass (4 skipped by default, including the live Pi check; covers the Pi triage / reply path)
+pnpm test        # 641 tests pass (4 skipped by default, including the live Pi check; covers the Pi triage / reply path)
 pnpm typecheck
 pnpm build       # tsc + esbuild (web dashboard and Markdown assets)
 pnpm check       # typecheck + test

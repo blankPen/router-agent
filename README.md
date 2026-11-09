@@ -267,7 +267,7 @@ Router 不再「逐条失忆」：同一个群里的每个人各有一个落盘�
 - **空闲回收**：30 分钟无消息只释放内存，文件保留，下一条消息重新打开；
 - **自动压缩**：用 Pi 原生 compaction，`contextTokens > contextWindow - reserveTokens` 时保留最近约 20k tokens，把更早的消息总结成结构化摘要；
 - **`/new`**：整条消息精确匹配，只重置发送者自己的 session；旧文件保留 7 天后由清理任务删除；
-- **人格**：`router.persona.soulFile` 可配置 soul；只改语气，不改工具白名单和权限判定。
+- **人格与规范**：Router 的 soul、执行规范与 Worker 规范统一存放在 `~/.router-agent/specs/`，可在 Web 面板「配置 → 规范文件」直接查看、编辑、保存或恢复默认；人格只改语气，不改工具白名单和权限判定。
 
 确定性回复（寒暄短路、附件提示、关闭话题提示等）也会写进 session，保证下一轮模型知道「刚才发生过什么」。
 
@@ -381,6 +381,36 @@ Router 不做对话，只在必要时说话：
 | `pr:linked` / `pr:state` | Service | — | PR 跟踪 |
 | `recover:*` | Service | — | 重启对账 |
 
+消息、配置与异常三类关键链路的补充事件（都遵循同一套 `at` / `level` / `message` + 业务字段格式）：
+
+| 事件 | 来源 | 关键字段 | 说明 |
+|-|-|-|-|
+| `trigger:duplicate` | Source | `id` `chat` | 重复投递的消息被入库去重，不是消息丢失 |
+| `feishu:reconnecting` | Source | `attempt` `delayMs` | 事件消费者断开，已安排退避重连 |
+| `feishu:spawn-failed` | Source | `message` | lark-cli 无法拉起（未安装 / 无权限），会继续重试 |
+| `feishu:card-fallback` | Sender | `target` `key` `code` `message` | 互动卡片发送失败，已自动降级为富文本 |
+| `feishu:quote-fetch-failed` / `feishu:quote-parse-failed` | Source | `messageId` `message` | 引用消息回查失败，按原消息继续 |
+| `chats:refresh-failed` / `chats:parse-failed` / `chats:cache-invalid` | Source | `code` / `message` / `path` | 群名目录刷新失败或缓存损坏，旧值继续可用 |
+| `loop:trigger-failed` | Agent Loop | `triggerId` `chat` `message` | 单条消息处理异常，同批其它消息不受影响 |
+| `decision:engine-failed` | Agent Loop | `triggerId` `message` | 研判引擎调用失败，按 unavailable 处理并留下原因 |
+| `chat:reply-failed` | Agent Loop | `triggerId` `chat` `reason` `message` | 回复模型失败，已退回固定话术 |
+| `session:transcript-failed` / `session:reset-failed` | Agent Loop | `key` `message` | 会话转录 / `/new` 重置失败，不影响当轮回复 |
+| `config:created` | Config | `path` | 首次启动写入了默认 `config.yaml` |
+| `config:parse-failed` | Config | `path` `message` | YAML 解析失败，已降级为默认配置启动 |
+| `config:legacy-backend` | Config | `path` | 旧版 `backend` 段已兼容映射到 `runtime` |
+| `config:invalid-security-override` | Config | `runtime` `keys` | `runtime.options` 试图覆盖安全参数，启动被拒绝 |
+| `config:patch-rejected` / `config:write-failed` | HTTP API | `errors` / `message` | 面板保存的配置校验失败或落盘失败 |
+| `api:config` | HTTP API | `changed` `policyChanged` `restartRequired` | 配置保存成功及是否需要重启 |
+| `api:request-failed` | HTTP API | `method` `path` `message` | 请求级未预期异常（客户端会收到 500） |
+| `ticket:resume-failed` | HTTP API | `ticketId` `message` | 工单详情里的恢复命令生成失败，详情页仍可打开 |
+| `effect:done` / `effect:failed` | Effects | `kind` `key` / `error` | 派工、停止、清理等内部动作的执行结果 |
+| `outbox:sent` / `outbox:failed` | Outbox | `key` `channel` `text` / `error` | 对外消息的最终投递结果 |
+| `worker:status-failed` | Service | `ticketId` `handle` `runtime` `message` | 运行时活性查询失败，按未知状态处理 |
+| `worker:event-log-failed` | Service | `ticketId` `kind` `message` | 工单 `events.log` 写入失败，不影响主流程 |
+| `pr:inspect-failed` / `pr:repo-slug-failed` | Service | `ticketId` `handle` `message` | PR 线索获取失败，等待 gh 兜底 |
+| `cursor:invalid` | Service | `key` `message` | 游标 JSON 损坏，按无游标处理 |
+| `llm:model-config-failed` | CLI | `message` | 启动时模型配置缺失或不可解析 |
+
 worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态）；主动巡检优先读 Claude 会话记录，其次才把终端里的语义摘要（助手文本 + 动作概要）发到话题，不逐条回放工具调用。要看它做了什么，读 `report` 的 `summary` 与 `~/.router-agent/workers/<ticketId>/events.log`。
 
 > **同一机器人只能有一个事件总线在跑。** 如果 `ra logs` 出现 `another event bus is already connected`，先停掉其它占用该应用的消费者，或用 `ra init` 的「专属机器人」选项给 router-agent 单独配一个。
@@ -468,7 +498,6 @@ router:
   # 人格：只影响语气与表达，不影响工具权限
   persona:
     name: "阿罗"
-    soulFile: ""           # 空=内置 prompts/soul.md
     style: friendly        # friendly | concise | professional
     language: zh-CN
 
@@ -664,6 +693,8 @@ llm:
 
 两种模式都不改项目自己的 `CLAUDE.md`。
 
+这些规范 markdown 统一存放在状态目录的 `specs/` 下，可在 Web 面板「配置 → 规范文件」直接编辑或恢复默认。`agent` 模式的全局规范文件仍由 `ra init` 写入，修改 Worker 手册后重新执行一次 `ra init` 即可同步。
+
 ## 命令
 
 | 命令 | 说明 |
@@ -808,7 +839,7 @@ ra report \
 ## 开发
 
 ```bash
-pnpm test        # 605 个测试通过（4 个默认跳过，其中包含真实 Pi 验证）
+pnpm test        # 641 个测试通过（4 个默认跳过，其中包含真实 Pi 验证）
 pnpm typecheck
 pnpm build       # tsc + esbuild（Web 面板与 Markdown 资产）
 pnpm check       # typecheck + test

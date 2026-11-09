@@ -23,6 +23,34 @@ describe('Effects / Outbox 处理器', () => {
     sender = new FakeSender()
   })
 
+  it('发送失败事件带上渠道与重试次数，便于排查投递问题', async () => {
+    sender.failTimes = 1
+    const events: { event: string; [key: string]: unknown }[] = []
+    store.enqueueOutbox({ id: 'o1', key: 'k1', channelKind: 'feishu', channelId: 'c', threadId: 'r', text: 'hi', now: '2026-11-06T10:00:00.000Z' })
+    const processor = new EffectsProcessor({ store, sender, clock: { now: () => '2026-11-06T10:00:01.000Z' }, onEvent: event => events.push(event) })
+    await processor.tick()
+    expect(events.find(event => event.event === 'outbox:failed')).toMatchObject({ key: 'k1', channel: 'feishu:c', error: 'network down' })
+  })
+
+  it('effect 执行失败与缺少处理器都会发出 effect:failed', async () => {
+    const events: { event: string; [key: string]: unknown }[] = []
+    store.enqueueEffect({ id: 'e1', key: 'launch:tk1', kind: 'flaky', payload: {}, now: '2026-11-06T10:00:00.000Z' })
+    store.enqueueEffect({ id: 'e2', key: 'x:1', kind: 'unknown-kind', payload: {}, now: '2026-11-06T10:00:00.000Z' })
+    const processor = new EffectsProcessor({
+      store,
+      sender,
+      clock: { now: () => '2026-11-06T10:00:01.000Z' },
+      onEvent: event => events.push(event),
+      handlers: { flaky: async () => { throw new Error('boom') } },
+    })
+    await processor.tick()
+
+    const failed = events.filter(event => event.event === 'effect:failed')
+    expect(failed).toHaveLength(2)
+    expect(failed.find(event => event.kind === 'flaky')).toMatchObject({ key: 'launch:tk1', error: 'boom' })
+    expect(failed.find(event => event.kind === 'unknown-kind')).toMatchObject({ error: 'effect:no-handler:unknown-kind' })
+  })
+
   it('发送成功/失败会发出可追踪事件', async () => {
     const events: { event: string; [key: string]: unknown }[] = []
     store.enqueueOutbox({ id: 'o1', key: 'k1', channelKind: 'feishu', channelId: 'c', threadId: 'r', text: '已开工', now: '2026-11-06T10:00:00.000Z' })
