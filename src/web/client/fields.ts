@@ -5,6 +5,10 @@
  * 默认值怎么取、明显不合法的值提前提示」，避免用户点保存后才被后端打回。
  */
 import { WORKER_RUNTIMES } from '../../worker/runtimes/catalog.js'
+import { ACP_AGENTS } from '../../worker/runtimes/acp/agents.js'
+import { runtimeStatusLabel, type RuntimeChoiceView } from './runtime-model.js'
+
+export type { RuntimeChoiceView } from './runtime-model.js'
 
 export type FieldKind = 'text' | 'number' | 'switch' | 'select' | 'list'
 
@@ -12,6 +16,9 @@ export interface FieldOption {
   value: string
   label: string
   hint?: string
+  disabled?: boolean
+  /** disabled 的原因，渲染成 option title。 */
+  reason?: string
 }
 
 export interface FieldDef {
@@ -200,6 +207,54 @@ export const SECTIONS: SectionDef[] = [
 /** 所有标量字段的点路径，用于计算「哪些配置被改过」。 */
 export const FIELD_PATHS: string[] = SECTIONS.flatMap(section => section.fields.map(field => field.path))
 
+/** 探测结果 → runtime.default 的下拉选项；无探测结果时回退静态清单。 */
+export function runtimeOptions(choices?: RuntimeChoiceView[]): FieldOption[] {
+  // 内置运行时永远保留；探测结果按 id 覆盖，避免旧缓存里缺 orca / claude-code。
+  const merged = new Map<string, RuntimeChoiceView>()
+  for (const runtime of WORKER_RUNTIMES) {
+    merged.set(runtime.id, { id: runtime.id, label: runtime.label, hint: runtime.hint, status: 'pending' })
+  }
+  for (const choice of choices ?? []) merged.set(choice.id, choice)
+  // 探测结果还没回来时，把目录里的 ACP 运行时以「待检测」占位，避免已配置的
+  // acp-* 默认值被前端误判成非法值、卡住保存。
+  for (const agent of ACP_AGENTS) {
+    if (!merged.has(agent.runtimeId)) {
+      merged.set(agent.runtimeId, {
+        id: agent.runtimeId,
+        label: agent.label,
+        hint: agent.hint,
+        status: 'pending',
+        installable: Boolean(agent.package),
+      })
+    }
+  }
+  const source = [...merged.values()]
+  return source.map(choice => {
+    const available = choice.status === 'ready' || choice.status === 'unverified' || choice.status === 'pending'
+    const statusLabel = runtimeStatusLabel(choice.status)
+    return {
+      value: choice.id,
+      label: choice.status === 'pending'
+        ? `${choice.label} · 待检测`
+        : available
+          ? `${choice.label}${choice.version ? ` · ${choice.version}` : ''}`
+          : `${choice.label}（${statusLabel}）`,
+      hint: choice.reason ?? choice.hint,
+      disabled: !available,
+      ...(choice.reason ? { reason: choice.reason } : {}),
+    }
+  })
+}
+
+/** 用动态 choices 替换 runtime.default 的 options；其余字段原样保留。 */
+export function sectionsFor(choices?: RuntimeChoiceView[]): SectionDef[] {
+  const options = runtimeOptions(choices)
+  return SECTIONS.map(section => ({
+    ...section,
+    fields: section.fields.map(field => field.path === 'runtime.default' ? { ...field, options } : field),
+  }))
+}
+
 export function getByPath(doc: unknown, path: string): unknown {
   return path.split('.').reduce<unknown>((node, part) => {
     if (!node || typeof node !== 'object') return undefined
@@ -242,8 +297,11 @@ export function fieldError(field: FieldDef, value: unknown): string | null {
     if (field.min !== undefined && value < field.min) return `不能小于 ${field.min}`
     if (field.max !== undefined && value > field.max) return `不能大于 ${field.max}`
   }
-  if (field.kind === 'select' && field.options && !field.options.some(option => option.value === value)) {
-    return '请选择一个有效值'
+  if (field.kind === 'select' && field.options) {
+    const option = field.options.find(item => item.value === value)
+    if (!option) return '请选择一个有效值'
+    // 当前选中项不可用（未安装/不兼容）时只置灰，不阻止用户保存其它字段。
+    if (option.disabled) return null
   }
   return null
 }

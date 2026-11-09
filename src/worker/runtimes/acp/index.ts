@@ -35,10 +35,18 @@ type AcpWorkspaceProvider = WorkspaceProvider & {
 }
 
 export interface AcpRuntimeOptions {
+  /** 运行时 id；默认 'acp'。动态 ACP Agent 用 acp-<agent>。 */
+  id?: string
   /** ACP Agent 可执行文件，例如 opencode / claude-agent-acp / codex-acp。 */
-  command: string
+  command?: string
   /** 传给 Agent 的参数，例如 ['acp']。 */
   args?: string[]
+  /** 命令不可用时的原因，start() 会原样带进 runtime:unavailable。 */
+  unavailableReason?: string
+  /** 安装提示，例如 ra runtime install codex。 */
+  installHint?: string
+  /** 版本探测参数；默认 ['--version']。codex-acp 用 ['version']。 */
+  probeArgs?: string[]
   /** ~/.router-agent/workers */
   workersDir: string
   /** ~/.router-agent */
@@ -66,7 +74,7 @@ interface AcpMeta {
   schemaVersion: number
   ticketId: string
   assignmentId?: string
-  runtime: 'acp'
+  runtime: string
   handle: string
   workdir: string
   repo: string
@@ -110,30 +118,37 @@ const READ_ONLY_TOOLS: ToolPolicy = { fileAccess: 'read-only', shell: 'deny', al
  * 工作区仍由 GitWorktreeProvider 负责，与 Claude/Orca 运行时保持一致。
  */
 export class AcpRuntime implements WorkerRuntime {
-  readonly id = 'acp'
+  readonly id: string
   readonly capabilities: RuntimeCapabilities = {
     agent: { liveStatus: true, processExit: true, output: false, activity: true, structuredInput: true, nudge: false },
     workspace: { cleanup: true, prLink: false, discovery: false },
   }
 
-  private readonly command: string
+  private readonly command: string | undefined
   private readonly args: string[]
   private readonly env: NodeJS.ProcessEnv
   private readonly workersDir: string
   private readonly home: string
   private readonly initializeTimeoutMs: number
+  private readonly unavailableReason?: string
+  private readonly installHint?: string
+  private readonly probeArgs: string[]
   private readonly gitProvider: GitWorktreeProvider
   private readonly workspaces: AcpWorkspaceProvider
   private readonly sessions = new Map<string, AcpSession>()
   private readonly bySessionId = new Map<string, AcpSession>()
 
   constructor(opts: AcpRuntimeOptions) {
-    this.command = opts.command
+    this.id = opts.id ?? 'acp'
+    this.command = opts.command?.trim() || undefined
     this.args = opts.args ?? []
     this.env = opts.env ?? {}
     this.workersDir = opts.workersDir
     this.home = opts.home
     this.initializeTimeoutMs = opts.initializeTimeoutMs ?? 30_000
+    this.unavailableReason = opts.unavailableReason
+    this.installHint = opts.installHint
+    this.probeArgs = opts.probeArgs ?? ['--version']
     this.gitProvider = new GitWorktreeProvider({
       git: opts.git,
       worktreesRoot: opts.worktreesRoot ?? join(opts.home, 'worktrees'),
@@ -142,6 +157,20 @@ export class AcpRuntime implements WorkerRuntime {
   }
 
   async start(ctx: WorkerContext): Promise<StartResult> {
+    if (!this.command) {
+      throw new WorkerRuntimeError(
+        'runtime:unavailable',
+        this.unavailableReason ?? `ACP Agent ${this.id} 不可用`,
+        {
+          retryable: false,
+          detail: {
+            runtimeId: this.id,
+            ...(this.unavailableReason ? { reason: this.unavailableReason } : {}),
+            ...(this.installHint ? { hint: this.installHint } : {}),
+          },
+        },
+      )
+    }
     const ticket = ctx.ticket
     const repo = ticket.repo
     const baseBranch = ticket.branch
@@ -171,7 +200,7 @@ export class AcpRuntime implements WorkerRuntime {
       schemaVersion: 3,
       ticketId: ticket.id,
       ...(ctx.assignment.id ? { assignmentId: ctx.assignment.id } : {}),
-      runtime: 'acp',
+      runtime: this.id,
       handle: '',
       workdir: workspace.workdir,
       repo,
@@ -296,7 +325,7 @@ export class AcpRuntime implements WorkerRuntime {
         phase: 'exited',
         acceptingInput: meta.loadSession === true && Boolean(meta.sessionId),
         ...(meta.startedAt ? { lastActivityAt: meta.startedAt } : {}),
-        ...(meta.lastError ? { detail: { source: 'acp', error: meta.lastError } } : { detail: { source: 'acp', status: meta.status } }),
+        ...(meta.lastError ? { detail: { source: this.id, error: meta.lastError } } : { detail: { source: this.id, status: meta.status } }),
       }
     }
     const lastActivityAt = session.lastEventAt ?? session.promptStartedAt ?? meta?.startedAt
@@ -307,7 +336,7 @@ export class AcpRuntime implements WorkerRuntime {
         acceptingInput: session.loadSession,
         ...(lastActivityAt ? { lastActivityAt } : {}),
         ...(session.connection.exit.code !== null ? { exitCode: session.connection.exit.code } : {}),
-        detail: { source: 'acp', status: 'exited' },
+        detail: { source: this.id, status: 'exited' },
       }
     }
     if (session.inFlight) {
@@ -316,7 +345,7 @@ export class AcpRuntime implements WorkerRuntime {
         phase: 'running',
         acceptingInput: false,
         ...(lastActivityAt ? { lastActivityAt } : {}),
-        detail: { source: 'acp', status: 'working' },
+        detail: { source: this.id, status: 'working' },
       }
     }
     return {
@@ -325,7 +354,7 @@ export class AcpRuntime implements WorkerRuntime {
       acceptingInput: true,
       ...(lastActivityAt ? { lastActivityAt } : {}),
       detail: {
-        source: 'acp',
+        source: this.id,
         status: session.lastError ? 'error' : 'idle',
         ...(session.lastError ? { error: session.lastError } : {}),
         ...(session.lastStopReason ? { stopReason: session.lastStopReason } : {}),
@@ -360,19 +389,28 @@ export class AcpRuntime implements WorkerRuntime {
 
   async doctor(): Promise<DiagnosticCheck[]> {
     const checks: DiagnosticCheck[] = []
-    const version = await realRunner(this.command).run(['--version'], {
-      cwd: this.home,
-      env: { ...process.env, ...this.env },
-      timeoutMs: 5_000,
-    })
-    checks.push({
-      name: `ACP Agent (${this.command})`,
-      status: version.code === 0 ? 'ok' : 'fail',
-      detail: version.code === 0
-        ? version.stdout.trim().split('\n')[0] ?? this.command
-        : `${version.stderr || version.stdout}`.trim().slice(0, 160),
-      ...(version.code === 0 ? {} : { hint: `确认 ${this.command} 可执行；命令与参数由 runtime.options.acp.command/args 配置` }),
-    })
+    if (!this.command) {
+      checks.push({
+        name: `ACP Agent (${this.id})`,
+        status: 'fail',
+        detail: this.unavailableReason ?? '未找到可执行文件',
+        hint: this.installHint ?? `安装该 Agent 后重启服务，或在 runtime.options.${this.id}.command 指定可执行文件`,
+      })
+    } else {
+      const version = await realRunner(this.command).run(this.probeArgs, {
+        cwd: this.home,
+        env: { ...process.env, ...this.env },
+        timeoutMs: 5_000,
+      })
+      checks.push({
+        name: `ACP Agent (${this.id})`,
+        status: version.code === 0 ? 'ok' : 'fail',
+        detail: version.code === 0
+          ? version.stdout.trim().split('\n')[0] ?? this.command
+          : `${version.stderr || version.stdout}`.trim().slice(0, 160),
+        ...(version.code === 0 ? {} : { hint: this.installHint ?? `确认 ${this.command} 可执行；命令与参数由 runtime.options.${this.id}.command/args 配置` }),
+      })
+    }
     const git = await this.gitProvider.version()
     checks.push({
       name: 'git worktree',
@@ -384,6 +422,9 @@ export class AcpRuntime implements WorkerRuntime {
   }
 
   private spawnConnection(cwd: string): AcpConnection {
+    if (!this.command) {
+      throw new WorkerRuntimeError('runtime:unavailable', this.unavailableReason ?? `ACP Agent ${this.id} 不可用`)
+    }
     return new AcpConnection({
       command: this.command,
       args: this.args,

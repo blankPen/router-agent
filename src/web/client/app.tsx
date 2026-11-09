@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
   FIELD_PATHS,
@@ -8,12 +8,21 @@ import {
   getByPath,
   humanizeMs,
   humanizeTime,
+  sectionsFor,
   setByPath,
   toInputValue,
   type FieldDef,
+  type RuntimeChoiceView,
   type SectionDef,
 } from './fields.js'
-import { ORCA_RUNTIME_ID, WORKER_RUNTIMES } from '../../worker/runtimes/catalog.js'
+import { getJson, saveConfigPatch, sendJson, type ConfigBundle, type ConfigDoc } from './api.js'
+import { Icon, LogoMark } from './icons.js'
+import { RuntimeCards, type RuntimeNotice } from './runtime-cards.js'
+import {
+  mergeRuntimeChoices,
+  runtimeStatusLabel,
+} from './runtime-model.js'
+import { ACP_RUNTIME_ID, ORCA_RUNTIME_ID, normalizeRuntimeId } from '../../worker/runtimes/catalog.js'
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -56,6 +65,12 @@ interface TicketInput {
   ackedAt?: string
 }
 
+interface ResumeInfo {
+  command: string
+  sessionId?: string
+  note?: string
+}
+
 interface TicketDetail {
   ticket: Ticket
   mandate: { strength: string; scope: string; rules: string[]; policyVersion: string } | null
@@ -63,15 +78,8 @@ interface TicketDetail {
   reports: Report[]
   inputs: TicketInput[]
   attention: { question: string; createdAt?: string } | null
+  resume?: ResumeInfo | null
 }
-
-interface ConfigBundle {
-  config: ConfigDoc
-  defaults: ConfigDoc
-  configPath: string
-}
-
-type ConfigDoc = Record<string, any>
 
 interface ProjectDraft {
   name: string
@@ -151,167 +159,11 @@ const PR_STATE_LABEL: Record<string, string> = {
   closed: '已关闭',
 }
 
-async function getJson<T>(path: string): Promise<T> {
-  const res = await fetch(path)
-  const data = await res.json()
-  if (!res.ok) throw new Error((data as { message?: string; error?: string }).message ?? (data as { error?: string }).error ?? `HTTP ${res.status}`)
-  return data as T
-}
-
-async function sendJson<T>(path: string, method: string, body: unknown): Promise<T> {
-  const res = await fetch(path, {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  const data = await res.json()
-  if (!res.ok) {
-    const failure = data as { error?: string; message?: string; errors?: { path: string; message: string }[] }
-    const detail = failure.errors?.map(item => `${item.path}: ${item.message}`).join('；')
-    throw new Error(detail || failure.message || failure.error || `HTTP ${res.status}`)
-  }
-  return data as T
-}
-
-// ---------------------------------------------------------------------------
-// 图标（内联 SVG，不引外部资源）
-// ---------------------------------------------------------------------------
-
-type IconName =
-  | 'inbox' | 'sliders' | 'radio' | 'search' | 'refresh' | 'copy' | 'external'
-  | 'stop' | 'alert' | 'plus' | 'trash' | 'branch' | 'terminal' | 'clock' | 'check' | 'chevron' | 'close'
-
-function Icon({ name, size = 16, className }: { name: IconName; size?: number; className?: string }): JSX.Element {
-  const paths: Record<IconName, JSX.Element> = {
-    inbox: (
-      <>
-        <path d="M22 12h-6l-2 3h-4l-2-3H2" />
-        <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z" />
-      </>
-    ),
-    sliders: (
-      <>
-        <path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3" />
-        <path d="M1 14h6M9 8h6M17 16h6" />
-      </>
-    ),
-    radio: (
-      <>
-        <circle cx="12" cy="12" r="2" />
-        <path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14" />
-      </>
-    ),
-    search: (
-      <>
-        <circle cx="11" cy="11" r="7" />
-        <path d="m21 21-4.3-4.3" />
-      </>
-    ),
-    refresh: (
-      <>
-        <path d="M21 12a9 9 0 1 1-2.64-6.36" />
-        <path d="M21 3v6h-6" />
-      </>
-    ),
-    copy: (
-      <>
-        <rect x="9" y="9" width="12" height="12" rx="2" />
-        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-      </>
-    ),
-    external: (
-      <>
-        <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-        <path d="M15 3h6v6M10 14 21 3" />
-      </>
-    ),
-    stop: <rect x="6" y="6" width="12" height="12" rx="2.5" />,
-    alert: (
-      <>
-        <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
-        <path d="M12 9v4M12 17h.01" />
-      </>
-    ),
-    plus: <path d="M12 5v14M5 12h14" />,
-    trash: (
-      <>
-        <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-        <path d="M10 11v6M14 11v6" />
-      </>
-    ),
-    branch: (
-      <>
-        <path d="M6 3v12" />
-        <circle cx="18" cy="6" r="3" />
-        <circle cx="6" cy="18" r="3" />
-        <path d="M18 9a9 9 0 0 1-9 9" />
-      </>
-    ),
-    terminal: (
-      <>
-        <path d="m4 17 6-6-6-6" />
-        <path d="M12 19h8" />
-      </>
-    ),
-    clock: (
-      <>
-        <circle cx="12" cy="12" r="9" />
-        <path d="M12 7v5l3 2" />
-      </>
-    ),
-    check: <path d="m4 12 5 5L20 6" />,
-    chevron: <path d="m9 6 6 6-6 6" />,
-    close: <path d="M18 6 6 18M6 6l12 12" />,
-  }
-  return (
-    <svg
-      className={className}
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.7"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      {paths[name]}
-    </svg>
-  )
-}
-
-// 品牌标识：与 docs/assets/router-agent-logo.svg 保持一致的矢量图形。
-function LogoMark({ size = 34 }: { size?: number }): JSX.Element {
-  return (
-    <svg width={size} height={size} viewBox="0 0 720 720" fill="none" aria-hidden="true">
-      <rect width="720" height="720" fill="#000000" />
-      <g stroke="#FFFFFF" strokeWidth="16">
-        <path d="M360 168V289.5" />
-        <path d="M359 553L360 428.5" />
-        <path d="M154 357.5L290.5 358.4" />
-        <path d="M565 357.5L429.5 358.4" />
-        <path d="M217 494L309 406.7" />
-        <path d="M502 494L409.9 406.9" />
-      </g>
-      <g fill="#FFFFFF">
-        <circle cx="360" cy="359" r="61.5" />
-        <circle cx="360" cy="168" r="36" />
-        <circle cx="359" cy="553" r="36" />
-        <circle cx="154" cy="357.5" r="36" />
-        <circle cx="565" cy="357.5" r="36" />
-        <circle cx="217" cy="494" r="36" />
-        <circle cx="502" cy="494" r="36" />
-      </g>
-    </svg>
-  )
-}
-
 // ---------------------------------------------------------------------------
 // 应用外壳
 // ---------------------------------------------------------------------------
 
-type Tab = 'tickets' | 'config' | 'sources'
+type Tab = 'setup' | 'tickets' | 'config' | 'sources'
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -324,6 +176,15 @@ function App(): JSX.Element {
   const [status, setStatus] = useState<ServiceStatus | null>(null)
   const [restartPhase, setRestartPhase] = useState<RestartPhase>('idle')
   const [restartError, setRestartError] = useState<string | null>(null)
+  // 配置页 / 初始化页共享同一个「有未保存修改」标记，切走前提醒一次。
+  const dirtyRef = useRef(false)
+
+  const switchTab = useCallback((next: Tab): void => {
+    if (next === tab) return
+    if (dirtyRef.current && !confirm('有未保存的配置修改，切换页面后将丢失，继续？')) return
+    dirtyRef.current = false
+    setTab(next)
+  }, [tab])
 
   useEffect(() => {
     const load = (): void => {
@@ -380,16 +241,20 @@ function App(): JSX.Element {
         </div>
 
         <nav className="side-nav">
-          <button className={`nav-tab ${tab === 'tickets' ? 'active' : ''}`} onClick={() => setTab('tickets')}>
+          <button className={`nav-tab ${tab === 'setup' ? 'active' : ''}`} onClick={() => switchTab('setup')}>
+            <Icon name="zap" />
+            <span>初始化</span>
+          </button>
+          <button className={`nav-tab ${tab === 'tickets' ? 'active' : ''}`} onClick={() => switchTab('tickets')}>
             <Icon name="inbox" />
             <span>工单</span>
             {status && status.tickets.open > 0 && <span className="nav-count">{status.tickets.open}</span>}
           </button>
-          <button className={`nav-tab ${tab === 'config' ? 'active' : ''}`} onClick={() => setTab('config')}>
+          <button className={`nav-tab ${tab === 'config' ? 'active' : ''}`} onClick={() => switchTab('config')}>
             <Icon name="sliders" />
             <span>配置</span>
           </button>
-          <button className={`nav-tab ${tab === 'sources' ? 'active' : ''}`} onClick={() => setTab('sources')}>
+          <button className={`nav-tab ${tab === 'sources' ? 'active' : ''}`} onClick={() => switchTab('sources')}>
             <Icon name="radio" />
             <span>来源</span>
           </button>
@@ -414,16 +279,29 @@ function App(): JSX.Element {
       </aside>
 
       <div className="workspace">
+        {tab === 'setup' && (
+          <SetupView
+            restarting={restartPhase === 'restarting'}
+            onRestart={() => void restartDaemon()}
+            onOpenConfig={() => switchTab('config')}
+            onDirtyChange={dirty => { dirtyRef.current = dirty }}
+          />
+        )}
         {tab === 'tickets' && <TicketsView />}
-        {tab === 'config' && <ConfigView restarting={restartPhase === 'restarting'} onRestart={() => void restartDaemon()} />}
+        {tab === 'config' && (
+          <ConfigView
+            restarting={restartPhase === 'restarting'}
+            onRestart={() => void restartDaemon()}
+            onDirtyChange={dirty => { dirtyRef.current = dirty }}
+          />
+        )}
         {tab === 'sources' && <SourcesView />}
       </div>
     </div>
   )
 }
 
-function PageHead({ eyebrow, title, subtitle, actions }: {
-  eyebrow: string
+function PageHead({ title, subtitle, actions }: {
   title: string
   subtitle?: JSX.Element | string
   actions?: JSX.Element
@@ -431,7 +309,6 @@ function PageHead({ eyebrow, title, subtitle, actions }: {
   return (
     <header className="page-head">
       <div>
-        <span className="eyebrow">{eyebrow}</span>
         <h1>{title}</h1>
         {subtitle && <p className="page-sub">{subtitle}</p>}
       </div>
@@ -540,7 +417,6 @@ function TicketsView(): JSX.Element {
   return (
     <>
       <PageHead
-        eyebrow="TICKETS"
         title="工单"
         subtitle={lastSync
           ? `${openCount} 张进行中 · ${tickets.length - openCount} 张已关闭 · 更新于 ${lastSync.toLocaleTimeString('zh-CN')}`
@@ -673,6 +549,7 @@ function TicketDetailView({ detail, onChanged }: { detail: TicketDetail; onChang
   const [copied, setCopied] = useState('')
   const { ticket } = detail
   const open = ticket.stage !== 'closed'
+  const resume = detail.resume
 
   const copy = async (label: string, value: string): Promise<void> => {
     try {
@@ -717,6 +594,16 @@ function TicketDetailView({ detail, onChanged }: { detail: TicketDetail; onChang
             <a className="btn" href={ticket.prUrl} target="_blank" rel="noreferrer">
               <Icon name="external" size={14} />PR #{ticket.prNumber}
             </a>
+          )}
+          {resume && (
+            <button
+              className="btn"
+              title={resume.note ? `${resume.command}\n${resume.note}` : resume.command}
+              onClick={() => void copy('resume', resume.command)}
+            >
+              <Icon name={copied === 'resume' ? 'check' : 'terminal'} size={14} />
+              {copied === 'resume' ? '已复制' : '恢复'}
+            </button>
           )}
           {open && (
             <button className="btn danger" onClick={() => void stop()}>
@@ -880,16 +767,47 @@ const CUSTOM_SECTIONS: SectionDef[] = [
   },
 ]
 
-function ConfigView({ restarting, onRestart }: { restarting: boolean; onRestart: () => void }): JSX.Element {
+/** 项目清单校验：repo 必填；非 orca 运行时必须是本地绝对路径。 */
+function projectIssue(runtimeId: string, projects: ProjectDraft[]): string | null {
+  for (const project of projects) {
+    if (!String(project.repo || '').trim()) return '每个项目都需要填写 repo'
+    if (runtimeId !== ORCA_RUNTIME_ID && !isLocalRepoPath(project.repo)) {
+      return 'repo 必须是本地仓库绝对路径（例如 /Users/me/project 或 path:/Users/me/project）'
+    }
+  }
+  return null
+}
+
+function chatsIssue(chats: unknown): string | null {
+  if (!Array.isArray(chats)) return null
+  for (const chat of chats as ChatDraft[]) {
+    if (!String(chat.chat || '').trim()) return '每行都需要填写 chat_id'
+  }
+  return null
+}
+
+function ConfigView({ restarting, onRestart, onDirtyChange }: {
+  restarting: boolean
+  onRestart: () => void
+  onDirtyChange?: (dirty: boolean) => void
+}): JSX.Element {
   const [original, setOriginal] = useState<ConfigDoc | null>(null)
   const [draft, setDraft] = useState<ConfigDoc | null>(null)
   const [defaults, setDefaults] = useState<ConfigDoc>({})
   const [configPath, setConfigPath] = useState('')
+  const [runtimeChoices, setRuntimeChoices] = useState<RuntimeChoiceView[]>([])
+  const [detecting, setDetecting] = useState(false)
   const [active, setActive] = useState<string>('policy')
   const [filter, setFilter] = useState('')
   const [saving, setSaving] = useState(false)
-  const [notice, setNotice] = useState<{ kind: 'ok' | 'warn' | 'error'; text: string } | null>(null)
+  const [notice, setNotice] = useState<RuntimeNotice | null>(null)
+  const [pendingRestart, setPendingRestart] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
+
+  // 重启开始后不再提示「需重启」。
+  useEffect(() => {
+    if (restarting) setPendingRestart(false)
+  }, [restarting])
 
   useEffect(() => {
     void getJson<ConfigBundle>('/api/config')
@@ -898,52 +816,51 @@ function ConfigView({ restarting, onRestart }: { restarting: boolean; onRestart:
         setDraft(data.config)
         setDefaults(data.defaults)
         setConfigPath(data.configPath)
+        setRuntimeChoices(data.runtimeChoices ?? [])
+        setDetecting(Boolean(data.detecting))
         setLoadError(null)
       })
       .catch(error => setLoadError(error instanceof Error ? error.message : String(error)))
   }, [])
 
+  // 探测轮询由 RuntimeCards 负责；这里只保留静态目录兜底 + 服务端快照合并。
+  const runtimeCatalog = useMemo(() => mergeRuntimeChoices(runtimeChoices), [runtimeChoices])
+
+  const sections = useMemo(() => [...sectionsFor(runtimeChoices), ...CUSTOM_SECTIONS], [runtimeChoices])
+
   const changed = useMemo(() => {
     if (!draft || !original) return []
     const paths = FIELD_PATHS.filter(path => JSON.stringify(getByPath(draft, path)) !== JSON.stringify(getByPath(original, path)))
-    for (const runtime of WORKER_RUNTIMES) {
+    for (const runtime of runtimeCatalog) {
       if (JSON.stringify(projectsOf(draft, runtime.id)) !== JSON.stringify(projectsOf(original, runtime.id))) {
         paths.push(projectPatchPath(runtime.id))
       }
     }
     if (JSON.stringify(draft.feishu?.chats) !== JSON.stringify(original.feishu?.chats)) paths.push('feishu.chats')
     return paths
-  }, [draft, original])
+  }, [draft, original, runtimeCatalog])
+
+  useEffect(() => {
+    onDirtyChange?.(changed.length > 0)
+  }, [changed.length, onDirtyChange])
 
   const errors = useMemo(() => {
     if (!draft) return new Map<string, string>()
     const map = new Map<string, string>()
-    for (const section of SECTIONS) {
+    for (const section of sections) {
       for (const field of section.fields) {
         const message = fieldError(field, getByPath(draft, field.path))
         if (message) map.set(field.path, message)
       }
     }
-    if (Array.isArray(draft.feishu?.chats)) {
-      for (const chat of draft.feishu.chats as ChatDraft[]) {
-        if (!String(chat.chat || '').trim()) map.set('feishu.chats', '每行都需要填写 chat_id')
-      }
-    }
-    for (const runtime of WORKER_RUNTIMES) {
-      const path = projectPatchPath(runtime.id)
-      for (const project of projectsOf(draft, runtime.id)) {
-        if (!String(project.repo || '').trim()) {
-          map.set(path, `${runtime.label}：每个项目都需要填写 repo`)
-          break
-        }
-        if (runtime.id !== ORCA_RUNTIME_ID && !isLocalRepoPath(project.repo)) {
-          map.set(path, `${runtime.label}：repo 必须是本地仓库绝对路径（例如 /Users/me/project）`)
-          break
-        }
-      }
+    const chatMessage = chatsIssue(draft.feishu?.chats)
+    if (chatMessage) map.set('feishu.chats', chatMessage)
+    for (const runtime of runtimeCatalog) {
+      const issue = projectIssue(runtime.id, projectsOf(draft, runtime.id))
+      if (issue) map.set(projectPatchPath(runtime.id), `${runtime.label}：${issue}`)
     }
     return map
-  }, [draft])
+  }, [draft, sections, runtimeCatalog])
 
   const setField = (path: string, value: unknown): void => {
     setDraft(current => (current ? setByPath(current, path, value) : current))
@@ -957,6 +874,11 @@ function ConfigView({ restarting, onRestart }: { restarting: boolean; onRestart:
     setNotice(null)
   }
 
+  const requestRestart = (): void => {
+    if (changed.length > 0 && !confirm('有未保存的修改，重启后不会自动保存，继续？')) return
+    onRestart()
+  }
+
   const save = async (): Promise<void> => {
     if (!draft || !original || changed.length === 0 || errors.size > 0) return
     const patch: Record<string, unknown> = {}
@@ -964,15 +886,14 @@ function ConfigView({ restarting, onRestart }: { restarting: boolean; onRestart:
     setSaving(true)
     setNotice(null)
     try {
-      const result = await sendJson<ConfigBundle & { changed: string[]; restartRequired: boolean; policyChanged: boolean }>(
-        '/api/config',
-        'PUT',
-        { patch },
-      )
+      const result = await saveConfigPatch(patch)
       setOriginal(result.config)
       setDraft(result.config)
       setDefaults(result.defaults)
       setConfigPath(result.configPath)
+      if (result.runtimeChoices) setRuntimeChoices(result.runtimeChoices)
+      if (typeof result.detecting === 'boolean') setDetecting(result.detecting)
+      setPendingRestart(result.restartRequired)
       const message = {
         kind: result.restartRequired ? 'warn' as const : 'ok' as const,
         text: result.restartRequired
@@ -994,15 +915,14 @@ function ConfigView({ restarting, onRestart }: { restarting: boolean; onRestart:
   if (!draft || !original) return <div className="empty-state tall"><p>正在读取配置…</p></div>
 
   const query = filter.trim().toLowerCase()
-  const runtimeId = typeof draft.runtime?.default === 'string' ? draft.runtime.default : ORCA_RUNTIME_ID
-  const runtimeLabel = WORKER_RUNTIMES.find(runtime => runtime.id === runtimeId)?.label ?? runtimeId
+  const runtimeId = normalizeRuntimeId(typeof draft.runtime?.default === 'string' ? draft.runtime.default : ORCA_RUNTIME_ID)
+  const runtimeLabel = runtimeCatalog.find(runtime => runtime.id === runtimeId)?.label ?? runtimeId
   const activeProjectsPath = projectPatchPath(runtimeId)
   const activeProjects = projectsOf(draft, runtimeId)
-  const projectErrors = WORKER_RUNTIMES
+  const projectErrors = runtimeCatalog
     .map(runtime => errors.get(projectPatchPath(runtime.id)))
     .filter((message): message is string => Boolean(message))
     .join('；')
-  const sections = [...SECTIONS, ...CUSTOM_SECTIONS]
   const visible = sections.filter(section =>
     !query ||
     section.title.toLowerCase().includes(query) ||
@@ -1013,12 +933,11 @@ function ConfigView({ restarting, onRestart }: { restarting: boolean; onRestart:
   return (
     <>
       <PageHead
-        eyebrow="SETTINGS"
         title="配置"
         subtitle="修改 config.yaml。策略项立即生效，其余配置在重启服务后生效。"
         actions={
           <>
-            <button className="btn tiny" onClick={onRestart} disabled={restarting} title="重启 ra 服务，当前页面不会刷新">
+            <button className="btn tiny" onClick={requestRestart} disabled={restarting} title="重启 ra 服务，当前页面不会刷新">
               <Icon name="refresh" size={13} className={restarting ? 'spin' : undefined} />
               {restarting ? '重启中…' : '重启服务'}
             </button>
@@ -1028,6 +947,17 @@ function ConfigView({ restarting, onRestart }: { restarting: boolean; onRestart:
           </>
         }
       />
+
+      {pendingRestart && (
+        <div className="banner warn restart-banner">
+          <Icon name="alert" />
+          <span>有配置需要重启服务后生效。</span>
+          <button className="btn tiny" onClick={requestRestart} disabled={restarting}>
+            <Icon name="refresh" size={12} className={restarting ? 'spin' : undefined} />
+            {restarting ? '重启中…' : '立即重启'}
+          </button>
+        </div>
+      )}
 
       <div className="config-layout">
         <aside className="config-nav">
@@ -1042,12 +972,12 @@ function ConfigView({ restarting, onRestart }: { restarting: boolean; onRestart:
               const dirty = hasFields
                 ? section.fields.some(field => changed.includes(field.path))
                 : projectSection
-                  ? WORKER_RUNTIMES.some(runtime => changed.includes(projectPatchPath(runtime.id))) || changed.includes('feishu.chats')
+                  ? runtimeCatalog.some(runtime => changed.includes(projectPatchPath(runtime.id))) || changed.includes('feishu.chats')
                   : changed.includes(section.id)
               const invalid = hasFields
                 ? section.fields.some(field => errors.has(field.path))
                 : projectSection
-                  ? WORKER_RUNTIMES.some(runtime => errors.has(projectPatchPath(runtime.id))) || errors.has('feishu.chats')
+                  ? runtimeCatalog.some(runtime => errors.has(projectPatchPath(runtime.id))) || errors.has('feishu.chats')
                   : errors.has(section.id)
               return (
                 <button
@@ -1076,7 +1006,7 @@ function ConfigView({ restarting, onRestart }: { restarting: boolean; onRestart:
             const dirty = section.fields.length > 0
               ? section.fields.some(field => changed.includes(field.path))
               : section.id === 'projects'
-                ? WORKER_RUNTIMES.some(runtime => changed.includes(projectPatchPath(runtime.id))) || changed.includes('feishu.chats')
+                ? runtimeCatalog.some(runtime => changed.includes(projectPatchPath(runtime.id))) || changed.includes('feishu.chats')
                 : changed.includes(section.id)
             return (
               <section key={section.id} id={`sec-${section.id}`} className="settings-card">
@@ -1120,9 +1050,23 @@ function ConfigView({ restarting, onRestart }: { restarting: boolean; onRestart:
                   </>
                 )}
 
+                {section.id === 'delivery' && (
+                  <RuntimeCards
+                    choices={runtimeChoices}
+                    detecting={detecting}
+                    selected={runtimeId}
+                    onSelect={id => setField('runtime.default', id)}
+                    onChoices={setRuntimeChoices}
+                    onDetecting={setDetecting}
+                    onNotice={setNotice}
+                    onPendingRestart={() => setPendingRestart(true)}
+                  />
+                )}
+
                 {section.fields.length > 0 && (
                   <div className="settings-rows">
                     {section.fields
+                      .filter(field => field.path !== 'runtime.default')
                       .filter(field => !query || `${field.label} ${field.path} ${field.hint ?? ''}`.toLowerCase().includes(query))
                       .map(field => (
                         <FieldRow
@@ -1142,20 +1086,383 @@ function ConfigView({ restarting, onRestart }: { restarting: boolean; onRestart:
         </div>
       </div>
 
-      <div className={`save-dock ${changed.length > 0 ? 'dirty' : ''} ${errors.size > 0 ? 'invalid' : ''} ${changed.length === 0 && errors.size === 0 && !notice ? 'hidden' : ''}`}>
-        <div className="save-status">
-          {errors.size > 0
-            ? <span className="danger-text"><Icon name="alert" size={13} />{errors.size} 个字段不合法</span>
-            : changed.length > 0 ? <span>{changed.length} 项未保存</span> : <span className="muted">配置已同步</span>}
-          {notice && <span className={`notice ${notice.kind}`}>{notice.text}</span>}
-        </div>
-        <div className="save-buttons">
-          <button className="btn ghost" onClick={resetAll} disabled={changed.length === 0 || saving}>放弃</button>
-          <button className="btn primary" onClick={() => void save()} disabled={changed.length === 0 || errors.size > 0 || saving}>
-            {saving ? '保存中…' : '保存配置'}
+      <SaveDock
+        changed={changed}
+        errors={errors}
+        notice={notice}
+        saving={saving}
+        onReset={resetAll}
+        onSave={() => void save()}
+      />
+    </>
+  )
+}
+
+function SaveDock({ changed, errors, notice, saving, onReset, onSave }: {
+  changed: string[]
+  errors: Map<string, string>
+  notice: RuntimeNotice | null
+  saving: boolean
+  onReset: () => void
+  onSave: () => void
+}): JSX.Element {
+  return (
+    <div className={`save-dock ${changed.length > 0 ? 'dirty' : ''} ${errors.size > 0 ? 'invalid' : ''} ${changed.length === 0 && errors.size === 0 && !notice ? 'hidden' : ''}`}>
+      <div className="save-status">
+        {errors.size > 0
+          ? <span className="danger-text"><Icon name="alert" size={13} />{errors.size} 个字段不合法</span>
+          : changed.length > 0 ? <span>{changed.length} 项未保存</span> : <span className="muted">配置已同步</span>}
+        {notice && <span className={`notice ${notice.kind}`}>{notice.text}</span>}
+      </div>
+      <div className="save-buttons">
+        <button className="btn ghost" onClick={onReset} disabled={changed.length === 0 || saving}>放弃</button>
+        <button className="btn primary" onClick={onSave} disabled={changed.length === 0 || errors.size > 0 || saving}>
+          {saving ? '保存中…' : '保存配置'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+const SETUP_FEISHU_FIELDS: FieldDef[] = (() => {
+  const all = SECTIONS.flatMap(section => section.fields)
+  return ['feishu.appId', 'feishu.larkHome', 'feishu.directMessages']
+    .map(path => all.find(field => field.path === path))
+    .filter((field): field is FieldDef => Boolean(field))
+})()
+
+/** 初始化页：只做启动必需项（运行时 / 项目 / 飞书 / 群），其余配置留在「配置」页。 */
+function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
+  restarting: boolean
+  onRestart: () => void
+  onOpenConfig: () => void
+  onDirtyChange?: (dirty: boolean) => void
+}): JSX.Element {
+  const [original, setOriginal] = useState<ConfigDoc | null>(null)
+  const [draft, setDraft] = useState<ConfigDoc | null>(null)
+  const [defaults, setDefaults] = useState<ConfigDoc>({})
+  const [configPath, setConfigPath] = useState('')
+  const [runtimeChoices, setRuntimeChoices] = useState<RuntimeChoiceView[]>([])
+  const [detecting, setDetecting] = useState(false)
+  const [feishuMode, setFeishuMode] = useState<'reuse' | 'dedicated'>('reuse')
+  const [saving, setSaving] = useState(false)
+  const [notice, setNotice] = useState<RuntimeNotice | null>(null)
+  const [pendingRestart, setPendingRestart] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+
+  // 重启开始后不再提示「需重启」。
+  useEffect(() => {
+    if (restarting) setPendingRestart(false)
+  }, [restarting])
+
+  useEffect(() => {
+    void getJson<ConfigBundle>('/api/config')
+      .then(data => {
+        setOriginal(data.config)
+        setDraft(data.config)
+        setDefaults(data.defaults)
+        setConfigPath(data.configPath)
+        setRuntimeChoices(data.runtimeChoices ?? [])
+        setDetecting(Boolean(data.detecting))
+        setFeishuMode(data.config.feishu?.appId || data.config.feishu?.larkHome ? 'dedicated' : 'reuse')
+        setLoadError(null)
+      })
+      .catch(error => setLoadError(error instanceof Error ? error.message : String(error)))
+  }, [])
+
+  const runtimeCatalog = useMemo(() => mergeRuntimeChoices(runtimeChoices), [runtimeChoices])
+  const runtimeId = normalizeRuntimeId(
+    draft && typeof draft.runtime?.default === 'string' ? draft.runtime.default : ORCA_RUNTIME_ID,
+  )
+  const activeProjectsPath = projectPatchPath(runtimeId)
+  const activeProjects = draft ? projectsOf(draft, runtimeId) : []
+  const runtimeLabel = runtimeCatalog.find(runtime => runtime.id === runtimeId)?.label ?? runtimeId
+
+  const changed = useMemo(() => {
+    if (!draft || !original) return []
+    const paths = ['runtime.default', 'feishu.appId', 'feishu.larkHome', 'feishu.directMessages', 'feishu.chats']
+    for (const runtime of runtimeCatalog) paths.push(projectPatchPath(runtime.id))
+    return paths.filter(path => JSON.stringify(getByPath(draft, path)) !== JSON.stringify(getByPath(original, path)))
+  }, [draft, original, runtimeCatalog])
+
+  useEffect(() => {
+    onDirtyChange?.(changed.length > 0)
+  }, [changed.length, onDirtyChange])
+
+  const errors = useMemo(() => {
+    const map = new Map<string, string>()
+    if (!draft) return map
+    const changedSet = new Set(changed)
+    for (const field of SETUP_FEISHU_FIELDS) {
+      const message = fieldError(field, getByPath(draft, field.path))
+      if (message) map.set(field.path, message)
+    }
+    if (feishuMode === 'dedicated' && !String(draft.feishu?.appId ?? '').trim() && !String(draft.feishu?.larkHome ?? '').trim()) {
+      map.set('feishu.appId', '专属机器人至少填写 App ID 或配置目录')
+    }
+    if (changedSet.has('feishu.chats')) {
+      const chatMessage = chatsIssue(draft.feishu?.chats)
+      if (chatMessage) map.set('feishu.chats', chatMessage)
+    }
+    for (const runtime of runtimeCatalog) {
+      const path = projectPatchPath(runtime.id)
+      // 只校验当前运行时的清单 + 本次确实要提交的其它清单，避免历史脏数据挡住保存。
+      if (runtime.id !== runtimeId && !changedSet.has(path)) continue
+      const issue = projectIssue(runtime.id, projectsOf(draft, runtime.id))
+      if (issue) map.set(path, `${runtime.label}：${issue}`)
+    }
+    // 自定义 acp 没有 command 时重启会直接启动失败，保存前就挡住。
+    const selected = runtimeCatalog.find(runtime => runtime.id === runtimeId)
+    if (runtimeId === ACP_RUNTIME_ID && selected?.status === 'not-installed') {
+      map.set('runtime.default', '自定义 acp 未配置 runtime.options.acp.command，重启后服务会启动失败')
+    }
+    return map
+  }, [draft, changed, feishuMode, runtimeCatalog, runtimeId])
+
+  const setField = (path: string, value: unknown): void => {
+    setDraft(current => (current ? setByPath(current, path, value) : current))
+    setNotice(null)
+  }
+
+  const resetAll = (): void => {
+    if (!original) return
+    if (!confirm('放弃所有未保存的修改？')) return
+    setDraft(structuredClone(original))
+    setFeishuMode(original.feishu?.appId || original.feishu?.larkHome ? 'dedicated' : 'reuse')
+    setNotice(null)
+  }
+
+  const requestRestart = (): void => {
+    if (changed.length > 0 && !confirm('有未保存的修改，重启后不会自动保存，继续？')) return
+    onRestart()
+  }
+
+  const save = async (): Promise<void> => {
+    if (!draft || !original || changed.length === 0 || errors.size > 0) return
+    const patch: Record<string, unknown> = {}
+    for (const path of changed) patch[path] = getByPath(draft, path)
+    setSaving(true)
+    setNotice(null)
+    try {
+      const result = await saveConfigPatch(patch)
+      setOriginal(result.config)
+      setDraft(result.config)
+      setDefaults(result.defaults)
+      setConfigPath(result.configPath)
+      if (result.runtimeChoices) setRuntimeChoices(result.runtimeChoices)
+      if (typeof result.detecting === 'boolean') setDetecting(result.detecting)
+      setPendingRestart(result.restartRequired)
+      const message = {
+        kind: result.restartRequired ? 'warn' as const : 'ok' as const,
+        text: result.restartRequired
+          ? `已保存 ${result.changed.length} 项，重启服务后生效；点上方「立即重启」即可。`
+          : `已保存 ${result.changed.length} 项，已立即生效。`,
+      }
+      setNotice(message)
+      window.setTimeout(() => setNotice(current => (current === message ? null : current)), 8_000)
+    } catch (error) {
+      const message = { kind: 'error' as const, text: error instanceof Error ? error.message : String(error) }
+      setNotice(message)
+      window.setTimeout(() => setNotice(current => (current === message ? null : current)), 8_000)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (loadError) return <div className="banner danger"><Icon name="alert" />读取配置失败：{loadError}</div>
+  if (!draft || !original) return <div className="empty-state tall"><p>正在读取配置…</p></div>
+
+  const chats = (draft.feishu?.chats ?? []) as ChatDraft[]
+  const runtimeChoice = runtimeCatalog.find(choice => choice.id === runtimeId)
+  const runtimeReady = runtimeChoice?.status === 'ready' || runtimeChoice?.status === 'unverified'
+  const projectReady = activeProjects.length > 0 && !projectIssue(runtimeId, activeProjects)
+  const feishuReady = feishuMode === 'reuse'
+    || Boolean(String(draft.feishu?.appId ?? '').trim() || String(draft.feishu?.larkHome ?? '').trim())
+  const chatReady = chats.length > 0 && !chatsIssue(chats)
+  const steps = [
+    { label: '运行时可用', hint: runtimeReady ? '已就绪' : runtimeChoice ? runtimeStatusLabel(runtimeChoice.status) : '未选择', done: runtimeReady },
+    { label: '已登记项目', hint: projectReady ? `${activeProjects.length} 个项目` : '至少一个', done: projectReady },
+    { label: '飞书已接入', hint: feishuMode === 'reuse' ? '复用当前 profile' : '专属机器人', done: feishuReady },
+    { label: '监控群已添加', hint: chatReady ? `${chats.length} 个群` : '至少一个', done: chatReady },
+  ]
+  const completed = steps.filter(step => step.done).length
+  const directMessagesField = SETUP_FEISHU_FIELDS.find(field => field.path === 'feishu.directMessages')
+  const missingBindings = chats.filter(chat => chat.repo && !activeProjects.some(project => project.name === chat.repo))
+
+  return (
+    <>
+      <PageHead
+        title="初始化配置"
+        subtitle="只配置服务跑起来必需的四件事；人格、会话复用、闲置治理等高级项仍在「配置」里。"
+        actions={
+          <>
+            <button className="btn tiny" onClick={onOpenConfig}>
+              <Icon name="sliders" size={13} />
+              完整配置
+            </button>
+            <button className="btn tiny" onClick={requestRestart} disabled={restarting}>
+              <Icon name="refresh" size={13} className={restarting ? 'spin' : undefined} />
+              {restarting ? '重启中…' : '重启服务'}
+            </button>
+            <span className={completed === steps.length ? 'saved-badge' : 'unsaved-badge'}>
+              {completed}/{steps.length} 已完成
+            </span>
+          </>
+        }
+      />
+
+      {pendingRestart && (
+        <div className="banner warn restart-banner">
+          <Icon name="alert" />
+          <span>有配置需要重启服务后生效。</span>
+          <button className="btn tiny" onClick={requestRestart} disabled={restarting}>
+            <Icon name="refresh" size={12} className={restarting ? 'spin' : undefined} />
+            {restarting ? '重启中…' : '立即重启'}
           </button>
         </div>
+      )}
+
+      <div className="setup-progress">
+        {steps.map((step, index) => (
+          <div key={step.label} className={`setup-step ${step.done ? 'done' : ''}`}>
+            <span className="setup-step-index">{step.done ? <Icon name="check" size={12} /> : index + 1}</span>
+            <div>
+              <strong>{step.label}</strong>
+              <small>{step.hint}</small>
+            </div>
+          </div>
+        ))}
       </div>
+
+      <section className="settings-card" id="setup-runtime">
+        <header className="settings-head">
+          <div>
+            <h2>1. 选择运行时</h2>
+            <p>只能选一个作为 Worker 后端。卡片会检测 CLI 是否安装、ACP 依赖是否齐全，并支持引导安装与握手试启动。</p>
+          </div>
+          <div className="settings-badges">
+            {runtimeReady ? <span className="badge hot">已就绪</span> : <span className="badge cold">未完成</span>}
+          </div>
+        </header>
+        {errors.get('runtime.default') && <p className="field-error">{errors.get('runtime.default')}</p>}
+        <RuntimeCards
+          choices={runtimeChoices}
+          detecting={detecting}
+          selected={runtimeId}
+          onSelect={id => setField('runtime.default', id)}
+          onChoices={setRuntimeChoices}
+          onDetecting={setDetecting}
+          onNotice={setNotice}
+          onPendingRestart={() => setPendingRestart(true)}
+        />
+      </section>
+
+      <section className="settings-card" id="setup-projects">
+        <header className="settings-head">
+          <div>
+            <h2>2. 登记项目</h2>
+            <p>当前运行时：<strong>{runtimeLabel}</strong>。至少登记一个项目，群绑定才能选；非 orca 运行时填本地仓库绝对路径。</p>
+          </div>
+          <div className="settings-badges">
+            {projectReady ? <span className="badge hot">已完成</span> : <span className="badge cold">未完成</span>}
+          </div>
+        </header>
+        <ProjectsEditor
+          runtimeId={runtimeId}
+          projects={activeProjects}
+          error={errors.get(activeProjectsPath)}
+          onChange={value => setField(activeProjectsPath, value)}
+        />
+      </section>
+
+      <section className="settings-card" id="setup-feishu">
+        <header className="settings-head">
+          <div>
+            <h2>3. 飞书接入</h2>
+            <p>机器人身份来自 lark-cli profile：可以复用当前登录，也可以给 router-agent 指定专属配置目录。</p>
+          </div>
+          <div className="settings-badges">
+            {feishuReady ? <span className="badge hot">已完成</span> : <span className="badge cold">未完成</span>}
+          </div>
+        </header>
+        <div className="segmented">
+          <button
+            className={feishuMode === 'reuse' ? 'active' : ''}
+            onClick={() => {
+              setFeishuMode('reuse')
+              setField('feishu.appId', '')
+              setField('feishu.larkHome', '')
+            }}
+          >
+            复用当前 lark-cli profile
+          </button>
+          <button className={feishuMode === 'dedicated' ? 'active' : ''} onClick={() => setFeishuMode('dedicated')}>
+            专属机器人
+          </button>
+        </div>
+        {feishuMode === 'reuse' ? (
+          <p className="editor-hint">将清空 <code>feishu.appId</code> / <code>feishu.larkHome</code>，直接复用终端里 lark-cli 当前登录的机器人。</p>
+        ) : (
+          <div className="settings-rows">
+            {SETUP_FEISHU_FIELDS.filter(field => field.path !== 'feishu.directMessages').map(field => (
+              <FieldRow
+                key={field.path}
+                field={field}
+                value={getByPath(draft, field.path)}
+                defaultValue={getByPath(defaults, field.path)}
+                error={errors.get(field.path)}
+                onChange={value => setField(field.path, value)}
+              />
+            ))}
+          </div>
+        )}
+        {directMessagesField && (
+          <div className="settings-rows">
+            <FieldRow
+              field={directMessagesField}
+              value={getByPath(draft, directMessagesField.path)}
+              defaultValue={getByPath(defaults, directMessagesField.path)}
+              error={errors.get(directMessagesField.path)}
+              onChange={value => setField(directMessagesField.path, value)}
+            />
+          </div>
+        )}
+      </section>
+
+      <section className="settings-card" id="setup-chats">
+        <header className="settings-head">
+          <div>
+            <h2>4. 群与绑定</h2>
+            <p>至少添加一个监控群；绑定项目后 Router 开工不再追问，分支跟随项目默认分支。</p>
+          </div>
+          <div className="settings-badges">
+            {chatReady ? <span className="badge hot">已完成</span> : <span className="badge cold">未完成</span>}
+          </div>
+        </header>
+        {missingBindings.length > 0 && (
+          <div className="banner warn compact">
+            <Icon name="alert" size={14} />
+            <span>{missingBindings.length} 个群绑定的项目不在当前运行时清单里：{missingBindings.map(chat => chat.repo).join('、')}。请重新选择，或回到「配置」页调整。</span>
+          </div>
+        )}
+        <ChatsEditor
+          chats={chats}
+          projects={activeProjects}
+          error={errors.get('feishu.chats')}
+          onChange={value => setField('feishu.chats', value)}
+        />
+      </section>
+
+      <p className="editor-foot setup-config-path">配置文件：{configPath || '未知'}。保存后如需生效，请点上方「立即重启」。</p>
+
+      <SaveDock
+        changed={changed}
+        errors={errors}
+        notice={notice}
+        saving={saving}
+        onReset={resetAll}
+        onSave={() => void save()}
+      />
     </>
   )
 }
@@ -1217,7 +1524,16 @@ function control(field: FieldDef, value: unknown, onChange: (value: unknown) => 
     return (
       <span className="select-wrap">
         <select value={String(value ?? '')} onChange={event => onChange(event.target.value)}>
-          {field.options?.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+          {field.options?.map(option => (
+            <option
+              key={option.value}
+              value={option.value}
+              disabled={option.disabled}
+              title={option.reason ?? option.hint}
+            >
+              {option.label}
+            </option>
+          ))}
         </select>
         <Icon name="chevron" size={13} className="select-chevron" />
       </span>
@@ -1332,7 +1648,7 @@ function ChatsEditor({ chats, projects, error, onChange }: {
             >
               <option value="">不绑定（开工前追问）</option>
               {projects.map(project => <option key={project.name} value={project.name}>{project.name}</option>)}
-              {chat.repo && !projectOf(chat.repo) && <option value={chat.repo}>⚠ {chat.repo}（不在当前清单）</option>}
+              {chat.repo && !projectOf(chat.repo) && <option value={chat.repo}>{chat.repo}（不在当前清单）</option>}
             </select>
             <Icon name="chevron" size={12} className="select-chevron" />
           </span>
@@ -1384,7 +1700,7 @@ function SourcesView(): JSX.Element {
 
   return (
     <>
-      <PageHead eyebrow="SOURCES" title="来源" subtitle="机器人从哪里收消息，收到后又派到哪里去。" />
+      <PageHead title="来源" subtitle="机器人从哪里收消息，收到后又派到哪里去。" />
 
       <div className="stat-grid">
         {stats.map(stat => (

@@ -4,9 +4,11 @@ import { extname, join, normalize, resolve } from 'node:path'
 import type { Store } from '../store/db.js'
 import type { Engine } from '../core/engine.js'
 import { applyConfigPatch, policyOf, publicConfig, publicDefaults, requiresRestart, writeConfig, type AppConfig } from '../config.js'
+import { InstallStartError, type AcpRuntimeAdmin } from '../worker/runtimes/acp/admin.js'
 import type { AcceptMode } from '../core/policy.js'
 import { noopSink, preview, type EventSink } from '../core/events.js'
 import type { WorkerStateFile } from '../worker/report-poller.js'
+import type { ResumeHint } from '../worker/port.js'
 
 export interface ApiServerOptions {
   engine: Engine
@@ -23,6 +25,10 @@ export interface ApiServerOptions {
   onEvent?: EventSink
   /** Worker 通过 `ra report` POST 上来的状态；由服务层接到 onWorkerState。 */
   onReport?: (state: WorkerStateFile) => void | Promise<void>
+  /** 工单详情里的恢复命令；缺省时 resume 恒为 null。 */
+  resumeHint?: (ticketId: string) => Promise<ResumeHint | null> | ResumeHint | null
+  /** ACP 运行时探测与安装；缺省时新端点返回 404。 */
+  runtimeAdmin?: AcpRuntimeAdmin
 }
 
 export interface ApiServer {
@@ -72,13 +78,24 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
     if (detail && req.method === 'GET') {
       const ticket = opts.store.getTicket(detail[1]!)
       if (!ticket) return respond(res, 404, { error: 'ticket-not-found' })
+      const assignment = opts.store.latestAssignment(ticket.id)
+      let resume: ResumeHint | null = null
+      if (assignment && opts.resumeHint) {
+        try {
+          resume = await opts.resumeHint(ticket.id)
+        } catch {
+          // 恢复命令只是详情页的辅助信息，失败不能拖垮整个详情接口。
+          resume = null
+        }
+      }
       return respond(res, 200, {
         ticket,
         mandate: opts.store.getMandate(ticket.mandateId),
-        assignment: opts.store.latestAssignment(ticket.id),
+        assignment,
         reports: opts.store.listReports(ticket.id, 20),
         inputs: opts.store.listInputs(ticket.id),
         attention: opts.store.getAttention(ticket.id),
+        resume,
       })
     }
 
@@ -176,7 +193,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
 
     if (path === '/api/config') {
       if (req.method === 'GET') {
-        return respond(res, 200, configPayload(config))
+        return respond(res, 200, configPayload(config, opts.runtimeAdmin))
       }
       if (req.method === 'PUT' || req.method === 'POST') {
         const body = await readJson(req)
@@ -209,7 +226,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         await opts.onConfigChange?.(config, result.changed)
         onEvent({ event: 'api:config', changed: result.changed })
         return respond(res, 200, {
-          ...configPayload(config),
+          ...configPayload(config, opts.runtimeAdmin),
           ok: true,
           changed: result.changed,
           policyChanged,
@@ -265,6 +282,54 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       })
     }
 
+    if (path === '/api/runtimes' && req.method === 'GET') {
+      if (!opts.runtimeAdmin) return respond(res, 404, { error: 'runtime-admin-not-available' })
+      const snapshot = opts.runtimeAdmin.snapshot()
+      return respond(res, 200, {
+        ...(snapshot ?? { detectedAt: null, choices: [] }),
+        detecting: opts.runtimeAdmin.isDetecting(),
+      })
+    }
+
+    if (path === '/api/runtimes/detect' && req.method === 'POST') {
+      if (!opts.runtimeAdmin) return respond(res, 404, { error: 'runtime-admin-not-available' })
+      const snapshot = await opts.runtimeAdmin.detect()
+      return respond(res, 200, { ...snapshot, detecting: false })
+    }
+
+    if (path === '/api/runtimes/check' && req.method === 'POST') {
+      if (!opts.runtimeAdmin) return respond(res, 404, { error: 'runtime-admin-not-available' })
+      const body = await readJson(req)
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      if (!id) return respond(res, 400, { error: 'id-required' })
+      const result = await opts.runtimeAdmin.check(id)
+      return respond(res, 200, result)
+    }
+
+    if (path === '/api/runtimes/install' && req.method === 'POST') {
+      if (!opts.runtimeAdmin) return respond(res, 404, { error: 'runtime-admin-not-available' })
+      const body = await readJson(req)
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      if (!id) return respond(res, 400, { error: 'id-required' })
+      try {
+        const job = opts.runtimeAdmin.startInstall(id, typeof body.version === 'string' ? { version: body.version } : {})
+        return respond(res, 202, { ok: true, ...job })
+      } catch (error) {
+        if (error instanceof InstallStartError) {
+          return respond(res, error.code === 'busy' ? 409 : 400, { error: error.code, message: error.message })
+        }
+        throw error
+      }
+    }
+
+    const installJobPath = /^\/api\/runtimes\/install\/([^/]+)$/.exec(path)
+    if (installJobPath && req.method === 'GET') {
+      if (!opts.runtimeAdmin) return respond(res, 404, { error: 'runtime-admin-not-available' })
+      const job = opts.runtimeAdmin.installJob(installJobPath[1]!)
+      if (!job) return respond(res, 404, { error: 'job-not-found' })
+      return respond(res, 200, job)
+    }
+
     if (path.startsWith('/api/')) return respond(res, 404, { error: 'not-found' })
 
     return serveStatic(res, path, opts.webRoot)
@@ -294,11 +359,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** 配置面板的读/写都用同一份口径：安全快照 + 默认值 + 配置文件路径。 */
-function configPayload(config: AppConfig): Record<string, unknown> {
+function configPayload(config: AppConfig, runtimeAdmin?: AcpRuntimeAdmin): Record<string, unknown> {
+  const snapshot = runtimeAdmin?.snapshot()
   return {
     config: publicConfig(config),
     defaults: publicDefaults(),
     configPath: config.home ? join(config.home, 'config.yaml') : '',
+    runtimeChoices: snapshot?.choices ?? [],
+    detecting: runtimeAdmin?.isDetecting() ?? false,
   }
 }
 

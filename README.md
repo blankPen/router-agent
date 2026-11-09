@@ -282,10 +282,11 @@ worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态�
 
 #### Web 面板
 
-`ra web` 打开的面板分三块：
+`ra web` 打开的面板分四块：
 
+- **初始化**：只放启动必需项——运行时、项目、飞书接入、群与绑定，顶部有完成度清单；运行时用卡片平铺展示（带对应品牌 Logo），每张卡会检测 CLI / 版本 / ACP 依赖 / 登录状态。安装拆成两个按钮：**安装 CLI** 跳转该 Agent 的官方安装文档，**安装 ACP 扩展** 由 ra 把 npm 适配包装到 `~/.router-agent/runtimes`（没有可安装扩展时不显示）；另有真实握手试启动。配好后保存并按提示重启服务即可。
 - **工单**：按阶段分组 + 计数、关键字搜索（标题 / 工单号 / 仓库 / PR）、自动刷新开关与手动刷新；详情页有阶段、派工、PR、授权范围、上报时间线（含完整回复与 `humanAction`）、投递记录，可直接投递 follow-up 或停止工单。
-- **配置**：按「准入策略 / 研判与人格 / 会话复用 / 进展同步 / 闲置治理 / 飞书接入 / 派工与服务 / 项目与群绑定」分组；每个字段带说明与默认值提示，改动逐项标脏，保存前做前端 + 后端双重校验，保存后写回 `config.yaml`。「派工与服务」里可在 `orca` / `claude-code` 之间切换新工单的 Worker 后端；项目清单按后端隔离，切换后端后「项目与群绑定」里的项目清单会切换到该后端自己的一套（Orca 用仓库选择器，Claude Code 必须是本地仓库绝对路径）。群绑定的项目只能从当前清单里选，分支自动跟随项目的默认分支，不能单独自定义。
+- **配置**：按「准入策略 / 研判与人格 / 会话复用 / 进展同步 / 闲置治理 / 飞书接入 / 派工与服务 / 项目与群绑定」分组；每个字段带说明与默认值提示，改动逐项标脏，保存前做前端 + 后端双重校验，保存后写回 `config.yaml`。「派工与服务」里的 Worker 运行时是与初始化页相同的卡片平铺组件（`orca` / `claude-code` / `acp` / `acp-*`），可检测安装状态、分别跳转官方文档安装 CLI 或由 ra 安装 ACP 扩展，并做 ACP 握手试启动；项目清单按后端隔离，切换后端后「项目与群绑定」里的项目清单会切换到该后端自己的一套（Orca 用仓库选择器，Claude Code 必须是本地仓库绝对路径）。群绑定的项目只能从当前清单里选，分支自动跟随项目的默认分支，不能单独自定义。
 - **来源**：服务状态、监控群、接收范围概览。
 
 配置项会标注生效范围：**策略**（`acceptMode` / `maxWorkers` / `admission`）保存后立即生效；其余配置在服务启动时读入，保存后点侧栏或配置页的「重启服务」即可热重启 daemon（浏览器页面不会刷新），也可以手动 `ra stop && ra start`。面板不会展示或接收模型密钥明文（`llm.apiKey` 请用 CLI / 环境变量配置），保存会重写 `config.yaml`，原文件的注释会丢失。
@@ -547,32 +548,54 @@ llm:
 
 ### ACP Runtime（可选）
 
-任何实现了 [Agent Client Protocol](https://agentclientprotocol.com) 的 Agent，都可以用同一套 `AcpRuntime` 接入，不需要为每家写适配器。配置示例：
+任何实现了 [Agent Client Protocol](https://agentclientprotocol.com) 的 Agent，都可以用同一套 `AcpRuntime` 接入，不需要为每家写适配器。ra 启动后会自动探测本机可用的 ACP Agent，Web 面板「配置 → 派工与服务 → Worker 运行时」里可以直接选择；未安装 / 版本不兼容 / 未登录的项会置灰并显示原因。
+
+内置的 ACP 运行时 id：
+
+| runtime id | Agent | 启动方式 | 可在线安装 | 说明 |
+|-|-|-|-|-|
+| `acp-claude` | Claude Code | `claude-agent-acp` | ✅ | 需先登录 Claude Code；支持 `session/load` |
+| `acp-codex` | Codex | `codex-acp` | ✅ | 需本机 `codex` CLI；`codex-acp login`；不支持断线恢复 |
+| `acp-opencode` | OpenCode | `opencode acp` | ❌ | 本机安装后自动识别 |
+| `acp-gemini` | Gemini CLI | `gemini --acp` | ❌ | |
+| `acp-copilot` | GitHub Copilot CLI | `copilot --acp --stdio` | ❌ | |
+| `acp-cursor` | Cursor CLI | `cursor-agent acp` | ❌ | 旧版本可能没有 `acp` 子命令 |
+| `acp-goose` | Goose | `goose acp` | ❌ | |
+
+按需安装、探测与检查：
+
+```bash
+ra runtime list                    # 本机 ACP Agent 状态、版本、来源
+ra runtime install acp-claude      # 装到 ~/.router-agent/runtimes/claude
+ra runtime install acp-codex
+ra runtime check acp-claude        # 完整 initialize + session/new 握手
+ra runtime login acp-codex         # 交互式登录
+ra runtime uninstall acp-codex
+```
+
+选好之后写进配置（也可以在 Web 面板直接选）：
 
 ```yaml
 runtime:
-  default: acp
-  options:
-    acp:
-      command: opencode        # 也可以是 claude-agent-acp / codex-acp / copilot ...
-      args: [acp]
+  default: acp-codex
+  # 可选：覆盖单个 Agent 的命令/参数/环境变量
+  # options:
+  #   acp-codex:
+  #     command: /Users/me/.router-agent/runtimes/codex/node_modules/.bin/codex-acp
+  #     args: ["--message-streaming"]
+  #     env: {}
+  projects:
+    acp-codex:
+      - name: router-agent
+        repo: /Users/me/router-agent   # 非 orca runtime 必须是本地仓库绝对路径
+        defaultBranch: main
 ```
 
-常见启动命令：
-
-| Agent | command + args |
-|-|-|
-| OpenCode | `opencode acp` |
-| Gemini CLI | `gemini --acp` |
-| GitHub Copilot CLI | `copilot --acp --stdio` |
-| Cursor CLI | `cursor-agent acp` |
-| Goose | `goose acp` |
-| Claude Code | `claude-agent-acp`（ACP 适配器，非原生） |
-| Codex CLI | `codex-acp`（ACP 适配器，非原生） |
+旧的 `runtime.default: acp` + `runtime.options.acp.command` 仍然可用，作为「自定义命令」入口保留。
 
 `AcpRuntime` 负责：spawn Agent 子进程 → `initialize` → `session/new` → `session/prompt`；从 `session/update` 读取助手文本与工具调用；把 Agent 的 `session/request_permission` 按 `worker.tools` 策略自动放行或拒绝；进程退出后，若 Agent 声明 `loadSession`，追问时会用 `session/load` 恢复会话。
 
-当前不做客户端侧的 `fs/*` 与 `terminal/*` 代理：`initialize` 里声明不支持，Agent 需使用自己的文件/命令工具。Agent 必须预先完成登录（ACP 的 `auth_required` 会以启动失败上报）。
+当前不做客户端侧的 `fs/*` 与 `terminal/*` 代理：`initialize` 里声明不支持，Agent 需使用自己的文件/命令工具。Agent 必须预先完成登录（ACP 的 `auth_required` 会以启动失败上报）。`codex-acp` 需要加上 `--message-streaming` 才能在活动面板看到文本输出（目录里已默认带上）。
 
 ## 命令
 
@@ -588,6 +611,11 @@ runtime:
 | `ra tickets [--stage]` | 列出工单 |
 | `ra ticket <id>` | 工单详情（状态 / 派工 / 上报 / 输入） |
 | `ra logs` | 最近 50 行日志 |
+| `ra runtime [list]` | 探测本机 ACP Agent：状态、版本、来源；`--json` 机器可读 |
+| `ra runtime install <id>` | 按需安装 ACP 适配器到 `~/.router-agent/runtimes/<agent>` |
+| `ra runtime uninstall <id>` | 卸载 ra 托管的 ACP 适配器 |
+| `ra runtime check <id>` | 完整 ACP 握手（`initialize` + `session/new`） |
+| `ra runtime login <id>` | 交互式登录（目前是 `codex-acp login`） |
 | `ra config` | 查看配置；`config set <key> <value>` 改单项（含 `project.<名>` / `chatBinding.<群>` / `chatMode.<群>` / `chatSync.<群>` / `chatAllow.<群>` / `progress.syncMs` / `progress.probeMs`）；`config edit` 编辑全文 |
 
 全局选项 `--home <dir>` 可切换状态目录（测试与多实例用）。

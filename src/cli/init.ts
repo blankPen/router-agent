@@ -1,7 +1,7 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { chatEntry, loadConfig, projectNameOf, projectsForRuntime, setProjectsForRuntime, writeConfig, type AppConfig, type ProjectConfig } from '../config.js'
-import { CLAUDE_CODE_RUNTIME_ID, normalizeRuntimeId } from '../worker/runtimes/catalog.js'
+import { ORCA_RUNTIME_ID, normalizeRuntimeId } from '../worker/runtimes/catalog.js'
 import type { CommandRunner } from '../infra/process.js'
 import {
   larkEnv,
@@ -125,10 +125,10 @@ async function pickRepo(
   out: (line: string) => void,
 ): Promise<void> {
   const existingRepo = projectsForRuntime(config)[0]?.repo ?? ''
-  // Claude Code 用 git worktree，需要本地仓库绝对路径，不走 Orca 的 displayName。
-  if (normalizeRuntimeId(config.runtime.default) === CLAUDE_CODE_RUNTIME_ID) {
+  // 非 Orca 运行时（claude-code / acp-*）都用 git worktree，需要本地仓库绝对路径。
+  if (normalizeRuntimeId(config.runtime.default) !== ORCA_RUNTIME_ID) {
     const repo = await prompts.input({
-      message: '本地仓库绝对路径（Claude Code 用，例如 /Users/me/project）',
+      message: '本地仓库绝对路径（例如 /Users/me/project）',
       default: existingRepo,
     })
     await registerProject(config, repo, prompts, out)

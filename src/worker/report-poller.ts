@@ -47,6 +47,10 @@ export interface WorkerMeta {
   assignmentId: string
   handle: string
   workdir: string
+  /** 运行时 id；ACP / Claude Code 会写入。 */
+  runtime?: string
+  /** 底层 Agent 的真实会话 id；用于人工恢复。 */
+  sessionId?: string
   repo?: string
   [key: string]: unknown
 }
@@ -92,7 +96,7 @@ export class ReportPoller {
         if (this.seen.get(ticketId) === fingerprint) continue
         const { ticketId: parsedId, state } = parseStateFile(content, ticketId)
         this.seen.set(ticketId, fingerprint)
-        const meta = readMeta(this.workersDir, ticketId)
+        const meta = readWorkerMeta(this.workersDir, ticketId)
         this.onState({ ...state, ticketId: parsedId }, meta, statePath)
         count += 1
       } catch (error) {
@@ -142,7 +146,8 @@ export function parseStateFile(content: string, expectedTicketId?: string): { ti
   }
 }
 
-function readMeta(workersDir: string, ticketId: string): WorkerMeta | null {
+/** 读取 worker 的 meta.json；供报告轮询与恢复命令共用。 */
+export function readWorkerMeta(workersDir: string, ticketId: string): WorkerMeta | null {
   const path = join(workersDir, ticketId, 'meta.json')
   if (!existsSync(path)) return null
   try {

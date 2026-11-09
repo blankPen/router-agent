@@ -10,6 +10,7 @@ import {
   loadConfig,
   policyOf,
   projectsForRuntime,
+  publicConfig,
   setConfigValue,
   setProjectsForRuntime,
   writeConfig,
@@ -438,6 +439,41 @@ describe('Worker 运行时配置', () => {
     expect(setConfigValue(cfg, 'runtime.default', 'claude-code')).toBe(true)
     expect(cfg.runtime.default).toBe('claude-code')
     expect(setConfigValue(cfg, 'runtime.default', 'nope')).toBe(false)
+  })
+
+  it('接受 ACP 目录里的动态 id，拒绝拼错的 acp-*', () => {
+    const cfg = defaultConfig()
+    expect(applyConfigPatch(cfg, { 'runtime.default': 'acp-codex' })).toEqual({ errors: [], changed: ['runtime.default'] })
+    expect(cfg.runtime.default).toBe('acp-codex')
+    expect(setConfigValue(cfg, 'runtime.default', 'acp-claude')).toBe(true)
+    expect(setConfigValue(cfg, 'runtime.default', 'acp-nope')).toBe(false)
+    expect(applyConfigPatch(cfg, { 'runtime.default': 'acp-nope' }).errors).toHaveLength(1)
+  })
+
+  it('runtime.projects.acp-codex 写回后重读不丢', () => {
+    const dir = home()
+    ensureHome(dir)
+    const cfg = defaultConfig()
+    cfg.runtime.default = 'acp-codex'
+    setProjectsForRuntime(cfg, 'acp-codex', [{ name: 'a', repo: '/Users/me/a', defaultBranch: 'main' }])
+    writeConfig(dir, cfg)
+    expect(projectsForRuntime(loadConfig(dir), 'acp-codex')).toEqual([
+      { name: 'a', repo: '/Users/me/a', defaultBranch: 'main' },
+    ])
+  })
+
+  it('publicConfig 遮蔽 runtime.options.*.env 明文', () => {
+    const cfg = defaultConfig()
+    cfg.runtime.options = {
+      'acp-codex': { env: { OPENAI_API_KEY: 'sk-secret' }, args: ['--message-streaming'] },
+      acp: { env: { TOKEN: 'token-secret' } },
+    }
+    const published = publicConfig(cfg) as { runtime: { options: Record<string, { env?: unknown; envKeys?: string[] }> } }
+    expect(published.runtime.options['acp-codex']?.env).toBeUndefined()
+    expect(published.runtime.options['acp-codex']?.envKeys).toEqual(['OPENAI_API_KEY'])
+    expect(published.runtime.options.acp?.env).toBeUndefined()
+    expect(JSON.stringify(published)).not.toContain('sk-secret')
+    expect(JSON.stringify(published)).not.toContain('token-secret')
   })
 })
 

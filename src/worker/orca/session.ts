@@ -13,6 +13,39 @@ export function claudeProjectSlug(workdir: string): string {
   return workdir.replace(/[^a-zA-Z0-9]/g, '-')
 }
 
+/**
+ * 按 workdir 找最近一次 Claude Code 会话的 id。
+ *
+ * Claude Code 的会话文件名就是 `claude --resume` 接受的 session id，
+ * 所以这里只按 mtime 取最新的 .jsonl，不解析文件内容。
+ * Orca 的 meta 只记录终端句柄，恢复按钮需要靠它补出真实 session id。
+ */
+export function latestClaudeSessionId(workdir: string, opts: { projectsDir?: string } = {}): string | null {
+  if (!workdir) return null
+  const dir = join(opts.projectsDir ?? defaultClaudeProjectsDir(), claudeProjectSlug(workdir))
+  if (!existsSync(dir)) return null
+
+  let files: string[]
+  try {
+    files = readdirSync(dir).filter(file => file.endsWith('.jsonl'))
+  } catch {
+    return null
+  }
+  if (files.length === 0) return null
+
+  let latest: { file: string; mtime: number } | null = null
+  for (const file of files) {
+    let mtime = 0
+    try {
+      mtime = statSync(join(dir, file)).mtimeMs
+    } catch {
+      // 读不到 mtime 的文件排在最后，不影响其它候选。
+    }
+    if (!latest || mtime > latest.mtime) latest = { file, mtime }
+  }
+  return latest ? latest.file.slice(0, -'.jsonl'.length) : null
+}
+
 export interface ReadSessionOptions {
   projectsDir?: string
   /** 只读文件尾部这么多字节，避免把几 MB 的会话全量读进内存。 */

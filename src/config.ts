@@ -6,7 +6,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { DEFAULT_ADMISSION, type AcceptMode, type AdmissionTable, type Policy } from './core/policy.js'
 import type { WorkerSpecMode } from './worker/spec/index.js'
 import type { ToolPolicy } from './worker/port.js'
-import { ORCA_RUNTIME_ID, WORKER_RUNTIME_IDS, normalizeRuntimeId } from './worker/runtimes/catalog.js'
+import { ORCA_RUNTIME_ID, isWorkerRuntimeId, normalizeRuntimeId } from './worker/runtimes/catalog.js'
 
 export type ChatMode = 'all' | 'mention'
 
@@ -358,13 +358,18 @@ workerSpec:
   mode: prompt         # prompt | agent
 
 runtime:
-  default: orca         # 新工单默认 runtime：orca | claude-code | acp
-  # ACP 运行时（可选）：任意实现 ACP 的 Agent 都可通过它接入
+  default: orca         # 新工单默认 runtime：orca | claude-code | acp | acp-claude | acp-codex ...
+  # ACP 运行时（可选）：ra 启动时会探测本机可用的 ACP Agent，也可以在 Web 面板选择
+  # 动态 id 为 acp-<agent>，例如 acp-claude / acp-codex / acp-opencode。
   # options:
-  #   acp:
-  #     command: opencode     # Agent 可执行文件
-  #     args: [acp]           # 传给 Agent 的参数
-  #     env: {}               # 额外环境变量
+  #   acp:                # 旧的自定义命令入口，兼容保留
+  #     command: opencode
+  #     args: [acp]
+  #     env: {}
+  #   acp-codex:          # 覆盖单个 ACP Agent 的命令/参数/环境变量
+  #     command: /Users/me/.router-agent/runtimes/codex/node_modules/.bin/codex-acp
+  #     args: ["--message-streaming"]
+  #     env: {}
   # 非 orca runtime 用独立项目清单，和顶层 projects 互不影响
   # projects:
   #   claude-code:
@@ -645,7 +650,7 @@ function parseProjectLists(value: unknown): { orca?: ProjectConfig[]; others: Ru
   let orca: ProjectConfig[] | undefined
   for (const [rawId, list] of Object.entries(value)) {
     const id = normalizeRuntimeId(rawId)
-    if (!WORKER_RUNTIME_IDS.includes(id)) continue
+    if (!isWorkerRuntimeId(id)) continue
     if (id === ORCA_RUNTIME_ID) orca = parseProjects(list)
     else others[id] = parseProjects(list)
   }
@@ -847,6 +852,26 @@ export function publicConfig(config: AppConfig): Record<string, unknown> {
     model: String(llm.model ?? ''),
     apiKeySet: Boolean(llm.apiKey),
   }
+  // ACP 适配器的 env 可能包含 API key：只下发 key 名，不下发明文。
+  const runtime = doc.runtime as Record<string, unknown> | undefined
+  const options = runtime?.options
+  if (runtime && options && typeof options === 'object' && !Array.isArray(options)) {
+    const next: Record<string, unknown> = {}
+    for (const [id, value] of Object.entries(options as Record<string, unknown>)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        next[id] = value
+        continue
+      }
+      const entry = { ...(value as Record<string, unknown>) }
+      if (entry.env && typeof entry.env === 'object') {
+        entry.envKeys = Object.keys(entry.env as Record<string, unknown>)
+        entry.envSet = true
+        delete entry.env
+      }
+      next[id] = entry
+    }
+    runtime.options = next
+  }
   return doc
 }
 
@@ -902,6 +927,13 @@ const stringValue: Validator = {
 
 function enumValue(allowed: readonly string[]): Validator {
   return { check: value => (typeof value === 'string' && allowed.includes(value) ? null : `只能是 ${allowed.join(' / ')}`) }
+}
+
+/** 运行时 id 校验：内置运行时 + ACP 目录里的动态 id。 */
+const runtimeIdValue: Validator = {
+  check: value => (typeof value === 'string' && isWorkerRuntimeId(normalizeRuntimeId(value))
+    ? null
+    : '未知 runtime：只接受 orca / claude-code / acp / acp-<agent>'),
 }
 
 function intValue(min: number, max: number, unit = ''): Validator {
@@ -988,7 +1020,7 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
   'retention.sweepMinutes': intValue(1, 1_440, ' 分钟'),
 
   'workerSpec.mode': enumValue(WORKER_MODES),
-'runtime.default': enumValue(WORKER_RUNTIME_IDS),
+'runtime.default': runtimeIdValue,
   'server.port': intValue(1, 65_535),
 
   'llm.baseUrl': stringValue,
@@ -1068,7 +1100,7 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
     const runtimeProjectPath = /^runtime\.projects\.([^.]+)$/.exec(path)
     if (runtimeProjectPath) {
       const id = normalizeRuntimeId(runtimeProjectPath[1]!)
-      if (!WORKER_RUNTIME_IDS.includes(id)) {
+      if (!isWorkerRuntimeId(id)) {
         errors.push({ path, message: `未知 runtime: ${runtimeProjectPath[1]}` })
       } else {
         const result = validateProjects(value, id)
@@ -1356,7 +1388,7 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
     }
 case 'runtime.default': {
       const id = normalizeRuntimeId(value)
-      if (!WORKER_RUNTIME_IDS.includes(id)) return false
+      if (!isWorkerRuntimeId(id)) return false
       config.runtime.default = id
       return true
     }

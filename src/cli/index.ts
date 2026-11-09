@@ -10,7 +10,9 @@ import { ensureHome, loadConfig, policyOf, projectsForRuntime, replyAlwaysChatsO
 import { Store } from '../store/db.js'
 import { Engine } from '../core/engine.js'
 import { createRuntimes } from '../worker/registry.js'
-import { WORKER_RUNTIME_IDS } from '../worker/runtimes/catalog.js'
+import { AcpRuntimeAdmin } from '../worker/runtimes/acp/admin.js'
+import { readDetectionSnapshot } from '../worker/runtimes/acp/detect.js'
+import { WORKER_RUNTIME_IDS, normalizeRuntimeId } from '../worker/runtimes/catalog.js'
 import { GitHubTracker } from '../sources/github.js'
 import { FeishuConsumer, FeishuSender, attachQuotedMessage, normalizeFeishuEventDetailed } from '../sources/feishu.js'
 import { attachImageText } from '../sources/feishu-image.js'
@@ -20,6 +22,7 @@ import { createVisionTranscriber, type ImageTranscriber } from '../infra/vision.
 import type { Trigger } from '../core/model.js'
 import { runInitWizard } from './init.js'
 import { formatChecks, runDoctor } from './doctor.js'
+import { cmdRuntimeCheck, cmdRuntimeInstall, cmdRuntimeList, cmdRuntimeLogin, cmdRuntimeUninstall } from './runtime.js'
 import { simulate } from './simulate.js'
 import { runReport, readContentArg, type ReportOptions } from './report.js'
 import type { Prompter } from './prompts.js'
@@ -104,6 +107,56 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
     .option('--json', '以 JSON 输出')
     .action(async (opts: { home?: string; json?: boolean }) => {
       setCode(await cmdDoctor(homeOf(opts, output), opts, output))
+    })
+
+  withHome(program.command('runtime [action] [id]')
+    .description('ACP 运行时：list / check / install / uninstall / login'))
+    .option('--json', 'list / check 以 JSON 输出')
+    .option('--version <version>', 'install 指定版本（默认用目录里 pinned 的版本）')
+    .action(async (action: string | undefined, id: string | undefined, opts: { home?: string; json?: boolean; version?: string }) => {
+      const home = homeOf(opts, output)
+      ensureHome(home)
+      const io = { stdout: output.stdout, stderr: output.stderr, env: output.env }
+      switch (action ?? 'list') {
+        case 'list':
+          setCode(await cmdRuntimeList(home, opts, io))
+          return
+        case 'check':
+          if (!id) {
+            output.stderr('用法：ra runtime check <id>')
+            setCode(2)
+            return
+          }
+          setCode(await cmdRuntimeCheck(home, id, io))
+          return
+        case 'install':
+          if (!id) {
+            output.stderr('用法：ra runtime install <id> [--version <v>]')
+            setCode(2)
+            return
+          }
+          setCode(await cmdRuntimeInstall(home, id, opts, io))
+          return
+        case 'uninstall':
+          if (!id) {
+            output.stderr('用法：ra runtime uninstall <id>')
+            setCode(2)
+            return
+          }
+          setCode(await cmdRuntimeUninstall(home, id, io))
+          return
+        case 'login':
+          if (!id) {
+            output.stderr('用法：ra runtime login <id>')
+            setCode(2)
+            return
+          }
+          setCode(await cmdRuntimeLogin(home, id, io))
+          return
+        default:
+          output.stderr(`未知操作 runtime ${action}；可用：list / check / install / uninstall / login`)
+          setCode(2)
+      }
     })
 
   withHome(program.command('simulate').description('本地模拟一条消息，验证 Gate + 研判（不派工）'))
@@ -221,6 +274,7 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
   const config = loadConfig(home, output.env as NodeJS.ProcessEnv)
   const lark = output.larkFor ?? (larkHome => createLarkRunner({ home: larkHome }))
   let runtime: import('../worker/port.js').WorkerRuntime | undefined
+  let runtimeError: string | undefined
   try {
     runtime = createRuntimes(config, {
       home,
@@ -230,14 +284,18 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
       claude: output.claude ?? realRunner('claude'),
       git: output.git ?? realRunner('git'),
     }).default()
-  } catch {
+  } catch (error) {
     // 未注册/拼错的 runtime 由配置检查单独报错，不让 doctor 直接崩溃。
+    runtimeError = error instanceof Error ? error.message : String(error)
   }
+  const admin = new AcpRuntimeAdmin({ home, env: output.env as NodeJS.ProcessEnv, config })
+  const snapshot = await admin.detect().catch(() => admin.snapshot())
   const checks = await runDoctor({
     config,
     orca: output.orca ?? realRunner('orca'),
     lark: lark(config.feishu.larkHome),
     ...(runtime ? { runtime } : {}),
+    ...(snapshot ? { runtimeChoices: snapshot.choices } : {}),
     llm: () => {
       try {
         const resolved = resolvePiModelConfig({ configPath: join(home, 'config.yaml') })
@@ -253,7 +311,7 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
     checks.unshift({
       name: 'Worker runtime',
       status: 'fail' as const,
-detail: `未注册 runtime: ${config.runtime.default}`,
+      detail: runtimeError ?? `未注册 runtime: ${config.runtime.default}`,
       hint: `ra config set runtime.default ${WORKER_RUNTIME_IDS.join('|')}`,
     })
   }
@@ -614,6 +672,21 @@ async function cmdStart(home: string, opts: { foreground?: boolean }, output: Cl
     output.stdout(`服务已在运行 (pid ${pid})`)
     return 0
   }
+  // 默认 ACP 运行时不可用时给个提示，但不阻止启动：用户需要进 Web 面板安装。
+  const config = loadConfig(home, output.env as NodeJS.ProcessEnv)
+  const defaultId = normalizeRuntimeId(config.runtime.default)
+  if (defaultId.startsWith('acp-')) {
+    let snapshot = readDetectionSnapshot(home)
+    if (!snapshot) {
+      snapshot = await new AcpRuntimeAdmin({ home, env: output.env as NodeJS.ProcessEnv, config }).detect().catch(() => null)
+    }
+    const choice = snapshot?.choices.find(item => item.id === defaultId)
+    if (choice && choice.status !== 'ready' && choice.status !== 'unverified') {
+      output.stdout(`默认运行时 ${defaultId} 当前不可用：${choice.reason ?? choice.status}`)
+      if (choice.installHint) output.stdout(`安装：${choice.installHint}`)
+      output.stdout('服务仍会启动；可在 Web 面板安装后重启。')
+    }
+  }
   if (opts.foreground) return cmdServe(home, output)
 
   const entry = fileURLToPath(new URL('./main.js', import.meta.url))
@@ -649,6 +722,8 @@ function cmdStop(home: string, output: CliIo): number {
 async function cmdServe(home: string, output: CliIo): Promise<number> {
   const config = loadConfig(home)
   ensureHome(home)
+  // 运行时探测在后台跑：先读缓存，API 立即可用，探测完成后刷新。
+  const runtimeAdmin = new AcpRuntimeAdmin({ home, env: process.env, config })
   // 单实例锁：目录创建是原子的，避免两个 ra serve 同时跑循环。
   const lockDir = join(home, 'router-agent.lock')
   const acquireLock = (): boolean => {
@@ -674,6 +749,16 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   }
   writeFileSync(join(home, 'router-agent.pid'), String(process.pid), 'utf8')
   const logger = createLogger(home, output)
+  void runtimeAdmin.detect()
+    .then(snapshot => {
+      logger.info('runtime:detected', {
+        ready: snapshot.choices.filter(choice => choice.status === 'ready').map(choice => choice.id),
+        unavailable: snapshot.choices
+          .filter(choice => choice.status !== 'ready')
+          .map(choice => `${choice.id}:${choice.status}`),
+      })
+    })
+    .catch(error => logger.warn('runtime:detect-failed', { message: error instanceof Error ? error.message : String(error) }))
   const sink = (event: { event: string; [key: string]: unknown }): void => {
     const { event: name, ...extra } = event
     logger.info(name, extra)
@@ -802,10 +887,12 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     engine,
     store,
     config,
+    runtimeAdmin,
     port: config.server.port,
     webRoot: existsSync(webRoot) ? webRoot : undefined,
     onEvent: sink,
     onReport: state => service.onWorkerState(state),
+    resumeHint: ticketId => service.resumeHint(ticketId),
     onRestart: () => { void requestRestart?.() },
     onPolicyChange: updated => {
       logger.info('policy:updated', { version: engine.policy().version, acceptMode: updated.policy.acceptMode })
