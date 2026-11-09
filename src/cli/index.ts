@@ -28,6 +28,7 @@ import { simulate } from './simulate.js'
 import { runReport, readContentArg, type ReportOptions } from './report.js'
 import type { Prompter } from './prompts.js'
 import { realRunner, type CommandRunner } from '../infra/process.js'
+import { errorMessage } from '../infra/logger.js'
 import { resolveImageModelConfig, resolvePiModelConfig, type PiModelConfig } from '../router/model-config.js'
 import { createDecisionEngine } from '../router/engine-factory.js'
 import type { DecisionAudit } from '../router/decision-engine.js'
@@ -437,7 +438,7 @@ async function cmdInit(home: string, opts: { yes?: boolean; agentsDir?: string }
 
   const agentsDir = opts.agentsDir ?? join(homedir(), '.claude', 'agents')
   mkdirSync(agentsDir, { recursive: true })
-  writeFileSync(join(agentsDir, 'router-agent-worker.md'), agentSpecDocument(), 'utf8')
+  writeFileSync(join(agentsDir, 'router-agent-worker.md'), agentSpecDocument(home), 'utf8')
   output.stdout('')
   output.stdout(`状态目录: ${home}`)
   output.stdout(`worker 全局规范: ${join(agentsDir, 'router-agent-worker.md')}`)
@@ -775,7 +776,9 @@ function cmdStop(home: string, output: CliIo): number {
 }
 
 async function cmdServe(home: string, output: CliIo): Promise<number> {
-  const config = loadConfig(home)
+  // 先建 logger 再读配置：配置解析失败、首次生成默认配置都要能落进日志。
+  const logger = createLogger(home, output)
+  const config = loadConfig(home, process.env, { logger })
   ensureHome(home)
   // 运行时探测在后台跑：先读缓存，API 立即可用，探测完成后刷新。
   const runtimeAdmin = new AcpRuntimeAdmin({ home, env: process.env, config })
@@ -804,7 +807,6 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     }
   }
   writeFileSync(join(home, 'router-agent.pid'), String(process.pid), 'utf8')
-  const logger = createLogger(home, output)
   void runtimeAdmin.detect()
     .then(snapshot => {
       logger.info('runtime:detected', {
@@ -848,7 +850,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     git: gitRunner,
   })
   const runtime = runtimes.default()
-  const sender = new FeishuSender(larkRunner)
+  const sender = new FeishuSender(larkRunner, logger)
   const prTracker = new GitHubTracker(ghRunner)
   let model: PiModelConfig | null = null
   try {
@@ -856,8 +858,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   } catch (error) {
     // 初始化阶段 LLM 本来就可能没配：不能让 Web 也起不来，否则用户没有入口去填。
     // 这里降级为「只跑 Web 配置面板」，配好保存并重启后再接管消息。
-    const message = error instanceof Error ? error.message : String(error)
-    logger.warn('serve:llm-unconfigured', { reason: message, mode: 'web-only' })
+    logger.warn('serve:llm-unconfigured', { reason: errorMessage(error), mode: 'web-only' })
     output.stdout('LLM 未配置：本次只启动 Web 配置面板，Router 不接收消息。')
     output.stdout('在面板「LLM Provider」填好 baseUrl / model / apiKey 并保存后，点「重启服务」即可。')
   }
@@ -898,7 +899,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       ...(audit.unavailableReason ? { unavailable: audit.unavailableReason } : {}),
     })
   }
-  const directory = new ChatDirectory(join(home, 'chats.json'))
+  const directory = new ChatDirectory(join(home, 'chats.json'), logger)
 
   const reactTo = async (messageId: string): Promise<void> => {
     const reactionId = await sender.react(messageId, config.feishu.reaction)
@@ -961,6 +962,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     projectSetup: new ProjectSetup({ home, git: gitRunner, orca: orcaRunner }),
     port: config.server.port,
     webRoot: existsSync(webRoot) ? webRoot : undefined,
+    logger,
     onEvent: sink,
     ...(service
       ? {
@@ -1005,10 +1007,14 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
         const needsImageWork = Boolean(base.mediaOnly) || Array.isArray(rawBase?.imageKeys)
         if (config.feishu.reaction && willReply && needsImageWork && !store.getReaction(base.externalId)) react(base.externalId)
         void (async () => {
-          const quoted = await attachQuotedMessage(base, larkRunner)
+          const quoted = await attachQuotedMessage(base, larkRunner, { logger })
           const trigger = await withImageText(quoted)
           const stored = engine.ingest(trigger)
-          if (!stored) return
+          if (!stored) {
+            // 重放 / 重复投递：消息已入库但被去重，日志里说清楚，避免误判成「消息丢了」。
+            logger.info('trigger:duplicate', { id: trigger.id, chat: trigger.chatId })
+            return
+          }
           const raw = trigger.raw as Record<string, unknown> | undefined
           const hasQuote = Boolean(raw?.quote)
           const imageCount = Array.isArray(raw?.images) ? raw.images.length : 0
@@ -1019,6 +1025,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
         })().catch(error => logger.warn('trigger:ingest-failed', { message: error instanceof Error ? error.message : String(error) }))
       },
       onReady: () => logger.info('feishu:ready', {}),
+      onReconnect: ({ attempt, delayMs }) => logger.warn('feishu:reconnecting', { attempt, delayMs }),
       onError: error => {
         if (/another event bus/i.test(error.message)) {
           logger.warn('feishu:bus-conflict', {
@@ -1033,11 +1040,15 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   consumer?.start()
   if (consumer) logger.info('feishu:consumer-started', { chats: config.feishu.chats.length })
   // Web-only 模式下不刷新群目录、也不启动消费循环，等配好 LLM 重启后再跑。
-  const chatTimer = service
-    ? setInterval(() => { void directory.refresh(larkRunner) }, 600_000)
-    : null
+  const refreshChats = (): void => {
+    void directory.refresh(larkRunner)
+      .then(count => logger.info('chats:refreshed', { count }))
+      .catch(error => logger.warn('chats:refresh-failed', { message: errorMessage(error) }))
+  }
+  const chatTimer = service ? setInterval(refreshChats, 600_000) : null
+  chatTimer?.unref()
   if (service) {
-    void directory.refresh(larkRunner).then(count => logger.info('chats:refreshed', { count }))
+    refreshChats()
     await service.start()
     output.stdout(`Router 服务运行中：http://127.0.0.1:${config.server.port}/`)
   } else {

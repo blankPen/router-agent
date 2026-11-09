@@ -20,12 +20,21 @@ import { getJson, saveConfigPatch, sendJson, type ConfigBundle, type ConfigDoc, 
 import { Icon, LogoMark } from './icons.js'
 import { RuntimeCards, type RuntimeNotice } from './runtime-cards.js'
 import { FeishuBotPanel } from './feishu-panel.js'
+import { SpecsEditor } from './specs-editor.js'
 import {
   mergeRuntimeChoices,
   runtimeStatusLabel,
 } from './runtime-model.js'
 import { hashForTab, tabFromHash, type Tab } from './tabs.js'
+import { THEME_MODE_LABEL, nextThemeMode, useThemeMode, type ThemeMode } from './theme.js'
 import { ACP_RUNTIME_ID, ORCA_RUNTIME_ID, normalizeRuntimeId } from '../../worker/runtimes/catalog.js'
+
+/** 三态各自一个图标：跟随系统用显示器，亮色用太阳，暗色用月亮。 */
+const THEME_ICON: Record<ThemeMode, 'monitor' | 'sun' | 'moon'> = {
+  system: 'monitor',
+  light: 'sun',
+  dark: 'moon',
+}
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -211,6 +220,9 @@ function App(): JSX.Element {
   const [status, setStatus] = useState<ServiceStatus | null>(null)
   const [restartPhase, setRestartPhase] = useState<RestartPhase>('idle')
   const [restartError, setRestartError] = useState<string | null>(null)
+  // 主题是纯前端偏好：不进配置页，也不写服务端配置，只落在浏览器 localStorage。
+  const theme = useThemeMode()
+  const nextTheme = nextThemeMode(theme.mode, theme.systemDark)
   // 配置页 / 初始化页共享同一个「有未保存修改」标记，切走前提醒一次。
   const dirtyRef = useRef(false)
   // 窄屏下导航横向滚动，切页时把当前项滚进可视区，避免选中项被裁在屏幕外。
@@ -291,6 +303,14 @@ function App(): JSX.Element {
             <strong>router-agent</strong>
             <small>control room</small>
           </span>
+          <button
+            className="icon-btn theme-toggle"
+            title={`主题：${THEME_MODE_LABEL[theme.mode]}，点击切换到${THEME_MODE_LABEL[nextTheme]}`}
+            aria-label={`主题：${THEME_MODE_LABEL[theme.mode]}，点击切换到${THEME_MODE_LABEL[nextTheme]}`}
+            onClick={() => theme.setMode(nextTheme)}
+          >
+            <Icon name={THEME_ICON[theme.mode]} size={15} />
+          </button>
         </div>
 
         <nav className="side-nav" ref={navRef}>
@@ -771,6 +791,12 @@ function MetaItem({ label, value, href, mono, wide, title }: {
 
 const CUSTOM_SECTIONS: SectionDef[] = [
   {
+    id: 'specs',
+    title: '规范文件',
+    description: 'Router 与 Worker 的提示词规范统一存放在内置存储里，可直接查看、编辑、保存或恢复默认；不再需要指定外部文件路径。',
+    fields: [],
+  },
+  {
     id: 'projects',
     title: '项目与群绑定',
     description: '维护可派工的项目，以及每个群绑定到哪个项目 / 分支。项目清单按 Worker 后端隔离；支持添加本地项目或从 Git 地址 clone。',
@@ -1034,12 +1060,16 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
                     <p>{section.description}</p>
                   </div>
                   <div className="settings-badges">
-                    {section.hot
-                      ? <span className="badge hot">立即生效</span>
-                      : <span className="badge cold">重启生效</span>}
+                    {section.id === 'specs'
+                      ? <span className="badge cold">保存后按项生效</span>
+                      : section.hot
+                        ? <span className="badge hot">立即生效</span>
+                        : <span className="badge cold">重启生效</span>}
                     {dirty && <span className="badge dirty">已修改</span>}
                   </div>
                 </header>
+
+                {section.id === 'specs' && <SpecsEditor />}
 
                 {section.id === 'projects' && (
                   <>

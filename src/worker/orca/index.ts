@@ -39,6 +39,8 @@ export interface OrcaRuntimeOptions {
   /** ~/.router-agent/workers */
   workersDir: string
   spec: 'prompt' | 'agent'
+  /** 状态目录；传入后 Worker 规范优先读 `<home>/specs/worker/` 下的覆盖文件。 */
+  home?: string
   /** Claude Code 会话记录目录；默认 ~/.claude/projects，测试可注入临时目录。 */
   claudeProjectsDir?: string
 }
@@ -197,12 +199,14 @@ export class OrcaRuntime implements WorkerRuntime {
   private runner: CommandRunner
   private workersDir: string
   private spec: 'prompt' | 'agent'
+  private home?: string
   private claudeProjectsDir?: string
 
   constructor(opts: OrcaRuntimeOptions) {
     this.runner = opts.runner
     this.workersDir = opts.workersDir
     this.spec = opts.spec
+    this.home = opts.home
     this.claudeProjectsDir = opts.claudeProjectsDir
   }
 
@@ -227,6 +231,7 @@ export class OrcaRuntime implements WorkerRuntime {
       branch: baseBranch,
       workBranch: branch,
       workdir: ctx.workdir,
+      ...(this.home ? { home: this.home } : {}),
     })
     const res = await this.run(worktreeCreate({ repo, name, prompt, branch, ...(baseBranch ? { baseBranch } : {}) }))
     const parsed = parseCreateResult(res.stdout)

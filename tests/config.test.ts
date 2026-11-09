@@ -602,3 +602,56 @@ describe('群绑定跟随项目清单', () => {
     expect(cfg.feishu.chats.find(chat => chat.chat === 'oc_a')?.branch).toBe('main')
   })
 })
+
+describe('配置链路日志', () => {
+  function recorder() {
+    const logs: { level: string; message: string; extra?: Record<string, unknown> }[] = []
+    const logger = {
+      info: (message: string, extra?: Record<string, unknown>) => logs.push({ level: 'info', message, ...(extra ? { extra } : {}) }),
+      warn: (message: string, extra?: Record<string, unknown>) => logs.push({ level: 'warn', message, ...(extra ? { extra } : {}) }),
+      error: (message: string, extra?: Record<string, unknown>) => logs.push({ level: 'error', message, ...(extra ? { extra } : {}) }),
+    }
+    return { logs, logger }
+  }
+
+  it('首次启动生成默认 config.yaml 时留一条 config:created', () => {
+    const { logs, logger } = recorder()
+    const dir = home()
+    loadConfig(dir, process.env, { logger })
+    expect(logs).toContainEqual({ level: 'info', message: 'config:created', extra: { path: join(dir, 'config.yaml') } })
+  })
+
+  it('YAML 解析失败降级默认值，并记下 config:parse-failed', () => {
+    const dir = home()
+    writeFileSync(join(dir, 'config.yaml'), 'policy: [unclosed')
+    const { logs, logger } = recorder()
+    const cfg = loadConfig(dir, process.env, { logger })
+    expect(cfg.policy.acceptMode).toBe('auto')
+    const entry = logs.find(log => log.message === 'config:parse-failed')
+    expect(entry?.level).toBe('warn')
+    expect(String(entry?.extra?.message ?? '')).not.toBe('')
+  })
+
+  it('旧版 backend 段迁移到 runtime 时留一条 config:legacy-backend', () => {
+    const dir = home()
+    writeFileSync(join(dir, 'config.yaml'), ['backend:', '  default: claude-cli'].join('\n'))
+    const { logs, logger } = recorder()
+    expect(loadConfig(dir, process.env, { logger }).runtime.default).toBe('claude-code')
+    expect(logs.some(log => log.message === 'config:legacy-backend')).toBe(true)
+  })
+
+  it('runtime.options 试图覆盖安全参数时先记 error 再抛错', () => {
+    const dir = home()
+    writeFileSync(join(dir, 'config.yaml'), [
+      'runtime:',
+      '  options:',
+      '    orca:',
+      '      allowNetwork: true',
+    ].join('\n'))
+    const { logs, logger } = recorder()
+    expect(() => loadConfig(dir, process.env, { logger })).toThrow(/不允许覆盖安全参数/)
+    const entry = logs.find(log => log.message === 'config:invalid-security-override')
+    expect(entry?.level).toBe('error')
+    expect(entry?.extra?.keys).toEqual(['allowNetwork'])
+  })
+})

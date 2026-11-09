@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline'
 import type { Trigger } from '../core/model.js'
 import type { ChatSettings } from '../config.js'
 import type { CommandRunner } from '../infra/process.js'
+import { noopLogger, errorMessage, type Logger } from '../infra/logger.js'
 import { parseImageKeysFromContent } from './feishu-image.js'
 
 export interface FeishuConfig {
@@ -218,15 +219,22 @@ const QUOTED_MAX_CHARS = 800
 export async function attachQuotedMessage(
   trigger: Trigger,
   runner: CommandRunner,
-  opts: { as?: string; maxChars?: number } = {},
+  opts: { as?: string; maxChars?: number; logger?: Logger } = {},
 ): Promise<Trigger> {
+  const logger = opts.logger ?? noopLogger
   const parentId = readParentId(trigger.raw)
   if (!parentId) return trigger
   try {
     const res = await runner.run(quotedMessageCommand(parentId, opts.as ?? 'bot'))
-    if (res.code !== 0) return trigger
+    if (res.code !== 0) {
+      logger.warn('feishu:quote-fetch-failed', { messageId: parentId, code: res.code, message: res.stderr.slice(0, 200) })
+      return trigger
+    }
     const quoted = parseQuotedMessage(res.stdout, parentId)
-    if (!quoted) return trigger
+    if (!quoted) {
+      logger.warn('feishu:quote-parse-failed', { messageId: parentId, sample: res.stdout.slice(0, 200) })
+      return trigger
+    }
     const max = opts.maxChars ?? QUOTED_MAX_CHARS
     const body = quoted.text.length > max ? `${quoted.text.slice(0, max)}…` : quoted.text
     const who = quoted.author ? ` ${quoted.author}` : ''
@@ -243,7 +251,8 @@ export async function attachQuotedMessage(
         ...(quoteImages.length > 0 ? { quoteImages } : {}),
       },
     }
-  } catch {
+  } catch (error) {
+    logger.warn('feishu:quote-fetch-failed', { messageId: parentId, message: errorMessage(error) })
     return trigger
   }
 }
@@ -264,6 +273,8 @@ export interface FeishuConsumerOptions {
   onLine?: (line: string) => void
   /** lark-cli 报告事件流就绪。 */
   onReady?: () => void
+  /** 消费进程断开后安排重连；用于把「正在重试」也写进日志。 */
+  onReconnect?: (info: { attempt: number; delayMs: number }) => void
   /** 消费进程异常退出后自动重连的退避基线（默认 5s，翻倍至 60s）。 */
   restartBaseMs?: number
   /** 测试注入点。 */
@@ -297,23 +308,24 @@ export class FeishuConsumer {
     const bin = this.opts.bin ?? 'lark-cli'
     const spawnFn = this.opts.spawnImpl ?? spawn
     // 关键：lark-cli 把 stdin EOF 当作退出信号，stdin 必须是保持打开的管道。
-    this.proc = spawnFn(bin, ['event', 'consume', 'im.message.receive_v1', '--as', this.opts.as ?? 'bot'], {
+    const child = spawnFn(bin, ['event', 'consume', 'im.message.receive_v1', '--as', this.opts.as ?? 'bot'], {
       stdio: ['pipe', 'pipe', 'pipe'],
       ...(this.opts.env ? { env: this.opts.env } : {}),
     })
-    this.proc.stdin?.on('error', () => { /* 关闭时的 EPIPE 忽略 */ })
-    const rl = createInterface({ input: this.proc.stdout! })
+    this.proc = child
+    child.stdin?.on('error', () => { /* 关闭时的 EPIPE 忽略 */ })
+    const rl = createInterface({ input: child.stdout! })
     rl.on('line', line => {
       const trimmed = line.trim()
       if (!trimmed) return
       this.opts.onLine?.(trimmed)
       try {
         this.opts.onEvent(JSON.parse(trimmed) as Record<string, unknown>)
-      } catch (error) {
+      } catch {
         this.opts.onError?.(new Error(`feishu:invalid-json: ${trimmed.slice(0, 200)}`))
       }
     })
-    this.proc.stderr?.on('data', chunk => {
+    child.stderr?.on('data', chunk => {
       const text = String(chunk).trim()
       if (!text) return
       const level = larkStderrLevel(text)
@@ -324,8 +336,15 @@ export class FeishuConsumer {
         this.opts.onError?.(new Error(`feishu:stderr: ${text.slice(0, 300)}`))
       }
     })
-    this.proc.on('exit', code => {
-      this.proc = null
+    child.on('error', error => {
+      // spawn 失败（例如 lark-cli 没装）不会触发 exit，必须单独处理，否则进程会直接抛错退出。
+      if (this.proc === child) this.proc = null
+      this.opts.onError?.(new Error(`feishu:spawn-failed: ${error.message}`))
+      this.scheduleRestart()
+    })
+    child.on('exit', code => {
+      // 只清理「当前这条」子进程，避免旧进程的迟到事件把新连接置空。
+      if (this.proc === child) this.proc = null
       if (this.stopping) return
       if (code !== 0) this.opts.onError?.(new Error(`feishu:consumer-exit: ${code}`))
       this.scheduleRestart()
@@ -337,6 +356,7 @@ export class FeishuConsumer {
     if (this.stopping || this.restartTimer) return
     this.restarts += 1
     const delay = Math.min((this.opts.restartBaseMs ?? 5000) * 2 ** (this.restarts - 1), 60_000)
+    this.opts.onReconnect?.({ attempt: this.restarts, delayMs: delay })
     this.restartTimer = setTimeout(() => {
       this.restartTimer = null
       if (!this.stopping) this.start()
@@ -566,7 +586,7 @@ export function fitIdempotencyKey(key: string, max = 50): string {
 
 /** 通过 lark-cli 发消息；幂等 key 由 Outbox 提供。 */
 export class FeishuSender {
-  constructor(private runner: CommandRunner) {}
+  constructor(private runner: CommandRunner, private logger: Logger = noopLogger) {}
 
   async reply(messageId: string, text: string, idempotencyKey: string): Promise<void> {
     const res = await this.runner.run(feishuReplyCommand(messageId, text, fitIdempotencyKey(idempotencyKey)))
@@ -583,6 +603,12 @@ export class FeishuSender {
     const key = fitIdempotencyKey(idempotencyKey)
     const res = await this.runner.run(feishuCardSendCommand(chatId, key), { input: feishuCard(markdown) })
     if (res.code === 0) return
+    this.logger.warn('feishu:card-fallback', {
+      target: chatId,
+      key,
+      code: res.code,
+      message: res.stderr.slice(0, 200),
+    })
     const fallback = await this.runner.run(feishuMarkdownSendCommand(chatId, key), { input: markdown })
     if (fallback.code !== 0) throw new Error(`feishu:card-send-failed: ${fallback.stderr.slice(0, 300)}`)
   }
@@ -591,6 +617,12 @@ export class FeishuSender {
     const key = fitIdempotencyKey(idempotencyKey)
     const res = await this.runner.run(feishuCardReplyCommand(messageId, key), { input: feishuCard(markdown) })
     if (res.code === 0) return
+    this.logger.warn('feishu:card-fallback', {
+      target: messageId,
+      key,
+      code: res.code,
+      message: res.stderr.slice(0, 200),
+    })
     const fallback = await this.runner.run(feishuMarkdownReplyCommand(messageId, key), { input: markdown })
     if (fallback.code !== 0) throw new Error(`feishu:card-reply-failed: ${fallback.stderr.slice(0, 300)}`)
   }

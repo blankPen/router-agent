@@ -32,7 +32,7 @@ Tests       291 passed | 4 skipped
 | `tests/cli.test.ts` | commander 命令解析：init / tickets / ticket / status / config / help（11） |
 | `tests/cli-init.test.ts` | inquirer 交互初始化：select/checkbox/password、App Secret 走 stdin、新建应用、授权引导（6） |
 | `tests/infra/process.test.ts` | 命令执行器：stdin 传递、错误码透出（3） |
-| `tests/sources/lark.test.ts` | larkHome 隔离、群/成员/身份/事件预检解析（7） |
+| `tests/sources/lark.test.ts` | 固定 lark profile、群/成员/身份/事件预检解析（7） |
 | `tests/config.test.ts` | 配置读写、统一群配置解析、群级白名单、旧格式迁移与 `config set` 点路径（14） |
 | `tests/sources/feishu-consumer.test.ts` | 消费者 stdin 常驻、NDJSON、stderr 分级、断线重连（9） |
 | `tests/cli-doctor.test.ts` | 启动前自检的 10 项检查（5） |
@@ -87,7 +87,7 @@ ra init → 配置 port 3099 → ra start → curl /api/status → curl / → ra
 | 命令运行器 | 原先或带或不带二进制名，真实环境报 `ENOENT` | `CommandRunner` 统一绑定二进制，argv 不含命令名 |
 | 飞书幂等 key 超长 | 拼接 turn + updatedAt 后超过 50 字符，飞书直接拒绝发送 | `fitIdempotencyKey()` 截断 + 稳定哈希 |
 | worker 会话被删 | 每秒重试 `terminal send`，工单一直挂着 running | 检测到终端不存在后结束派工、转 blocked、取消订阅并只通知一次 |
-| lark-cli 机器人隔离 | 原先只能复用默认 profile | 新增 `feishu.larkHome`，所有 lark-cli 子进程注入独立 HOME |
+| lark-cli 机器人隔离 | 原先只能复用默认 profile | 固定 `~/.router-agent-lark` profile，所有 lark-cli 子进程注入独立 HOME |
 | init 依赖手工配置 | 原先要手动跑 lark-cli 并填 4 个 id | 交互式引导 + 内部调用 `lark-cli config init` / `auth login` |
 | CLI 解析手写 | 手写 argv 解析、无补全/帮助 | 换 `commander`：子命令、选项、`--help`、退出码 |
 | 交互原始 | readline 裸提问，密钥回显 | 换 `@inquirer/prompts`：select / checkbox / password |
