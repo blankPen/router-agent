@@ -15,7 +15,7 @@
 ![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
 
-[快速开始](#快速开始) &nbsp;·&nbsp; [它怎么工作](#它怎么工作) &nbsp;·&nbsp; [配置](#配置) &nbsp;·&nbsp; [命令](#命令) &nbsp;·&nbsp; [Worker 协议](#worker-上报协议) &nbsp;·&nbsp; [文档](#文档)
+[快速开始](#快速开始) &nbsp;·&nbsp; [它怎么工作](#它怎么工作) &nbsp;·&nbsp; [Runtime](#runtimeworker-运行时) &nbsp;·&nbsp; [配置](#配置) &nbsp;·&nbsp; [命令](#命令) &nbsp;·&nbsp; [Worker 协议](#worker-上报协议) &nbsp;·&nbsp; [文档](#文档)
 
 **简体中文** · [English](README.en.md)
 
@@ -44,40 +44,60 @@ router-agent（`ra`）是一个常驻的双层 Agent 系统：**Router 只做研
 
 | 依赖 | 说明 |
 |-|-|
-| Node.js | `>= 22.19.0`（使用内置 `node:sqlite`；项目根目录 `.node-version` 已固定 22.19.0） |
+| Node.js | `>= 22.19.0`（使用内置 `node:sqlite`；项目根目录 `.nvmrc` 已固定 22.19.0） |
 | pnpm | 安装依赖与构建 |
-| Orca | 提供 `orca` CLI，负责创建 worktree 与终端 |
+| Orca | 提供 `orca` CLI，负责创建 worktree 与终端（仅 `orca` 运行时需要） |
 | lark-cli | 飞书事件消费、发消息；需要一个飞书自建应用 |
-| Claude Code | Worker 的实际执行者，由 Orca 在 worktree 内拉起 |
+| Claude Code | Worker 的实际执行者；`orca` / `claude-code` / `acp-claude` 运行时都需要 |
 
 **1 · 安装并构建**
 
 ```bash
 pnpm install --registry=https://registry.npmjs.org/
 pnpm build
+pnpm link --global      # 之后可直接用 ra；不 link 时用 node bin/ra.js <command>
 ```
 
-`ra` 是 `pnpm link --global` 后可用，也可以直接 `node bin/ra.js <command>`。
+**2 · 初始化：两种方式，任选一种**
 
-**2 · 初始化**
+初始化的结果是一份 `~/.router-agent/config.yaml`（`ra init` 还会顺带写入全局 worker 规范）。下面两种方式写的是同一份配置，可以混用，也可以重复运行。
+
+| 方式 | 适合 | 入口 |
+|-|-|-|
+| **Web 初始化页**（推荐） | 第一次接入；想边填边看到检测结果 | `ra start` 自动打开 `#setup` |
+| **CLI 交互式** | 远程机器 / 无图形界面；想一次配完群与成员 | `ra init` |
+
+**方式 A · Web 初始化页**
 
 ```bash
-ra init                 # 交互式引导：仓库 → 机器人 → 群 → 授权成员，一条命令装完
-```
-
-`ra init` 只问必填项，其余参数写成默认值。专属机器人、群绑定、白名单都可以在引导里一次配好。
-
-**3 · 启动**
-
-```bash
-ra start                # 后台常驻，就绪后自动打开 Web 初始化页
+ra start              # 后台常驻；就绪后自动打开 http://127.0.0.1:3083/#setup
 ra status
-ra web                  # 之后想再打开面板
+ra web                # 之后想再打开面板
 ```
 
-`ra start` 等服务就绪后会用默认浏览器打开面板的「初始化」页，把启动必需项一次配完：Worker 运行时（含 ACP 扩展一键安装）、项目、飞书接入、监控群与绑定。保存后按页面提示重启服务即可。远程机器或没有图形界面时用 `ra start --no-open`，只打印面板地址。
+页面只放「服务跑起来必需的五件事」，顶部是完成度清单：
 
-**4 · 自检与模拟**
+1. **LLM Provider**：Base URL / 模型 / API Key。密钥只写入 `config.yaml`，保存后不回显；留空则继续复用 `~/.trove/config.json` 或环境变量。
+2. **选择运行时**：Orca / Claude Code / ACP Agent 卡片平铺，自动检测 CLI、版本、ACP 依赖与登录状态，支持安装引导和真实握手试启动。
+3. **登记项目**：添加本地项目（系统目录选择 + 自动识别 Git）或 Git 项目（自动 clone 到 `<RA_HOME>/repos`）。
+4. **飞书接入**：复用当前 lark-cli profile，或填专属机器人的 App ID / 配置目录。
+5. **群与绑定**：至少添加一个监控群；可把群固定到某个项目，之后开工不再追问。
+
+![Web 初始化页：五步完成度清单、LLM Provider 与运行时卡片](docs/assets/readme/setup-overview-dark.png)
+
+保存后页面会提示需要重启，点「保存并重启」即可热重启 daemon（浏览器页面不刷新）。远程机器或没有图形界面时用 `ra start --no-open`，只打印面板地址。
+
+**方式 B · CLI 交互式**
+
+```bash
+ra init
+```
+
+按提示依次完成：**仓库**（Orca 运行时从 `orca repo list` 里挑 git 仓库；其它运行时填本地绝对路径）→ **飞书机器人**（复用当前 lark-cli / 专属机器人 + 已有 App ID+Secret / 浏览器新建应用）→ **用户授权**（可选，用于按名字搜索群与成员）→ **监控群** → **授权成员** → **机器人身份** → **群绑定**。只问必填项，其余留默认；`ra init --yes` 只写默认配置，适合脚本化。
+
+两种方式可以接力：先 `ra init` 配好机器人与群，再用 Web 页补齐 LLM / 项目 / 绑定；页面只提交改动过的字段，不会覆盖 CLI 写好的其它配置。
+
+**3 · 自检与模拟**
 
 ```bash
 ra doctor                                              # 配置 / Orca / 飞书 / 模型 / 端口，全绿再往下
@@ -106,14 +126,14 @@ Router（AgentLoop + DecisionEngine(Pi) + HTTP API + Web）
 领域内核（TS 零依赖：Ticket / Mandate / Assignment / Stage / Policy）
         │ Assignment
         ▼
-WorkerRuntime 端口 ── OrcaRuntime（默认）/ ClaudeCodeRuntime / AcpRuntime ── 未来：Codex
+WorkerRuntime 端口 ── OrcaRuntime（默认）/ ClaudeCodeRuntime / AcpRuntime（acp 与 7 个 acp-*）
 ```
 
 一条消息会依次经过四步：
 
 1. **听**：常驻消费飞书群 / 私聊消息，按名单与 `@` 规则做确定性准入。
 2. **判**：未被直接指派的候选交给 Pi 研判（可批量），输出 `accept / stop / ignore / unavailable` 四类决定。
-3. **派**：接单后创建工单与授权（Mandate），先确认「项目 + 起始分支」，再按 `runtime.default` 选择运行时：Orca 用 `orca worktree create --repo ... --base-branch ...` 开 worktree + Claude Code 终端；Claude Code 用 `git worktree` + `claude --bg` 后台会话。缺项目或分支时不开单，先在会话里追问（群配置里可固定项目和分支，免问答）。
+3. **派**：接单后创建工单与授权（Mandate），先确认「项目 + 起始分支」，再按 `runtime.default` 选择运行时：Orca 用 `orca worktree create --repo ... --base-branch ...` 开 worktree + Claude Code 终端；Claude Code 用 `git worktree` + `claude --bg` 后台会话；ACP 用 `AcpRuntime` 拉起对应的 ACP Agent。缺项目或分支时不开单，先在会话里追问（群配置里可固定项目和分支，免问答）。运行时的差异与选型见 [Runtime](#runtimeworker-运行时)。
 4. **跟**：Worker 用 `ra report` 上报（失败自动落盘 `state.json`），Router 刷新工单阶段；PR 合并 / 关闭后闭环并通知发起人。
 
 关键约束：
@@ -123,6 +143,89 @@ WorkerRuntime 端口 ── OrcaRuntime（默认）/ ClaudeCodeRuntime / AcpRunt
 - **所有对外通知走 Outbox**：幂等 key + 2s 起步的指数退避（上限 60s）。
 - **状态判定不解析终端屏幕文本**：`checkIdle` 只读中立 `AgentStatus`（Orca 映射自 `connected / orphaned / lastOutputAt`，Claude 映射自 `claude agents --json`）；主动巡检优先读 Agent 自己的会话记录（结构化 JSONL），只有读不到时才退回终端输出并做保守清洗。巡检消息是语义摘要：只保留助手文本与一行动作概要，工具调用回显与状态行会被过滤或折叠。
 - **研判层是 DecisionEngine 端口**：Pi 是唯一实现，研判与礼貌回复都走同一条 Pi 通道；研判工具只产出提案，写库仍由 Engine 统一完成。
+
+## Runtime：Worker 运行时
+
+Worker 不在 Router 进程里跑。每张工单开工时，Router 按 `runtime.default` 选一个 **WorkerRuntime** 适配器，由它负责：创建隔离 workspace、拉起 Agent、投递工单、读取状态、接住追问。内核与 Router 只依赖 `WorkerRuntime` 端口，换运行时不需要改业务代码。
+
+一份配置只有一个默认运行时，但**项目清单按运行时分开维护**：Orca 用仓库选择器（`name:` / `id:` / `path:`），Claude Code 与 ACP 用本地仓库绝对路径。切换运行时不会把 Orca 的选择器当成文件路径；旧工单也不会被新的默认运行时接管，而是继续用 Assignment 里记录的运行时。
+
+### 内置运行时
+
+| runtime id | 拉起方式 | workspace | 状态读取 | 追问 / 恢复 | 适用场景 |
+|-|-|-|-|-|-|
+| `orca`（默认） | Orca 创建 worktree + Claude Code 终端 | `orca worktree create --repo … --base-branch …` | Orca `AgentStatus`（`connected` / `orphaned` / `lastOutputAt`） | 终端常驻，追问直接投递；巡检优先读 Claude 会话记录 | 本机已用 Orca 管仓库，想同时看到终端 |
+| `claude-code` | `git worktree` + `claude --bg` 后台会话 | 本地 git 仓库绝对路径 | `claude agents --json --all` | 会话结束后用 `claude --bg --resume <sessionId>` 追问；进程退出不自动 resume | 不用 Orca，直接跑 Claude Code |
+| `acp` / `acp-*` | ACP 子进程：`initialize` → `session/new` → `session/prompt` | `git worktree`（本地绝对路径） | ACP `session/update` | Agent 声明 `loadSession` 时用 `session/load` 恢复 | 想接 Codex / Gemini / OpenCode 等 |
+
+`acp` 是自定义命令入口；`acp-*` 是内置 ACP Agent，共用同一套 `AcpRuntime`。
+
+### 在 Web 面板里选（推荐）
+
+「初始化 → 2. 选择运行时」与「配置 → 派工与服务 → Worker 运行时」是同一组卡片：
+
+- 自动检测 CLI 是否安装、版本、来源（PATH / ra 托管）、ACP 扩展依赖与登录状态；
+- **安装 CLI** 跳转该 Agent 的官方安装页；**安装 ACP 扩展** 由 ra 把 npm 适配包装到 `~/.router-agent/runtimes/<agent>`；
+- **检测 / 试启动** 做一次真实 ACP 握手（`initialize` + `session/new`），避免只看版本号；
+- 点卡片即切换 `runtime.default`，只影响新工单；已开工的工单保留原运行时。
+
+![Web 初始化页的运行时卡片：内置运行时与 ACP Agent 的可用性检测](docs/assets/readme/setup-runtime-dark.png)
+
+### 用 CLI 选
+
+```bash
+ra config set runtime.default claude-code
+ra runtime list                    # 本机 ACP Agent 状态、版本、来源
+ra runtime install acp-claude      # 装到 ~/.router-agent/runtimes/claude
+ra runtime check acp-claude        # 完整 initialize + session/new 握手
+ra runtime login acp-codex         # 交互式登录
+ra runtime uninstall acp-codex     # 卸载 ra 托管的适配器
+```
+
+### 运行时配置
+
+```yaml
+runtime:
+  default: acp-codex        # orca | claude-code | acp | acp-*
+  # 运行时专属的非安全参数
+  options:
+    claude-code:
+      model: claude-sonnet-5-5
+    acp:                    # 自定义 ACP 命令
+      command: opencode
+      args: [acp]
+      env: {}
+  # 非 orca 运行时使用独立项目清单，和顶层 projects 互不影响
+  projects:
+    claude-code:
+      - name: router-agent
+        repo: /Users/me/router-agent   # 本地仓库绝对路径
+        defaultBranch: main
+    acp-codex:
+      - name: router-agent
+        repo: /Users/me/router-agent
+        defaultBranch: main
+```
+
+`allowedTools` / `permissionMode` / `sandbox` / `shellAllow` / `allowNetwork` / `fileAccess` 这些安全字段不允许写在 `runtime.options` 里，写了会直接启动失败。Worker 权限统一由 `worker.tools` 与 adapter 内置基线决定。
+
+### ACP Agent 目录
+
+任何实现了 [Agent Client Protocol](https://agentclientprotocol.com) 的 Agent，都可以用同一套 `AcpRuntime` 接入。ra 启动后自动探测本机可用的 ACP Agent，未安装 / 版本不兼容 / 未登录的项会在面板里置灰并给出原因。
+
+| runtime id | Agent | 启动方式 | 可在线安装 | 断线恢复 | 说明 |
+|-|-|-|-|-|-|
+| `acp-claude` | Claude Code | `claude-agent-acp` | ✅ | ✅ `session/load` | 需先登录 Claude Code |
+| `acp-codex` | Codex | `codex-acp` | ✅ | ❌ | 需本机 `codex` CLI；先 `codex-acp login`；默认带 `--message-streaming` |
+| `acp-opencode` | OpenCode | `opencode acp` | ❌ | ✅ | 本机安装后自动识别，建议先 `ra runtime check` |
+| `acp-gemini` | Gemini CLI | `gemini --acp` | ❌ | — | 实验性 ACP 模式 |
+| `acp-copilot` | GitHub Copilot CLI | `copilot --acp --stdio` | ❌ | — | |
+| `acp-cursor` | Cursor CLI | `cursor-agent acp` | ❌ | — | 旧版本可能没有 `acp` 子命令 |
+| `acp-goose` | Goose | `goose acp` | ❌ | — | |
+
+`AcpRuntime` 负责：spawn Agent 子进程 → `initialize` → `session/new` → `session/prompt`；从 `session/update` 读取助手文本与工具调用；把 Agent 的 `session/request_permission` 按 `worker.tools` 策略自动放行或拒绝；进程退出后，若 Agent 声明 `loadSession`，追问时会用 `session/load` 恢复会话。
+
+当前不做客户端侧的 `fs/*` 与 `terminal/*` 代理：`initialize` 里声明不支持，Agent 需使用自己的文件 / 命令工具。Agent 必须预先完成登录（ACP 的 `auth_required` 会以启动失败上报）。
 
 ## 它能做什么
 
@@ -316,11 +419,15 @@ worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态�
 
 `ra start` 自动打开、`ra web` 也可随时打开的面板分五块：
 
-- **初始化**：只放启动必需项——LLM Provider、运行时、项目、飞书接入、群与绑定，顶部有完成度清单；LLM Provider 放在第一位，可直接填 Base URL / 模型 / API Key（密钥只写入 `config.yaml`，保存后不回显），留空则继续复用 `.trove` 或环境变量。运行时用卡片平铺展示（带对应品牌 Logo），每张卡会检测 CLI / 版本 / ACP 依赖 / 登录状态。安装拆成两个按钮：**安装 CLI** 跳转该 Agent 的官方安装文档，**安装 ACP 扩展** 由 ra 把 npm 适配包装到 `~/.router-agent/runtimes`（没有可安装扩展时不显示）；另有真实握手试启动。配好后保存并按提示重启服务即可。
+- **初始化**：只放启动必需的五件事——LLM Provider、运行时、项目、飞书接入、群与绑定，顶部有完成度清单。逐项说明见 [快速开始 · 方式 A](#快速开始)；运行时的卡片检测与安装引导见 [Runtime](#runtimeworker-运行时)。
 - **工单**：按阶段分组 + 计数、关键字搜索（标题 / 工单号 / 仓库 / PR）、自动刷新开关与手动刷新；详情页有阶段、派工、PR、授权范围、上报时间线（含完整回复与 `humanAction`）、投递记录，可直接投递 follow-up 或停止工单。
 - **日志**：直接看 `~/.router-agent/logs/router-agent.log`，默认 2 秒增量拉取（只读游标之后的新字节，不重复读整个文件），可开「实时刷新」；按 INFO / WARN / ERROR 过滤、按消息或字段搜索、复制当前结果；停在底部时自动跟随新日志，往上翻后不再打断，点「最新」回到底部。文件不存在或还没写入时给出空状态提示。
-- **配置**：按「LLM Provider / 准入策略 / 研判与人格 / 会话复用 / 进展同步 / 闲置治理 / 飞书接入 / 派工与服务 / 项目与群绑定」分组；每个字段带说明与默认值提示，改动逐项标脏，保存前做前端 + 后端双重校验，保存后写回 `config.yaml`。「派工与服务」里的 Worker 运行时是与初始化页相同的卡片平铺组件（`orca` / `claude-code` / `acp` / `acp-*`），可检测安装状态、分别跳转官方文档安装 CLI 或由 ra 安装 ACP 扩展，并做 ACP 握手试启动；项目清单按后端隔离，切换后端后「项目与群绑定」里的项目清单会切换到该后端自己的一套（Orca 用仓库选择器，Claude Code 必须是本地仓库绝对路径）；「添加本地项目」支持系统目录选择并自动识别 Git / 分支，「添加 Git 项目」支持填写 ssh / http(s) 地址后自动 clone 并登记。群绑定的项目只能从当前清单里选，分支自动跟随项目的默认分支，不能单独自定义。
+- **配置**：按「LLM Provider / 准入策略 / 研判与人格 / 会话复用 / 进展同步 / 闲置治理 / 飞书接入 / 派工与服务 / 项目与群绑定」分组；每个字段带说明与默认值提示，改动逐项标脏，保存前做前端 + 后端双重校验，保存后写回 `config.yaml`。「派工与服务」里的 Worker 运行时是与初始化页相同的卡片平铺组件（`orca` / `claude-code` / `acp` / `acp-*`），可检测安装状态、分别跳转官方文档安装 CLI 或由 ra 安装 ACP 扩展，并做 ACP 握手试启动；项目清单按运行时隔离，切换运行时后「项目与群绑定」里的项目清单会切换到该运行时自己的一套（Orca 用仓库选择器，Claude Code / ACP 必须是本地仓库绝对路径）；「添加本地项目」支持系统目录选择并自动识别 Git / 分支，「添加 Git 项目」支持填写 ssh / http(s) 地址后自动 clone 并登记。群绑定的项目只能从当前清单里选，分支自动跟随项目的默认分支，不能单独自定义。
 - **来源**：服务状态、监控群、接收范围概览。
+
+初始化页的下半部分（项目 / 飞书 / 群绑定）：
+
+![Web 初始化页：项目登记、飞书接入与群绑定](docs/assets/readme/setup-steps-dark.png)
 
 配置项会标注生效范围：**策略**（`acceptMode` / `maxWorkers` / `admission`）保存后立即生效；其余配置在服务启动时读入，保存后点侧栏或配置页的「重启服务」即可热重启 daemon（浏览器页面不会刷新），也可以手动 `ra stop && ra start`。面板可以在「初始化 · LLM Provider」或「配置 · LLM Provider」里填写 `llm.apiKey`，密钥只写入 `config.yaml`，保存后不会再回显（`publicConfig` 只返回 `apiKeySet`）；也可以用 CLI / 环境变量配置。保存会重写 `config.yaml`，原文件的注释会丢失。
 
@@ -423,7 +530,7 @@ worker:
     allowNetwork: false      # 预留字段：当前只解析，未用于收窄网络
 
 runtime:
-  default: orca            # orca | claude-code | acp（claude-code 对 projects 的本地路径有要求，见「已知限制」）
+  default: orca            # orca | claude-code | acp | acp-*（非 orca 运行时的项目必须是本地路径，见「Runtime」）
   # 运行时专属的非安全参数：目前有 claude-code.model（兼容旧键 claude-cli.model）与 acp.command/args/env。
   # 写 allowedTools / permissionMode / sandbox / shellAllow / allowNetwork / fileAccess 会直接启动失败。
   # options:
@@ -471,7 +578,7 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 | `progress.syncMs` / `probeMs` / `silenceMs` / `repeatMs` | 毫秒；前两项 0 = 关闭 |
 | `retention.enabled` / `idleHours` / `closeGraceHours` / `zombieHours` / `sweepMinutes` | 见「闲置工单治理」 |
 | `workerSpec.mode` | `prompt` / `agent` |
-| `backend.default` | `orca` / `claude-cli` |
+| `runtime.default` | `orca` / `claude-code` / `acp` / `acp-*` |
 | `server.port` | 1–65535 |
 | `feishu.larkHome` / `appId` / `reaction` / `directMessages` / `allowed` / `bots` / `botOpenIds` / `botNames` | 字符串、布尔或逗号分隔列表 |
 | `feishu.chats` | 逗号分隔 chat_id；已有条目的 mode / 绑定 / sync 保留，新条目默认 `all` |
@@ -487,7 +594,7 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 | `chatSync.<chatId>` | `ra config set chatSync.oc_xxx true` | 启动时补拉该群历史 |
 | `chatAllow.<chatId>` | `ra config set chatAllow.oc_xxx ou_a,ou_b` | 空值 = 沿用全局 `feishu.allowed` |
 
-`router.session.*`、`router.persona.*`、`feishu.images.*` 不在 `config set` 的白名单里，用 `ra config edit` 或 Web 面板改；`worker.tools.*` 与 `backend.options.*` 面板不提供，只能 `ra config edit` 直接改文件。
+`router.session.*`、`router.persona.*`、`feishu.images.*` 不在 `config set` 的白名单里，用 `ra config edit` 或 Web 面板改；`worker.tools.*` 与 `runtime.options.*` 面板不提供，只能 `ra config edit` 直接改文件。
 
 ### 环境变量
 
@@ -501,14 +608,13 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 
 ### 专属机器人（推荐）
 
-`ra init` 的「飞书机器人」一步提供两种专属机器人方式，都不需要手动敲 `lark-cli`：
-
-`ra init` 用交互式选择器引导（方向键选择、空格多选、密码输入不回显）：
+`ra init` 的「飞书机器人」一步提供三种来源，用交互式选择器引导（方向键选择、空格多选、密码输入不回显），都不需要手动敲 `lark-cli`：
 
 | 选项 | 行为 |
 |-|-|
-| 2) 已有 App ID / App Secret | 输入后 `ra init` 内部执行 `lark-cli config init --app-id ... --app-secret-stdin`，写进 `feishu.larkHome` 指定的独立目录；Secret 走 stdin，不落 argv、不写 config.yaml |
-| 3) 现在新建应用 | `ra init` 内部执行 `lark-cli config init --new`，浏览器完成创建后自动回读 appId |
+| 复用当前 lark-cli 绑定的机器人 | 清空 `feishu.larkHome` / `feishu.appId`，直接使用终端里已登录的 profile |
+| 专属机器人 · 已有 App ID / App Secret | 输入后 `ra init` 内部执行 `lark-cli config init --app-id ... --app-secret-stdin`，写进 `feishu.larkHome` 指定的独立目录；Secret 走 stdin，不落 argv、不写 config.yaml |
+| 专属机器人 · 现在新建应用 | `ra init` 内部执行 `lark-cli config init --new`，浏览器完成创建后自动回读 appId |
 
 之后如果需要用户身份（按名字搜索群 / 成员），`ra init` 会检测并询问是否立刻执行 `lark-cli auth login`。
 
@@ -518,7 +624,7 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 
 ### 项目与仓库选择
 
-每个 `projects[].repo` 决定该工单 `orca worktree create --repo` 的目标。先看 Orca 里注册了哪些：
+每个 `projects[].repo` 决定该工单的仓库：Orca 运行时交给 `orca worktree create --repo`；其它运行时作为 `git worktree` 的本地仓库绝对路径。先看 Orca 里注册了哪些：
 
 ```bash
 orca repo list --json | jq -r '.result.repos[] | "\(.displayName)\t\(.path)\t\(.kind)"'
@@ -531,7 +637,7 @@ Web 面板的「登记项目」提供两种添加方式：
 | 添加本地项目 | 弹出系统目录选择框；选中后自动识别 Git 根目录、当前分支与 origin。不是 Git 仓库时直接提示，不能用于创建 worktree |
 | 添加 Git 项目 | 填写 ssh / http(s) 地址，自动 clone 到 `<RA_HOME>/repos/<项目名>`（默认 `~/.router-agent/repos`）；Orca 运行时再执行 `orca repo add --path ... --kind git` 登记，配置里写 `path:<绝对路径>` |
 
-三种写法都支持：
+四种写法都支持：
 
 | 写法 | 例子 | 说明 |
 |-|-|-|
@@ -541,6 +647,8 @@ Web 面板的「登记项目」提供两种添加方式：
 | `path:` | `path:/Users/admin/du/teamwork-repos` | 按绝对路径 |
 
 注意：只有 `kind: git` 的仓库能创建 worktree；`kind: folder`（纯文件夹项目）会在 `orca worktree create` 阶段失败。
+
+非 Orca 运行时（`claude-code` / `acp-*`）不使用仓库选择器，`repo` 直接填本地仓库绝对路径，项目清单写在 `runtime.projects.<runtime id>` 下，见 [Runtime](#runtimeworker-运行时)。
 
 另外，旧版的全局 `repo` 配置已移除（`ra` 不再读取它）。已有配置文件请改成 `projects`，`ra doctor` 会在没有任何项目时直接报错并给出命令。
 
@@ -574,7 +682,7 @@ llm:
 | `shellAllow` | 命令前缀数组 | 仅在 `shell: allowlist` 时生效 |
 | `allowNetwork` | `true` / `false` | 预留字段：当前只解析，未用于收窄网络 |
 
-它只对 `backend.default: claude-cli` 生效（映射成 Claude 的 `allowedTools`）；`orca` 后端里 worker 的权限由 Orca 启动的 Claude Code 自身决定。安全字段只能由这里和 adapter 内置基线决定，`backend.options` 写了同名键会直接启动失败。
+`worker.tools` 对 `claude-code` 生效（映射成 Claude 的 `allowedTools`）；`acp-*` 运行时的 `session/request_permission` 也按同一策略自动放行或拒绝；`orca` 运行时里 worker 的权限由 Orca 启动的 Claude Code 自身决定。安全字段只能由这里和 adapter 内置基线决定，`runtime.options` 写了同名键会直接启动失败。
 
 ### Worker 规范注入
 
@@ -586,57 +694,6 @@ llm:
 两种模式都不改项目自己的 `CLAUDE.md`。
 
 这些规范 markdown 统一存放在状态目录的 `specs/` 下，可在 Web 面板「配置 → 规范文件」直接编辑或恢复默认。`agent` 模式的全局规范文件仍由 `ra init` 写入，修改 Worker 手册后重新执行一次 `ra init` 即可同步。
-
-### ACP Runtime（可选）
-
-任何实现了 [Agent Client Protocol](https://agentclientprotocol.com) 的 Agent，都可以用同一套 `AcpRuntime` 接入，不需要为每家写适配器。ra 启动后会自动探测本机可用的 ACP Agent，Web 面板「配置 → 派工与服务 → Worker 运行时」里可以直接选择；未安装 / 版本不兼容 / 未登录的项会置灰并显示原因。
-
-内置的 ACP 运行时 id：
-
-| runtime id | Agent | 启动方式 | 可在线安装 | 说明 |
-|-|-|-|-|-|
-| `acp-claude` | Claude Code | `claude-agent-acp` | ✅ | 需先登录 Claude Code；支持 `session/load` |
-| `acp-codex` | Codex | `codex-acp` | ✅ | 需本机 `codex` CLI；`codex-acp login`；不支持断线恢复 |
-| `acp-opencode` | OpenCode | `opencode acp` | ❌ | 本机安装后自动识别 |
-| `acp-gemini` | Gemini CLI | `gemini --acp` | ❌ | |
-| `acp-copilot` | GitHub Copilot CLI | `copilot --acp --stdio` | ❌ | |
-| `acp-cursor` | Cursor CLI | `cursor-agent acp` | ❌ | 旧版本可能没有 `acp` 子命令 |
-| `acp-goose` | Goose | `goose acp` | ❌ | |
-
-按需安装、探测与检查：
-
-```bash
-ra runtime list                    # 本机 ACP Agent 状态、版本、来源
-ra runtime install acp-claude      # 装到 ~/.router-agent/runtimes/claude
-ra runtime install acp-codex
-ra runtime check acp-claude        # 完整 initialize + session/new 握手
-ra runtime login acp-codex         # 交互式登录
-ra runtime uninstall acp-codex
-```
-
-选好之后写进配置（也可以在 Web 面板直接选）：
-
-```yaml
-runtime:
-  default: acp-codex
-  # 可选：覆盖单个 Agent 的命令/参数/环境变量
-  # options:
-  #   acp-codex:
-  #     command: /Users/me/.router-agent/runtimes/codex/node_modules/.bin/codex-acp
-  #     args: ["--message-streaming"]
-  #     env: {}
-  projects:
-    acp-codex:
-      - name: router-agent
-        repo: /Users/me/router-agent   # 非 orca runtime 必须是本地仓库绝对路径
-        defaultBranch: main
-```
-
-旧的 `runtime.default: acp` + `runtime.options.acp.command` 仍然可用，作为「自定义命令」入口保留。
-
-`AcpRuntime` 负责：spawn Agent 子进程 → `initialize` → `session/new` → `session/prompt`；从 `session/update` 读取助手文本与工具调用；把 Agent 的 `session/request_permission` 按 `worker.tools` 策略自动放行或拒绝；进程退出后，若 Agent 声明 `loadSession`，追问时会用 `session/load` 恢复会话。
-
-当前不做客户端侧的 `fs/*` 与 `terminal/*` 代理：`initialize` 里声明不支持，Agent 需使用自己的文件/命令工具。Agent 必须预先完成登录（ACP 的 `auth_required` 会以启动失败上报）。`codex-acp` 需要加上 `--message-streaming` 才能在活动面板看到文本输出（目录里已默认带上）。
 
 ## 命令
 
@@ -782,7 +839,7 @@ ra report \
 ## 开发
 
 ```bash
-pnpm test        # 466 个测试通过（5 个默认跳过，其中包含真实 Pi 验证）
+pnpm test        # 641 个测试通过（4 个默认跳过，其中包含真实 Pi 验证）
 pnpm typecheck
 pnpm build       # tsc + esbuild（Web 面板与 Markdown 资产）
 pnpm check       # typecheck + test
