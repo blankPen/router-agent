@@ -28,6 +28,12 @@ import {
 import { hashForTab, tabFromHash, type Tab } from './tabs.js'
 import { THEME_MODE_LABEL, nextThemeMode, useThemeMode, type ThemeMode } from './theme.js'
 import { ACP_RUNTIME_ID, ORCA_RUNTIME_ID, normalizeRuntimeId } from '../../worker/runtimes/catalog.js'
+import type {
+  WorkspaceCleanupResultView,
+  WorkspaceOverviewView,
+  WorkspaceRuntimeGroupView,
+  WorkspaceSkipView,
+} from '../../worker/workspaces/overview.js'
 
 /** 三态各自一个图标：跟随系统用显示器，亮色用太阳，暗色用月亮。 */
 const THEME_ICON: Record<ThemeMode, 'monitor' | 'sun' | 'moon'> = {
@@ -408,6 +414,7 @@ function TicketsView(): JSX.Element {
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [lastSync, setLastSync] = useState<Date | null>(null)
   const [detailError, setDetailError] = useState<string | null>(null)
+  const [cleanupOpen, setCleanupOpen] = useState(false)
 
   const loadDetail = useCallback((id: string): void => {
     void getJson<TicketDetail>(`/api/tickets/${id}`)
@@ -490,6 +497,10 @@ function TicketsView(): JSX.Element {
               <span className="switch-track"><span className="switch-knob" /></span>
               自动刷新
             </label>
+            <button className="btn" onClick={() => setCleanupOpen(true)}>
+              <Icon name="trash" size={14} />
+              清理工作区
+            </button>
             <button className="btn" onClick={refresh}>
               <Icon name="refresh" size={14} />
               刷新
@@ -568,7 +579,191 @@ function TicketsView(): JSX.Element {
           </aside>
         </div>
       )}
+
+      {cleanupOpen && <WorkspaceCleanupDialog onClose={() => setCleanupOpen(false)} />}
     </>
+  )
+}
+
+/** 工单页「清理工作区」：按运行时分组展示工作区，勾选工单后批量清理。 */
+function WorkspaceCleanupDialog({ onClose }: { onClose: () => void }): JSX.Element {
+  const [overview, setOverview] = useState<WorkspaceOverviewView | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [selected, setSelected] = useState<Set<string>>(() => new Set())
+  const [notice, setNotice] = useState<{ tone: 'ok' | 'warn'; text: string; skipped: WorkspaceSkipView[] } | null>(null)
+
+  const load = useCallback((): void => {
+    void getJson<WorkspaceOverviewView>('/api/workspaces')
+      .then(data => {
+        setOverview(data)
+        setError(null)
+        // 工作区已经不在清单里的工单自动从选中集合里剔除。
+        const available = new Set(data.runtimes.flatMap(group => group.entries.filter(entry => entry.cleanable).map(entry => entry.ticketId)))
+        setSelected(current => new Set([...current].filter(id => available.has(id))))
+      })
+      .catch(err => setError(err instanceof Error ? err.message : String(err)))
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape' && !busy) onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      document.body.style.overflow = previousOverflow
+    }
+  }, [busy, onClose])
+
+  const toggle = (ticketId: string): void => {
+    setSelected(current => {
+      const next = new Set(current)
+      if (next.has(ticketId)) next.delete(ticketId)
+      else next.add(ticketId)
+      return next
+    })
+  }
+
+  const toggleGroup = (group: WorkspaceRuntimeGroupView): void => {
+    const cleanable = group.entries.filter(entry => entry.cleanable).map(entry => entry.ticketId)
+    const allSelected = cleanable.length > 0 && cleanable.every(id => selected.has(id))
+    setSelected(current => {
+      const next = new Set(current)
+      for (const id of cleanable) {
+        if (allSelected) next.delete(id)
+        else next.add(id)
+      }
+      return next
+    })
+  }
+
+  const clean = async (): Promise<void> => {
+    const ticketIds = [...selected]
+    if (ticketIds.length === 0) return
+    if (!confirm(`确认清理所选 ${ticketIds.length} 个工单的工作区？\nOrca 会关闭 worktree 并删除目录；Claude Code 会删除 agent view 与 worktree；ACP 直接删除 worktree。\n有未提交改动的目录会被跳过，不会强删。`)) return
+    setBusy(true)
+    setNotice(null)
+    try {
+      const result = await sendJson<WorkspaceCleanupResultView>('/api/workspaces/cleanup', 'POST', { ticketIds })
+      setNotice({
+        tone: result.skipped.length > 0 ? 'warn' : 'ok',
+        text: `已清理 ${result.removed.length} 个${result.skipped.length > 0 ? `，跳过 ${result.skipped.length} 个` : ''}`,
+        skipped: result.skipped,
+      })
+      setError(null)
+      setSelected(new Set())
+      load()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="modal-layer">
+      <button className="modal-backdrop" aria-label="关闭" onClick={() => { if (!busy) onClose() }} />
+      <div className="modal modal-wide" role="dialog" aria-modal="true" aria-label="清理工作区">
+        <header className="modal-head">
+          <div>
+            <h3>清理工作区</h3>
+            <p>按 Worker 运行时分组列出仍在磁盘上的工单工作区，勾选后批量清理。Orca 会关闭 worktree 并删除目录，Claude Code 会删除 agent view 与 worktree，ACP 直接删除 worktree；有未提交改动的目录会被跳过，不会强删。</p>
+          </div>
+          <button className="icon-btn" title="关闭" onClick={() => { if (!busy) onClose() }} disabled={busy}>
+            <Icon name="close" size={14} />
+          </button>
+        </header>
+        <div className="modal-body">
+          {error && <p className="modal-error">{error}</p>}
+          {notice && (
+            <div className={`ws-result ws-result-${notice.tone}`}>
+              <strong>{notice.text}</strong>
+              {notice.skipped.length > 0 && (
+                <ul>
+                  {notice.skipped.map(item => (
+                    <li key={`${item.ticketId}:${item.workdir}`}>
+                      <code>{item.ticketId}</code>{item.workdir ? <>（<code>{item.workdir}</code>）</> : ''}：{item.reason}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+          {!overview && !error && <p className="modal-hint">正在读取工作区…</p>}
+          {overview && overview.runtimes.length === 0 && (
+            <p className="modal-hint">没有发现遗留工作区。已关闭工单的 worktree 会在关单后自动回收。</p>
+          )}
+          {overview?.runtimes.map(group => {
+            const cleanable = group.entries.filter(entry => entry.cleanable)
+            const allSelected = cleanable.length > 0 && cleanable.every(entry => selected.has(entry.ticketId))
+            return (
+              <section key={group.runtimeId} className="ws-group">
+                <header className="ws-group-head">
+                  <div className="ws-group-title">
+                    <strong>{group.label}</strong>
+                    <span className="mono ws-runtime-id">{group.runtimeId}</span>
+                    {group.isDefault && <span className="ws-tag">默认</span>}
+                    <small>{group.entries.length} 个工作区 · {group.cleanableCount} 个可清理</small>
+                  </div>
+                  <label className={`ws-select-all ${cleanable.length === 0 ? 'disabled' : ''}`}>
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      disabled={busy || cleanable.length === 0}
+                      onChange={() => toggleGroup(group)}
+                    />
+                    本组全选
+                  </label>
+                </header>
+                {!group.supported && (
+                  <p className="modal-hint">当前服务未注册该运行时，只能查看、不能自动清理。</p>
+                )}
+                {group.entries.length === 0 ? (
+                  <p className="muted ws-empty">没有遗留工作区。</p>
+                ) : (
+                  <ul className="ws-list">
+                    {group.entries.map(entry => (
+                      <li key={entry.assignmentId} className={`ws-item ${entry.cleanable ? 'ws-item-cleanable' : ''}`}>
+                        <label className={`ws-item-main ${entry.cleanable ? '' : 'disabled'}`}>
+                          <input
+                            type="checkbox"
+                            checked={selected.has(entry.ticketId)}
+                            disabled={busy || !entry.cleanable}
+                            onChange={() => toggle(entry.ticketId)}
+                          />
+                          <span className="ws-ticket">{entry.title || entry.ticketId}</span>
+                          <span className="mono ws-ticket-id">{entry.ticketId}</span>
+                          <span className={`ws-state ${entry.cleanable ? 'ok' : 'hold'}`}>
+                            {entry.cleanable ? '已关闭 · 可清理' : entry.reason ?? '使用中'}
+                          </span>
+                        </label>
+                        <code className="ws-path">{entry.workdir}</code>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+            )
+          })}
+        </div>
+        <footer className="modal-foot ws-foot">
+          <span className="ws-selected">已选 <strong>{selected.size}</strong> 个</span>
+          <button className="btn" onClick={load} disabled={busy}>
+            <Icon name="refresh" size={13} />刷新
+          </button>
+          <button className="btn primary" onClick={() => void clean()} disabled={busy || selected.size === 0}>
+            <Icon name="trash" size={13} />
+            {busy ? '清理中…' : '清理所选'}
+          </button>
+          <button className="btn" onClick={onClose} disabled={busy}>关闭</button>
+        </footer>
+      </div>
+    </div>
   )
 }
 

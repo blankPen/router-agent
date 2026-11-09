@@ -960,6 +960,15 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     runtimeAdmin,
     feishuBot: new FeishuBotAdmin({ lark: larkRunner }),
     projectSetup: new ProjectSetup({ home, git: gitRunner, orca: orcaRunner }),
+    // Web-only 模式没有 RouterService，工作区清理端点按「不支持」返回。
+    ...(service
+      ? {
+          workspaceAdmin: {
+            list: async () => service.listWorkspaces(),
+            cleanup: (request: Parameters<RouterService['cleanupWorkspaces']>[0]) => service.cleanupWorkspaces(request),
+          },
+        }
+      : {}),
     port: config.server.port,
     webRoot: existsSync(webRoot) ? webRoot : undefined,
     logger,
