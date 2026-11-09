@@ -118,19 +118,16 @@ button, input, select {
 
 .brand { display: flex; align-items: center; gap: 11px; padding: 0 6px; }
 .brand-mark {
-  display: grid;
-  place-items: center;
+  display: block;
+  flex-shrink: 0;
   width: 34px;
   height: 34px;
   border-radius: 10px;
-  background: linear-gradient(145deg, #23745d 0%, #144438 100%);
-  color: #fff;
-  font-family: "SF Mono", ui-monospace, monospace;
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), 0 2px 6px rgba(23, 78, 64, 0.25);
+  overflow: hidden;
+  background: #000000;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.22);
 }
+.brand-mark svg { display: block; width: 100%; height: 100%; }
 .brand-text { display: flex; flex-direction: column; line-height: 1.35; }
 .brand-text strong { font-size: 13.5px; font-weight: 650; letter-spacing: -0.005em; }
 .brand-text small { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
