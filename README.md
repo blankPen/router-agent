@@ -196,6 +196,8 @@ llm:
 
 feishu:
   appId: cli_xxx
+  allowed: [ou_xxx]       # 允许发起工作的成员 open_id
+  botOpenIds: [ou_bot]    # 机器人自己的 open_id，用于识别 @；也可写 botNames
   chats:
     - chat: oc_xxx
       mode: mention
@@ -208,6 +210,8 @@ projects:
     repo: name:dsh/router-agent
     defaultBranch: main
 ```
+
+`mode: mention` 的群必须配置 `botOpenIds`（或 `botNames`），否则识别不到「@机器人」，消息会被当作未 @ 丢弃；`allowed` 为空时 `ra doctor` 也会报必填缺失。
 
 常用调整不必编辑整份文件：
 
@@ -240,8 +244,8 @@ ra config edit                                   # 用 $EDITOR 编辑全文
 | `ra runtime install <id>` | 按需安装 ACP 适配器到 `~/.router-agent/runtimes/<agent>` |
 | `ra runtime uninstall <id>` | 卸载 ra 托管的 ACP 适配器 |
 | `ra runtime check <id>` | 完整 ACP 握手（`initialize` + `session/new`） |
-| `ra runtime login <id>` | 交互式登录（目前是 `codex-acp login`） |
-| `ra config` | 查看配置；`config set <key> <value>` 改单项（含 `project.<名>` / `chatBinding.<群>` / `chatMode.<群>` / `chatSync.<群>` / `chatAllow.<群>` / `progress.syncMs` / `progress.probeMs`）；`config edit` 编辑全文 |
+| `ra runtime login <id>` | 交互式登录（由 Agent 自己提供：`acp-claude` 走 `claude`，`acp-codex` 走 `codex-acp login`） |
+| `ra config` | 查看配置；`config set <key> <value>` 改单项（含 `project.<名>` / `chatBinding.<群>` / `chatMode.<群>` / `chatAllow.<群>` / `progress.syncMs` / `progress.probeMs`）；`config edit` 编辑全文 |
 | `ra report` | Worker 侧上报：状态、摘要、`--reply`（字面量 / `@文件` / `-`）、PR 链接与 `--ack` |
 | `ra doc` | Worker 侧创建飞书文档并输出链接，长结论写进 `--reply` |
 

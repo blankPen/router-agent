@@ -196,6 +196,8 @@ llm:
 
 feishu:
   appId: cli_xxx
+  allowed: [ou_xxx]       # members allowed to start work
+  botOpenIds: [ou_bot]    # the bot's own open_id, used to detect @mentions; botNames also works
   chats:
     - chat: oc_xxx
       mode: mention
@@ -208,6 +210,8 @@ projects:
     repo: name:dsh/router-agent
     defaultBranch: main
 ```
+
+A `mode: mention` chat must set `botOpenIds` (or `botNames`); otherwise the Router cannot tell that the bot was mentioned and drops the message. An empty `allowed` list also fails the `ra doctor` required-field check.
 
 Common tweaks don't require editing the whole file:
 
@@ -240,8 +244,8 @@ Every field, the `ra config set` allowlist, environment variables, model / Feish
 | `ra runtime install <id>` | Install an ACP adapter into `~/.router-agent/runtimes/<agent>` |
 | `ra runtime uninstall <id>` | Remove an ra-managed ACP adapter |
 | `ra runtime check <id>` | Full ACP handshake (`initialize` + `session/new`) |
-| `ra runtime login <id>` | Interactive login (currently `codex-acp login`) |
-| `ra config` | View config; `config set <key> <value>` changes one key (including `project.<name>` / `chatBinding.<chat>` / `chatMode.<chat>` / `chatSync.<chat>` / `chatAllow.<chat>` / `progress.syncMs` / `progress.probeMs`); `config edit` edits the whole file |
+| `ra runtime login <id>` | Interactive login (provided by the agent: `acp-claude` runs `claude`, `acp-codex` runs `codex-acp login`) |
+| `ra config` | View config; `config set <key> <value>` changes one key (including `project.<name>` / `chatBinding.<chat>` / `chatMode.<chat>` / `chatAllow.<chat>` / `progress.syncMs` / `progress.probeMs`); `config edit` edits the whole file |
 | `ra report` | Worker-side reporting: state, summary, `--reply` (literal / `@file` / `-`), PR link and `--ack` |
 | `ra doc` | Worker-side Feishu doc creation; put the returned link in `--reply` for long results |
 
