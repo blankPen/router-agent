@@ -115,6 +115,19 @@ Router 不做对话，只在必要时说话：
 | `update:service-restarted` / `update:service-stop-failed` / `update:restart-failed` | CLI | `pid` / `pid` `reason` `message` | `ra update` 自动重启的结果 |
 | `update:restart-scheduled` | Router Tool | `delayMs` | 飞书里让 Router 更新版本后，安排在回复发出后重启服务 |
 | `api:update` | HTTP API | `phase` `from` `to` `reason` | 面板触发的更新结果 |
+| `codex:binary-resolved` | Codex runtime | `ticketId` `source` `path` `version` | 实际使用的 Codex 可执行文件（App 内置 / 环境变量 / PATH） |
+| `codex:full-access` | Codex runtime | `ticketId` `approvalPolicy` `sandboxMode` | Worker 以 full access 运行；没有人工审批闸门 |
+| `codex:thread-started` | Codex runtime | `ticketId` `threadId` `cwd` `sandboxMode` `approvalPolicy` | `thread/start` 成功，threadId 写入 Assignment |
+| `codex:thread-name-failed` | Codex runtime | `ticketId` `threadId` `reason` | `thread/name/set` 失败；不影响工单，只是桌面端标题退回默认摘要 |
+| `codex:turn-started` | Codex runtime | `ticketId` `threadId` `turnId` `inputIds` `preview` | 新 turn 开始；追问也会走这里 |
+| `codex:turn-completed` | Codex runtime | `ticketId` `threadId` `turnId` `status` `durationMs` | turn 正常结束 |
+| `codex:turn-failed` | Codex runtime | `ticketId` `threadId` `turnId` `reason` | turn 失败，转人工 |
+| `codex:turn-steered` / `codex:steer-failed` | Codex runtime | `ticketId` `threadId` `turnId` `inputId` / `reason` | 执行中追加输入成功或失败（失败会排队） |
+| `codex:approval` | Codex runtime | `ticketId` `threadId` `kind` `decision` `command` | 审批请求的处理结果（full + never 下通常不出现） |
+| `codex:resumed` / `codex:resume-failed` | Codex runtime | `ticketId` `threadId` / `reason` | 重启后 `thread/resume` 接回成功或失败 |
+| `codex:process-exit` | Codex runtime | `ticketId` `threadId` `code` `signal` `reason` | app-server 子进程退出 |
+| `codex:error` | Codex runtime | `ticketId` `threadId` `reason` | Codex 返回的警告/错误事件 |
+| `codex:launch-failed` | Codex runtime | `workdir` `branch` `reason` | 派工启动失败 |
 
 worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态）；主动巡检优先读 Claude 会话记录，其次才把终端里的语义摘要（助手文本 + 动作概要）发到话题，不逐条回放工具调用。要看它做了什么，读 `report` 的 `summary` 与 `~/.router-agent/workers/<ticketId>/events.log`。
 

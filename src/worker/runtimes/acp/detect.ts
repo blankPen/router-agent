@@ -39,7 +39,7 @@ export interface RuntimeChoice {
   status: RuntimeStatus
   version?: string
   command?: string
-  source?: 'config' | 'managed' | 'path'
+  source?: 'config' | 'managed' | 'path' | 'app' | 'env'
   reason?: string
   installable: boolean
   packageName?: string
@@ -59,7 +59,7 @@ export interface RuntimeDetection {
 
 export interface ResolvedCommand {
   command?: string
-  source?: 'config' | 'managed' | 'path'
+  source?: 'config' | 'managed' | 'path' | 'app' | 'env'
   reason?: string
 }
 

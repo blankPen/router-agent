@@ -4,12 +4,14 @@ import { realRunner, type CommandRunner } from '../../../infra/process.js'
 import {
   ACP_RUNTIME_ID,
   CLAUDE_CODE_RUNTIME_ID,
+  CODEX_APP_RUNTIME_ID,
   ORCA_RUNTIME_ID,
   WORKER_RUNTIMES,
   normalizeRuntimeId,
   type WorkerRuntimeMeta,
 } from '../catalog.js'
 import { acpAgentOf } from './agents.js'
+import { detectCodexBinary, probeCodexHandshake } from '../codex/detect.js'
 import {
   checkAcpAgent,
   detectAcpAgent,
@@ -62,6 +64,7 @@ interface BuiltinProbe {
   status: RuntimeChoice['status']
   command?: string
   version?: string
+  source?: RuntimeChoice['source']
   reason?: string
   requires?: RuntimeRequirement[]
 }
@@ -129,13 +132,15 @@ export class AcpRuntimeAdmin {
    * 不代表已经登录；登录状态只有带 login.check 的 ACP Agent 才会判定。
    */
   private async builtinChoices(): Promise<RuntimeChoice[]> {
-    const [orca, claude] = await Promise.all([
+    const [orca, claude, codex] = await Promise.all([
       this.probeBuiltin('orca', ORCA_RUNTIME_ID),
       this.probeBuiltin('claude', CLAUDE_CODE_RUNTIME_ID),
+      this.probeCodex(),
     ])
     const probes = new Map<string, BuiltinProbe>([
       [ORCA_RUNTIME_ID, orca],
       [CLAUDE_CODE_RUNTIME_ID, claude],
+      [CODEX_APP_RUNTIME_ID, codex],
     ])
     return WORKER_RUNTIMES.map(meta => {
       if (meta.id === ACP_RUNTIME_ID) return this.genericAcpChoice(meta)
@@ -147,19 +152,55 @@ export class AcpRuntimeAdmin {
         status: probe.status,
         installable: false,
         cli: {
-          command: meta.id === CLAUDE_CODE_RUNTIME_ID ? 'claude' : 'orca',
-          label: meta.id === CLAUDE_CODE_RUNTIME_ID ? 'Claude Code CLI' : 'Orca CLI',
+          command: meta.id === CLAUDE_CODE_RUNTIME_ID
+            ? 'claude'
+            : meta.id === CODEX_APP_RUNTIME_ID
+              ? (probe.command ?? 'codex')
+              : 'orca',
+          label: meta.id === CLAUDE_CODE_RUNTIME_ID
+            ? 'Claude Code CLI'
+            : meta.id === CODEX_APP_RUNTIME_ID
+              ? 'Codex CLI'
+              : 'Orca CLI',
           installed: Boolean(probe.command),
           ...(probe.version ? { version: probe.version } : {}),
           ...(meta.installUrl ? { installUrl: meta.installUrl } : {}),
         },
         ...(probe.version ? { version: probe.version } : {}),
-        ...(probe.command ? { command: probe.command, source: 'path' as const } : {}),
+        ...(probe.command ? { command: probe.command, source: probe.source ?? 'path' } : {}),
         ...(probe.reason ? { reason: probe.reason } : {}),
         ...(probe.requires && probe.requires.length > 0 ? { requires: probe.requires } : {}),
         ...(meta.installHint ? { installHint: meta.installHint } : {}),
       }
     })
+  }
+
+  /** Codex App Server：优先 App bundle，其次 PATH；没装时给出安装入口。 */
+  private async probeCodex(): Promise<BuiltinProbe> {
+    const detection = await detectCodexBinary({
+      home: this.opts.home,
+      env: { ...process.env, ...this.env },
+      config: this.opts.config,
+      runner: this.runner,
+    })
+    if (!detection.command) {
+      return { status: 'not-installed', reason: detection.reason }
+    }
+    if (!detection.compatible) {
+      return {
+        status: 'incompatible',
+        command: detection.command,
+        ...(detection.version ? { version: detection.version } : {}),
+        ...(detection.source !== 'missing' ? { source: detection.source } : {}),
+        reason: detection.reason,
+      }
+    }
+    return {
+      status: 'ready',
+      command: detection.command,
+      ...(detection.version ? { version: detection.version } : {}),
+      ...(detection.source !== 'missing' ? { source: detection.source } : {}),
+    }
   }
 
   /** 自定义 `acp` 运行时：命令来自 config.yaml，Web 面板只读展示。 */
@@ -256,6 +297,9 @@ export class AcpRuntimeAdmin {
     loadSession?: boolean
   }> {
     const normalized = normalizeRuntimeId(idOrRuntimeId)
+    if (normalized === CODEX_APP_RUNTIME_ID) {
+      return this.checkCodexApp()
+    }
     if (normalized === ORCA_RUNTIME_ID || normalized === CLAUDE_CODE_RUNTIME_ID || normalized === ACP_RUNTIME_ID) {
       return this.checkBuiltin(normalized)
     }
@@ -321,6 +365,45 @@ export class AcpRuntimeAdmin {
     return {
       ok: choice.status === 'ready' || choice.status === 'unverified',
       detail,
+      choice,
+    }
+  }
+
+  /** Codex 做真实 initialize 握手；版本探测通过但握手失败仍判 incompatible。 */
+  private async checkCodexApp(): Promise<{ ok: boolean; detail: string; choice?: RuntimeChoice }> {
+    const detection = await detectCodexBinary({
+      home: this.opts.home,
+      env: { ...process.env, ...this.env },
+      config: this.opts.config,
+      runner: this.runner,
+    })
+    if (!detection.command || !detection.compatible) {
+      const choices = await this.builtinChoices()
+      this.mergeChoices(choices)
+      const choice = choices.find(item => item.id === CODEX_APP_RUNTIME_ID)
+      return { ok: false, detail: detection.reason ?? 'Codex 不可用', ...(choice ? { choice } : {}) }
+    }
+    const handshake = await probeCodexHandshake({
+      command: detection.command,
+      env: { ...process.env, ...this.env },
+      cwd: this.opts.home,
+    })
+    const choices = await this.builtinChoices()
+    const base = choices.find(item => item.id === CODEX_APP_RUNTIME_ID)
+    if (!base) return { ok: false, detail: '未知运行时：codex-app' }
+    const choice: RuntimeChoice = handshake.ok
+      ? base
+      : {
+          ...base,
+          status: 'incompatible',
+          reason: handshake.reason ?? 'initialize 握手失败',
+        }
+    this.mergeChoices([choice])
+    return {
+      ok: handshake.ok,
+      detail: handshake.ok
+        ? `initialize 握手通过${detection.version ? `（${detection.version}）` : ''}${handshake.userAgent ? ` · ${handshake.userAgent}` : ''}`
+        : (handshake.reason ?? 'initialize 握手失败'),
       choice,
     }
   }

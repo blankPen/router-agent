@@ -119,7 +119,7 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
     })
 
   withHome(program.command('runtime [action] [id]')
-    .description('ACP 运行时：list / check / install / uninstall / login'))
+    .description('Worker 运行时：list / check / install / uninstall / login（含 ACP 与 codex-app）'))
     .option('--json', 'list / check 以 JSON 输出')
     .option('--version <version>', 'install 指定版本（默认用目录里 pinned 的版本）')
     .action(async (action: string | undefined, id: string | undefined, opts: { home?: string; json?: boolean; version?: string }) => {
@@ -314,6 +314,7 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
       orca: output.orca ?? realRunner('orca'),
       claude: output.claude ?? realRunner('claude'),
       git: output.git ?? realRunner('git'),
+      logger: createLogger(home, output, false),
     }).default()
   } catch (error) {
     // 未注册/拼错的 runtime 由配置检查单独报错，不让 doctor 直接崩溃。
@@ -1128,6 +1129,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     orca: orcaRunner,
     claude: claudeRunner,
     git: gitRunner,
+    logger,
   })
   const runtime = runtimes.default()
   const prTracker = new ForgeTracker({

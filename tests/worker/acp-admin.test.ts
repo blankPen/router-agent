@@ -70,6 +70,31 @@ describe('内置运行时探测', () => {
     const admin = new AcpRuntimeAdmin({ home: dir, env: { ...process.env, PATH: join(dir, 'bin') }, config: config() })
     expect(() => admin.startInstall('orca')).toThrow(InstallStartError)
   })
+
+  it('codex-app 优先探测 Codex CLI，并支持真实 initialize 握手', async () => {
+    const dir = home()
+    const bin = join(dir, 'bin')
+    fakeBin(bin, 'codex', [
+      'case "$1" in',
+      '  --version) echo "codex-cli 0.166.0"; exit 0;;',
+      '  app-server)',
+      '    if [ "$2" = "--help" ]; then exit 0; fi',
+      '    read line',
+      '    echo \'{"id":1,"result":{"userAgent":"fake-codex/0.166.0"}}\'',
+      '    exit 0;;',
+      'esac',
+      'exit 1',
+    ].join('\n'))
+    const admin = new AcpRuntimeAdmin({ home: dir, env: { ...process.env, PATH: bin }, config: config() })
+    const snapshot = await admin.detect()
+    const codex = snapshot.choices.find(choice => choice.id === 'codex-app')
+    expect(codex).toMatchObject({ status: 'ready', version: '0.166.0', source: 'path', command: join(bin, 'codex') })
+
+    const checked = await admin.check('codex-app')
+    expect(checked.ok).toBe(true)
+    expect(checked.detail).toContain('initialize 握手通过')
+    expect(checked.choice).toMatchObject({ id: 'codex-app', status: 'ready' })
+  })
 })
 
 describe('自定义 acp 运行时', () => {

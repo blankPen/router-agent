@@ -10,6 +10,7 @@ Worker 不在 Router 进程里跑。每张工单开工时，Router 按 `runtime.
 |-|-|-|-|-|-|
 | `orca`（默认） | Orca 创建 worktree + Claude Code 终端 | `orca worktree create --repo … --base-branch …` | Orca `AgentStatus`（`connected` / `orphaned` / `lastOutputAt`） | 终端常驻，追问直接投递；巡检优先读 Claude 会话记录 | 本机已用 Orca 管仓库，想同时看到终端 |
 | `claude-code` | `git worktree` + `claude --bg` 后台会话 | 本地 git 仓库绝对路径 | `claude agents --json --all` | 会话结束后用 `claude --bg --resume <sessionId>` 追问；进程退出不自动 resume | 不用 Orca，直接跑 Claude Code |
+| `codex-app` | `git worktree` + `codex app-server --stdio` | 本地 git 仓库绝对路径 | Codex `thread/status/changed`、`turn/*`、`item/*` 事件 | `thread/resume` 接回；执行中 `turn/steer`；停止用 `turn/interrupt` | 想用 Codex，且希望 Router 创建的 thread 能在 Codex 桌面端看到 |
 | `acp` / `acp-*` | ACP 子进程：`initialize` → `session/new` → `session/prompt` | `git worktree`（本地绝对路径） | ACP `session/update` | Agent 声明 `loadSession` 时用 `session/load` 恢复 | 想接 Codex / Gemini / OpenCode 等 |
 
 `acp` 是自定义命令入口；`acp-*` 是内置 ACP Agent，共用同一套 `AcpRuntime`。
@@ -40,11 +41,15 @@ ra runtime uninstall acp-codex     # 卸载 ra 托管的适配器
 
 ```yaml
 runtime:
-  default: acp-codex        # orca | claude-code | acp | acp-*
+  default: acp-codex        # orca | claude-code | codex-app | acp | acp-*
   # 运行时专属的非安全参数
   options:
     claude-code:
       model: claude-sonnet-5-5
+    codex-app:
+      permissions: full        # full=danger-full-access；workspace=workspace-write
+      approvalPolicy: never    # never / on-request / untrusted
+      network: true
     acp:                    # 自定义 ACP 命令
       command: opencode
       args: [acp]
@@ -62,6 +67,65 @@ runtime:
 ```
 
 `allowedTools` / `permissionMode` / `sandbox` / `shellAllow` / `allowNetwork` / `fileAccess` 这些安全字段不允许写在 `runtime.options` 里，写了会直接启动失败。Worker 权限统一由 `worker.tools` 与 adapter 内置基线决定。
+
+## Codex App Server 运行时（`codex-app`）
+
+`codex-app` 直接启动 `codex app-server --stdio`，用 Codex 原生 JSON-RPC 承载工单：
+
+- `thread/start` + `turn/start` 首轮；`thread/resume` 重启后接回；`turn/steer` 执行中追加输入；`turn/interrupt` 停止；
+- 原生处理 `item/commandExecution/requestApproval`、`item/fileChange/requestApproval`、`item/permissions/requestApproval` 等审批请求；
+- threadId 同时写入 `meta.handle` / `meta.sessionId`，Web 面板会显示「Codex 打开」按钮，用 `codex://threads/<threadId>` 在 Codex 桌面端打开同一 thread。
+
+### 二进制发现（优先 Codex App 内置）
+
+按以下顺序探测，取第一个既能跑 `codex --version`、又支持 `codex app-server` 的版本：
+
+1. `runtime.options.codex-app.command` 显式配置；
+2. `RA_CODEX_BIN` / `CODEX_BIN` / `CODEX_CLI_PATH`；
+3. Codex App bundle（macOS）：
+   - `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`
+   - `/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`
+   - `/Applications/ChatGPT.app/Contents/Resources/codex`
+   - `/Applications/Codex.app/Contents/Resources/codex`
+   - 以及 `~/Applications/...` 下的同名布局；
+4. `PATH` 里的 `codex`。
+
+都找不到时，`start` 报 `runtime:unavailable`，`ra doctor` / `ra runtime list` 会提示安装 Codex App 或 Codex CLI，并给出 https://chatgpt.com/codex 。`ra runtime check codex-app` 会真正做一次 `initialize` 握手。
+
+### 权限与审批
+
+默认按工单要求使用 **full access + 不审批**：
+
+```yaml
+runtime:
+  default: codex-app
+  options:
+    codex-app:
+      permissions: full          # full=danger-full-access；workspace=workspace-write
+      approvalPolicy: never      # never / on-request / untrusted
+      network: true              # 仅 workspace 模式生效
+      model: gpt-6.1-sol         # 可选；缺省用 Codex 自己的配置
+      modelProvider: ep          # 可选
+      # command: /Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex
+```
+
+`full + never` 不会产生审批请求；`workspace + never` 允许在工作区与 `~/.router-agent/workers/<ticket>` 写文件、允许联网，但系统级操作受限。只有把 `approvalPolicy` 改成 `on-request` / `untrusted` 时，才按 `worker.tools.shell` / `shellAllow` 逐条放行或拒绝**触发审批的**命令。
+
+> Codex 的 sandbox 允许的命令不会逐条走审批，因此 `shellAllow` 不能替代 sandbox 的命令级白名单；真正要限制“哪些命令能跑”，需要 Codex execpolicy/rules 或更窄的 sandbox。`codex-app` 映射的是 `worker.tools` 的审批决策，不是完整的命令过滤器。
+
+> `full + never` 没有人工闸门；请只对 Router 创建的 worktree 使用，不要对不可信仓库默认开启。运行时会打 `codex:full-access` 日志。
+
+### 桌面端可见性
+
+Router 与 Codex 桌面 App 默认共用 `~/.codex`。要让桌面端侧边栏自然列出 Router 创建的 thread，需要同时满足：
+
+- 同一个 `CODEX_HOME`、同一个登录；
+- thread 至少完成一个 turn，`preview` 非空；
+- thread 的 `source` 属于交互式来源（`codex-app` 外部客户端默认是 `vscode`）；
+- 桌面端当前 `model provider` 与 thread 的 `modelProvider` 一致；
+- Codex CLI / Codex App 版本兼容（见 `docs/RUNTIME.md` 的版本说明）。
+
+跨进程默认不是实时同步：桌面端看到的是落盘后的 thread；要实时收同一份事件，需要连同一个 app-server / daemon。Router 重启后会用 `thread/resume` 接回；关闭 Router 不会关闭桌面 App。
 
 ## ACP Agent 目录
 
@@ -92,7 +156,7 @@ runtime:
 | `shellAllow` | 命令前缀数组 | 仅在 `shell: allowlist` 时生效 |
 | `allowNetwork` | `true` / `false` | 预留字段：当前只解析，未用于收窄网络 |
 
-`worker.tools` 对 `claude-code` 生效（映射成 Claude 的 `allowedTools`）；`acp-*` 运行时的 `session/request_permission` 也按同一策略自动放行或拒绝；`orca` 运行时里 worker 的权限由 Orca 启动的 Claude Code 自身决定。安全字段只能由这里和 adapter 内置基线决定，`runtime.options` 写了同名键会直接启动失败。
+`worker.tools` 对 `claude-code` 生效（映射成 Claude 的 `allowedTools`）；`acp-*` 运行时的 `session/request_permission` 也按同一策略自动放行或拒绝；`codex-app` 在 `approvalPolicy: on-request` / `untrusted` 时按同一策略处理命令审批，`approvalPolicy: never` 时不再逐条审批；`orca` 运行时里 worker 的权限由 Orca 启动的 Claude Code 自身决定。安全字段只能由这里和 adapter 内置基线决定，`runtime.options` 写了同名键会直接启动失败。
 
 ## Worker 规范注入
 
