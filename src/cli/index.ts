@@ -653,7 +653,7 @@ async function cmdTicketStop(home: string, ticketId: string, output: CliIo): Pro
       body: JSON.stringify({ reason: 'ra ticket --stop' }),
     })
     if (res.ok) {
-      output.stdout(`已停止 ${ticketId}（服务已关闭 worker 终端）`)
+      output.stdout(`已停止 ${ticketId}（worker 终端与 workspace 正在回收）`)
       return 0
     }
     output.stderr(`服务返回 ${res.status}，改为直接写库停止`)
@@ -673,8 +673,18 @@ async function cmdTicketStop(home: string, ticketId: string, output: CliIo): Pro
       return 0
     }
     const engine = new Engine({ store, policy: policyOf(config) })
-    engine.stopTicket(ticketId, 'ra ticket --stop')
-    output.stdout(`已停止 ${ticketId}`)
+    const stopped = engine.stopTicket(ticketId, 'ra ticket --stop')
+    // 服务未运行时先把回收任务落到 effects 队列，下次启动会按同一套逻辑删 worktree。
+    const now = new Date().toISOString()
+    const suffix = (stopped.closedAt ?? now).replace(/[^0-9a-zA-Z]/g, '')
+    store.enqueueEffect({
+      id: `ef_cleanup_${ticketId}_${suffix}`,
+      key: `cleanup-workspace:${ticketId}:${stopped.closedAt ?? now}`,
+      kind: 'cleanup-workspace',
+      payload: { ticketId },
+      now,
+    })
+    output.stdout(`已停止 ${ticketId}；workspace 回收已排队，服务启动后执行`)
     return 0
   } finally {
     store.close()
@@ -1265,6 +1275,8 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
             list: async () => service.listWorkspaces(),
             cleanup: (request: Parameters<RouterService['cleanupWorkspaces']>[0]) => service.cleanupWorkspaces(request),
           },
+          // 面板「停止」由服务层关单并排 workspace 回收，避免只停进程、目录留在磁盘上。
+          onStopTicket: (ticketId: string, reason: string) => service.stopTicket(ticketId, reason),
         }
       : {}),
     port: config.server.port,

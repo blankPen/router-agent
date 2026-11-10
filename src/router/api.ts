@@ -10,6 +10,7 @@ import { isWorkerRuntimeId, normalizeRuntimeId } from '../worker/runtimes/catalo
 import { ProjectSetupError, type ProjectSetupPort } from './project-setup.js'
 import type { ChannelAdmin } from '../channels/port.js'
 import type { AcceptMode } from '../core/policy.js'
+import type { Ticket } from '../core/model.js'
 import { noopSink, preview, type EventSink } from '../core/events.js'
 import { noopLogger, errorMessage, type Logger } from '../infra/logger.js'
 import type { WorkerStateFile } from '../worker/report-poller.js'
@@ -58,6 +59,8 @@ export interface ApiServerOptions {
   logPath?: string
   /** 项目登记：目录选择、Git 探测、clone 与 Orca 仓库登记；缺省时端点返回 404。 */
   projectSetup?: ProjectSetupPort
+  /** 面板「停止」：由服务层关单并排 workspace 回收；缺省时只停 worker（Web-only 模式）。 */
+  onStopTicket?: (ticketId: string, reason: string) => Ticket
   /** 工单页「批量清理工作区」：按运行时列出与回收遗留 worktree；缺省时端点返回 501。 */
   workspaceAdmin?: WorkspaceAdminPort
   /** 本机 LLM Provider 发现；缺省扫描当前用户主目录下的 Claude Code / CCSwitch / Pi 配置。 */
@@ -170,15 +173,20 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
 
       if (what === 'stop' && req.method === 'POST') {
         const reason = String((body as Record<string, unknown>).reason ?? '面板停止')
-        const stopped = opts.engine.stopTicket(ticketId, reason)
+        // 有服务层时由它统一关单 + 回收 workspace；Web-only 模式退回只停 worker。
+        const stopped = opts.onStopTicket
+          ? opts.onStopTicket(ticketId, reason)
+          : opts.engine.stopTicket(ticketId, reason)
         onEvent({ event: 'api:stop', ticketId, reason: preview(reason) })
-        opts.store.enqueueEffect({
-          id: `ef_stop_${ticketId}_${Date.now()}`,
-          key: `stop:${ticketId}`,
-          kind: 'stop-worker',
-          payload: { ticketId },
-          now: clock.now(),
-        })
+        if (!opts.onStopTicket) {
+          opts.store.enqueueEffect({
+            id: `ef_stop_${ticketId}_${Date.now()}`,
+            key: `stop:${ticketId}`,
+            kind: 'stop-worker',
+            payload: { ticketId },
+            now: clock.now(),
+          })
+        }
         return respond(res, 200, { ticket: stopped })
       }
 
