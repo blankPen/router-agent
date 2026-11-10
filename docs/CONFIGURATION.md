@@ -172,6 +172,31 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 
 模型配置是**必填项**：必须在 `~/.router-agent/config.yaml` 的 `llm` 段（或 Web 面板的「LLM Provider」）配置 `baseUrl` / `model` / `apiKey`，三项缺一不可，否则服务启动直接报错。密钥只写不回显。也可以用 `RA_LLM_BASE_URL` / `RA_LLM_API_KEY` / `RA_LLM_MODEL` 覆盖。
 
+默认走 OpenAI 兼容协议（`/chat/completions`）。如果网关是 Anthropic 兼容（Claude Code / CCSwitch 里常见的 `ANTHROPIC_BASE_URL`），加两项：
+
+```yaml
+llm:
+  baseUrl: https://gateway.example.com
+  model: claude-sonnet-demo
+  apiKey: sk-xxx
+  api: anthropic-messages   # 默认 openai-completions
+  authHeader: true          # 密钥用 Authorization: Bearer 发送（ANTHROPIC_AUTH_TOKEN）
+```
+
+`authHeader` 只在 `api: anthropic-messages` 时生效：用 `ANTHROPIC_AUTH_TOKEN` 的网关开启，用 `ANTHROPIC_API_KEY`（x-api-key）的网关保持关闭。Web 初始化页 / 配置页的「接口协议」「密钥用 Bearer 发送」对应这两项。
+
+**从本地配置导入**：Web 初始化页「LLM Provider」下方的「扫描本地配置」会只读检查以下位置，把 Base URL / 模型 / 密钥齐全的 Provider 列出来，点「导入」直接写回 `config.yaml`（密钥在服务端读取，不会回显到页面）：
+
+| 来源 | 路径 | 说明 |
+|-|-|-|
+| Claude Code | `~/.claude/settings.json` 的 `env` | 识别 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL`（含 `ANTHROPIC_DEFAULT_*_MODEL`） |
+| CCSwitch | `~/.cc-switch/cc-switch.db`（SQLite `providers` 表）与旧版 `~/.cc-switch/config.json` | 支持 claude（Anthropic 兼容）以及 opencode / openclaw / pi 这类 `baseUrl + apiKey + models` 结构 |
+| Pi | `~/.pi/agent/models.json` | 读取 `providers` 下的模型清单，`apiKey` 支持 `$ENV` 引用 |
+| OpenCode | `~/.config/opencode/opencode.json` | 读取 `provider.<id>.options.baseURL / apiKey` 与 `models`，`apiKey` 支持 `{ "env": "VAR" }` |
+| Magpie | `~/.config/magpie/providers.json` | 读取 `providers[]` 的 `chat` / `anthropic` / `baseAPI` / `models`；`model[1M]` 标记会转换成模型名 + 上下文窗口 |
+
+导入只新增或覆盖 `llm` 段的连接信息，不改动本地原配置；导入后需要重启服务生效。
+
 > 服务未启动时 Web 面板打不开，首次配置可以直接写 `config.yaml`，或用 `ra config set llm.baseUrl ...` / `ra config set llm.model ...` / `ra config set llm.apiKey ...` 先落盘，再 `ra start`。会话自动压缩依赖 `llm.contextWindow`（默认 128000），换模型时记得同步改。
 
 图片消息转文本默认复用同一个模型；如果主模型不支持多模态，单独指定视觉模型即可（只覆盖图片链路，不影响研判）：
@@ -184,6 +209,8 @@ llm:
 ```
 
 也可以用 `RA_LLM_IMAGE_MODEL` / `RA_LLM_IMAGE_BASE_URL` / `RA_LLM_IMAGE_API_KEY` 覆盖。`feishu.images.enabled: false` 可关闭图片转文本（回到「只回一句请补充文字」的行为）。
+
+> 图片转写目前只走 OpenAI 兼容的 `/chat/completions`。如果主模型是 `anthropic-messages` 且没有单独配置 `imageBaseUrl` / `imageApiKey`，请同时配置一个 OpenAI 兼容的视觉模型，或关闭 `feishu.images.enabled`。
 
 `llm.temperature` 只影响图片转写（默认 `0.1`），不参与研判。
 

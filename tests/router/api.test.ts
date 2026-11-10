@@ -200,7 +200,13 @@ describe('HTTP 管理 API', () => {
     const res = await call(server, 'GET', '/api/config')
     expect(res.status).toBe(200)
     expect(res.json.config.policy.acceptMode).toBe('auto')
-    expect(res.json.config.llm).toEqual({ baseUrl: 'https://api.example.com/v1', model: 'demo', apiKeySet: true })
+    expect(res.json.config.llm).toEqual({
+      baseUrl: 'https://api.example.com/v1',
+      model: 'demo',
+      api: 'openai-completions',
+      authHeader: false,
+      apiKeySet: true,
+    })
     expect(JSON.stringify(res.json)).not.toContain('sk-secret')
     expect(res.json.defaults.policy.maxWorkers).toBe(4)
     expect(res.json.configPath).toBe(join(config.home, 'config.yaml'))

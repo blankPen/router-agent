@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { existsSync, readFileSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { extname, join, normalize, resolve } from 'node:path'
 import type { Store } from '../store/db.js'
 import type { Engine } from '../core/engine.js'
@@ -17,6 +18,11 @@ import type { WorkspaceAdminPort } from '../worker/workspaces/overview.js'
 import { readLogs } from './log-tail.js'
 import { getSpec, listSpecs, resetSpec, saveSpec, SpecError } from '../specs/index.js'
 import { PACKAGE_VERSION, type UpdateSnapshot } from '../update/index.js'
+import {
+  discoverLocalProviders,
+  toLocalProviderView,
+  type LocalProviderScan,
+} from './provider-import.js'
 
 /** 版本检查 / 升级端口；由 CLI 注入 UpdateService，单测可传假实现。 */
 export interface UpdatePort {
@@ -54,6 +60,8 @@ export interface ApiServerOptions {
   projectSetup?: ProjectSetupPort
   /** 工单页「批量清理工作区」：按运行时列出与回收遗留 worktree；缺省时端点返回 501。 */
   workspaceAdmin?: WorkspaceAdminPort
+  /** 本机 LLM Provider 发现；缺省扫描当前用户主目录下的 Claude Code / CCSwitch / Pi 配置。 */
+  localProviders?: { discover(): Promise<LocalProviderScan> }
   /** 请求级异常与配置写入失败的日志出口。 */
   logger?: Logger
 }
@@ -69,6 +77,9 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
   const onEvent = opts.onEvent ?? noopSink
   const logger = opts.logger ?? noopLogger
   const logPath = opts.logPath ?? (config.home ? join(config.home, 'logs', 'router-agent.log') : '')
+  const localProviders = opts.localProviders ?? {
+    discover: () => discoverLocalProviders({ home: homedir() }),
+  }
 
   const server = createServer((req, res) => {
     handle(req, res).catch(error => {
@@ -314,6 +325,87 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         })
       }
       return respond(res, 405, { error: 'method-not-allowed' })
+    }
+
+    if (path === '/api/llm/local-providers' && req.method === 'GET') {
+      try {
+        const scan = await localProviders.discover()
+        return respond(res, 200, {
+          candidates: scan.candidates.map(toLocalProviderView),
+          sources: scan.sources,
+        })
+      } catch (error) {
+        logger.warn('llm:import-scan-failed', { message: errorMessage(error) })
+        return respond(res, 500, { error: 'llm-import-scan-failed', message: errorMessage(error) })
+      }
+    }
+
+    if (path === '/api/llm/local-providers/import' && req.method === 'POST') {
+      const body = await readJson(req)
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      if (!id) return respond(res, 400, { error: 'id-required', message: '缺少要导入的候选 id' })
+
+      let scan: LocalProviderScan
+      try {
+        scan = await localProviders.discover()
+      } catch (error) {
+        logger.warn('llm:import-scan-failed', { message: errorMessage(error) })
+        return respond(res, 500, { error: 'llm-import-scan-failed', message: errorMessage(error) })
+      }
+      const candidate = scan.candidates.find(item => item.id === id)
+      if (!candidate) {
+        logger.warn('llm:import-missing', { id: preview(id, 120) })
+        return respond(res, 404, { error: 'provider-not-found', message: '本地配置里已经没有这个 Provider，请刷新后重试' })
+      }
+
+      const patch: Record<string, unknown> = {
+        'llm.baseUrl': candidate.baseUrl,
+        'llm.model': candidate.model,
+        'llm.apiKey': candidate.apiKey,
+        'llm.api': candidate.api,
+        'llm.authHeader': candidate.authHeader === true,
+        ...(candidate.contextWindow ? { 'llm.contextWindow': candidate.contextWindow } : {}),
+      }
+      const previewConfig = structuredClone(config)
+      const result = applyConfigPatch(previewConfig, patch)
+      if (result.errors.length > 0) {
+        logger.warn('llm:import-rejected', { id: preview(id, 120), errors: result.errors })
+        return respond(res, 400, { error: 'invalid-config', errors: result.errors })
+      }
+      if (config.home && result.changed.length > 0) {
+        try {
+          writeConfig(config.home, previewConfig)
+        } catch (error) {
+          logger.error('llm:import-write-failed', { home: config.home, message: errorMessage(error) })
+          return respond(res, 500, { error: 'config-write-failed', message: errorMessage(error) })
+        }
+      }
+      applyConfigPatch(config, patch)
+      await opts.onConfigChange?.(config, result.changed)
+      logger.info('llm:import-applied', {
+        source: candidate.source,
+        name: candidate.name,
+        api: candidate.api,
+        baseUrl: candidate.baseUrl,
+        changed: result.changed,
+      })
+      onEvent({ event: 'api:llm-import', source: candidate.source, model: candidate.model, changed: result.changed })
+      return respond(res, 200, {
+        ...configPayload(config, opts.runtimeAdmin),
+        ok: true,
+        changed: result.changed,
+        restartRequired: requiresRestart(result.changed),
+        policyChanged: false,
+        imported: {
+          id: candidate.id,
+          source: candidate.source,
+          sourceLabel: candidate.sourceLabel,
+          name: candidate.name,
+          baseUrl: candidate.baseUrl,
+          model: candidate.model,
+          api: candidate.api,
+        },
+      })
     }
 
     if (path === '/api/feishu/status' && req.method === 'GET') {

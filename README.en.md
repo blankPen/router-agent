@@ -93,7 +93,7 @@ ra web                # reopen the dashboard later
 
 The page only covers the five things needed to get running, with a completion checklist at the top:
 
-1. **LLM Provider**: Base URL / model / API key — all three are required. The key is written only to `config.yaml` and never echoed back; `RA_LLM_*` environment variables can override it.
+1. **LLM Provider**: Base URL / model / API key — all three are required; both OpenAI-compatible and Anthropic-compatible APIs are supported. The key is written only to `config.yaml` and never echoed back; `RA_LLM_*` environment variables can override it. Use **Scan local config** below the form to import an existing provider from Claude Code, CCSwitch, Pi, OpenCode or Magpie (the source files are read-only and the key is never sent back to the page).
 2. **Worker runtime**: Orca / Claude Code / ACP Agent cards, with automatic checks for the CLI, version, ACP dependencies and login state, plus install guidance and a real handshake test.
 3. **Projects**: add a local project (system directory picker + Git detection) or a Git project (cloned into `~/.router-agent/repos`; `RA_HOME` changes the root).
 4. **Feishu bot**: enter App ID / App Secret (the secret is written only to lark-cli's encrypted store); router-agent always uses the fixed `~/.router-agent-lark` profile. After saving you can check authorization status and complete the Device Flow login from the same page.

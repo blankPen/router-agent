@@ -172,6 +172,26 @@ export interface RetentionSettings {
   sweepMinutes: number
 }
 
+/** Router 支持的模型接口协议；默认 OpenAI 兼容。 */
+export const LLM_APIS = ['openai-completions', 'anthropic-messages'] as const
+export type LlmApi = typeof LLM_APIS[number]
+
+export interface LlmSettings {
+  baseUrl?: string
+  apiKey?: string
+  model?: string
+  /** 接口协议；不写按 openai-completions 处理（兼容旧配置）。 */
+  api?: LlmApi
+  /** anthropic-messages 下是否把 apiKey 作为 Authorization: Bearer 发送（ANTHROPIC_AUTH_TOKEN）。 */
+  authHeader?: boolean
+  temperature?: number
+  contextWindow?: number
+  /** 图片转写单独指定时使用；只影响图片链路。 */
+  imageModel?: string
+  imageBaseUrl?: string
+  imageApiKey?: string
+}
+
 export interface AppConfig {
   home: string
   projects: ProjectConfig[]
@@ -184,7 +204,7 @@ export interface AppConfig {
   worker: { tools: ToolPolicy }
 runtime: { default: string; options?: Record<string, unknown>; projects?: RuntimeProjects }
   server: { port: number }
-  llm?: { baseUrl?: string; apiKey?: string; model?: string; temperature?: number; contextWindow?: number }
+  llm?: LlmSettings
 }
 
 /** 某个 runtime 当前可用的项目清单；orca 兼容顶层 projects。 */
@@ -384,13 +404,15 @@ server:
   port: 3083
 
 # 模型配置必填：baseUrl / model / apiKey 三项缺一不可，未配置时服务启动会直接报错；
-# 也可以在 Web 面板「初始化 · LLM Provider」里填写（密钥只写不回显）
+# 也可以在 Web 面板「初始化 · LLM Provider」里填写，或从 Claude Code / CCSwitch / Pi / OpenCode / Magpie 的本地配置导入
 # 环境变量 RA_LLM_BASE_URL / RA_LLM_API_KEY / RA_LLM_MODEL 优先级更高，可按需覆盖
 # llm:
 #   baseUrl: https://api.deepseek.com/v1
 #   model: deepseek-v4-flash
 #   apiKey: sk-xxx
-#   contextWindow: 128000    # 用于会话自动压缩的阈值计算
+#   api: openai-completions   # 或 anthropic-messages（Claude Code / CCSwitch 的 Anthropic 兼容网关）
+#   authHeader: false         # anthropic-messages 用 ANTHROPIC_AUTH_TOKEN 时改成 true
+#   contextWindow: 128000     # 用于会话自动压缩的阈值计算
 `
 
 /** 创建 ~/.router-agent 目录结构；不覆盖已有配置。 */
@@ -521,11 +543,35 @@ runtime: {
       ...(Object.keys(projectLists.others).length > 0 ? { projects: projectLists.others } : {}),
     },
     server: { port: Number.isFinite(port) && port >= 0 && port < 65536 ? port : base.server.port },
-    ...(doc.llm ? { llm: doc.llm } : {}),
+    ...(isRecord(doc.llm) ? { llm: parseLlm(doc.llm) } : {}),
   }
   // 群绑定分支始终跟随项目清单，避免 YAML 里残留的自定义分支与面板显示不一致。
   alignChatBranches(config)
   return config
+}
+
+/**
+ * 只保留认识的 llm 字段，避免手写 YAML 里混入拼错或类型不对的键后，
+ * 悄悄跟随运行期一路传进 Pi（尤其是 api / authHeader 会直接影响请求协议）。
+ */
+function parseLlm(value: unknown): LlmSettings {
+  if (!isRecord(value)) return {}
+  const out: LlmSettings = {}
+  for (const key of ['baseUrl', 'apiKey', 'model', 'imageModel', 'imageBaseUrl', 'imageApiKey'] as const) {
+    const raw = value[key]
+    if (typeof raw === 'string' && raw.trim()) out[key] = raw.trim()
+  }
+  if (typeof value.api === 'string' && (LLM_APIS as readonly string[]).includes(value.api)) {
+    out.api = value.api as LlmApi
+  }
+  if (typeof value.authHeader === 'boolean') out.authHeader = value.authHeader
+  if (typeof value.temperature === 'number' && Number.isFinite(value.temperature)) {
+    out.temperature = value.temperature
+  }
+  if (typeof value.contextWindow === 'number' && Number.isInteger(value.contextWindow) && value.contextWindow > 0) {
+    out.contextWindow = value.contextWindow
+  }
+  return out
 }
 
 /** 把配置折算成领域 Policy；版本号是规则的指纹。 */
@@ -861,6 +907,9 @@ export function publicConfig(config: AppConfig): Record<string, unknown> {
   doc.llm = {
     baseUrl: String(llm.baseUrl ?? ''),
     model: String(llm.model ?? ''),
+    api: typeof llm.api === 'string' ? llm.api : 'openai-completions',
+    authHeader: llm.authHeader === true,
+    ...(typeof llm.contextWindow === 'number' ? { contextWindow: llm.contextWindow } : {}),
     apiKeySet: Boolean(llm.apiKey),
   }
   // ACP 适配器的 env 可能包含 API key：只下发 key 名，不下发明文。
@@ -1042,6 +1091,9 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
   'llm.baseUrl': stringValue,
   'llm.model': stringValue,
   'llm.apiKey': secretValue,
+  'llm.api': enumValue(LLM_APIS),
+  'llm.authHeader': boolValue(),
+  'llm.contextWindow': intValue(1_000, 10_000_000),
 }
 
 /** 整段替换的复杂字段（项目、群、白名单这类不适合逐项点路径编辑的配置）。 */
@@ -1414,6 +1466,23 @@ case 'runtime.default': {
     case 'llm.model': {
       const key = path.split('.')[1] as 'baseUrl' | 'apiKey' | 'model'
       config.llm = { ...(config.llm ?? {}), [key]: value }
+      return true
+    }
+    case 'llm.api': {
+      if (!(LLM_APIS as readonly string[]).includes(value)) return false
+      config.llm = { ...(config.llm ?? {}), api: value as LlmApi }
+      return true
+    }
+    case 'llm.authHeader': {
+      const v = bool()
+      if (v === null) return false
+      config.llm = { ...(config.llm ?? {}), authHeader: v }
+      return true
+    }
+    case 'llm.contextWindow': {
+      const n = int(1_000, 10_000_000)
+      if (n === null) return false
+      config.llm = { ...(config.llm ?? {}), contextWindow: n }
       return true
     }
     default:

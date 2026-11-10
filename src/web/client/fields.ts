@@ -91,7 +91,17 @@ export const LLM_FIELDS: FieldDef[] = [
     label: '模型 Base URL',
     kind: 'text',
     placeholder: '例如 https://api.deepseek.com/v1',
-    hint: 'OpenAI 兼容接口地址，必填，例如 https://api.deepseek.com/v1',
+    hint: '接口地址，必填；OpenAI 兼容填到 /v1，Anthropic 兼容填网关根地址（不带 /v1/messages）',
+  },
+  {
+    path: 'llm.api',
+    label: '接口协议',
+    kind: 'select',
+    options: [
+      { value: 'openai-completions', label: 'openai-completions · OpenAI 兼容（默认）', hint: 'DeepSeek / 通义 / Kimi 等 /chat/completions 接口' },
+      { value: 'anthropic-messages', label: 'anthropic-messages · Anthropic 兼容', hint: 'Claude Code / CCSwitch 里常见的 ANTHROPIC_BASE_URL 网关' },
+    ],
+    hint: '从本地 Claude Code / CCSwitch 配置导入时会自动设置',
   },
   {
     path: 'llm.model',
@@ -107,13 +117,19 @@ export const LLM_FIELDS: FieldDef[] = [
     placeholder: '留空 = 保持已配置的密钥',
     hint: '只写入 config.yaml，保存后不会回显；必填，环境变量 RA_LLM_API_KEY 可覆盖',
   },
+  {
+    path: 'llm.authHeader',
+    label: '密钥用 Bearer 发送',
+    kind: 'switch',
+    hint: 'Anthropic 兼容端点使用 ANTHROPIC_AUTH_TOKEN 时开启；使用 ANTHROPIC_API_KEY（x-api-key）时保持关闭',
+  },
 ]
 
 export const SECTIONS: SectionDef[] = [
   {
     id: 'llm',
     title: 'LLM Provider',
-    description: 'Router 研判与图片转写使用的大模型接入，三项均为必填。密钥只写入 config.yaml，保存后不回显明文。',
+    description: 'Router 研判与图片转写使用的大模型接入，Base URL / 模型 / API Key 三项必填。密钥只写入 config.yaml，保存后不回显明文。',
     fields: LLM_FIELDS,
   },
   {

@@ -2,12 +2,17 @@ import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { parse as parseYaml } from 'yaml'
+import { LLM_APIS, type LlmApi } from '../config.js'
 
-/** Pi 会话需要的模型配置（OpenAI 兼容接口）。 */
+/** Pi 会话需要的模型配置（OpenAI / Anthropic 兼容接口）。 */
 export interface PiModelConfig {
   baseUrl: string
   apiKey: string
   model: string
+  /** 接口协议；默认 openai-completions。 */
+  api?: LlmApi
+  /** anthropic-messages 下把密钥作为 Authorization: Bearer 发送。 */
+  authHeader?: boolean
   temperature?: number
 }
 
@@ -37,7 +42,7 @@ export function resolvePiModelConfig(opts: ResolveModelOptions = {}): PiModelCon
   const configPath = opts.configPath ?? join(raHome, 'config.yaml')
   const fromConfig = readYamlModel(configPath)
 
-  const merged = { ...fromConfig, ...fromEnv }
+  const merged = { api: 'openai-completions' as LlmApi, ...fromConfig, ...fromEnv }
   if (!merged.baseUrl || !merged.apiKey || !merged.model) {
     throw new Error('pi:model-config-missing: 需要配置 baseUrl / apiKey / model（config.yaml 的 llm 段 / ra config set llm.* / 环境变量 RA_LLM_*）')
   }
@@ -53,6 +58,10 @@ function readYamlModel(path: string): Partial<PiModelConfig> {
       ...(llm.baseUrl ? { baseUrl: String(llm.baseUrl) } : {}),
       ...(llm.apiKey ? { apiKey: String(llm.apiKey) } : {}),
       ...(llm.model ? { model: String(llm.model) } : {}),
+      ...(typeof llm.api === 'string' && (LLM_APIS as readonly string[]).includes(llm.api)
+        ? { api: llm.api as LlmApi }
+        : {}),
+      ...(typeof llm.authHeader === 'boolean' ? { authHeader: llm.authHeader } : {}),
       ...(llm.temperature !== undefined ? { temperature: Number(llm.temperature) } : {}),
     }
   } catch {

@@ -16,7 +16,18 @@ import {
   type RuntimeChoiceView,
   type SectionDef,
 } from './fields.js'
-import { getJson, saveConfigPatch, sendJson, type ConfigBundle, type ConfigDoc, type ConfigSaveResult } from './api.js'
+import {
+  importLocalProvider,
+  listLocalProviders,
+  getJson,
+  saveConfigPatch,
+  sendJson,
+  type ConfigBundle,
+  type ConfigDoc,
+  type ConfigSaveResult,
+  type LocalProviderList,
+  type LocalProviderView,
+} from './api.js'
 import { Icon, LogoMark } from './icons.js'
 import { RuntimeCards, type RuntimeNotice } from './runtime-cards.js'
 import { FeishuBotPanel } from './feishu-panel.js'
@@ -1583,6 +1594,11 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
   const [notice, setNotice] = useState<RuntimeNotice | null>(null)
   const [pendingRestart, setPendingRestart] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [importOpen, setImportOpen] = useState(false)
+  const [importLoading, setImportLoading] = useState(false)
+  const [importingId, setImportingId] = useState('')
+  const [importError, setImportError] = useState<string | null>(null)
+  const [localProviders, setLocalProviders] = useState<LocalProviderList | null>(null)
 
   // 重启开始后不再提示「需重启」。
   useEffect(() => {
@@ -1613,7 +1629,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
 
   const changed = useMemo(() => {
     if (!draft || !original) return []
-    const paths = ['llm.baseUrl', 'llm.model', 'llm.apiKey', 'runtime.default', 'feishu.appId', 'feishu.directMessages', 'feishu.chats']
+    const paths = ['llm.baseUrl', 'llm.model', 'llm.apiKey', 'llm.api', 'llm.authHeader', 'runtime.default', 'feishu.appId', 'feishu.directMessages', 'feishu.chats']
     for (const runtime of runtimeCatalog) paths.push(projectPatchPath(runtime.id))
     return paths.filter(path => JSON.stringify(getByPath(draft, path)) !== JSON.stringify(getByPath(original, path)))
   }, [draft, original, runtimeCatalog])
@@ -1709,6 +1725,46 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
     if (await save()) onRestart()
   }
 
+  const scanLocalProviders = async (): Promise<void> => {
+    setImportOpen(true)
+    setImportLoading(true)
+    setImportError(null)
+    try {
+      setLocalProviders(await listLocalProviders())
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setImportLoading(false)
+    }
+  }
+
+  const applyLocalProvider = async (candidate: LocalProviderView): Promise<void> => {
+    if (changed.length > 0 && !confirm('导入会覆盖当前草稿里未保存的修改。继续？')) return
+    setImportingId(candidate.id)
+    setImportError(null)
+    try {
+      const result = await importLocalProvider(candidate.id)
+      setOriginal(result.config)
+      setDraft(result.config)
+      setDefaults(result.defaults)
+      setConfigPath(result.configPath)
+      if (result.runtimeChoices) setRuntimeChoices(result.runtimeChoices)
+      if (typeof result.detecting === 'boolean') setDetecting(result.detecting)
+      setPendingRestart(result.restartRequired)
+      setImportOpen(false)
+      const message = {
+        kind: result.restartRequired ? 'warn' as const : 'ok' as const,
+        text: `已导入 ${candidate.sourceLabel} · ${candidate.name}${result.restartRequired ? '，重启服务后生效' : ''}。`,
+      }
+      setNotice(message)
+      window.setTimeout(() => setNotice(current => (current === message ? null : current)), 8_000)
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setImportingId('')
+    }
+  }
+
   if (loadError) return <div className="banner danger"><Icon name="alert" />读取配置失败：{loadError}</div>
   if (!draft || !original) return <div className="empty-state tall"><p>正在读取配置…</p></div>
 
@@ -1801,6 +1857,58 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
               onChange={value => setField(field.path, value)}
             />
           ))}
+        </div>
+        <div className="provider-import">
+          <div className="provider-import-head">
+            <div>
+              <strong>从本地配置导入</strong>
+              <span>读取 Claude Code、CCSwitch、Pi、OpenCode、Magpie 的本地 Provider 配置，只读取，不改动原文件。</span>
+            </div>
+            <button className="btn tiny" onClick={() => void scanLocalProviders()} disabled={importLoading || Boolean(importingId)}>
+              <Icon name={importLoading ? 'refresh' : 'download'} size={13} className={importLoading ? 'spin' : undefined} />
+              {importOpen ? '重新扫描' : '扫描本地配置'}
+            </button>
+          </div>
+          {importOpen && (
+            <div className="provider-import-panel">
+              {importError && <p className="field-error">{importError}</p>}
+              {importLoading && <p className="muted">正在扫描本地配置…</p>}
+              {!importLoading && localProviders && localProviders.candidates.length === 0 && (
+                <>
+                  <p className="muted">没有找到完整的 Provider（Base URL / 模型 / Key 三项都要有）。</p>
+                  <ul className="provider-source-list">
+                    {localProviders.sources.map(source => (
+                      <li key={source.id}>
+                        <span className={source.found ? 'source-ok' : 'source-missing'}>{source.found ? '已找到' : '未找到'}</span>
+                        <strong>{source.label}</strong>
+                        <code>{source.path}</code>
+                        {source.error && <em>{source.error}</em>}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {!importLoading && localProviders && localProviders.candidates.length > 0 && (
+                <ul className="provider-candidate-list">
+                  {localProviders.candidates.map(candidate => (
+                    <li key={candidate.id}>
+                      <div className="provider-candidate-info">
+                        <strong>{candidate.name}</strong>
+                        <span>{candidate.sourceLabel} · {candidate.api}</span>
+                        <code>{candidate.baseUrl}</code>
+                        <small>
+                          模型：{candidate.model}{candidate.apiKeySet ? ' · 已带 Key' : ' · 缺少 Key'}
+                        </small>
+                      </div>
+                      <button className="btn tiny" onClick={() => void applyLocalProvider(candidate)} disabled={Boolean(importingId)}>
+                        {importingId === candidate.id ? '导入中…' : '导入'}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
         </div>
       </section>
 

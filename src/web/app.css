@@ -1935,3 +1935,60 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
   .spec-nav-group { flex-direction: row; flex-wrap: wrap; align-items: center; }
   .spec-nav-title { padding: 0 4px; }
 }
+
+/* 初始化 · 从本地 LLM Provider 配置导入 */
+.provider-import {
+  padding: 16px var(--card-pad-x);
+  border-top: 1px solid var(--rule);
+  background: color-mix(in srgb, var(--raised) 35%, transparent);
+}
+.provider-import-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.provider-import-head strong { display: block; font-size: 14px; font-weight: 500; }
+.provider-import-head span { display: block; margin-top: 2px; font-size: 12px; color: var(--muted); }
+.provider-import-panel { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.provider-import-panel .muted { font-size: 12px; }
+.provider-source-list,
+.provider-candidate-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.provider-candidate-list { max-height: 420px; overflow: auto; padding-right: 2px; }
+.provider-source-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.provider-source-list code { font-family: var(--mono); font-size: 11px; }
+.provider-source-list em { color: var(--negative); font-style: normal; }
+.provider-source-list .source-ok { color: var(--pill-positive-ink); }
+.provider-source-list .source-missing { color: var(--muted); }
+.provider-candidate-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+}
+.provider-candidate-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.provider-candidate-info strong { font-size: 13px; font-weight: 600; }
+.provider-candidate-info span,
+.provider-candidate-info small { font-size: 12px; color: var(--muted); }
+.provider-candidate-info code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 640px) {
+  .provider-import-head { align-items: flex-start; flex-direction: column; }
+  .provider-candidate-list li { align-items: flex-start; flex-direction: column; }
+}

@@ -44,6 +44,53 @@ export interface ConfigSaveResult extends ConfigBundle {
   policyChanged: boolean
 }
 
+/** 本机 LLM Provider 候选（服务端已剥掉明文密钥）。 */
+export interface LocalProviderView {
+  id: string
+  source: string
+  sourceLabel: string
+  name: string
+  baseUrl: string
+  model: string
+  api: string
+  authHeader?: boolean
+  contextWindow?: number
+  apiKeySet: boolean
+}
+
+export interface LocalProviderSourceStatus {
+  id: string
+  label: string
+  path: string
+  found: boolean
+  error?: string
+}
+
+export interface LocalProviderList {
+  candidates: LocalProviderView[]
+  sources: LocalProviderSourceStatus[]
+}
+
+export interface LocalProviderImportResult extends ConfigSaveResult {
+  imported: {
+    id: string
+    source: string
+    sourceLabel: string
+    name: string
+    baseUrl: string
+    model: string
+    api: string
+  }
+}
+
+export async function listLocalProviders(): Promise<LocalProviderList> {
+  return getJson<LocalProviderList>('/api/llm/local-providers')
+}
+
+export async function importLocalProvider(id: string): Promise<LocalProviderImportResult> {
+  return sendJson<LocalProviderImportResult>('/api/llm/local-providers/import', 'POST', { id })
+}
+
 export async function saveConfigPatch(patch: Record<string, unknown>): Promise<ConfigSaveResult> {
   return sendJson<ConfigSaveResult>('/api/config', 'PUT', { patch })
 }
