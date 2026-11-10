@@ -11,9 +11,11 @@
 每张工单都有自己的分支、终端和上下文。支持 Orca、Claude Code 与各类 ACP Agent。
 
 [![Stars](https://img.shields.io/github/stars/blankPen/router-agent?style=flat&color=111111)](https://github.com/blankPen/router-agent/stargazers)
+[![npm](https://img.shields.io/npm/v/router-agent?color=cb3837&logo=npm)](https://www.npmjs.com/package/router-agent)
 ![Node](https://img.shields.io/badge/node-%E2%89%A522.19-339933?logo=node.js&logoColor=white)
 ![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
+[![License](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 
 [快速开始](#快速开始) &nbsp;·&nbsp; [它怎么工作](#它怎么工作) &nbsp;·&nbsp; [核心机制](#核心机制) &nbsp;·&nbsp; [配置](#配置) &nbsp;·&nbsp; [命令](#命令) &nbsp;·&nbsp; [文档](#文档)
 
@@ -46,7 +48,8 @@ router-agent（`ra`）是一个常驻的双层 Agent 系统：**Router 只做研
 |-|-|
 | Node.js | `>= 22.19.0`（自带 npm；使用内置 `node:sqlite`；项目根目录 `.nvmrc` 已固定 22.19.0） |
 | 编码 Agent | 任选其一：Orca（`orca` 运行时，提供 worktree 与终端）、Claude Code（`claude-code` / `acp-claude` 运行时）或其它 ACP Agent（Codex / Gemini / OpenCode 等） |
-| lark-cli | 飞书事件消费、发消息；需要一个飞书自建应用 |
+| lark-cli | 飞书事件消费、发消息；需提前安装并确保在 `PATH` 中，`ra doctor` 会检查是否可用；需要一个飞书自建应用 |
+| gh / glab（可选） | PR / MR 状态跟踪：GitHub 用 `gh`，GitLab 用 `glab`；对应平台需已登录。不需要跟踪 PR / MR 时可不装 |
 | pnpm | 仅从源码运行或参与开发时需要（见本节末尾） |
 
 **1 · 安装**
@@ -56,7 +59,7 @@ npm install -g router-agent   # 从 npm 全局安装，装完直接用 ra
 ra --help                     # 确认命令可用
 ```
 
-升级到最新版用 `ra update`：检查 npm 上的最新版、执行 `npm install -g`，服务在跑时自动重启；只想看有没有新版用 `ra update --check`。等价于手动 `npm install -g router-agent@latest` 后 `ra stop && ra start`。
+升级到最新版用 `ra update`：检查 npm 上的最新版、执行 `npm install -g`，服务在跑时自动重启；只想看有没有新版用 `ra update --check`。等价于手动 `npm install -g router-agent@latest` 后 `ra stop && ra start`。Web 面板侧栏发现新版本时会显示「更新并重启」；在飞书里直接说「更新版本」，Router 也会调用更新工具并在回复后自动重启服务。
 
 <details>
 <summary>需要从源码运行或参与开发？</summary>
@@ -92,7 +95,7 @@ ra web                # 之后想再打开面板
 
 1. **LLM Provider**：Base URL / 模型 / API Key，三项必填。密钥只写入 `config.yaml`，保存后不回显；环境变量 `RA_LLM_*` 可覆盖。
 2. **选择运行时**：Orca / Claude Code / ACP Agent 卡片平铺，自动检测 CLI、版本、ACP 依赖与登录状态，支持安装引导和真实握手试启动。
-3. **登记项目**：添加本地项目（系统目录选择 + 自动识别 Git）或 Git 项目（自动 clone 到 `<RA_HOME>/repos`）。
+3. **登记项目**：添加本地项目（系统目录选择 + 自动识别 Git）或 Git 项目（自动 clone 到 `~/.router-agent/repos`，可用 `RA_HOME` 改根目录）。
 4. **飞书机器人**：填 App ID / App Secret（Secret 只写入 lark-cli 加密存储），固定使用 `~/.router-agent-lark` profile；保存后可检查授权状态并完成 Device Flow 授权。
 5. **群与绑定**：至少添加一个监控群；可把群固定到某个项目，之后开工不再追问。
 
@@ -114,8 +117,9 @@ ra init
 
 ```bash
 ra doctor                                              # 配置 / 运行时 / 飞书 / 模型 / 端口，全绿再往下
-ra simulate --infer --text "把 README 的端口从 3000 改成 3083" --dry-run
+ra simulate --infer --text "把 README 的端口从 3000 改成 3083" --dry-run   # 只看 Gate + 研判结论，不落库
 ra simulate --text "你好，在吗" --dry-run               # 验证回复通道也走 Pi
+ra simulate --text "把 README 的端口从 3000 改成 3083"  # 去掉 --dry-run 才落库；仍不派工
 ra tickets                                             # 模拟产生的工单会出现在这里
 ```
 
@@ -125,7 +129,7 @@ ra tickets                                             # 模拟产生的工单�
 2. `ra tickets` 出现工单，`ra ticket <id>` 能看到授权范围与强度；
 3. `orca worktree list --json`（`orca` 运行时；其它运行时用 `git worktree list`）出现 `ra-tk-<编号>-<语义slug>`，分支名为 `ra/tk-<编号>-<语义slug>`（目录名与分支名一一对应，只把 `/` 换成 `-`），对应运行时里出现 Agent 会话（Orca 为 Claude Code 终端）；
 4. Worker 执行 `ra report` 后，`ra ticket <id>` 的阶段在 `running → review/blocked` 之间变化；
-5. 合并或关闭 PR / MR 后，工单变 `closed`，飞书收到一次闭环通知。
+5. 合并或关闭 PR / MR 后，工单变 `done`，飞书收到一次闭环通知。
 
 ## 它怎么工作
 
@@ -192,6 +196,8 @@ llm:
 
 feishu:
   appId: cli_xxx
+  allowed: [ou_xxx]       # 允许发起工作的成员 open_id
+  botOpenIds: [ou_bot]    # 机器人自己的 open_id，用于识别 @；也可写 botNames
   chats:
     - chat: oc_xxx
       mode: mention
@@ -204,6 +210,8 @@ projects:
     repo: name:dsh/router-agent
     defaultBranch: main
 ```
+
+`mode: mention` 的群必须配置 `botOpenIds`（或 `botNames`），否则识别不到「@机器人」，消息会被当作未 @ 丢弃；`allowed` 为空时 `ra doctor` 也会报必填缺失。
 
 常用调整不必编辑整份文件：
 
@@ -228,23 +236,25 @@ ra config edit                                   # 用 $EDITOR 编辑全文
 | `ra stop` | 停止服务 |
 | `ra status` | 服务状态 + 工单概览 |
 | `ra web` | 重新打开 Web 面板 |
-| `ra tickets [--stage]` | 列出工单 |
-| `ra ticket <id>` | 工单详情（状态 / 派工 / 上报 / 输入） |
-| `ra logs` | 最近 50 行日志 |
+| `ra tickets [--stage <stage>]` | 列出工单；`--stage` 可选 `todo` / `running` / `review` / `blocked` / `done` |
+| `ra ticket <id> [--stop]` | 工单详情（状态 / 派工 / 上报 / 输入）；`--stop` 停止该工单并关闭 worker 终端 |
+| `ra logs [--follow]` | 最近 50 行日志；`--follow` 持续跟踪 |
 | `ra update [--check]` | 检查并升级到 npm 最新版：默认执行 `npm install -g router-agent@latest`，服务在跑时自动重启；`--no-restart` 只安装、`--registry` 指定源、`--force` 在源码 / link 运行时仍装全局版、`--json` 机器可读 |
 | `ra runtime [list]` | 探测本机 ACP Agent：状态、版本、来源；`--json` 机器可读 |
 | `ra runtime install <id>` | 按需安装 ACP 适配器到 `~/.router-agent/runtimes/<agent>` |
 | `ra runtime uninstall <id>` | 卸载 ra 托管的 ACP 适配器 |
 | `ra runtime check <id>` | 完整 ACP 握手（`initialize` + `session/new`） |
-| `ra runtime login <id>` | 交互式登录（目前是 `codex-acp login`） |
-| `ra config` | 查看配置；`config set <key> <value>` 改单项（含 `project.<名>` / `chatBinding.<群>` / `chatMode.<群>` / `chatSync.<群>` / `chatAllow.<群>` / `progress.syncMs` / `progress.probeMs`）；`config edit` 编辑全文 |
+| `ra runtime login <id>` | 交互式登录（由 Agent 自己提供：`acp-claude` 走 `claude`，`acp-codex` 走 `codex-acp login`） |
+| `ra config` | 查看配置；`config set <key> <value>` 改单项（含 `project.<名>` / `chatBinding.<群>` / `chatMode.<群>` / `chatAllow.<群>` / `progress.syncMs` / `progress.probeMs`）；`config edit` 编辑全文 |
+| `ra report` | Worker 侧上报：状态、摘要、`--reply`（字面量 / `@文件` / `-`）、PR 链接与 `--ack` |
+| `ra doc` | Worker 侧创建飞书文档并输出链接，长结论写进 `--reply` |
 
-全局选项 `--home <dir>` 可切换状态目录（测试与多实例用）。`ra report` / `ra doc` 的用法见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#上报协议)。
+全局选项 `--home <dir>` 可切换状态目录（测试与多实例用）。上报协议与字段细节见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#上报协议)。
 
 ## 开发
 
 ```bash
-pnpm test        # 657 个测试通过（4 个默认跳过，其中包含真实 Pi 验证）
+pnpm test        # 740 个测试通过（4 个默认跳过，其中包含真实 Pi 验证）
 pnpm typecheck
 pnpm build       # tsc + esbuild（Web 面板与 Markdown 资产）
 pnpm check       # typecheck + test

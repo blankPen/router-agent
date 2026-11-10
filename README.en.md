@@ -11,9 +11,11 @@ Admission, ticketing, dispatch, follow-ups, progress sync and closure are automa
 and every ticket gets its own branch, terminal and context. Works with Orca, Claude Code and any ACP agent.
 
 [![Stars](https://img.shields.io/github/stars/blankPen/router-agent?style=flat&color=111111)](https://github.com/blankPen/router-agent/stargazers)
+[![npm](https://img.shields.io/npm/v/router-agent?color=cb3837&logo=npm)](https://www.npmjs.com/package/router-agent)
 ![Node](https://img.shields.io/badge/node-%E2%89%A522.19-339933?logo=node.js&logoColor=white)
 ![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
+[![License](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 
 [Quick start](#quick-start) &nbsp;·&nbsp; [How it works](#how-it-works) &nbsp;·&nbsp; [Core mechanics](#core-mechanics) &nbsp;·&nbsp; [Configuration](#configuration) &nbsp;·&nbsp; [Commands](#commands) &nbsp;·&nbsp; [Documentation](#documentation)
 
@@ -46,7 +48,8 @@ It is a **clean rewrite** of dsh-superagent, with no dependency on the prototype
 |-|-|
 | Node.js | `>= 22.19.0` (bundles npm; uses the built-in `node:sqlite`; pinned to 22.19.0 via `.nvmrc`) |
 | Coding agent | Pick one: Orca (the `orca` runtime, provides worktrees and terminals), Claude Code (the `claude-code` / `acp-claude` runtimes), or another ACP agent (Codex / Gemini / OpenCode and friends) |
-| lark-cli | Feishu event consumption and messaging; needs a Feishu custom app |
+| lark-cli | Feishu event consumption and messaging; install it and make sure it is on `PATH` (`ra doctor` checks it); needs a Feishu custom app |
+| gh / glab (optional) | PR / MR state tracking: `gh` for GitHub, `glab` for GitLab; log in to the matching platform first. Not needed if you don't track PRs / MRs |
 | pnpm | Only needed to run from source or contribute (see the end of this section) |
 
 **1 · Install**
@@ -56,7 +59,7 @@ npm install -g router-agent   # install globally from npm, then use `ra` directl
 ra --help                     # verify the command is available
 ```
 
-Upgrading is one command: `ra update` checks npm for the latest version, runs the global install, and restarts the running service automatically. Use `ra update --check` to only check. It is equivalent to `npm install -g router-agent@latest` followed by `ra stop && ra start`.
+Upgrading is one command: `ra update` checks npm for the latest version, runs the global install, and restarts the running service automatically. Use `ra update --check` to only check. It is equivalent to `npm install -g router-agent@latest` followed by `ra stop && ra start`. When the web panel's sidebar notices a new version it shows an "Update and restart" button; typing "更新版本" in Feishu also makes the Router call the update tool and restart after replying.
 
 <details>
 <summary>Run from source or contribute?</summary>
@@ -92,7 +95,7 @@ The page only covers the five things needed to get running, with a completion ch
 
 1. **LLM Provider**: Base URL / model / API key — all three are required. The key is written only to `config.yaml` and never echoed back; `RA_LLM_*` environment variables can override it.
 2. **Worker runtime**: Orca / Claude Code / ACP Agent cards, with automatic checks for the CLI, version, ACP dependencies and login state, plus install guidance and a real handshake test.
-3. **Projects**: add a local project (system directory picker + Git detection) or a Git project (cloned into `<RA_HOME>/repos`).
+3. **Projects**: add a local project (system directory picker + Git detection) or a Git project (cloned into `~/.router-agent/repos`; `RA_HOME` changes the root).
 4. **Feishu bot**: enter App ID / App Secret (the secret is written only to lark-cli's encrypted store); router-agent always uses the fixed `~/.router-agent-lark` profile. After saving you can check authorization status and complete the Device Flow login from the same page.
 5. **Chats and bindings**: at least one monitored chat; bind it to a project so dispatch stops asking.
 
@@ -114,8 +117,9 @@ The two paths can hand off to each other: run `ra init` for the bot and chats, t
 
 ```bash
 ra doctor                                              # config / runtimes / Feishu / model / port — all green before going further
-ra simulate --infer --text "change the README port from 3000 to 3083" --dry-run
+ra simulate --infer --text "change the README port from 3000 to 3083" --dry-run   # gate + triage only, nothing persisted
 ra simulate --text "hey, are you there" --dry-run      # verifies the reply path also goes through Pi
+ra simulate --text "change the README port from 3000 to 3083"   # drop --dry-run to persist; still no dispatch
 ra tickets                                             # simulated tickets show up here
 ```
 
@@ -125,7 +129,7 @@ For a real acceptance run, mention the bot in a chat with a small request, then 
 2. `ra tickets` shows a ticket, and `ra ticket <id>` shows its scope and strength;
 3. `orca worktree list --json` (for the `orca` runtime; use `git worktree list` for other runtimes) shows `ra-tk-<number>-<semantic slug>` with branch `ra/tk-<number>-<semantic slug>` (the directory name matches the branch, with `/` replaced by `-`), and the runtime shows an agent session (a Claude Code terminal for Orca);
 4. after the Worker runs `ra report`, the stage in `ra ticket <id>` moves between `running → review/blocked`;
-5. when the PR / MR is merged or closed, the ticket becomes `closed` and Feishu gets one closure notification.
+5. when the PR / MR is merged or closed, the ticket becomes `done` and Feishu gets one closure notification.
 
 ## How it works
 
@@ -192,6 +196,8 @@ llm:
 
 feishu:
   appId: cli_xxx
+  allowed: [ou_xxx]       # members allowed to start work
+  botOpenIds: [ou_bot]    # the bot's own open_id, used to detect @mentions; botNames also works
   chats:
     - chat: oc_xxx
       mode: mention
@@ -204,6 +210,8 @@ projects:
     repo: name:dsh/router-agent
     defaultBranch: main
 ```
+
+A `mode: mention` chat must set `botOpenIds` (or `botNames`); otherwise the Router cannot tell that the bot was mentioned and drops the message. An empty `allowed` list also fails the `ra doctor` required-field check.
 
 Common tweaks don't require editing the whole file:
 
@@ -228,23 +236,25 @@ Every field, the `ra config set` allowlist, environment variables, model / Feish
 | `ra stop` | Stop the service |
 | `ra status` | Service status + ticket overview |
 | `ra web` | Reopen the web dashboard |
-| `ra tickets [--stage]` | List tickets |
-| `ra ticket <id>` | Ticket details (stage / assignment / reports / inputs) |
-| `ra logs` | Last 50 log lines |
+| `ra tickets [--stage <stage>]` | List tickets; `--stage` accepts `todo` / `running` / `review` / `blocked` / `done` |
+| `ra ticket <id> [--stop]` | Ticket details (stage / assignment / reports / inputs); `--stop` stops the ticket and closes its worker terminal |
+| `ra logs [--follow]` | Last 50 log lines; `--follow` keeps tailing |
 | `ra update [--check]` | Check and upgrade to the latest npm version: runs `npm install -g router-agent@latest` and restarts the running service; `--no-restart` installs only, `--registry` picks a registry, `--force` installs globally even from a source / linked checkout, `--json` for machines |
 | `ra runtime [list]` | Probe local ACP agents: status / version / source (`--json` for machines) |
 | `ra runtime install <id>` | Install an ACP adapter into `~/.router-agent/runtimes/<agent>` |
 | `ra runtime uninstall <id>` | Remove an ra-managed ACP adapter |
 | `ra runtime check <id>` | Full ACP handshake (`initialize` + `session/new`) |
-| `ra runtime login <id>` | Interactive login (currently `codex-acp login`) |
-| `ra config` | View config; `config set <key> <value>` changes one key (including `project.<name>` / `chatBinding.<chat>` / `chatMode.<chat>` / `chatSync.<chat>` / `chatAllow.<chat>` / `progress.syncMs` / `progress.probeMs`); `config edit` edits the whole file |
+| `ra runtime login <id>` | Interactive login (provided by the agent: `acp-claude` runs `claude`, `acp-codex` runs `codex-acp login`) |
+| `ra config` | View config; `config set <key> <value>` changes one key (including `project.<name>` / `chatBinding.<chat>` / `chatMode.<chat>` / `chatAllow.<chat>` / `progress.syncMs` / `progress.probeMs`); `config edit` edits the whole file |
+| `ra report` | Worker-side reporting: state, summary, `--reply` (literal / `@file` / `-`), PR link and `--ack` |
+| `ra doc` | Worker-side Feishu doc creation; put the returned link in `--reply` for long results |
 
-The global option `--home <dir>` switches the state directory (for tests and multiple instances). `ra report` / `ra doc` are documented in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (Chinese).
+The global option `--home <dir>` switches the state directory (for tests and multiple instances). The reporting protocol and field details are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#上报协议) (Chinese).
 
 ## Development
 
 ```bash
-pnpm test        # 657 tests pass (4 skipped by default, including the live Pi check)
+pnpm test        # 740 tests pass (4 skipped by default, including the live Pi check)
 pnpm typecheck
 pnpm build       # tsc + esbuild (web dashboard and Markdown assets)
 pnpm check       # typecheck + test
