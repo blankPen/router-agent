@@ -192,6 +192,8 @@ llm:
 | Claude Code | `~/.claude/settings.json` 的 `env` | 识别 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL`（含 `ANTHROPIC_DEFAULT_*_MODEL`） |
 | CCSwitch | `~/.cc-switch/cc-switch.db`（SQLite `providers` 表）与旧版 `~/.cc-switch/config.json` | 支持 claude（Anthropic 兼容）以及 opencode / openclaw / pi 这类 `baseUrl + apiKey + models` 结构 |
 | Pi | `~/.pi/agent/models.json` | 读取 `providers` 下的模型清单，`apiKey` 支持 `$ENV` 引用 |
+| OpenCode | `~/.config/opencode/opencode.json` | 读取 `provider.<id>.options.baseURL / apiKey` 与 `models`，`apiKey` 支持 `{ "env": "VAR" }` |
+| Magpie | `~/.config/magpie/providers.json` | 读取 `providers[]` 的 `chat` / `anthropic` / `baseAPI` / `models`；`model[1M]` 标记会转换成模型名 + 上下文窗口 |
 
 导入只新增或覆盖 `llm` 段的连接信息，不改动本地原配置；导入后需要重启服务生效。
 

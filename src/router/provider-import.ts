@@ -1,10 +1,12 @@
 /**
  * 从本机已有的 Agent 配置里发现 LLM Provider。
  *
- * 支持三类来源（都在用户主目录下，只读，不改动原文件）：
+ * 支持这些来源（都在用户主目录下，只读，不改动原文件）：
  * - Claude Code：`~/.claude/settings.json` 的 `env`（ANTHROPIC_BASE_URL / ANTHROPIC_*_MODEL）；
  * - CCSwitch：新版 `~/.cc-switch/cc-switch.db`（SQLite providers 表）与旧版 `config.json`；
- * - Pi：`~/.pi/agent/models.json`。
+ * - Pi：`~/.pi/agent/models.json`；
+ * - OpenCode：`~/.config/opencode/opencode.json`；
+ * - Magpie：`~/.config/magpie/providers.json`。
  *
  * 安全约束：`apiKey` 只保留在服务端候选对象里，`toLocalProviderView` 负责剥掉，
  * 任何日志 / HTTP 响应都不得出现明文密钥。
@@ -13,7 +15,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { LLM_APIS, type LlmApi } from '../config.js'
 
-export type LocalProviderSource = 'claude-code' | 'cc-switch' | 'pi'
+export type LocalProviderSource = 'claude-code' | 'cc-switch' | 'pi' | 'opencode' | 'magpie'
 
 export interface LocalProviderCandidate {
   /** 稳定标识；导入时按它重新发现，不接受客户端传路径或密钥。 */
@@ -58,12 +60,16 @@ export interface DiscoverLocalProvidersOptions {
   piModelsPath?: string
   ccSwitchDbPath?: string
   ccSwitchConfigPath?: string
+  opencodeConfigPath?: string
+  magpieProvidersPath?: string
 }
 
 const SOURCE_LABELS: Record<LocalProviderSource, string> = {
   'claude-code': 'Claude Code',
   'cc-switch': 'CCSwitch',
   pi: 'Pi',
+  opencode: 'OpenCode',
+  magpie: 'Magpie',
 }
 
 /** 把服务端候选变成可以安全下发的视图。 */
@@ -132,6 +138,34 @@ export async function discoverLocalProviders(opts: DiscoverLocalProvidersOptions
   }
   sources.push(piStatus)
 
+  const opencodePath = opts.opencodeConfigPath ?? join(home, '.config', 'opencode', 'opencode.json')
+  const opencodeStatus: LocalProviderSourceStatus = {
+    id: 'opencode',
+    label: SOURCE_LABELS.opencode,
+    path: opencodePath,
+    found: existsSync(opencodePath),
+  }
+  if (opencodeStatus.found) {
+    const result = readOpencodeConfig(opencodePath, env)
+    if (result.error) opencodeStatus.error = result.error
+    candidates.push(...result.candidates)
+  }
+  sources.push(opencodeStatus)
+
+  const magpiePath = opts.magpieProvidersPath ?? join(home, '.config', 'magpie', 'providers.json')
+  const magpieStatus: LocalProviderSourceStatus = {
+    id: 'magpie',
+    label: SOURCE_LABELS.magpie,
+    path: magpiePath,
+    found: existsSync(magpiePath),
+  }
+  if (magpieStatus.found) {
+    const result = readMagpieProviders(magpiePath)
+    if (result.error) magpieStatus.error = result.error
+    candidates.push(...result.candidates)
+  }
+  sources.push(magpieStatus)
+
   return { candidates: dedupe(candidates), sources }
 }
 
@@ -172,7 +206,7 @@ function fromAnthropicEnv(env: Record<string, unknown>): AnthropicEnvCandidate |
   const baseUrl = text(env.ANTHROPIC_BASE_URL)
   const authToken = text(env.ANTHROPIC_AUTH_TOKEN)
   const apiKey = authToken || text(env.ANTHROPIC_API_KEY)
-  const model = normalizeClaudeModel(
+  const model = normalizeModelId(
     text(env.ANTHROPIC_MODEL)
       || text(env.ANTHROPIC_DEFAULT_SONNET_MODEL)
       || text(env.ANTHROPIC_DEFAULT_OPUS_MODEL)
@@ -190,9 +224,18 @@ function fromAnthropicEnv(env: Record<string, unknown>): AnthropicEnvCandidate |
   }
 }
 
-/** Claude Code 允许用 `model[1m]` 标记 1M 上下文；真正发给网关的模型名不带这个后缀。 */
-function normalizeClaudeModel(model: string): string {
+/** Claude Code / Magpie 允许用 `model[1m]` 标记上下文；真正发给网关的模型名不带这个后缀。 */
+function normalizeModelId(model: string): string {
   return model.replace(/\[[0-9]+[kKmM]\]$/, '').trim()
+}
+
+/** 从 `[200k]` / `[1M]` 这类标记推断上下文窗口。 */
+function contextFromMarker(model: string): number | undefined {
+  const match = /\[([0-9]+)([kKmM])\]$/.exec(model)
+  if (!match) return undefined
+  const value = Number(match[1])
+  if (!Number.isFinite(value) || value <= 0) return undefined
+  return match[2]!.toLowerCase() === 'm' ? value * 1_000_000 : value * 1_000
 }
 
 // ---------------------------------------------------------------------------
@@ -395,6 +438,116 @@ function resolveEnvRef(value: string, env: NodeJS.ProcessEnv): string {
   const match = /^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))$/.exec(value)
   if (!match) return value.startsWith('!') ? '' : value
   return text(env[match[1] ?? match[2] ?? ''])
+}
+
+// ---------------------------------------------------------------------------
+// OpenCode（~/.config/opencode/opencode.json）
+// ---------------------------------------------------------------------------
+
+function readOpencodeConfig(path: string, env: NodeJS.ProcessEnv): { candidates: LocalProviderCandidate[]; error?: string } {
+  const doc = readJson(path)
+  if (!doc.ok) return { candidates: [], error: doc.error }
+  if (!isRecord(doc.value) || !isRecord(doc.value.provider)) return { candidates: [] }
+  const candidates: LocalProviderCandidate[] = []
+  for (const [providerId, provider] of Object.entries(doc.value.provider)) {
+    if (!isRecord(provider)) continue
+    const options = isRecord(provider.options) ? provider.options : {}
+    const baseUrl = text(options.baseURL) || text(options.baseUrl) || text(provider.baseURL)
+    const apiKey = resolveOpencodeSecret(options.apiKey, env)
+    if (!baseUrl || !apiKey) continue
+    const npm = text(provider.npm)
+    const api: LlmApi = /anthropic/i.test(npm) ? 'anthropic-messages' : 'openai-completions'
+    const models = isRecord(provider.models) ? Object.entries(provider.models) : []
+    for (const [index, [modelId, model]] of models.entries()) {
+      const id = normalizeModelId(modelId)
+      if (!id) continue
+      const entry = isRecord(model) ? model : {}
+      const limit = isRecord(entry.limit) ? entry.limit : {}
+      const contextWindow = typeof limit.context === 'number' ? limit.context
+        : typeof entry.contextWindow === 'number' ? entry.contextWindow
+          : contextFromMarker(modelId)
+      candidates.push({
+        id: `opencode:${providerId}:${id}:${index}`,
+        source: 'opencode',
+        sourceLabel: SOURCE_LABELS.opencode,
+        name: `OpenCode · ${text(provider.name) || providerId} · ${id}`,
+        baseUrl,
+        model: id,
+        apiKey,
+        api,
+        ...(contextWindow ? { contextWindow } : {}),
+      })
+    }
+  }
+  return { candidates }
+}
+
+/** OpenCode 的 apiKey 支持字符串与 `{ env: "VAR" }` 两种写法。 */
+function resolveOpencodeSecret(value: unknown, env: NodeJS.ProcessEnv): string {
+  if (typeof value === 'string') return text(value)
+  if (isRecord(value) && typeof value.env === 'string') return text(env[value.env])
+  return ''
+}
+
+// ---------------------------------------------------------------------------
+// Magpie（~/.config/magpie/providers.json）
+// ---------------------------------------------------------------------------
+
+function readMagpieProviders(path: string): { candidates: LocalProviderCandidate[]; error?: string } {
+  const doc = readJson(path)
+  if (!doc.ok) return { candidates: [], error: doc.error }
+  if (!isRecord(doc.value) || !Array.isArray(doc.value.providers)) return { candidates: [] }
+  const candidates: LocalProviderCandidate[] = []
+  for (const [providerIndex, provider] of doc.value.providers.entries()) {
+    if (!isRecord(provider)) continue
+    const apiKey = text(provider.key)
+    if (!apiKey) continue
+    const target = magpieTarget(provider)
+    if (!target) continue
+    const models = magpieModels(provider)
+    const providerName = text(provider.name) || text(provider.id) || `provider-${providerIndex + 1}`
+    for (const [index, rawModel] of models.entries()) {
+      const id = normalizeModelId(rawModel)
+      if (!id) continue
+      const contextWindow = contextFromMarker(rawModel)
+      candidates.push({
+        id: `magpie:${text(provider.id) || providerIndex}:${id}:${index}`,
+        source: 'magpie',
+        sourceLabel: SOURCE_LABELS.magpie,
+        name: `Magpie · ${providerName} · ${id}`,
+        baseUrl: target.baseUrl,
+        model: id,
+        apiKey,
+        api: target.api,
+        ...(target.authHeader ? { authHeader: true } : {}),
+        ...(contextWindow ? { contextWindow } : {}),
+      })
+    }
+  }
+  return { candidates }
+}
+
+/** Magpie 同时存 chat / anthropic / responses 地址；优先按 baseAPI，其次 OpenAI 兼容。 */
+function magpieTarget(provider: Record<string, unknown>): { baseUrl: string; api: LlmApi; authHeader?: boolean } | null {
+  const chat = text(provider.chat)
+  const anthropic = text(provider.anthropic)
+  const baseApi = text(provider.baseAPI)
+  if (baseApi === 'anthropic' && anthropic) {
+    return { baseUrl: anthropic, api: 'anthropic-messages', authHeader: true }
+  }
+  if (chat) return { baseUrl: chat, api: 'openai-completions' }
+  if (anthropic) return { baseUrl: anthropic, api: 'anthropic-messages', authHeader: true }
+  return null
+}
+
+function magpieModels(provider: Record<string, unknown>): string[] {
+  const list = Array.isArray(provider.models) ? provider.models : []
+  const models = list
+    .map(item => (typeof item === 'string' ? item : isRecord(item) ? text(item.id) : ''))
+    .filter(Boolean)
+  if (models.length > 0) return models
+  const single = text(provider.model)
+  return single ? [single] : []
 }
 
 // ---------------------------------------------------------------------------

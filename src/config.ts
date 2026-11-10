@@ -404,7 +404,7 @@ server:
   port: 3083
 
 # 模型配置必填：baseUrl / model / apiKey 三项缺一不可，未配置时服务启动会直接报错；
-# 也可以在 Web 面板「初始化 · LLM Provider」里填写，或从 Claude Code / CCSwitch / Pi 的本地配置导入
+# 也可以在 Web 面板「初始化 · LLM Provider」里填写，或从 Claude Code / CCSwitch / Pi / OpenCode / Magpie 的本地配置导入
 # 环境变量 RA_LLM_BASE_URL / RA_LLM_API_KEY / RA_LLM_MODEL 优先级更高，可按需覆盖
 # llm:
 #   baseUrl: https://api.deepseek.com/v1

@@ -93,7 +93,7 @@ ra web                # 之后想再打开面板
 
 页面只放「服务跑起来必需的五件事」，顶部是完成度清单：
 
-1. **LLM Provider**：Base URL / 模型 / API Key，三项必填；OpenAI 兼容与 Anthropic 兼容协议都支持。密钥只写入 `config.yaml`，保存后不回显；环境变量 `RA_LLM_*` 可覆盖。页面下方可「扫描本地配置」，从 Claude Code、CCSwitch、Pi 的已有 Provider 里一键导入（只读原配置，密钥不回显）。
+1. **LLM Provider**：Base URL / 模型 / API Key，三项必填；OpenAI 兼容与 Anthropic 兼容协议都支持。密钥只写入 `config.yaml`，保存后不回显；环境变量 `RA_LLM_*` 可覆盖。页面下方可「扫描本地配置」，从 Claude Code、CCSwitch、Pi、OpenCode、Magpie 的已有 Provider 里一键导入（只读原配置，密钥不回显）。
 2. **选择运行时**：Orca / Claude Code / ACP Agent 卡片平铺，自动检测 CLI、版本、ACP 依赖与登录状态，支持安装引导和真实握手试启动。
 3. **登记项目**：添加本地项目（系统目录选择 + 自动识别 Git）或 Git 项目（自动 clone 到 `~/.router-agent/repos`，可用 `RA_HOME` 改根目录）。
 4. **飞书机器人**：填 App ID / App Secret（Secret 只写入 lark-cli 加密存储），固定使用 `~/.router-agent-lark` profile；保存后可检查授权状态并完成 Device Flow 授权。

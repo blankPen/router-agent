@@ -167,6 +167,87 @@ describe('discoverLocalProviders', () => {
     })
   })
 
+  it('读取 Magpie providers.json：chat / anthropic 地址与 [1M] 标记', async () => {
+    const dir = home()
+    writeJson(join(dir, '.config', 'magpie', 'providers.json'), {
+      providers: [
+        {
+          id: 'zhipu',
+          name: 'Zhipu GLM',
+          key: 'sk-zhipu',
+          chat: 'https://open.bigmodel.cn/api/paas/v4',
+          anthropic: 'https://open.bigmodel.cn/api/anthropic',
+          models: ['glm-4.6'],
+        },
+        {
+          id: 'dcc',
+          name: 'DCC',
+          key: 'sk-dcc',
+          baseAPI: 'anthropic',
+          anthropic: 'https://gateway.example.com',
+          models: ['deepseek-v4.1-flash[1M]'],
+        },
+        {
+          id: 'keyless',
+          name: 'Keyless',
+          chat: 'https://keyless.example.com/v1',
+          models: ['free-model'],
+        },
+        {
+          id: 'no-models',
+          name: 'No Models',
+          key: 'sk-nomodels',
+          chat: 'https://nomodels.example.com/v1',
+        },
+      ],
+    })
+
+    const scan = await discoverLocalProviders({ home: dir, env: {} })
+    const magpie = scan.candidates.filter(item => item.source === 'magpie')
+    expect(magpie).toHaveLength(2)
+    expect(magpie.find(item => item.name.includes('Zhipu'))).toMatchObject({
+      baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+      model: 'glm-4.6',
+      api: 'openai-completions',
+    })
+    expect(magpie.find(item => item.name.includes('DCC'))).toMatchObject({
+      baseUrl: 'https://gateway.example.com',
+      model: 'deepseek-v4.1-flash',
+      api: 'anthropic-messages',
+      authHeader: true,
+      contextWindow: 1_000_000,
+    })
+  })
+
+  it('读取 OpenCode 的 provider 配置与 env 密钥引用', async () => {
+    const dir = home()
+    writeJson(join(dir, '.config', 'opencode', 'opencode.json'), {
+      provider: {
+        ark: {
+          name: 'Ark Volcengine',
+          npm: '@ai-sdk/openai-compatible',
+          options: {
+            baseURL: 'https://ark.example.com/v3',
+            apiKey: { env: 'ARK_KEY' },
+          },
+          models: {
+            'deepseek-v3.2': { name: 'DeepSeek V3.2', limit: { context: 128000 } },
+          },
+        },
+      },
+    })
+
+    const scan = await discoverLocalProviders({ home: dir, env: { ARK_KEY: 'sk-ark' } })
+    expect(scan.candidates.find(item => item.source === 'opencode')).toMatchObject({
+      name: 'OpenCode · Ark Volcengine · deepseek-v3.2',
+      baseUrl: 'https://ark.example.com/v3',
+      model: 'deepseek-v3.2',
+      apiKey: 'sk-ark',
+      api: 'openai-completions',
+      contextWindow: 128000,
+    })
+  })
+
   it('配置损坏时只标记来源失败，不抛异常', async () => {
     const dir = home()
     mkdirSync(join(dir, '.claude'), { recursive: true })

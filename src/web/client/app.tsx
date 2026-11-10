@@ -1862,7 +1862,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
           <div className="provider-import-head">
             <div>
               <strong>从本地配置导入</strong>
-              <span>读取 Claude Code、CCSwitch、Pi 的本地 Provider 配置，只读取，不改动原文件。</span>
+              <span>读取 Claude Code、CCSwitch、Pi、OpenCode、Magpie 的本地 Provider 配置，只读取，不改动原文件。</span>
             </div>
             <button className="btn tiny" onClick={() => void scanLocalProviders()} disabled={importLoading || Boolean(importingId)}>
               <Icon name={importLoading ? 'refresh' : 'download'} size={13} className={importLoading ? 'spin' : undefined} />
