@@ -61,7 +61,15 @@
 
 ## 快速开始
 
-**前置条件**
+```bash
+npm install -g router-agent   # 安装
+ra start                      # 启动，就绪后自动打开 http://127.0.0.1:3083/#setup
+```
+
+打开面板后按五步完成配置：LLM Provider → 运行时 → 项目 → 飞书机器人 → 群与绑定。保存后服务自动重启，之后在群里 @机器人 提需求即可。
+
+<details>
+<summary>前置条件</summary>
 
 | 依赖 | 说明 |
 |-|-|
@@ -71,44 +79,10 @@
 | gh / glab（可选） | PR / MR 状态跟踪：GitHub 用 `gh`，GitLab 用 `glab`；对应平台需已登录。不需要跟踪 PR / MR 时可不装 |
 | pnpm | 仅从源码运行或参与开发时需要（见本节末尾） |
 
-**1 · 安装**
-
-```bash
-npm install -g router-agent   # 从 npm 全局安装，装完直接用 ra
-ra --help                     # 确认命令可用
-```
-
-升级到最新版用 `ra update`：检查 npm 上的最新版、执行 `npm install -g`，服务在跑时自动重启；只想看有没有新版用 `ra update --check`。等价于手动 `npm install -g router-agent@latest` 后 `ra stop && ra start`。Web 面板侧栏发现新版本时会显示「更新并重启」；在飞书里直接说「更新版本」，Router 也会调用更新工具并在回复后自动重启服务。
-
-<details>
-<summary>需要从源码运行或参与开发？</summary>
-
-```bash
-git clone https://github.com/blankPen/router-agent.git
-cd router-agent
-pnpm install --registry=https://registry.npmjs.org/
-pnpm build
-pnpm link --global      # 之后可直接用 ra；不 link 时用 node bin/ra.js <command>
-```
-
 </details>
 
-**2 · 初始化：两种方式，任选一种**
-
-初始化的结果是一份 `~/.router-agent/config.yaml`（`ra init` 还会顺带写入全局 worker 规范）。下面两种方式写的是同一份配置，可以混用，也可以重复运行。
-
-| 方式 | 适合 | 入口 |
-|-|-|-|
-| **Web 初始化页**（推荐） | 第一次接入；想边填边看到检测结果 | `ra start` 自动打开 `#setup` |
-| **CLI 交互式** | 远程机器 / 无图形界面；想一次配完群与成员 | `ra init` |
-
-**方式 A · Web 初始化页**
-
-```bash
-ra start              # 后台常驻；就绪后自动打开 http://127.0.0.1:3083/#setup
-ra status
-ra web                # 之后想再打开面板
-```
+<details>
+<summary>Web 初始化页：五步分别在配什么</summary>
 
 页面只放「服务跑起来必需的五件事」，顶部是完成度清单：
 
@@ -120,9 +94,14 @@ ra web                # 之后想再打开面板
 
 ![Web 初始化页：五步完成度清单、LLM Provider 与运行时卡片](docs/assets/readme/setup-overview-dark.png)
 
-保存后页面会提示需要重启，点「保存并重启」即可热重启 daemon（浏览器页面不刷新）。远程机器或没有图形界面时用 `ra start --no-open`，只打印面板地址。
+保存后页面会提示需要重启，点「保存并重启」即可热重启 daemon（浏览器页面不刷新）。远程机器或没有图形界面时用 `ra start --no-open`，只打印面板地址；之后用 `ra web` 重新打开。
 
-**方式 B · CLI 交互式**
+</details>
+
+<details>
+<summary>备选：命令行交互式初始化（ra init）</summary>
+
+`ra init` 和 Web 页写的是同一份 `~/.router-agent/config.yaml`，可以混用，也可以重复运行。
 
 ```bash
 ra init
@@ -132,7 +111,17 @@ ra init
 
 两种方式可以接力：先 `ra init` 配好机器人与群，再用 Web 页补齐 LLM / 项目 / 绑定；页面只提交改动过的字段，不会覆盖 CLI 写好的其它配置。
 
-**3 · 自检与模拟**
+</details>
+
+<details>
+<summary>升级到最新版</summary>
+
+升级到最新版用 `ra update`：检查 npm 上的最新版、执行 `npm install -g`，服务在跑时自动重启；只想看有没有新版用 `ra update --check`。等价于手动 `npm install -g router-agent@latest` 后 `ra stop && ra start`。Web 面板侧栏发现新版本时会显示「更新并重启」；在飞书里直接说「更新版本」，Router 也会调用更新工具并在回复后自动重启服务。
+
+</details>
+
+<details>
+<summary>自检、模拟与真实验收</summary>
 
 ```bash
 ra doctor                                              # 配置 / 运行时 / 飞书 / 模型 / 端口，全绿再往下
@@ -150,6 +139,21 @@ ra tickets                                             # 模拟产生的工单�
 4. Worker 执行 `ra report` 后，`ra ticket <id>` 的阶段在 `running → review/blocked` 之间变化；
 5. 合并或关闭 PR / MR 后，工单变 `done`，飞书收到一次闭环通知。
 
+</details>
+
+<details>
+<summary>需要从源码运行或参与开发？</summary>
+
+```bash
+git clone https://github.com/blankPen/router-agent.git
+cd router-agent
+pnpm install --registry=https://registry.npmjs.org/
+pnpm build
+pnpm link --global      # 之后可直接用 ra；不 link 时用 node bin/ra.js <command>
+```
+
+</details>
+
 ## 核心能力
 
 ### 运行时随你挑
@@ -164,9 +168,13 @@ Worker 不在 Router 进程里跑。Router 按 `runtime.default` 选择适配器
 
 换运行时只加一个 adapter，内核与 Router 一行不改。项目清单按运行时分开维护：Orca 用仓库选择器，其它运行时用本地仓库绝对路径；切换默认运行时只影响新工单。完整的运行时对比、ACP Agent 目录、工具策略与规范注入见 [docs/RUNTIME.md](docs/RUNTIME.md)。
 
+![运行时选择：Orca、Claude Code 与 ACP Agent 卡片](docs/assets/readme/runtime-cards.png)
+
 ### 一张工单，一个隔离的工作区
 
 一个工单对应一个 worktree、一条分支、一个 Agent 终端。做完即隔离，并行开单互不打扰；每张工单都有自己的上下文，不用在多个会话窗口之间来回找。
+
+![工单看板：进行中、审核中、已阻塞、已完成](docs/assets/readme/tickets-board.png)
 
 ### 工单进展与原始会话
 
@@ -174,13 +182,19 @@ Worker 不在 Router 进程里跑。Router 按 `runtime.default` 选择适配器
 - 面板工单详情的「恢复」会复制一条终端命令，直接接回该工单的原始 Agent 会话：Claude Code 走 `claude --resume`，Codex 走 `codex resume`，Orca 找不到会话记录时切回原终端。
 - 复杂问题不用只在飞书里聊：随时回到原始会话里继续追问、调试、叫停。
 
+![工单详情：派工、来源、PR、授权范围与「恢复」入口](docs/assets/readme/ticket-detail.png)
+
 ### 多群、多项目
 
 一个群可以绑定一个项目，不同群里同时推进多个项目；每个项目对应的都是你电脑里的真实目录。项目、分支、群绑定集中在一份配置里，开工前就先确认清楚。
 
+![群与绑定：一个群绑定一个项目，未绑定的群开工前追问](docs/assets/readme/group-binding.png)
+
 ### 从消息到 PR 的闭环
 
 消息 → 研判 → 工单 → 派工 → 上报 → PR 跟踪 → 闭环通知，全链路留痕。对外通知统一走 Outbox（幂等 key + 2s 起步、上限 60s 的指数退避），失败会重试，不会重复轰炸群里。
+
+![一条消息从进群到合并：来源、Router、执行、交付](docs/assets/readme/message-to-pr.png)
 
 ## 它怎么工作
 
@@ -197,33 +211,13 @@ Router（AgentLoop + DecisionEngine(Pi) + HTTP API + Web）
 WorkerRuntime 端口 ── OrcaRuntime（默认）/ ClaudeCodeRuntime / AcpRuntime（acp 与 7 个 acp-*）
 ```
 
-一条消息从进群到合并，中间只有四件事：**听、判、派、跟**。
-
-### 听
-
-常驻消费飞书群 / 私聊消息，按名单与 `@` 规则做确定性准入。`mode: all` 收全部消息，`mode: mention` 只收 @机器人；群级 `allowed` 严格限制可触发的人；图片消息原图落盘并透传给 Worker。
-
-### 判
-
-未被直接指派的候选交给 Pi 研判，输出 `accept / stop / ignore / unavailable` 四类决定。确定性 Gate 在前，Pi 研判在后；研判工具只读，写操作统一走 Engine，超时 / 超预算落 `unavailable`。
-
-同一群内按人各一个落盘 session，重启可恢复，30 分钟空闲释放内存，靠 Pi 原生 compaction 自动压缩，`/new` 只清自己的上下文。
-
-### 派
-
-接单后创建工单与授权（Mandate），确认「任务 + 项目 + 起始分支」后按运行时派工；信息不全时记成派工草稿并追问，群绑定可免问答。
-
-### 跟
-
-Worker 用 `ra report` 上报，Router 刷新阶段、按 `progress.syncMs` 合并进展并同步回话题；Worker 静默时 Router 主动读会话记录巡检。`--reply` 原文回群；寒暄走 Pi 礼貌回复，真需求只开一个话题；PR 合并 / 关闭后自动闭环并通知。
-
 三条设计约束：
 
 - **Engine 是唯一状态写入口**：Router、Worker、面板都不直接写 SQLite。
 - **WorkerRuntime 是唯一扩展点**：换运行时只加一个 adapter，内核与 Router 一行不改。
 - **所有对外通知走 Outbox**：幂等 key + 2s 起步的指数退避（上限 60s）。
 
-逐项细节：[听 / 判 / 派 / 跟](docs/ARCHITECTURE.md)、[回复策略、面板与日志](docs/OPERATIONS.md)。
+完整的分层、研判边界、会话机制与工单生命周期见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)；回复策略、面板与日志见 [docs/OPERATIONS.md](docs/OPERATIONS.md)。
 
 ## 配置
 
@@ -342,6 +336,10 @@ src/cli/      ra 命令
 | [README.en.md](README.en.md) | English version |
 
 设计蓝本见飞书文档《router-agent（ra）技术设计方案》。
+
+## License
+
+本项目基于 [MIT](./LICENSE) 协议开源。
 
 ---
 
