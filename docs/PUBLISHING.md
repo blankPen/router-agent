@@ -77,7 +77,7 @@ Actions → 发布 npm 包 → Run workflow。发布的是所选分支 `package.
 5. `pnpm check`（类型检查 + 全量测试）；
 6. `pnpm build`（tsc + esbuild，产物在 `dist/`）；
 7. `npm publish --provenance`，带构建来源证明（`id-token: write`）；
-8. 发布后回查版本是否真的可从 npm 查询到（防止只有 stage 权限时静默进入暂存区）；
+8. 发布后最多等 5 分钟回查版本是否真的可从 npm 查询到（npm 通常要 1~2 分钟才可查；防止只有 stage 权限时静默进入暂存区）；
 9. 自动升版时把版本号提交回 `main`，让仓库与 npm 保持一致。
 
 ## 自动升版与分支保护
