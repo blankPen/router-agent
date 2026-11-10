@@ -90,6 +90,16 @@ describe('codex-app 配置', () => {
     })
   })
 
+  it('读取 runtime.options.codex-app.env，只保留字符串值', () => {
+    const config = defaultConfig()
+    config.runtime.options = {
+      'codex-app': {
+        env: { CODEX_HOME: '/tmp/codex-home', COUNT: 7, FLAG: true },
+      },
+    }
+    expect(codexAppOptionsOf(config).env).toEqual({ CODEX_HOME: '/tmp/codex-home' })
+  })
+
   it('支持 workspace / on-request / 模型与显式命令', () => {
     const config = defaultConfig()
     config.runtime.options = {

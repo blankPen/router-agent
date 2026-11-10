@@ -1,4 +1,5 @@
 import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { preview } from '../../../core/events.js'
 import { errorMessage, noopLogger, type Logger } from '../../../infra/logger.js'
@@ -168,10 +169,13 @@ export class CodexAppRuntime implements WorkerRuntime {
       approvalPolicy: approval,
       network: opts.network ?? true,
       args: opts.args ?? [],
+      env: opts.env ?? {},
     }
     this.workersDir = opts.workersDir
     this.home = opts.home
-    this.env = opts.env ?? {}
+    // Codex 桌面端固定读写 ~/.codex；这里用同一个 HOME，避免服务从别的 CODEX_HOME 启动时
+    // thread 落在别处，桌面端侧边栏看不到。显式 env 优先于这个默认值。
+    this.env = { CODEX_HOME: join(homedir(), '.codex'), ...this.opts.env }
     this.logger = opts.logger ?? noopLogger
     this.initializeTimeoutMs = opts.initializeTimeoutMs ?? 30_000
     this.args = this.opts.args
@@ -553,6 +557,10 @@ export class CodexAppRuntime implements WorkerRuntime {
       })
     }
     const args = [...this.prependArgs, ...this.serverArgs(ticketId, workdir, sandboxMode)]
+    this.logger.info('codex:codex-home', {
+      ticketId,
+      codexHome: this.env.CODEX_HOME ?? '',
+    })
     return new CodexAppClient({
       command: detection.command,
       args,

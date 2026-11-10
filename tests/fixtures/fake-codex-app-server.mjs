@@ -12,7 +12,7 @@ function log(entry) {
   }
 }
 
-log({ direction: 'argv', argv: process.argv })
+log({ direction: 'argv', argv: process.argv, env: { CODEX_HOME: process.env.CODEX_HOME ?? null } })
 
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`)

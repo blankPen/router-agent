@@ -116,6 +116,7 @@ Router 不做对话，只在必要时说话：
 | `update:restart-scheduled` | Router Tool | `delayMs` | 飞书里让 Router 更新版本后，安排在回复发出后重启服务 |
 | `api:update` | HTTP API | `phase` `from` `to` `reason` | 面板触发的更新结果 |
 | `codex:binary-resolved` | Codex runtime | `ticketId` `source` `path` `version` | 实际使用的 Codex 可执行文件（App 内置 / 环境变量 / PATH） |
+| `codex:codex-home` | Codex runtime | `ticketId` `codexHome` | 子进程使用的 `CODEX_HOME`；与桌面端不一致时桌面端看不到 thread |
 | `codex:full-access` | Codex runtime | `ticketId` `approvalPolicy` `sandboxMode` | Worker 以 full access 运行；没有人工审批闸门 |
 | `codex:thread-started` | Codex runtime | `ticketId` `threadId` `cwd` `sandboxMode` `approvalPolicy` | `thread/start` 成功，threadId 写入 Assignment |
 | `codex:thread-name-failed` | Codex runtime | `ticketId` `threadId` `reason` | `thread/name/set` 失败；不影响工单，只是桌面端标题退回默认摘要 |

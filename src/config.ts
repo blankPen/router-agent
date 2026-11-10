@@ -387,6 +387,9 @@ runtime:
   #     command: /Users/me/.router-agent/runtimes/codex/node_modules/.bin/codex-acp
   #     args: ["--message-streaming"]
   #     env: {}
+  #   codex-app:           # Codex App 运行时；CODEX_HOME 缺省为 ~/.codex，与桌面端一致
+  #     env:
+  #       CODEX_HOME: /Users/me/.codex
   # 非 orca runtime 用独立项目清单，和顶层 projects 互不影响
   # projects:
   #   claude-code:
