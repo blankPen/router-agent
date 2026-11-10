@@ -185,7 +185,7 @@ llm:
 
 `authHeader` 只在 `api: anthropic-messages` 时生效：用 `ANTHROPIC_AUTH_TOKEN` 的网关开启，用 `ANTHROPIC_API_KEY`（x-api-key）的网关保持关闭。Web 初始化页 / 配置页的「接口协议」「密钥用 Bearer 发送」对应这两项。
 
-**从本地配置导入**：Web 初始化页「LLM Provider」下方的「扫描本地配置」会只读检查以下位置，把 Base URL / 模型 / 密钥齐全的 Provider 列出来，点「导入」直接写回 `config.yaml`（密钥在服务端读取，不会回显到页面）：
+**从本地配置导入**：Web 初始化页「LLM Provider」卡片右上角的「从本地配置导入」会打开选择弹窗，只读检查以下位置，把 Base URL / 模型 / 密钥齐全的 Provider 列出来；选中一份后点「导入所选」直接写回 `config.yaml`（密钥在服务端读取，不会回显到页面）：
 
 | 来源 | 路径 | 说明 |
 |-|-|-|
