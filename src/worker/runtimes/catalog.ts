@@ -8,6 +8,7 @@ import { ACP_AGENTS } from './acp/agents.js'
 export const ORCA_RUNTIME_ID = 'orca'
 export const CLAUDE_CODE_RUNTIME_ID = 'claude-code'
 export const ACP_RUNTIME_ID = 'acp'
+export const CODEX_APP_RUNTIME_ID = 'codex-app'
 
 export interface WorkerRuntimeMeta {
   id: string
@@ -35,6 +36,13 @@ export const WORKER_RUNTIMES: readonly WorkerRuntimeMeta[] = [
     installUrl: 'https://docs.claude.com/en/docs/claude-code/setup',
   },
   {
+    id: CODEX_APP_RUNTIME_ID,
+    label: 'codex-app · Codex App Server',
+    hint: '直连 Codex App Server；优先使用 Codex App 内置 CLI，桌面端可见同一 thread',
+    installHint: '安装 Codex App（macOS/Windows）或 Codex CLI；ra 会优先使用 Codex App 内置的版本',
+    installUrl: 'https://chatgpt.com/codex',
+  },
+  {
     id: ACP_RUNTIME_ID,
     label: 'acp · 任意 ACP Agent',
     hint: '通过 ACP 协议接入其它 Agent；启用前需要在 runtime.options.acp 配置 command',
@@ -60,7 +68,7 @@ export function normalizeRuntimeId(id: string): string {
 /**
  * 是否是已知的 worker runtime id。
  *
- * 包含内置运行时（orca / claude-code / acp）和 ACP 目录里的动态运行时
+ * 包含内置运行时（orca / claude-code / codex-app / acp）和 ACP 目录里的动态运行时
  * （acp-claude / acp-codex / ...）。未知值让配置校验直接拒绝，避免拼错后
  * 启动期才炸。
  */

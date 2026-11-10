@@ -59,6 +59,11 @@ const RESUME_SPECS: Record<string, ResumeSpec> = {
     args: ['resume', '{sessionId}'],
     note: 'Codex 会话恢复为 best-effort；若找不到会话，请在 worktree 内运行 codex resume 选择历史会话。',
   },
+  'codex-app': {
+    command: 'codex',
+    args: ['resume', '{sessionId}'],
+    note: 'Codex thread 恢复；也可以在 Codex 桌面端用 codex://threads/<threadId> 打开。',
+  },
   'acp-opencode': {
     command: 'opencode',
     args: ['--session', '{sessionId}'],

@@ -29,6 +29,7 @@ describe('运行时恢复映射', () => {
   it('已核实的运行时映射到各自 CLI，未知运行时返回 null', () => {
     expect(resumeSpecOf('acp-claude')?.command).toBe('claude')
     expect(resumeSpecOf('acp-codex')?.command).toBe('codex')
+    expect(resumeSpecOf('codex-app')?.command).toBe('codex')
     expect(resumeSpecOf('acp-opencode')?.command).toBe('opencode')
     expect(resumeSpecOf('claude-cli')?.command).toBe('claude')
     expect(resumeSpecOf('orca')?.command).toBe('claude')
@@ -42,6 +43,10 @@ describe('运行时恢复映射', () => {
     const codex = buildResumeHint('acp-codex', { workdir: '/tmp/wt', sessionId: 'thread_1' })
     expect(codex?.command).toBe("cd '/tmp/wt' && codex 'resume' 'thread_1'")
     expect(codex?.note).toContain('best-effort')
+
+    const codexApp = buildResumeHint('codex-app', { workdir: '/tmp/wt', sessionId: 'thread_1' })
+    expect(codexApp?.command).toBe("cd '/tmp/wt' && codex 'resume' 'thread_1'")
+    expect(codexApp?.note).toContain('codex://threads')
   })
 
   it('claude-code 没有 sessionId 时退回 handle attach', () => {

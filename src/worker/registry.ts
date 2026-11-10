@@ -1,14 +1,18 @@
 import type { AppConfig } from '../config.js'
 import type { CommandRunner } from '../infra/process.js'
+import type { Logger } from '../infra/logger.js'
 import { WorkerRuntimeError, type WorkerRuntime } from './port.js'
 import { OrcaRuntime } from './orca/index.js'
 import { ClaudeCodeRuntime } from './runtimes/claude-code/index.js'
+import { CodexAppRuntime } from './runtimes/codex/index.js'
+import { codexAppOptionsOf } from './runtimes/codex/detect.js'
 import { AcpRuntime } from './runtimes/acp/index.js'
 import { ACP_AGENTS } from './runtimes/acp/agents.js'
 import { acpRuntimeConfig, installHintOf, resolveAgentCommand } from './runtimes/acp/detect.js'
 import {
   ACP_RUNTIME_ID,
   CLAUDE_CODE_RUNTIME_ID,
+  CODEX_APP_RUNTIME_ID,
   LEGACY_CLAUDE_CODE_RUNTIME_ID,
   ORCA_RUNTIME_ID,
   normalizeRuntimeId,
@@ -26,6 +30,7 @@ export interface RuntimeDeps {
   git: CommandRunner
   claudeProjectsDir?: string
   env?: NodeJS.ProcessEnv
+  logger?: Logger
 }
 
 /** 按 id 持有运行时；内核只通过它取运行时，不直接 new OrcaRuntime。 */
@@ -85,6 +90,22 @@ export function createRuntimes(config: AppConfig, deps: RuntimeDeps): RuntimeReg
     // 只允许非安全参数；allowedTools / 跳过权限确认 / sandbox 由 worker.tools 与内置基线决定。
     ...(typeof claudeOptions.model === 'string' ? { model: claudeOptions.model } : {}),
     ...(deps.env ? { env: deps.env } : {}),
+  }))
+
+  const codexOptions = codexAppOptionsOf(config)
+  runtimes.set(CODEX_APP_RUNTIME_ID, new CodexAppRuntime({
+    command: codexOptions.command,
+    model: codexOptions.model,
+    modelProvider: codexOptions.modelProvider,
+    permissions: codexOptions.permissions,
+    approvalPolicy: codexOptions.approvalPolicy,
+    network: codexOptions.network,
+    args: codexOptions.args,
+    workersDir: deps.workersDir,
+    home: deps.home,
+    git: deps.git,
+    ...(deps.env ? { env: deps.env } : {}),
+    ...(deps.logger ? { logger: deps.logger } : {}),
   }))
 
   const acpOptions = (config.runtime.options?.[ACP_RUNTIME_ID] ?? {}) as Record<string, unknown>
