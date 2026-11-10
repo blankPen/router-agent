@@ -439,6 +439,11 @@ describe('RouterService 编排', () => {
     expect(store.getTicket(ticket.id)?.prState).toBe('merged')
     const outbox = store.claimOutbox('2026-11-06T10:10:00.000Z', 10)
     expect(outbox.some(item => item.text.includes('已合并'))).toBe(true)
+
+    // PR 合并关单也要回收 workspace，不能只关单不删目录。
+    await service.runOnce()
+    expect(runtime.stopped).toContain(assignment.handle)
+    expect(runtime.removed).toContain(`path:/tmp/${ticket.id}`)
   })
 
   it('PR 仍开时不关闭工单', async () => {
@@ -553,7 +558,7 @@ describe('RouterService 编排', () => {
     expect(store.claimOutbox('2026-11-06T10:11:00.000Z', 20).filter(item => item.text.includes('执行会话已不存在'))).toHaveLength(0)
   })
 
-  it('停止工单会触发 worker 停止', async () => {
+  it('停止工单会停止 worker 并回收 workspace', async () => {
     engine.ingest(makeTrigger())
     await service.runOnce()
     const ticket = store.listTickets()[0]!
@@ -563,6 +568,7 @@ describe('RouterService 编排', () => {
     await service.runOnce()
     expect(runtime.stopped).toContain(assignment.handle)
     expect(store.getTicket(ticket.id)?.stage).toBe('done')
+    expect(runtime.removed).toContain(`path:/tmp/${ticket.id}`)
   })
 
   it('待投递的 follow-up 会在下一轮投给 worker', async () => {

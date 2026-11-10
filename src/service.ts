@@ -1023,7 +1023,7 @@ export class RouterService {
         ? String(error.detail.workdir)
         : assignment.workdir
       this.store.updateAssignment({ ...assignment, workdir: failedWorkdir, status: 'ended', endedAt: this.clock.now() })
-      if (failedWorkdir) this.enqueueWorkspaceCleanup(ticket)
+      if (failedWorkdir) this.enqueueWorkspaceCleanup(ticket, 'launch-failed')
       this.reportLaunchFailure(ticket, error)
       throw error
     }
@@ -1502,7 +1502,7 @@ export class RouterService {
       throw error
     }
     this.store.deleteCursor(reminderCursorKey(ticket.id))
-    this.enqueueWorkspaceCleanup(closed)
+    this.enqueueWorkspaceCleanup(closed, 'idle')
     this.notify(
       closed,
       `工单「${closed.title}」已 ${this.retention.idleHours} 小时无进展且 ${this.retention.closeGraceHours} 小时未回复，已自动关闭，正在回收对应的 workspace。`,
@@ -1511,15 +1511,21 @@ export class RouterService {
     this.log('retention:closed', closed.id, { reason: 'idle' })
   }
 
-  private enqueueWorkspaceCleanup(ticket: Ticket): void {
+  /**
+   * 投递 workspace 回收任务。所有自动关单来源（闲置超时、PR 合并 / 关闭、派工半成功、人工停止）
+   * 都必须走这里，否则工单会关掉、worktree 却留在磁盘上。
+   */
+  private enqueueWorkspaceCleanup(ticket: Ticket, source: string): void {
     const suffix = ticket.closedAt ?? this.clock.now()
-    this.store.enqueueEffect({
+    const queued = this.store.enqueueEffect({
       id: `ef_cleanup_${ticket.id}_${suffix.replace(/[^0-9a-zA-Z]/g, '')}`,
       key: `cleanup-workspace:${ticket.id}:${suffix}`,
       kind: 'cleanup-workspace',
       payload: { ticketId: ticket.id },
       now: this.clock.now(),
     })
+    // 队列去重时不重复打日志，避免 PR 轮询反复命中同一张单。
+    if (queued) this.log('cleanup:queued', ticket.id, { source })
   }
 
   /**
@@ -1829,7 +1835,9 @@ export class RouterService {
 
   stopTicket(ticketId: string, reason: string): Ticket {
     const ticket = this.engine.stopTicket(ticketId, reason)
-    this.store.enqueueEffect({ id: `ef_stop_${ticketId}_${Date.now()}`, key: `stop:${ticketId}`, kind: 'stop-worker', payload: { ticketId }, now: this.clock.now() })
+    // 人工停止同样要回收 workspace：cleanup-workspace 会先停终端再删 worktree，
+    // 比单独排 stop-worker 更完整（旧实现只停进程，目录会一直留在磁盘上）。
+    this.enqueueWorkspaceCleanup(ticket, 'stop')
     return ticket
   }
 
@@ -1916,8 +1924,10 @@ let repo = ticket.repo
       if ((info.state === 'merged' || info.state === 'closed') && updated.stage !== 'done') {
         const closed = this.engine.closeTicket(ticket.id, `pr:${info.state}`)
         appendEvent(join(this.config.home, 'workers', ticket.id, 'events.log'), { kind: 'pr', state: info.state, at: this.clock.now() })
+        // PR 闭环也是自动关单：和闲置超时关单一样回收 workspace，否则目录会一直留在磁盘上。
+        this.enqueueWorkspaceCleanup(closed, `pr:${info.state}`)
         const label = info.state === 'merged' ? '已合并' : '已关闭'
-        this.notify(closed, `工单「${closed.title}」的 PR ${info.url} ${label}，工单闭环。`, `pr:${ticket.id}:${info.state}`)
+        this.notify(closed, `工单「${closed.title}」的 PR ${info.url} ${label}，工单闭环，正在回收对应的 workspace。`, `pr:${ticket.id}:${info.state}`)
       }
     }
   }
