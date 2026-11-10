@@ -25,6 +25,7 @@ import {
   type ConfigBundle,
   type ConfigDoc,
   type ConfigSaveResult,
+  type LocalProviderImportResult,
   type LocalProviderList,
   type LocalProviderView,
 } from './api.js'
@@ -1576,6 +1577,144 @@ const SETUP_FEISHU_FIELDS: FieldDef[] = (() => {
     .filter((field): field is FieldDef => Boolean(field))
 })()
 
+/**
+ * 初始化页 · 本地 Provider 选择弹窗。
+ * 打开即扫描本机配置，选中一份后调用导入接口；扫描与导入失败都留在弹窗内提示。
+ */
+function LocalProviderImportDialog({ hasUnsavedChanges, onClose, onImported }: {
+  hasUnsavedChanges: boolean
+  onClose: () => void
+  onImported: (candidate: LocalProviderView, result: LocalProviderImportResult) => void
+}): JSX.Element {
+  const [providers, setProviders] = useState<LocalProviderList | null>(null)
+  const [selectedId, setSelectedId] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [importingId, setImportingId] = useState('')
+  const [error, setError] = useState<string | null>(null)
+
+  const scan = useCallback((): void => {
+    setLoading(true)
+    setError(null)
+    void listLocalProviders()
+      .then(list => {
+        setProviders(list)
+        // 候选集会随扫描变化：原选择还在就保留，否则默认选中第一份可用配置。
+        setSelectedId(current => (
+          list.candidates.some(candidate => candidate.id === current)
+            ? current
+            : list.candidates[0]?.id ?? ''
+        ))
+      })
+      .catch(err => setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setLoading(false))
+  }, [])
+
+  useEffect(() => { scan() }, [scan])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape' && !importingId) onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      document.body.style.overflow = previousOverflow
+    }
+  }, [importingId, onClose])
+
+  const busy = Boolean(importingId)
+  const selected = providers?.candidates.find(candidate => candidate.id === selectedId)
+
+  const apply = async (): Promise<void> => {
+    if (!selected) return
+    if (hasUnsavedChanges && !confirm('导入会覆盖当前草稿里未保存的修改。继续？')) return
+    setImportingId(selected.id)
+    setError(null)
+    try {
+      onImported(selected, await importLocalProvider(selected.id))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setImportingId('')
+    }
+  }
+
+  return (
+    <div className="modal-layer">
+      <button className="modal-backdrop" aria-label="关闭" onClick={() => { if (!busy) onClose() }} />
+      <div className="modal provider-picker" role="dialog" aria-modal="true" aria-label="从本地配置导入">
+        <header className="modal-head">
+          <div>
+            <h3>从本地配置导入</h3>
+            <p>只读扫描本机 Claude Code、CCSwitch、Pi、OpenCode、Magpie 的 Provider 配置，选一份写入当前 LLM Provider。原文件不会改动，密钥不回显。</p>
+          </div>
+          <button className="icon-btn" title="关闭" onClick={() => { if (!busy) onClose() }} disabled={busy}>
+            <Icon name="close" size={14} />
+          </button>
+        </header>
+        <div className="modal-body">
+          {error && <p className="modal-error">{error}</p>}
+          {loading && <p className="modal-hint">正在扫描本地配置…</p>}
+          {!loading && providers && providers.candidates.length === 0 && (
+            <>
+              <p className="modal-hint">没有找到完整的 Provider（Base URL / 模型 / Key 三项都要有）。</p>
+              <ul className="provider-source-list">
+                {providers.sources.map(source => (
+                  <li key={source.id}>
+                    <span className={source.found ? 'source-ok' : 'source-missing'}>{source.found ? '已找到' : '未找到'}</span>
+                    <strong>{source.label}</strong>
+                    <code>{source.path}</code>
+                    {source.error && <em>{source.error}</em>}
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+          {!loading && providers && providers.candidates.length > 0 && (
+            <ul className="provider-pick-list">
+              {providers.candidates.map(candidate => (
+                <li key={candidate.id}>
+                  <label className={`provider-pick ${candidate.id === selectedId ? 'selected' : ''}`}>
+                    <input
+                      type="radio"
+                      name="local-provider"
+                      checked={candidate.id === selectedId}
+                      disabled={busy}
+                      onChange={() => setSelectedId(candidate.id)}
+                    />
+                    <span className="provider-pick-info">
+                      <strong>{candidate.name}</strong>
+                      <span>
+                        {candidate.sourceLabel} · {candidate.api}
+                        {candidate.contextWindow ? ` · 上下文 ${candidate.contextWindow.toLocaleString()} tokens` : ''}
+                      </span>
+                      <code>{candidate.baseUrl}</code>
+                      <small>模型：{candidate.model}{candidate.apiKeySet ? ' · 已带 Key' : ' · 缺少 Key'}</small>
+                    </span>
+                  </label>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <footer className="modal-foot">
+          <button className="btn" onClick={scan} disabled={loading || busy}>
+            <Icon name="refresh" size={13} className={loading ? 'spin' : undefined} />
+            重新扫描
+          </button>
+          <span className="provider-pick-spacer" />
+          <button className="btn" onClick={onClose} disabled={busy}>取消</button>
+          <button className="btn primary" onClick={() => void apply()} disabled={!selected || busy}>
+            {busy ? '导入中…' : '导入所选'}
+          </button>
+        </footer>
+      </div>
+    </div>
+  )
+}
+
 /** 初始化页：只做启动必需项（运行时 / 项目 / 飞书 / 群），其余配置留在「配置」页。 */
 function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
   restarting: boolean
@@ -1594,11 +1733,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
   const [notice, setNotice] = useState<RuntimeNotice | null>(null)
   const [pendingRestart, setPendingRestart] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [importOpen, setImportOpen] = useState(false)
-  const [importLoading, setImportLoading] = useState(false)
-  const [importingId, setImportingId] = useState('')
-  const [importError, setImportError] = useState<string | null>(null)
-  const [localProviders, setLocalProviders] = useState<LocalProviderList | null>(null)
+  const [providerPickerOpen, setProviderPickerOpen] = useState(false)
 
   // 重启开始后不再提示「需重启」。
   useEffect(() => {
@@ -1725,44 +1860,22 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
     if (await save()) onRestart()
   }
 
-  const scanLocalProviders = async (): Promise<void> => {
-    setImportOpen(true)
-    setImportLoading(true)
-    setImportError(null)
-    try {
-      setLocalProviders(await listLocalProviders())
-    } catch (error) {
-      setImportError(error instanceof Error ? error.message : String(error))
-    } finally {
-      setImportLoading(false)
+  // 弹窗里导入成功后直接用返回的配置替换草稿，并关掉弹窗、提示结果。
+  const applyLocalProvider = (candidate: LocalProviderView, result: LocalProviderImportResult): void => {
+    setOriginal(result.config)
+    setDraft(result.config)
+    setDefaults(result.defaults)
+    setConfigPath(result.configPath)
+    if (result.runtimeChoices) setRuntimeChoices(result.runtimeChoices)
+    if (typeof result.detecting === 'boolean') setDetecting(result.detecting)
+    setPendingRestart(result.restartRequired)
+    setProviderPickerOpen(false)
+    const message = {
+      kind: result.restartRequired ? 'warn' as const : 'ok' as const,
+      text: `已导入 ${candidate.sourceLabel} · ${candidate.name}${result.restartRequired ? '，重启服务后生效' : ''}。`,
     }
-  }
-
-  const applyLocalProvider = async (candidate: LocalProviderView): Promise<void> => {
-    if (changed.length > 0 && !confirm('导入会覆盖当前草稿里未保存的修改。继续？')) return
-    setImportingId(candidate.id)
-    setImportError(null)
-    try {
-      const result = await importLocalProvider(candidate.id)
-      setOriginal(result.config)
-      setDraft(result.config)
-      setDefaults(result.defaults)
-      setConfigPath(result.configPath)
-      if (result.runtimeChoices) setRuntimeChoices(result.runtimeChoices)
-      if (typeof result.detecting === 'boolean') setDetecting(result.detecting)
-      setPendingRestart(result.restartRequired)
-      setImportOpen(false)
-      const message = {
-        kind: result.restartRequired ? 'warn' as const : 'ok' as const,
-        text: `已导入 ${candidate.sourceLabel} · ${candidate.name}${result.restartRequired ? '，重启服务后生效' : ''}。`,
-      }
-      setNotice(message)
-      window.setTimeout(() => setNotice(current => (current === message ? null : current)), 8_000)
-    } catch (error) {
-      setImportError(error instanceof Error ? error.message : String(error))
-    } finally {
-      setImportingId('')
-    }
+    setNotice(message)
+    window.setTimeout(() => setNotice(current => (current === message ? null : current)), 8_000)
   }
 
   if (loadError) return <div className="banner danger"><Icon name="alert" />读取配置失败：{loadError}</div>
@@ -1844,6 +1957,10 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
           <div className="settings-badges">
             {llmReady ? <span className="badge hot">已就绪</span> : <span className="badge cold">未完成</span>}
             {keyConfigured && <span className="badge cold">密钥已配置</span>}
+            <button className="btn tiny" onClick={() => setProviderPickerOpen(true)}>
+              <Icon name="download" size={13} />
+              从本地配置导入
+            </button>
           </div>
         </header>
         <div className="settings-rows">
@@ -1857,58 +1974,6 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
               onChange={value => setField(field.path, value)}
             />
           ))}
-        </div>
-        <div className="provider-import">
-          <div className="provider-import-head">
-            <div>
-              <strong>从本地配置导入</strong>
-              <span>读取 Claude Code、CCSwitch、Pi、OpenCode、Magpie 的本地 Provider 配置，只读取，不改动原文件。</span>
-            </div>
-            <button className="btn tiny" onClick={() => void scanLocalProviders()} disabled={importLoading || Boolean(importingId)}>
-              <Icon name={importLoading ? 'refresh' : 'download'} size={13} className={importLoading ? 'spin' : undefined} />
-              {importOpen ? '重新扫描' : '扫描本地配置'}
-            </button>
-          </div>
-          {importOpen && (
-            <div className="provider-import-panel">
-              {importError && <p className="field-error">{importError}</p>}
-              {importLoading && <p className="muted">正在扫描本地配置…</p>}
-              {!importLoading && localProviders && localProviders.candidates.length === 0 && (
-                <>
-                  <p className="muted">没有找到完整的 Provider（Base URL / 模型 / Key 三项都要有）。</p>
-                  <ul className="provider-source-list">
-                    {localProviders.sources.map(source => (
-                      <li key={source.id}>
-                        <span className={source.found ? 'source-ok' : 'source-missing'}>{source.found ? '已找到' : '未找到'}</span>
-                        <strong>{source.label}</strong>
-                        <code>{source.path}</code>
-                        {source.error && <em>{source.error}</em>}
-                      </li>
-                    ))}
-                  </ul>
-                </>
-              )}
-              {!importLoading && localProviders && localProviders.candidates.length > 0 && (
-                <ul className="provider-candidate-list">
-                  {localProviders.candidates.map(candidate => (
-                    <li key={candidate.id}>
-                      <div className="provider-candidate-info">
-                        <strong>{candidate.name}</strong>
-                        <span>{candidate.sourceLabel} · {candidate.api}</span>
-                        <code>{candidate.baseUrl}</code>
-                        <small>
-                          模型：{candidate.model}{candidate.apiKeySet ? ' · 已带 Key' : ' · 缺少 Key'}
-                        </small>
-                      </div>
-                      <button className="btn tiny" onClick={() => void applyLocalProvider(candidate)} disabled={Boolean(importingId)}>
-                        {importingId === candidate.id ? '导入中…' : '导入'}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          )}
         </div>
       </section>
 
@@ -2033,6 +2098,14 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
         onSave={() => void save()}
         onSaveAndRestart={() => void saveAndRestart()}
       />
+
+      {providerPickerOpen && (
+        <LocalProviderImportDialog
+          hasUnsavedChanges={changed.length > 0}
+          onClose={() => setProviderPickerOpen(false)}
+          onImported={applyLocalProvider}
+        />
+      )}
     </>
   )
 }
