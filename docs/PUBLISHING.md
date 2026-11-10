@@ -76,9 +76,23 @@ Actions → 发布 npm 包 → Run workflow。发布的是所选分支 `package.
 4. 自动升版时把 `package.json` 版本改成计划里的版本；
 5. `pnpm check`（类型检查 + 全量测试）；
 6. `pnpm build`（tsc + esbuild，产物在 `dist/`）；
-7. `npm publish --provenance`，带构建来源证明（`id-token: write`）；
-8. 发布后最多等 5 分钟回查版本是否真的可从 npm 查询到（npm 通常要 1~2 分钟才可查；防止只有 stage 权限时静默进入暂存区）；
+7. `npm publish --provenance --json`，带构建来源证明（`id-token: write`）；
+8. 依据 `npm publish` 的退出码与 JSON 输出判定发布是否成功（`scripts/publish-result.mjs`），
+   判定结果写进 step outputs 传给后续步骤，不再回查 npm registry；
 9. 自动升版时把版本号提交回 `main`，让仓库与 npm 保持一致。
+
+### 怎么判定发布成功
+
+判定完全依据 `npm publish` 自己的返回结果，不再轮询 `npm view`：
+
+- **退出码非 0**：发布失败。优先从 JSON 输出里的 `error.code` / `error.summary` 取错误原因，
+  取不到就退回 stderr 末尾几行；
+- **退出码为 0**：从 JSON 输出里取出包名与版本，和 `package.json` 对比，一致才算成功；
+- **暂存发布（staged）**：npm 11 会在输出里带 `stageId`，并在 stderr 打印 `has been staged`。
+  命中即判为失败——这种 token 没有真正把包发到 npm，用户装不到。
+
+不同 npm 版本的 JSON 外层结构不同（npm 10 是发布结果对象本身，npm 11 多包一层包名），
+`scripts/publish-result.mjs` 两种都认。单测见 `tests/scripts/publish-result.test.ts`。
 
 ## 自动升版与分支保护
 
@@ -133,7 +147,7 @@ ra -v
 - 需要维护者在 https://www.npmjs.com/package/router-agent → **Staged Packages** 标签页点 **Approve**（需要 2FA），版本才真正公开；
 - 或使用 npm 11+ 的 CLI：`npx npm@11 stage list router-agent` 查看暂存版本，`npx npm@11 stage approve <stage-id>` 批准。
 
-工作流末尾的「校验发布结果」会回查版本是否可查询，遇到这种情况会直接失败并提示原因，不再静默通过。
+工作流的「发布到 npm」步骤会依据 `npm publish` 的输出识别暂存发布，遇到这种情况会直接失败并提示原因，不再静默通过。
 长期方案是把 token 权限改为 `Read and write (publish and stage)`，或改用 Trusted Publishing（无需 token，但对已存在的包才能配置）。
 
 ## 常见失败排查
@@ -144,7 +158,7 @@ ra -v
 | `E403 ... two-factor authentication` | token 未勾选 Bypass 2FA | 重新生成 granular token |
 | `E403 ... not allowed to publish` | token 权限不足或 Packages 未选 All | 调整 token 权限 |
 | `E409 ... cannot publish over existing version` | 同版本已发布 | 升版本号后重新发版；工作流正常情况下会提前跳过 |
-| 流水线成功但 npm 上只有 `0.0.0-stage` | token 只有 `stage only` 权限，版本进了暂存区 | 改 token 权限，或在 Staged Packages 中 Approve |
+| 流水线报「只写进了暂存区」 | token 只有 `stage only` 权限，版本进了暂存区 | 改 token 权限，或在 Staged Packages 中 Approve |
 | `tag vX 与 package.json 版本不一致` | tag 与版本不同步 | `pnpm version` 重新打 tag 再推 |
 | 流水线提示「版本号回写 main 失败」 | main 分支保护禁止 Actions 直接推送 | 允许 Actions 推送，或忽略该提示：npm 已发布，下一次合集会以 npm 上最新版本为基准继续升 patch |
 | provenance 相关报错 | 缺少 `id-token: write` 或仓库/runner 不满足要求 | 检查工作流权限与仓库可见性 |
