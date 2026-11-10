@@ -173,6 +173,7 @@ export async function discoverLocalProviders(opts: DiscoverLocalProvidersOptions
 // Claude Code
 // ---------------------------------------------------------------------------
 
+/** 读取 Claude Code settings.json 的 env 块；文件不存在不算错误。 */
 function readClaudeCodeSettings(path: string): { found: boolean; candidates: LocalProviderCandidate[]; error?: string } {
   if (!existsSync(path)) return { found: false, candidates: [] }
   const doc = readJson(path)
@@ -249,6 +250,7 @@ interface CcSwitchRow {
   settings: unknown
 }
 
+/** 只读打开 CCSwitch SQLite，逐行解析 providers 表；锁库等错误降级为 source.error。 */
 async function readCcSwitchDb(path: string): Promise<{ candidates: LocalProviderCandidate[]; error?: string }> {
   let db: import('node:sqlite').DatabaseSync | undefined
   try {
@@ -276,6 +278,7 @@ async function readCcSwitchDb(path: string): Promise<{ candidates: LocalProvider
   }
 }
 
+/** 兼容旧版 CCSwitch config.json（只处理 claude 一类）。 */
 function readCcSwitchLegacy(path: string): { candidates: LocalProviderCandidate[]; error?: string } {
   const doc = readJson(path)
   if (!doc.ok) return { candidates: [], error: doc.error }
@@ -315,6 +318,7 @@ function collectLegacyClaudeProviders(root: unknown): CcSwitchRow[] {
   return rows
 }
 
+/** 把一行 CCSwitch provider 转成候选；claude 走 env，其余走通用结构。 */
 function candidatesFromCcSwitchRow(row: CcSwitchRow): LocalProviderCandidate[] {
   const key = `${row.appType}:${row.id}`
   if (row.appType === 'claude') {
@@ -380,7 +384,7 @@ function candidatesFromGenericSettings(row: CcSwitchRow, key: string): LocalProv
         return (LLM_APIS as readonly string[]).includes(modelApi) ? modelApi as LlmApi : api
       })(),
       ...(settings.authHeader === true ? { authHeader: true } : {}),
-      ...(typeof model.contextWindow === 'number' && Number.isInteger(model.contextWindow) ? { contextWindow: model.contextWindow } : {}),
+      ...contextWindowOf(model.contextWindow),
     })
   }
   return candidates
@@ -399,6 +403,7 @@ function genericModelEntries(value: unknown): Record<string, unknown>[] {
 // Pi models.json
 // ---------------------------------------------------------------------------
 
+/** 读取 Pi models.json 的 providers 与模型清单。 */
 function readPiModels(path: string, env: NodeJS.ProcessEnv): { candidates: LocalProviderCandidate[]; error?: string } {
   const doc = readJson(path)
   if (!doc.ok) return { candidates: [], error: doc.error }
@@ -425,7 +430,7 @@ function readPiModels(path: string, env: NodeJS.ProcessEnv): { candidates: Local
         apiKey,
         api: (LLM_APIS as readonly string[]).includes(rawApi) ? rawApi as LlmApi : 'openai-completions',
         ...(provider.authHeader === true ? { authHeader: true } : {}),
-        ...(typeof model.contextWindow === 'number' && Number.isInteger(model.contextWindow) ? { contextWindow: model.contextWindow } : {}),
+        ...contextWindowOf(model.contextWindow),
       })
     }
   }
@@ -444,6 +449,7 @@ function resolveEnvRef(value: string, env: NodeJS.ProcessEnv): string {
 // OpenCode（~/.config/opencode/opencode.json）
 // ---------------------------------------------------------------------------
 
+/** 读取 OpenCode opencode.json 的 provider.options 与 models。 */
 function readOpencodeConfig(path: string, env: NodeJS.ProcessEnv): { candidates: LocalProviderCandidate[]; error?: string } {
   const doc = readJson(path)
   if (!doc.ok) return { candidates: [], error: doc.error }
@@ -475,7 +481,7 @@ function readOpencodeConfig(path: string, env: NodeJS.ProcessEnv): { candidates:
         model: id,
         apiKey,
         api,
-        ...(contextWindow ? { contextWindow } : {}),
+        ...contextWindowOf(contextWindow),
       })
     }
   }
@@ -493,6 +499,7 @@ function resolveOpencodeSecret(value: unknown, env: NodeJS.ProcessEnv): string {
 // Magpie（~/.config/magpie/providers.json）
 // ---------------------------------------------------------------------------
 
+/** 读取 Magpie providers.json，按 chat / anthropic 地址生成候选。 */
 function readMagpieProviders(path: string): { candidates: LocalProviderCandidate[]; error?: string } {
   const doc = readJson(path)
   if (!doc.ok) return { candidates: [], error: doc.error }
@@ -520,7 +527,7 @@ function readMagpieProviders(path: string): { candidates: LocalProviderCandidate
         apiKey,
         api: target.api,
         ...(target.authHeader ? { authHeader: true } : {}),
-        ...(contextWindow ? { contextWindow } : {}),
+        ...contextWindowOf(contextWindow),
       })
     }
   }
@@ -540,6 +547,7 @@ function magpieTarget(provider: Record<string, unknown>): { baseUrl: string; api
   return null
 }
 
+/** Magpie 的 models 可能是字符串或对象；没有列表时退回单个 model 字段。 */
 function magpieModels(provider: Record<string, unknown>): string[] {
   const list = Array.isArray(provider.models) ? provider.models : []
   const models = list
@@ -554,6 +562,24 @@ function magpieModels(provider: Record<string, unknown>): string[] {
 // 通用工具
 // ---------------------------------------------------------------------------
 
+const MIN_CONTEXT_WINDOW = 1_000
+const MAX_CONTEXT_WINDOW = 10_000_000
+
+/**
+ * 只保留配置校验器允许的上下文窗口。
+ * 本地配置里的 0 / 负值 / 过小值会让整次导入被 applyConfigPatch 拒绝，
+ * 这里提前丢弃，退回到默认上下文窗口。
+ */
+function contextWindowOf(value: unknown): { contextWindow: number } | Record<string, never> {
+  return typeof value === 'number'
+    && Number.isInteger(value)
+    && value >= MIN_CONTEXT_WINDOW
+    && value <= MAX_CONTEXT_WINDOW
+    ? { contextWindow: value }
+    : {}
+}
+
+/** 读取并解析 JSON；失败返回错误文本供面板提示。 */
 function readJson(path: string): { ok: true; value: unknown } | { ok: false; error: string } {
   try {
     return { ok: true, value: JSON.parse(readFileSync(path, 'utf8')) }
@@ -562,15 +588,18 @@ function readJson(path: string): { ok: true; value: unknown } | { ok: false; err
   }
 }
 
+/** 解析 JSON 字符串（如 CCSwitch 的 settings_config），失败返回 undefined。 */
 function parseJsonText(value: unknown): unknown {
   if (typeof value !== 'string') return undefined
   try { return JSON.parse(value) } catch { return undefined }
 }
 
+/** 判断是否为普通对象（排除数组与 null）。 */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
+/** 只接受字符串并去掉首尾空白，其余类型返回空串。 */
 function text(value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
 }

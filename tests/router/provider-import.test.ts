@@ -248,6 +248,28 @@ describe('discoverLocalProviders', () => {
     })
   })
 
+  it('越界的 contextWindow 在发现阶段就丢弃，避免整次导入被配置校验拒绝', async () => {
+    const dir = home()
+    writeJson(join(dir, '.pi', 'agent', 'models.json'), {
+      providers: {
+        bad: {
+          baseUrl: 'https://bad.example.com/v1',
+          apiKey: 'sk-bad',
+          models: [
+            { id: 'too-small', contextWindow: 512 },
+            { id: 'too-large', contextWindow: 20_000_000 },
+            { id: 'ok', contextWindow: 128_000 },
+          ],
+        },
+      },
+    })
+
+    const scan = await discoverLocalProviders({ home: dir, env: {} })
+    expect(scan.candidates.find(item => item.model === 'too-small')?.contextWindow).toBeUndefined()
+    expect(scan.candidates.find(item => item.model === 'too-large')?.contextWindow).toBeUndefined()
+    expect(scan.candidates.find(item => item.model === 'ok')?.contextWindow).toBe(128_000)
+  })
+
   it('配置损坏时只标记来源失败，不抛异常', async () => {
     const dir = home()
     mkdirSync(join(dir, '.claude'), { recursive: true })

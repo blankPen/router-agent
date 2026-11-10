@@ -103,7 +103,8 @@ Router 不做对话，只在必要时说话：
 | `pr:inspect-failed` / `pr:repo-slug-failed` | Service | `ticketId` `handle` `message` | PR 线索获取失败，等待 gh 兜底 |
 | `cursor:invalid` | Service | `key` `message` | 游标 JSON 损坏，按无游标处理 |
 | `llm:model-config-failed` | CLI | `message` | 启动时模型配置缺失或不可解析 |
-| `llm:import-applied` | HTTP API | `source` `name` `api` `baseUrl` `changed` | 从本地 Claude Code / CCSwitch / Pi 配置导入 Provider，已写回 `config.yaml` |
+| `llm:import-applied` | HTTP API | `source` `name` `api` `baseUrl` `changed` | 从本地 Claude Code / CCSwitch / Pi / OpenCode / Magpie 配置导入 Provider，已写回 `config.yaml` |
+| `api:llm-import` | HTTP API | `source` `model` `changed` | 面板触发的本地 Provider 导入成功（不记录密钥） |
 | `llm:import-missing` / `llm:import-rejected` / `llm:import-scan-failed` / `llm:import-write-failed` | HTTP API / Import | `id` / `errors` / `message` | 候选已失效、校验失败、扫描失败或落盘失败（不记录密钥） |
 | `update:checked` | Update | `current` `latest` `hasUpdate` | 每 6 小时的版本检查结果 |
 | `update:check-failed` / `update:skipped` | Update | `message` / `reason` `root` | registry 不可达，或源码运行时跳过全局安装 |
