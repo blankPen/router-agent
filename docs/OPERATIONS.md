@@ -72,6 +72,13 @@ Router 不做对话，只在必要时说话：
 | 事件 | 来源 | 关键字段 | 说明 |
 |-|-|-|-|
 | `trigger:duplicate` | Source | `id` `chat` | 重复投递的消息被入库去重，不是消息丢失 |
+| `channel:not-registered` | Channel Router | `channel` `target` `key` | Outbox 里的通道没有注册，跳过发送（历史脏数据不会卡死队列） |
+| `channel:duplicate-id` | Channel Registry | `channel` `kind` | 同一通道实例被重复注册，保留最后一次 |
+| `channel:ack-failed` | Channel Ingress | `channel` `messageId` `message` | 回执表情添加失败，不影响消息入库与回复 |
+| `session:migrated` | CLI | `sessions` `resets` | 人工执行 `ra migrate sessions --apply` 完成 |
+| `session:migration-required` | CLI | `pending` | 存在未迁移的历史 sessionKey，服务拒绝启动 |
+| `session:migration-incomplete` / `session:migration-verify-failed` / `session:migration-failed` | CLI | 计数与异常数 / `message` | 迁移执行失败（已回滚）或迁移后校验未通过 |
+| `feishu:consumer-start-failed` | CLI | `message` | 飞书通道启动失败 |
 | `feishu:reconnecting` | Source | `attempt` `delayMs` | 事件消费者断开，已安排退避重连 |
 | `feishu:spawn-failed` | Source | `message` | lark-cli 无法拉起（未安装 / 无权限），会继续重试 |
 | `feishu:card-fallback` | Sender | `target` `key` `code` `message` | 互动卡片发送失败，已自动降级为富文本 |
@@ -116,6 +123,31 @@ grep '"message":"trigger:' ~/.router-agent/logs/router-agent.log
 面板「日志」页支持按 INFO / WARN / ERROR 过滤与关键字搜索。
 
 > **同一机器人只能有一个事件总线在跑。** 如果 `ra logs` 出现 `another event bus is already connected`，先停掉其它占用该应用的消费者；建议给 router-agent 使用独立的自建应用，避免与其它 agent 抢同一个机器人。
+
+## 数据迁移
+
+历史 sessionKey 从 `chat:<chatId>:...` 迁移到 `channel:feishu:chat:<chatId>:...`，**只由人手动执行**，启动时不会自动写库：
+
+```bash
+ra stop
+
+# 备份（WAL 先 checkpoint，生成一致性快照）
+sqlite3 ~/.router-agent/state.db "PRAGMA wal_checkpoint(TRUNCATE);"
+sqlite3 ~/.router-agent/state.db \
+  "VACUUM INTO '$HOME/.router-agent/state.db.bak-$(date +%Y%m%d%H%M%S)';"
+
+ra migrate sessions --dry-run    # 只读：待迁移数 / 异常 key / 映射样例
+ra migrate sessions --apply      # 交互确认后执行，事务内完成，幂等
+ra migrate sessions --verify     # 总数、格式、审计表、异常检查
+
+ra start
+```
+
+- 迁移只改 `chat_sessions` 与 `chat_session_resets` 的 `session_key`、`id`，会话文件与内容不动。
+- 异常 key（既不是 `chat:` 也不是 `channel:`）不会被修改，`--dry-run` 会列出来，需要人工确认后单独处理。
+- 非交互环境执行 `--apply` 必须显式加 `--yes`；不提供 `--force`。
+- 迁移失败时事务整体回滚；回滚版本请恢复上一步的备份文件。
+- 手工 SQL 兜底：`scripts/migrations/2026-11-session-key-channel.sql`（同样由人确认后执行）。
 
 ## 已知限制
 

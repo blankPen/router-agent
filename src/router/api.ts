@@ -7,7 +7,7 @@ import { applyConfigPatch, policyOf, publicConfig, publicDefaults, requiresResta
 import { InstallStartError, type AcpRuntimeAdmin } from '../worker/runtimes/acp/admin.js'
 import { isWorkerRuntimeId, normalizeRuntimeId } from '../worker/runtimes/catalog.js'
 import { ProjectSetupError, type ProjectSetupPort } from './project-setup.js'
-import type { FeishuBotAdmin } from '../sources/feishu-bot-admin.js'
+import type { ChannelAdmin } from '../channels/port.js'
 import type { AcceptMode } from '../core/policy.js'
 import { noopSink, preview, type EventSink } from '../core/events.js'
 import { noopLogger, errorMessage, type Logger } from '../infra/logger.js'
@@ -46,8 +46,8 @@ export interface ApiServerOptions {
   resumeHint?: (ticketId: string) => Promise<ResumeHint | null> | ResumeHint | null
   /** ACP 运行时探测与安装；缺省时新端点返回 404。 */
   runtimeAdmin?: AcpRuntimeAdmin
-  /** 飞书机器人凭据与授权；缺省时相关端点返回 404。 */
-  feishuBot?: FeishuBotAdmin
+  /** 通道管理能力（飞书实现由 FeishuBotAdmin 提供）；缺省时相关端点返回 404。 */
+  feishuBot?: ChannelAdmin
   /** 面板「日志」页读取的日志文件；缺省时用 `<home>/logs/router-agent.log`。 */
   logPath?: string
   /** 项目登记：目录选择、Git 探测、clone 与 Orca 仓库登记；缺省时端点返回 404。 */

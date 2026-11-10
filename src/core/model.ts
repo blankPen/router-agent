@@ -36,6 +36,11 @@ export interface Attachment {
 export interface Trigger {
   id: string
   source: SourceKind
+  /**
+   * 通道实例 ID（一期固定 feishu）。
+   * 历史数据没有该字段时按 DEFAULT_CHANNEL_ID 兜底，见 channels/port.ts。
+   */
+  channelId?: string
   /** Source 自己的事件 ID，用于幂等。 */
   externalId: string
   threadId: string

@@ -30,7 +30,7 @@ import {
 } from './worker/workspaces/overview.js'
 import { EffectsProcessor } from './core/effects.js'
 import { preview } from './core/events.js'
-import { shouldSendAsText } from './sources/feishu.js'
+import { DEFAULT_CHANNEL_ID } from './channels/port.js'
 import type { CommandRunner } from './infra/process.js'
 import { noopLogger, type Logger } from './infra/logger.js'
 import type { PrInfo } from './sources/github.js'
@@ -70,7 +70,7 @@ export interface RouterServiceOptions {
   idleAfterMs?: number
   /** 唤醒后多久仍无响应算 stale，默认 5 分钟。 */
   staleAfterMs?: number
-  /** 注入触发源（服务层用 FeishuConsumer 接）。 */
+  /** 注入触发源（服务层由通道适配器接入）。 */
   onTrigger?: (trigger: Trigger) => void
   /** Claude Code 会话记录目录；默认 ~/.claude/projects，测试可注入。 */
   claudeProjectsDir?: string
@@ -2021,7 +2021,7 @@ let repo = ticket.repo
       this.store.enqueueOutbox({
         id: `ob_${`${key}:${index}`.replace(/[^a-zA-Z0-9:_-]/g, '_')}`,
         key: `${key}:${index}`,
-        channelKind: 'feishu',
+        channelKind: DEFAULT_CHANNEL_ID,
         channelId: ticket.chatId,
         threadId: ticket.threadId.split(':').at(-1) ?? '',
         text: `${chunk}${suffix}`,
@@ -2034,7 +2034,7 @@ let repo = ticket.repo
     this.store.enqueueOutbox({
       id: `ob_${key.replace(/[^a-zA-Z0-9:_-]/g, '_')}`,
       key,
-      channelKind: 'feishu',
+      channelKind: DEFAULT_CHANNEL_ID,
       channelId: ticket.chatId,
       threadId: ticket.threadId.split(':').at(-1) ?? '',
       text,
@@ -2071,37 +2071,12 @@ export interface CreateServiceDeps {
   runner: CommandRunner
   runtime: WorkerRuntime
   prTracker: PrTracker
-  sender: FeishuOutbound
+  sender: OutboundSender
   logger: Logger
 }
 
-/** 回复投递需要的飞书能力；生产环境由 FeishuSender 实现。 */
-export interface FeishuOutbound {
-  reply(messageId: string, text: string, idempotencyKey: string): Promise<void>
-  send(chatId: string, text: string, idempotencyKey: string): Promise<void>
-  sendCard(chatId: string, markdown: string, idempotencyKey: string): Promise<void>
-  replyCard(messageId: string, markdown: string, idempotencyKey: string): Promise<void>
-}
-
-/** 生产装配：用一个 CommandRunner 驱动 Orca 与 gh。 */
-export function createEffectsSender(sender: FeishuOutbound): OutboundSender {
-  return {
-    async send(item) {
-      if (item.channelKind !== 'feishu') return
-      const text = item.text.trim()
-      if (!text) return
-      // 简单消息走纯文本：不开卡片，少一次渲染、少一类兼容问题。
-      if (shouldSendAsText(text)) {
-        if (item.threadId) await sender.reply(item.threadId, text, item.key)
-        else await sender.send(item.channelId, text, item.key)
-        return
-      }
-      // 其余走互动卡片：Markdown 先在 feishuCard 内归一化，卡片失败时 Sender 内部降级为 post。
-      if (item.threadId) await sender.replyCard(item.threadId, text, item.key)
-      else await sender.sendCard(item.channelId, text, item.key)
-    },
-  }
-}
+/** 旧版出站兼容层；生产路径已改为 `ChannelRouter`，这里仅保留导出。 */
+export { createEffectsSender, type FeishuOutbound } from './channels/legacy.js'
 
 /** 按行切成不超过 limit 的消息块，保证长回复不会被截断。 */
 export function splitMessage(text: string, limit = 3500): string[] {
