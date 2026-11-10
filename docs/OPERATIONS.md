@@ -46,7 +46,7 @@ Router 不做对话，只在必要时说话：
 
 ## 日志
 
-所有关键节点都是结构化 JSON，一行一个事件（`at` / `level` / `message` + 业务字段），写入 `~/.router-agent/logs/router-agent.log`：
+所有关键节点都是结构化 JSON，一行一个事件（`at` / `level` / `message` + 业务字段），写入 `~/.router-agent/logs/router-agent.log`。`message` 固定是事件名（`域:动作`），错误详情等文本一律用 `detail` 字段，不要占用 `message`：
 
 | 事件 | 来源 | 关键字段 | 说明 |
 |-|-|-|-|
@@ -64,7 +64,7 @@ Router 不做对话，只在必要时说话：
 | `api:input` / `api:stop` / `api:policy` / `api:config` | HTTP API | — | 面板 / CLI 的操作 |
 | `idle:nudge` / `idle:stale` | Service | — | 空闲唤醒与失联标记 |
 | `pr:linked` / `pr:state` | Service | — | PR / MR 跟踪 |
-| `pr:track-failed` | Service | `ticketId` `prNumber` `repo` `message` | PR / MR 状态查询无结果；同一工单 + PR 只记一次 |
+| `pr:track-failed` | Service | `ticketId` `prNumber` `repo` `detail` | PR / MR 状态查询无结果；同一工单 + PR 只记一次 |
 | `recover:*` | Service | — | 重启对账 |
 
 消息、配置与异常三类关键链路的补充事件（都遵循同一套 `at` / `level` / `message` + 业务字段格式）：
@@ -74,45 +74,45 @@ Router 不做对话，只在必要时说话：
 | `trigger:duplicate` | Source | `id` `chat` | 重复投递的消息被入库去重，不是消息丢失 |
 | `channel:not-registered` | Channel Router | `channel` `target` `key` | Outbox 里的通道没有注册，跳过发送（历史脏数据不会卡死队列） |
 | `channel:duplicate-id` | Channel Registry | `channel` `kind` | 同一通道实例被重复注册，保留最后一次 |
-| `channel:ack-failed` | Channel Ingress | `channel` `messageId` `message` | 回执表情添加失败，不影响消息入库与回复 |
+| `channel:ack-failed` | Channel Ingress | `channel` `messageId` `detail` | 回执表情添加失败，不影响消息入库与回复 |
 | `session:migrated` | CLI | `sessions` `resets` | 人工执行 `ra migrate sessions --apply` 完成 |
 | `session:migration-required` | CLI | `pending` | 存在未迁移的历史 sessionKey，服务拒绝启动 |
-| `session:migration-incomplete` / `session:migration-verify-failed` / `session:migration-failed` | CLI | 计数与异常数 / `message` | 迁移执行失败（已回滚）或迁移后校验未通过 |
-| `feishu:consumer-start-failed` | CLI | `message` | 飞书通道启动失败 |
+| `session:migration-incomplete` / `session:migration-verify-failed` / `session:migration-failed` | CLI | 计数与异常数 / `detail` | 迁移执行失败（已回滚）或迁移后校验未通过 |
+| `feishu:consumer-start-failed` | CLI | `detail` | 飞书通道启动失败 |
 | `feishu:reconnecting` | Source | `attempt` `delayMs` | 事件消费者断开，已安排退避重连 |
-| `feishu:spawn-failed` | Source | `message` | lark-cli 无法拉起（未安装 / 无权限），会继续重试 |
-| `feishu:card-fallback` | Sender | `target` `key` `code` `message` | 互动卡片发送失败，已自动降级为富文本 |
-| `feishu:quote-fetch-failed` / `feishu:quote-parse-failed` | Source | `messageId` `message` | 引用消息回查失败，按原消息继续 |
-| `chats:refresh-failed` / `chats:parse-failed` / `chats:cache-invalid` | Source | `code` / `message` / `path` | 群名目录刷新失败或缓存损坏，旧值继续可用 |
-| `loop:trigger-failed` | Agent Loop | `triggerId` `chat` `message` | 单条消息处理异常，同批其它消息不受影响 |
-| `decision:engine-failed` | Agent Loop | `triggerId` `message` | 研判引擎调用失败，按 unavailable 处理并留下原因 |
-| `chat:reply-failed` | Agent Loop | `triggerId` `chat` `reason` `message` | 回复模型失败，已退回固定话术 |
-| `session:transcript-failed` / `session:reset-failed` | Agent Loop | `key` `message` | 会话转录 / `/new` 重置失败，不影响当轮回复 |
+| `feishu:spawn-failed` | Source | `detail` | lark-cli 无法拉起（未安装 / 无权限），会继续重试 |
+| `feishu:card-fallback` | Sender | `target` `key` `code` `detail` | 互动卡片发送失败，已自动降级为富文本 |
+| `feishu:quote-fetch-failed` / `feishu:quote-parse-failed` | Source | `messageId` `detail` | 引用消息回查失败，按原消息继续 |
+| `chats:refresh-failed` / `chats:parse-failed` / `chats:cache-invalid` | Source | `code` / `detail` / `path` | 群名目录刷新失败或缓存损坏，旧值继续可用 |
+| `loop:trigger-failed` | Agent Loop | `triggerId` `chat` `detail` | 单条消息处理异常，同批其它消息不受影响 |
+| `decision:engine-failed` | Agent Loop | `triggerId` `detail` | 研判引擎调用失败，按 unavailable 处理并留下原因 |
+| `chat:reply-failed` | Agent Loop | `triggerId` `chat` `reason` `detail` | 回复模型失败，已退回固定话术 |
+| `session:transcript-failed` / `session:reset-failed` | Agent Loop | `key` `detail` | 会话转录 / `/new` 重置失败，不影响当轮回复 |
 | `config:created` | Config | `path` | 首次启动写入了默认 `config.yaml` |
-| `config:parse-failed` | Config | `path` `message` | YAML 解析失败，已降级为默认配置启动 |
+| `config:parse-failed` | Config | `path` `detail` | YAML 解析失败，已降级为默认配置启动 |
 | `config:legacy-backend` | Config | `path` | 旧版 `backend` 段已兼容映射到 `runtime` |
 | `config:invalid-security-override` | Config | `runtime` `keys` | `runtime.options` 试图覆盖安全参数，启动被拒绝 |
-| `config:patch-rejected` / `config:write-failed` | HTTP API | `errors` / `message` | 面板保存的配置校验失败或落盘失败 |
+| `config:patch-rejected` / `config:write-failed` | HTTP API | `errors` / `detail` | 面板保存的配置校验失败或落盘失败 |
 | `api:config` | HTTP API | `changed` `policyChanged` `restartRequired` | 配置保存成功及是否需要重启 |
-| `api:request-failed` | HTTP API | `method` `path` `message` | 请求级未预期异常（客户端会收到 500） |
-| `ticket:resume-failed` | HTTP API | `ticketId` `message` | 工单详情里的恢复命令生成失败，详情页仍可打开 |
+| `api:request-failed` | HTTP API | `method` `path` `detail` | 请求级未预期异常（客户端会收到 500） |
+| `ticket:resume-failed` | HTTP API | `ticketId` `detail` | 工单详情里的恢复命令生成失败，详情页仍可打开 |
 | `effect:done` / `effect:failed` | Effects | `kind` `key` / `error` | 派工、停止、清理等内部动作的执行结果 |
 | `cleanup:queued` | Service | `ticketId` `source` | 关单（`idle` / `pr:merged` / `pr:closed` / `stop` / `launch-failed`）后排队回收 workspace；同 key 已存在时不重复记录 |
 | `cleanup:worktree-removed` / `cleanup:worktree-skipped` / `cleanup:no-remove-capability` | Service | `ticketId` `workdir` / `reason` `attempts` | 自动回收 workspace 的结果；脏目录或不可重试的失败只记录一次并通知发起人 |
 | `workspace:bulk-removed` / `workspace:bulk-skip` / `workspace:bulk-cleanup` | Service | `ticketId` `workdir` / `reason` / `requested` `removed` `skipped` | 面板「清理工作区」逐项回收结果与汇总 |
 | `outbox:sent` / `outbox:failed` | Outbox | `key` `channel` `text` / `error` | 对外消息的最终投递结果 |
-| `worker:status-failed` | Service | `ticketId` `handle` `runtime` `message` | 运行时活性查询失败，按未知状态处理 |
-| `worker:event-log-failed` | Service | `ticketId` `kind` `message` | 工单 `events.log` 写入失败，不影响主流程 |
-| `pr:inspect-failed` / `pr:repo-slug-failed` | Service | `ticketId` `handle` `message` | PR 线索获取失败，等待 gh 兜底 |
-| `cursor:invalid` | Service | `key` `message` | 游标 JSON 损坏，按无游标处理 |
-| `llm:model-config-failed` | CLI | `message` | 启动时模型配置缺失或不可解析 |
+| `worker:status-failed` | Service | `ticketId` `handle` `runtime` `detail` | 运行时活性查询失败，按未知状态处理 |
+| `worker:event-log-failed` | Service | `ticketId` `kind` `detail` | 工单 `events.log` 写入失败，不影响主流程 |
+| `pr:inspect-failed` / `pr:repo-slug-failed` | Service | `ticketId` `handle` `detail` | PR 线索获取失败，等待 gh 兜底 |
+| `cursor:invalid` | Service | `key` `detail` | 游标 JSON 损坏，按无游标处理 |
+| `llm:model-config-failed` | CLI | `detail` | 启动时模型配置缺失或不可解析 |
 | `llm:import-applied` | HTTP API | `source` `name` `api` `baseUrl` `changed` | 从本地 Claude Code / CCSwitch / Pi / OpenCode / Magpie 配置导入 Provider，已写回 `config.yaml` |
 | `api:llm-import` | HTTP API | `source` `model` `changed` | 面板触发的本地 Provider 导入成功（不记录密钥） |
-| `llm:import-missing` / `llm:import-rejected` / `llm:import-scan-failed` / `llm:import-write-failed` | HTTP API / Import | `id` / `errors` / `message` | 候选已失效、校验失败、扫描失败或落盘失败（不记录密钥） |
+| `llm:import-missing` / `llm:import-rejected` / `llm:import-scan-failed` / `llm:import-write-failed` | HTTP API / Import | `id` / `errors` / `detail` | 候选已失效、校验失败、扫描失败或落盘失败（不记录密钥） |
 | `update:checked` | Update | `current` `latest` `hasUpdate` | 每 6 小时的版本检查结果 |
-| `update:check-failed` / `update:skipped` | Update | `message` / `reason` `root` | registry 不可达，或源码运行时跳过全局安装 |
-| `update:upgrade-started` / `update:upgraded` / `update:upgrade-failed` | Update | `from` `to` `durationMs` / `code` `message` | npm 全局安装的开始、成功与失败 |
-| `update:service-restarted` / `update:service-stop-failed` / `update:restart-failed` | CLI | `pid` / `pid` `reason` `message` | `ra update` 自动重启的结果 |
+| `update:check-failed` / `update:skipped` | Update | `detail` / `reason` `root` | registry 不可达，或源码运行时跳过全局安装 |
+| `update:upgrade-started` / `update:upgraded` / `update:upgrade-failed` | Update | `from` `to` `durationMs` / `code` `detail` | npm 全局安装的开始、成功与失败 |
+| `update:service-restarted` / `update:service-stop-failed` / `update:restart-failed` | CLI | `pid` / `pid` `reason` `detail` | `ra update` 自动重启的结果 |
 | `update:restart-scheduled` | Router Tool | `delayMs` | 飞书里让 Router 更新版本后，安排在回复发出后重启服务 |
 | `api:update` | HTTP API | `phase` `from` `to` `reason` | 面板触发的更新结果 |
 | `codex:binary-resolved` | Codex runtime | `ticketId` `source` `path` `version` | 实际使用的 Codex 可执行文件（App 内置 / 环境变量 / PATH） |
