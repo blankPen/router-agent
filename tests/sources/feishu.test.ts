@@ -187,6 +187,13 @@ describe('飞书文档交付', () => {
 })
 
 describe('卡片消息', () => {
+  /** 取出 `--flag=value` 形式的参数值。 */
+  function valueOf(argv: string[], flag: string): string {
+    const hit = argv.find(item => item.startsWith(`${flag}=`))
+    if (hit === undefined) throw new Error(`argv 缺少 ${flag}: ${argv.join(' ')}`)
+    return hit.slice(flag.length + 1)
+  }
+
   it('把 Markdown 包成 interactive 卡片，不再发源码文本', () => {
     const card = JSON.parse(feishuCard('## 标题\n- A\n- B'))
     expect(card.elements[0]).toEqual({ tag: 'markdown', content: '**标题**\n- A\n- B' })
@@ -225,7 +232,7 @@ describe('卡片消息', () => {
     expect(content).not.toContain('\n\n\n')
   })
 
-  it('发送走 --msg-type interactive，正文由 stdin 传入', async () => {
+  it('发送走 --msg-type interactive，正文直接放在 --content 参数里', async () => {
     const calls: { argv: string[]; input?: string }[] = []
     const sender = new FeishuSender({
       async run(argv, opts) {
@@ -234,9 +241,13 @@ describe('卡片消息', () => {
       },
     })
     await sender.sendCard('oc_dev', '**粗体**', 'k')
-    expect(calls[0]!.argv).toEqual(feishuCardSendCommand('oc_dev', 'k'))
-    expect(calls[0]!.argv).toContain('interactive')
-    expect(JSON.parse(calls[0]!.input!).elements[0].content).toBe('**粗体**')
+    const argv = calls[0]!.argv
+    expect(argv).toEqual(feishuCardSendCommand('oc_dev', feishuCard('**粗体**'), 'k'))
+    expect(argv).toContain('interactive')
+    // lark-cli 的 im 命令不读 stdin，正文必须落到参数值上
+    expect(valueOf(argv, '--content')).not.toBe('-')
+    expect(JSON.parse(valueOf(argv, '--content')).elements[0].content).toBe('**粗体**')
+    expect(calls[0]!.input).toBeUndefined()
   })
 
   it('卡片失败时自动降级为 post markdown', async () => {
@@ -251,6 +262,52 @@ describe('卡片消息', () => {
     })
     await sender.sendCard('oc_dev', '内容', 'k')
     expect(argvList[1]!.join(' ')).toContain('--markdown')
+  })
+
+  it('卡片降级为 post markdown 时正文是原文，不是 "-" 占位', async () => {
+    const argvList: string[][] = []
+    let n = 0
+    const sender = new FeishuSender({
+      async run(argv) {
+        argvList.push(argv)
+        n += 1
+        return n === 1 ? { code: 1, stdout: '', stderr: 'bad card' } : { code: 0, stdout: '{}', stderr: '' }
+      },
+    })
+    await sender.sendCard('oc_dev', '真实正文', 'k')
+    expect(valueOf(argvList[1]!, '--markdown')).toBe('真实正文')
+  })
+
+  it('话题回复的卡片与富文本同样直接带正文', async () => {
+    const argvList: string[][] = []
+    let n = 0
+    const sender = new FeishuSender({
+      async run(argv) {
+        argvList.push(argv)
+        n += 1
+        return n === 1 ? { code: 1, stdout: '', stderr: 'bad card' } : { code: 0, stdout: '{}', stderr: '' }
+      },
+    })
+    await sender.replyCard('om_x1', '真实正文', 'k')
+    const card = argvList[0]!
+    const fallback = argvList[1]!
+    expect(valueOf(card, '--content')).not.toBe('-')
+    expect(JSON.parse(valueOf(card, '--content')).elements[0].content).toBe('真实正文')
+    expect(valueOf(fallback, '--markdown')).toBe('真实正文')
+  })
+
+  it('正文以 "---" 开头时用等号传参，不会被当成 flag', async () => {
+    const calls: string[][] = []
+    const sender = new FeishuSender({
+      async run(argv) {
+        calls.push(argv)
+        return { code: 0, stdout: '{}', stderr: '' }
+      },
+    })
+    await sender.send('oc_dev', '---\n分隔线', 'k')
+    await sender.reply('om_x1', '---\n分隔线', 'k2')
+    expect(valueOf(calls[0]!, '--text')).toBe('---\n分隔线')
+    expect(valueOf(calls[1]!, '--text')).toBe('---\n分隔线')
   })
 })
 

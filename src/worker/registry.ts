@@ -93,6 +93,10 @@ export function createRuntimes(config: AppConfig, deps: RuntimeDeps): RuntimeReg
   }))
 
   const codexOptions = codexAppOptionsOf(config)
+  // 服务继承的 CODEX_HOME 可能指向别处（例如从别的工具的隔离 HOME 启动服务），
+  // 那会让 thread 落在桌面端读不到的目录；只有 runtime.options.codex-app.env 显式配置的才生效。
+  const inheritedCodexEnv = { ...(deps.env ?? {}) }
+  delete inheritedCodexEnv.CODEX_HOME
   runtimes.set(CODEX_APP_RUNTIME_ID, new CodexAppRuntime({
     command: codexOptions.command,
     model: codexOptions.model,
@@ -104,7 +108,7 @@ export function createRuntimes(config: AppConfig, deps: RuntimeDeps): RuntimeReg
     workersDir: deps.workersDir,
     home: deps.home,
     git: deps.git,
-    ...(deps.env ? { env: deps.env } : {}),
+    env: { ...inheritedCodexEnv, ...codexOptions.env },
     ...(deps.logger ? { logger: deps.logger } : {}),
   }))
 

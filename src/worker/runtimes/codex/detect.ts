@@ -29,6 +29,8 @@ export interface CodexAppOptions {
   network: boolean
   /** 追加到 `codex` 与 `app-server` 之间的参数（高级选项）。 */
   args: string[]
+  /** 传给 codex 子进程的额外环境变量；用于显式指定 CODEX_HOME 等。 */
+  env: NodeJS.ProcessEnv
 }
 
 function optionRecordOf(config: AppConfig | undefined): Record<string, unknown> {
@@ -45,6 +47,11 @@ export function codexAppOptionsOf(config: AppConfig | undefined): CodexAppOption
   const args = Array.isArray(options.args)
     ? options.args.filter((item): item is string => typeof item === 'string')
     : []
+  const env = options.env && typeof options.env === 'object' && !Array.isArray(options.env)
+    ? Object.fromEntries(
+      Object.entries(options.env as Record<string, unknown>).filter(([, value]) => typeof value === 'string'),
+    ) as NodeJS.ProcessEnv
+    : {}
   return {
     ...(typeof options.command === 'string' && options.command.trim() ? { command: options.command.trim() } : {}),
     ...(typeof options.model === 'string' && options.model.trim() ? { model: options.model.trim() } : {}),
@@ -53,6 +60,7 @@ export function codexAppOptionsOf(config: AppConfig | undefined): CodexAppOption
     approvalPolicy,
     network: options.network !== false,
     args,
+    env,
   }
 }
 

@@ -10,6 +10,7 @@
 
 - 服务日志一行一个 JSON：`at`（ISO 时间）/ `level` / `message` + 业务字段，由 `src/cli/index.ts` 的 `createLogger` 统一写入 `<RA_HOME>/logs/router-agent.log`。
 - `message` 用 `域:动作` 的 kebab-case，例如 `trigger:ingested`、`config:parse-failed`。常用域：`feishu` / `chats` / `trigger` / `loop` / `decision` / `chat` / `session` / `config` / `api` / `ticket` / `outbox` / `effect` / `worker` / `launch` / `input` / `report` / `progress` / `pr` / `retention` / `recover`。
+- `message` 只放事件名，错误详情、stderr 摘要等文本一律用 `detail` 字段；`createLogger` 会把业务字段里的 `message` 自动改写成 `detail`，事件名不会被冲掉。
 - 业务字段**平铺**在同一层，不要塞 `payload` / `data` 嵌套对象；长文本用 `preview()`（`src/core/events.ts`）截断。
 - 每个事件至少带一个可定位字段：`triggerId` / `ticketId` / `inputId` / `key` / `chat` / `path` / `handle`。
 

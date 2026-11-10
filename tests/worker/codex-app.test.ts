@@ -1,8 +1,9 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import type { Logger } from '../../src/infra/logger.js'
 import type { CommandRunner } from '../../src/infra/process.js'
 import { CodexAppRuntime } from '../../src/worker/runtimes/codex/index.js'
 import type {
@@ -35,7 +36,11 @@ const git: CommandRunner = {
 
 const DEFAULT_TOOLS: ToolPolicy = { fileAccess: 'read-write', shell: 'allow', allowNetwork: true }
 
-function runtimeFor(home: string, tools: 'never' | 'on-request' = 'never'): CodexAppRuntime {
+function runtimeFor(
+  home: string,
+  tools: 'never' | 'on-request' = 'never',
+  extra: { env?: NodeJS.ProcessEnv; logger?: Logger } = {},
+): CodexAppRuntime {
   return new CodexAppRuntime({
     command: process.execPath,
     prependArgs: [fixture],
@@ -47,6 +52,8 @@ function runtimeFor(home: string, tools: 'never' | 'on-request' = 'never'): Code
     network: true,
     initializeTimeoutMs: 5_000,
     workspaceProvider: new FakeWorkspace(home),
+    ...(extra.env ? { env: extra.env } : {}),
+    ...(extra.logger ? { logger: extra.logger } : {}),
     detectBinary: async () => ({
       command: process.execPath,
       source: 'config',
@@ -57,6 +64,17 @@ function runtimeFor(home: string, tools: 'never' | 'on-request' = 'never'): Code
       installUrl: '',
     }),
   })
+}
+
+/** 读取夹具记录的启动参数与子进程环境。 */
+function readArgvLine(logPath: string): { argv?: string[]; env?: { CODEX_HOME?: string | null } } | undefined {
+  const lines = readFileSync(logPath, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+  return lines.find(line => line.direction === 'argv')
+}
+
+function restoreEnv(key: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[key]
+  else process.env[key] = value
 }
 
 function context(home: string, tools: ToolPolicy = DEFAULT_TOOLS, contract = '# 工单\n请执行'): WorkerContext {
@@ -215,6 +233,63 @@ describe('CodexAppRuntime', () => {
         code: 'runtime:unavailable',
         detail: { installUrl: 'https://chatgpt.com/codex' },
       })
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('子进程默认使用 ~/.codex 作为 CODEX_HOME，不受服务继承的环境变量影响', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-codex-home-'))
+    const logPath = join(home, 'codex.log')
+    const previousHome = process.env.CODEX_HOME
+    const previousLog = process.env.FAKE_CODEX_LOG
+    process.env.CODEX_HOME = '/tmp/foreign-codex-home'
+    process.env.FAKE_CODEX_LOG = logPath
+    const rt = runtimeFor(home)
+    try {
+      const started = await rt.start(context(home))
+      await waitIdle(rt, home, started.handle)
+      expect(readArgvLine(logPath)?.env?.CODEX_HOME).toBe(join(homedir(), '.codex'))
+      await rt.stop(ref(home, started.handle), 'done')
+    } finally {
+      restoreEnv('CODEX_HOME', previousHome)
+      restoreEnv('FAKE_CODEX_LOG', previousLog)
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('显式 env 覆盖默认 CODEX_HOME', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-codex-home-override-'))
+    const logPath = join(home, 'codex.log')
+    const previousLog = process.env.FAKE_CODEX_LOG
+    process.env.FAKE_CODEX_LOG = logPath
+    const rt = runtimeFor(home, 'never', { env: { CODEX_HOME: '/tmp/custom-codex-home' } })
+    try {
+      const started = await rt.start(context(home))
+      await waitIdle(rt, home, started.handle)
+      expect(readArgvLine(logPath)?.env?.CODEX_HOME).toBe('/tmp/custom-codex-home')
+      await rt.stop(ref(home, started.handle), 'done')
+    } finally {
+      restoreEnv('FAKE_CODEX_LOG', previousLog)
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('启动时记录 codex:codex-home 事件，便于排查桌面端看不到 thread', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-codex-home-log-'))
+    const events: { message: string; extra?: Record<string, unknown> }[] = []
+    const logger: Logger = {
+      info: (message, extra) => { events.push({ message, extra }) },
+      warn: () => {},
+      error: () => {},
+    }
+    const rt = runtimeFor(home, 'never', { logger })
+    try {
+      const started = await rt.start(context(home))
+      await waitIdle(rt, home, started.handle)
+      expect(events.find(event => event.message === 'codex:codex-home')?.extra)
+        .toMatchObject({ ticketId: 'tk-1', codexHome: join(homedir(), '.codex') })
+      await rt.stop(ref(home, started.handle), 'done')
     } finally {
       rmSync(home, { recursive: true, force: true })
     }

@@ -107,6 +107,8 @@ runtime:
       model: gpt-6.1-sol         # 可选；缺省用 Codex 自己的配置
       modelProvider: ep          # 可选
       # command: /Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex
+      # env:                      # 可选；传给 codex 子进程的额外环境变量
+      #   CODEX_HOME: /Users/you/.codex
 ```
 
 `full + never` 不会产生审批请求；`workspace + never` 允许在工作区与 `~/.router-agent/workers/<ticket>` 写文件、允许联网，但系统级操作受限。只有把 `approvalPolicy` 改成 `on-request` / `untrusted` 时，才按 `worker.tools.shell` / `shellAllow` 逐条放行或拒绝**触发审批的**命令。
@@ -126,6 +128,22 @@ Router 与 Codex 桌面 App 默认共用 `~/.codex`。要让桌面端侧边栏�
 - Codex CLI / Codex App 版本兼容（见 `docs/RUNTIME.md` 的版本说明）。
 
 跨进程默认不是实时同步：桌面端看到的是落盘后的 thread；要实时收同一份事件，需要连同一个 app-server / daemon。Router 重启后会用 `thread/resume` 接回；关闭 Router 不会关闭桌面 App。
+
+#### CODEX_HOME
+
+`codex-app` 启动子进程时**固定**把 `CODEX_HOME` 设为 `~/.codex`，与桌面端一致；服务自身继承的 `CODEX_HOME`（例如从别的工具的隔离 HOME 启动）会被忽略，否则 thread 会落在桌面端读不到的目录，侧边栏永远看不到。
+
+需要指向别处时，在 `runtime.options.codex-app.env.CODEX_HOME` 显式配置：
+
+```yaml
+runtime:
+  options:
+    codex-app:
+      env:
+        CODEX_HOME: /Users/you/.codex
+```
+
+实际生效的路径会打在 `codex:codex-home` 事件里，排查「桌面端看不到 thread」时先看这条。
 
 ## ACP Agent 目录
 

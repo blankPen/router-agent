@@ -1400,7 +1400,15 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
 function createLogger(home: string, output: CliIo, echo = true): Logger {
   const path = join(home, 'logs', 'router-agent.log')
   const write = (level: string, message: string, extra?: Record<string, unknown>): void => {
-    const line = JSON.stringify({ at: new Date().toISOString(), level, message, ...(extra ?? {}) })
+    // message 永远是事件名；业务字段里的 message 改写成 detail，避免把事件名冲掉。
+    const { message: detail, ...rest } = extra ?? {}
+    const line = JSON.stringify({
+      at: new Date().toISOString(),
+      level,
+      message,
+      ...(detail === undefined ? {} : { detail }),
+      ...rest,
+    })
     try {
       writeFileSync(path, `${line}\n`, { flag: 'a' })
     } catch {
