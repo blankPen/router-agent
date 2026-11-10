@@ -217,6 +217,15 @@ describe('全局状态目录与配置', () => {
     expect(setConfigValue(cfg, 'workerSpec.mode', 'agent')).toBe(true)
     expect(cfg.workerSpec.mode).toBe('agent')
     expect(setConfigValue(cfg, 'workerSpec.mode', 'magic')).toBe(false)
+    expect(setConfigValue(cfg, 'llm.api', 'anthropic-messages')).toBe(true)
+    expect(cfg.llm?.api).toBe('anthropic-messages')
+    expect(setConfigValue(cfg, 'llm.api', 'bogus')).toBe(false)
+    expect(setConfigValue(cfg, 'llm.authHeader', 'true')).toBe(true)
+    expect(cfg.llm?.authHeader).toBe(true)
+    expect(setConfigValue(cfg, 'llm.authHeader', 'yes')).toBe(false)
+    expect(setConfigValue(cfg, 'llm.contextWindow', '200000')).toBe(true)
+    expect(cfg.llm?.contextWindow).toBe(200_000)
+    expect(setConfigValue(cfg, 'llm.contextWindow', '0')).toBe(false)
     expect(setConfigValue(cfg, 'nope.nope', 'x')).toBe(false)
   })
 })
@@ -496,6 +505,8 @@ describe('Worker 运行时配置', () => {
     expect(published.llm).toEqual({
       baseUrl: 'https://api.deepseek.com/v1',
       model: 'deepseek-v4-flash',
+      api: 'openai-completions',
+      authHeader: false,
       apiKeySet: true,
     })
     expect(JSON.stringify(published)).not.toContain('sk-panel-secret')
@@ -504,6 +515,11 @@ describe('Worker 运行时配置', () => {
     expect(loadConfig(dir).llm?.apiKey).toBe('sk-panel-secret')
     expect(applyConfigPatch(cfg, { 'llm.apiKey': 123 }).errors).toHaveLength(1)
     expect(applyConfigPatch(cfg, { 'llm.apiKey': '   ' }).errors).toHaveLength(1)
+    // 从本地配置导入时使用的协议与鉴权方式也要能落盘。
+    expect(applyConfigPatch(cfg, { 'llm.api': 'anthropic-messages', 'llm.authHeader': true }).errors).toEqual([])
+    expect(cfg.llm).toMatchObject({ api: 'anthropic-messages', authHeader: true })
+    expect(applyConfigPatch(cfg, { 'llm.api': 'bogus' }).errors).toHaveLength(1)
+    expect(applyConfigPatch(cfg, { 'llm.authHeader': 'yes' }).errors).toHaveLength(1)
   })
 })
 

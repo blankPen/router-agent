@@ -49,6 +49,10 @@ export interface PiSessionOptions {
   apiKey: string
   baseUrl: string
   model: string
+  /** 模型接口协议；默认 openai-completions。 */
+  api?: 'openai-completions' | 'anthropic-messages'
+  /** anthropic-messages 下把密钥作为 Authorization: Bearer 发送。 */
+  authHeader?: boolean
   /** 落盘 SessionManager；不传则 in-memory（旧行为）。 */
   sessionManager?: unknown
   /** 自动压缩配置；不传则关闭。 */
@@ -373,6 +377,8 @@ export class PiDecisionEngine implements DecisionEngine {
         apiKey: this.model.apiKey,
         baseUrl: this.model.baseUrl,
         model: this.model.model,
+        api: this.model.api,
+        ...(this.model.authHeader !== undefined ? { authHeader: this.model.authHeader } : {}),
         compaction: this.compaction,
         contextWindow: this.contextWindow,
       })
@@ -553,6 +559,8 @@ export class PiDecisionEngine implements DecisionEngine {
       apiKey: this.model.apiKey,
       baseUrl: this.model.baseUrl,
       model: this.model.model,
+      api: this.model.api,
+      ...(this.model.authHeader !== undefined ? { authHeader: this.model.authHeader } : {}),
       sessionManager: manager,
       compaction: this.compaction,
       contextWindow: this.contextWindow,
@@ -653,15 +661,17 @@ export async function createDefaultPiSession(opts: PiSessionOptions): Promise<Pi
     modelsPath: null,
     refreshOnCreate: false,
   })
+  const api = opts.api ?? 'openai-completions'
   modelRuntime.registerProvider(PROVIDER, {
     name: 'Router Agent',
-    api: 'openai-completions',
+    api,
     baseUrl: opts.baseUrl,
+    ...(opts.authHeader ? { authHeader: true } : {}),
     models: [
       {
         id: opts.model,
         name: opts.model,
-        api: 'openai-completions',
+        api,
         baseUrl: opts.baseUrl,
         reasoning: false,
         input: ['text'],

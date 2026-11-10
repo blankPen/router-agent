@@ -21,12 +21,30 @@ describe('resolvePiModelConfig', () => {
       baseUrl: 'https://api.example.com/v1',
       apiKey: 'sk-main',
       model: 'text-model',
+      api: 'openai-completions',
     })
   })
 
   it('缺 apiKey 时直接报错，不再隐式兜底', () => {
     const opts = setup({ baseUrl: 'https://api.example.com/v1', model: 'text-model' })
     expect(() => resolvePiModelConfig({ ...opts, env: {} })).toThrow(/pi:model-config-missing/)
+  })
+
+  it('支持 anthropic-messages 与 authHeader（从 Claude Code / CCSwitch 导入）', () => {
+    const opts = setup({
+      baseUrl: 'https://gateway.example.com',
+      apiKey: 'sk-anthropic',
+      model: 'claude-sonnet-demo',
+      api: 'anthropic-messages',
+      authHeader: true,
+    })
+    expect(resolvePiModelConfig({ ...opts, env: {} })).toEqual({
+      baseUrl: 'https://gateway.example.com',
+      apiKey: 'sk-anthropic',
+      model: 'claude-sonnet-demo',
+      api: 'anthropic-messages',
+      authHeader: true,
+    })
   })
 
   it('不再读取 ~/.trove/config.json', () => {
@@ -47,6 +65,7 @@ describe('resolveImageModelConfig', () => {
       baseUrl: 'https://api.example.com/v1',
       apiKey: 'sk-main',
       model: 'text-model',
+      api: 'openai-completions',
     })
   })
 

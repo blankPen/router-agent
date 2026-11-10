@@ -107,6 +107,7 @@ function setup(
     tokenBudget?: number
     updater?: { check(force?: boolean): Promise<any>; upgrade(options?: { force?: boolean }): Promise<any> }
     scheduleRestart?: () => void
+    model?: PiModelConfig
   } = {},
 ) {
   const store = new Store(':memory:')
@@ -120,7 +121,7 @@ function setup(
   engine.ingest(trigger())
   const state: { captured: PiSessionOptions | null; session: FakeSession | null } = { captured: null, session: null }
   const enginePi = new PiDecisionEngine({
-    model,
+    model: over.model ?? model,
     toolbox,
     agentDir: '/tmp/ra-pi-test',
     timeoutMs: over.timeoutMs ?? 2_000,
@@ -286,6 +287,25 @@ describe('PiDecisionEngine', () => {
     expect(result.proposal).toBeUndefined()
     expect(result.unavailableReason).toBe('pi:no-decision')
     expect(state.session?.disposed).toBe(true)
+  })
+
+  it('把 anthropic-messages 协议与 authHeader 透传给 Pi session', async () => {
+    const { enginePi, state } = setup(s => s.finish(), {
+      model: {
+        baseUrl: 'https://gateway.example.com',
+        apiKey: 'sk-anthropic',
+        model: 'claude-sonnet-demo',
+        api: 'anthropic-messages',
+        authHeader: true,
+      },
+    })
+    await enginePi.assess(request())
+    expect(state.captured).toMatchObject({
+      baseUrl: 'https://gateway.example.com',
+      model: 'claude-sonnet-demo',
+      api: 'anthropic-messages',
+      authHeader: true,
+    })
   })
 
   it('reply 走同一个 Pi 通道但不开放任何工具', async () => {
