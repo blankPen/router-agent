@@ -17,6 +17,35 @@ import type {
 import type { Policy } from '../core/policy.js'
 import { normalizeStage, stageAliases } from '../core/stage.js'
 
+/** sessionKey 迁移记录 ID；与手工执行的 SQL 文件保持一致。 */
+export const SESSION_KEY_MIGRATION_ID = '2026-11-session-key-channel'
+
+export interface SessionMigrationState {
+  totalSessions: number
+  totalResets: number
+  pendingSessions: number
+  pendingResets: number
+  migratedSessions: number
+  /** 既不是旧格式也不是新格式的 key；脚本不猜，列出来人工处理。 */
+  anomalies: { table: 'chat_sessions' | 'chat_session_resets'; id: string; sessionKey: string }[]
+  applied: boolean
+}
+
+export interface SessionMigrationResult {
+  sessions: number
+  resets: number
+  skipped: boolean
+}
+
+export interface SessionMigrationVerifyResult {
+  ok: boolean
+  applied: boolean
+  totalSessions: number
+  pendingSessions: number
+  pendingResets: number
+  anomalies: number
+}
+
 export interface OutboxItem {
   id: string
   key: string
@@ -99,6 +128,12 @@ CREATE TABLE IF NOT EXISTS policy (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   version TEXT NOT NULL,
   body TEXT NOT NULL
+);
+
+-- 一次性数据迁移记录；迁移只由人手动执行，不在启动时自动写库。
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  id         TEXT PRIMARY KEY,
+  applied_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS triggers (
@@ -589,6 +624,96 @@ export class Store {
 
   clearDispatchDraft(chatId: string, actorId: string): void {
     this.db.prepare('DELETE FROM dispatch_drafts WHERE chat_id = ? AND actor_id = ?').run(chatId, actorId)
+  }
+
+  // ---------- 会话 key 迁移（只由 ra migrate sessions 手动触发） ----------
+
+  /** 迁移记录 ID；与 scripts/migrations 下的 SQL 文件保持一致。 */
+  static readonly SESSION_KEY_MIGRATION_ID = SESSION_KEY_MIGRATION_ID
+
+  hasSessionKeyMigration(): boolean {
+    const row = this.db.prepare('SELECT id FROM schema_migrations WHERE id = ?').get(SESSION_KEY_MIGRATION_ID) as Row | undefined
+    return Boolean(row)
+  }
+
+  /** 启动检测：存在旧格式 key 且迁移未执行时，返回待迁移数量。 */
+  legacySessionKeyCount(): number {
+    return this.countWhere('chat_sessions', "session_key LIKE 'chat:%' AND session_key NOT LIKE 'channel:%'")
+  }
+
+  /** dry-run 用的只读快照。 */
+  sessionMigrationState(): SessionMigrationState {
+    const anomalies: SessionMigrationState['anomalies'] = []
+    for (const table of ['chat_sessions', 'chat_session_resets'] as const) {
+      const rows = this.db.prepare(
+        `SELECT id, session_key FROM ${table}
+         WHERE session_key NOT LIKE 'chat:%' AND session_key NOT LIKE 'channel:%'
+         ORDER BY created_at LIMIT 50`,
+      ).all() as Row[]
+      for (const row of rows) {
+        anomalies.push({ table, id: String(row.id), sessionKey: String(row.session_key) })
+      }
+    }
+    return {
+      totalSessions: this.countWhere('chat_sessions'),
+      totalResets: this.countWhere('chat_session_resets'),
+      pendingSessions: this.legacySessionKeyCount(),
+      pendingResets: this.countWhere('chat_session_resets', "session_key LIKE 'chat:%' AND session_key NOT LIKE 'channel:%'"),
+      migratedSessions: this.countWhere('chat_sessions', "session_key LIKE 'channel:%'"),
+      anomalies,
+      applied: this.hasSessionKeyMigration(),
+    }
+  }
+
+  /**
+   * 执行迁移：只给 `session_key LIKE 'chat:%'` 的行加 `channel:feishu:` 前缀。
+   *
+   * - 幂等：已有迁移记录直接返回 skipped；
+   * - 事务：任一步失败整体回滚；
+   * - 异常 key 不动，交由人确认。
+   */
+  applySessionKeyMigration(now: string): SessionMigrationResult {
+    if (this.hasSessionKeyMigration()) return { sessions: 0, resets: 0, skipped: true }
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const sessions = this.db.prepare(
+        `UPDATE chat_sessions
+         SET id = 'channel:feishu:' || id,
+             session_key = 'channel:feishu:' || session_key
+         WHERE session_key LIKE 'chat:%' AND session_key NOT LIKE 'channel:%'`,
+      ).run()
+      const resets = this.db.prepare(
+        `UPDATE chat_session_resets
+         SET id = 'channel:feishu:' || id,
+             session_key = 'channel:feishu:' || session_key
+         WHERE session_key LIKE 'chat:%' AND session_key NOT LIKE 'channel:%'`,
+      ).run()
+      this.db.prepare('INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?, ?)')
+        .run(SESSION_KEY_MIGRATION_ID, now)
+      this.db.exec('COMMIT')
+      return { sessions: Number(sessions.changes), resets: Number(resets.changes), skipped: false }
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  /** 迁移后校验；只读。 */
+  verifySessionKeyMigration(): SessionMigrationVerifyResult {
+    const state = this.sessionMigrationState()
+    return {
+      ok: state.pendingSessions === 0 && state.pendingResets === 0 && state.anomalies.length === 0,
+      applied: state.applied,
+      totalSessions: state.totalSessions,
+      pendingSessions: state.pendingSessions,
+      pendingResets: state.pendingResets,
+      anomalies: state.anomalies.length,
+    }
+  }
+
+  private countWhere(table: 'chat_sessions' | 'chat_session_resets', where = '1 = 1'): number {
+    const row = this.db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE ${where}`).get() as Row | undefined
+    return Number(row?.n ?? 0)
   }
 
   // ---------- 会话复用（chat + 人） ----------

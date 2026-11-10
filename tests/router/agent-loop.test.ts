@@ -686,7 +686,7 @@ describe('会话复用与 /new', () => {
 
     await loop.tick()
 
-    expect(llm.requests[0]?.session?.key).toBe('chat:oc_dev:user:ou_alice')
+    expect(llm.requests[0]?.session?.key).toBe('channel:feishu:chat:oc_dev:user:ou_alice')
   })
 
   it('mode: mention 群里没 @ 的消息不进 session', async () => {
@@ -704,7 +704,7 @@ describe('会话复用与 /new', () => {
 
     await loop.tick()
 
-    expect(llm.requests[0]?.session?.key).toBe('chat:oc_dev:user:ou_alice')
+    expect(llm.requests[0]?.session?.key).toBe('channel:feishu:chat:oc_dev:user:ou_alice')
   })
 
   it('/new 只重置发送者自己的 session', async () => {
@@ -714,7 +714,7 @@ describe('会话复用与 /new', () => {
     const result = await loop.tick()
 
     expect(result.replied).toBe(1)
-    expect(llm.sessions.reset).toEqual(['chat:oc_dev:user:ou_alice@ou_alice'])
+    expect(llm.sessions.reset).toEqual(['channel:feishu:chat:oc_dev:user:ou_alice@ou_alice'])
     const outbox = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)
     expect(outbox[0]?.text).toContain('重新开始')
     expect(outbox[0]?.text).toContain('其他人的会话也不受影响')
@@ -738,7 +738,7 @@ describe('会话复用与 /new', () => {
     await loop.tick()
 
     expect(llm.sessions.transcripts).toHaveLength(1)
-    expect(llm.sessions.transcripts[0]?.key).toBe('chat:oc_dev:user:ou_alice')
+    expect(llm.sessions.transcripts[0]?.key).toBe('channel:feishu:chat:oc_dev:user:ou_alice')
     expect(llm.sessions.transcripts[0]?.text).toContain('附件')
   })
 })
@@ -820,7 +820,7 @@ describe('关键链路日志', () => {
 
     const entry = logs.find(log => log.message === 'session:transcript-failed')
     expect(entry?.level).toBe('warn')
-    expect(entry?.extra?.key).toBe('chat:oc_dev:user:ou_alice')
+    expect(entry?.extra?.key).toBe('channel:feishu:chat:oc_dev:user:ou_alice')
   })
 
   it('/new 重置会话失败时记 session:reset-failed', async () => {

@@ -6,7 +6,7 @@ import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { Command, CommanderError } from 'commander'
 import { ensureHome, loadConfig, policyOf, projectsForRuntime, replyAlwaysChatsOf, setConfigValue, writeConfig } from '../config.js'
-import { Store } from '../store/db.js'
+import { Store, type SessionMigrationState } from '../store/db.js'
 import { Engine } from '../core/engine.js'
 import { shouldAcknowledge } from '../core/policy.js'
 import { createRuntimes } from '../worker/registry.js'
@@ -16,13 +16,13 @@ import { WORKER_RUNTIME_IDS, normalizeRuntimeId } from '../worker/runtimes/catal
 import { GitHubTracker } from '../sources/github.js'
 import { GitLabTracker } from '../sources/gitlab.js'
 import { ForgeTracker } from '../sources/forge-tracker.js'
-import { FeishuConsumer, FeishuSender, attachQuotedMessage, normalizeFeishuEventDetailed } from '../sources/feishu.js'
-import { attachImageText } from '../sources/feishu-image.js'
+import { createFeishuChannel, createFeishuDocumenter } from '../channels/feishu/index.js'
+import { ChannelIngress } from '../channels/ingress.js'
+import { ChannelRegistry } from '../channels/registry.js'
+import { ChannelRouter } from '../channels/router.js'
 import { ChatDirectory } from '../sources/feishu-directory.js'
 import { createLarkRunner, larkEnv } from '../sources/lark.js'
-import { FeishuBotAdmin } from '../sources/feishu-bot-admin.js'
 import { createVisionTranscriber, type ImageTranscriber } from '../infra/vision.js'
-import type { Trigger } from '../core/model.js'
 import { runInitWizard } from './init.js'
 import { formatChecks, runDoctor } from './doctor.js'
 import { cmdRuntimeCheck, cmdRuntimeInstall, cmdRuntimeList, cmdRuntimeLogin, cmdRuntimeUninstall } from './runtime.js'
@@ -36,7 +36,7 @@ import { resolveImageModelConfig, resolvePiModelConfig, type PiModelConfig } fro
 import { createDecisionEngine } from '../router/engine-factory.js'
 import type { DecisionAudit } from '../router/decision-engine.js'
 import type { WorkerStateFile } from '../worker/report-poller.js'
-import { RouterService, createEffectsSender, type Logger } from '../service.js'
+import { RouterService, type Logger } from '../service.js'
 import { EffectsProcessor } from '../core/effects.js'
 import { createApiServer } from '../router/api.js'
 import { ProjectSetup } from '../router/project-setup.js'
@@ -212,6 +212,16 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
       setCode(await cmdDoc(homeOf(opts, output), opts, output))
     })
 
+  withHome(program.command('migrate [action]')
+    .description('数据迁移：migrate sessions --dry-run | --apply | --verify（人工手动执行）')
+    .option('--dry-run', '只读检查，不写库（默认行为）')
+    .option('--apply', '执行迁移；默认要求交互确认，非交互环境需 --yes')
+    .option('--verify', '迁移后校验')
+    .option('--yes', '跳过交互确认'))
+    .action(async (action: string | undefined, opts: { home?: string; dryRun?: boolean; apply?: boolean; verify?: boolean; yes?: boolean }) => {
+      setCode(await cmdMigrate(homeOf(opts, output), action, opts, output))
+    })
+
   withHome(program.command('start').description('启动常驻 Router 服务（默认后台），就绪后自动打开 Web 初始化页'))
     .option('--foreground', '前台运行，便于调试')
     .option('--no-open', '不自动打开浏览器，只打印 Web 面板地址')
@@ -363,9 +373,9 @@ async function cmdDoc(_home: string, opts: { title: string; content?: string }, 
     output.stderr('--content 不能为空（可用 @文件 或 - 从 stdin 读）')
     return 2
   }
-  const sender = new FeishuSender(output.lark ?? createLarkRunner())
+  const documenter = createFeishuDocumenter({ runner: output.lark ?? createLarkRunner() })
   try {
-    const url = await sender.createDocument(opts.title, content)
+    const url = await documenter.createDocument(opts.title, content)
     output.stdout(url)
     return 0
   } catch (error) {
@@ -461,6 +471,111 @@ async function cmdInit(home: string, opts: { yes?: boolean; agentsDir?: string }
 function openStore(home: string): Store {
   ensureHome(home)
   return new Store(join(home, 'state.db'))
+}
+
+/**
+ * 历史 sessionKey 迁移：只由人手动执行，不在服务启动时自动写库。
+ *
+ * 迁移只把 `chat:...` 前缀改成 `channel:feishu:chat:...`，会话文件不动；
+ * 异常 key 不猜、不改，列出来交给人确认。
+ */
+async function cmdMigrate(
+  home: string,
+  action: string | undefined,
+  opts: { dryRun?: boolean; apply?: boolean; verify?: boolean; yes?: boolean },
+  output: CliIo,
+): Promise<number> {
+  if (action !== 'sessions') {
+    output.stderr('用法：ra migrate sessions [--dry-run | --apply | --verify]')
+    return 2
+  }
+  const store = openStore(home)
+  const logger = createLogger(home, output)
+  try {
+    if (opts.apply) {
+      const state = store.sessionMigrationState()
+      if (state.applied && state.pendingSessions === 0) {
+        output.stdout('该迁移已执行过，无需重复执行。')
+        return 0
+      }
+      if (state.applied && state.pendingSessions > 0) {
+        output.stderr(`迁移记录已存在，但仍有 ${state.pendingSessions} 条旧格式 key，请人工检查后再处理。`)
+        return 1
+      }
+      printSessionMigrationState(state, output)
+      if (state.anomalies.length > 0) {
+        output.stdout(`注意：${state.anomalies.length} 条异常 key 不会被迁移，请人工确认后再单独处理。`)
+      }
+      if (!opts.yes) {
+        const confirmed = output.prompts
+          ? await output.prompts.confirm({
+            message: `确认迁移 ${state.pendingSessions} 条会话记录、${state.pendingResets} 条重置记录？`,
+            default: false,
+          })
+          : false
+        if (!confirmed) {
+          output.stderr('已取消，未写入任何数据。非交互环境请显式传 --yes。')
+          return 1
+        }
+      }
+      const result = (() => {
+        try {
+          return store.applySessionKeyMigration(new Date().toISOString())
+        } catch (error) {
+          logger.error('session:migration-failed', { message: errorMessage(error) })
+          output.stderr(`迁移失败，事务已回滚：${errorMessage(error)}`)
+          return null
+        }
+      })()
+      if (!result) return 1
+      logger.info('session:migrated', { sessions: result.sessions, resets: result.resets })
+      output.stdout(`迁移完成：会话 ${result.sessions} 条，重置记录 ${result.resets} 条。`)
+      const verify = store.verifySessionKeyMigration()
+      if (!verify.ok) {
+        output.stderr(`迁移后校验未通过：待迁移 ${verify.pendingSessions}，异常 ${verify.anomalies}。`)
+        logger.error('session:migration-verify-failed', { ...verify })
+        return 1
+      }
+      output.stdout('校验通过：全部 sessionKey 已为新格式。')
+      return 0
+    }
+
+    if (opts.verify) {
+      const verify = store.verifySessionKeyMigration()
+      output.stdout(`迁移记录：${verify.applied ? '已执行' : '未执行'}`)
+      output.stdout(`会话总数：${verify.totalSessions}`)
+      output.stdout(`待迁移：${verify.pendingSessions}`)
+      output.stdout(`待迁移重置记录：${verify.pendingResets}`)
+      output.stdout(`异常 key：${verify.anomalies}`)
+      if (verify.ok) {
+        output.stdout('校验通过。')
+        return 0
+      }
+      logger.warn('session:migration-incomplete', { ...verify })
+      output.stderr('校验未通过，请按上面的计数处理后再试。')
+      return 1
+    }
+
+    // 默认与 --dry-run 都是只读。
+    printSessionMigrationState(store.sessionMigrationState(), output)
+    output.stdout('未写入任何数据。确认后执行：ra migrate sessions --apply')
+    return 0
+  } finally {
+    store.close()
+  }
+}
+
+function printSessionMigrationState(state: SessionMigrationState, output: CliIo): void {
+  output.stdout(`迁移记录：${state.applied ? '已执行' : '未执行'}`)
+  output.stdout(`会话记录：共 ${state.totalSessions} 条，待迁移 ${state.pendingSessions} 条，已迁移 ${state.migratedSessions} 条`)
+  output.stdout(`重置记录：共 ${state.totalResets} 条，待迁移 ${state.pendingResets} 条`)
+  if (state.anomalies.length > 0) {
+    output.stdout(`异常 key：${state.anomalies.length} 条（不会自动修改）`)
+    for (const item of state.anomalies.slice(0, 3)) {
+      output.stdout(`  [${item.table}] ${item.sessionKey}`)
+    }
+    if (state.anomalies.length > 3) output.stdout('  ...')
+  }
 }
 
 function cmdTickets(home: string, opts: { stage?: string; limit?: string }, output: CliIo): number {
@@ -973,6 +1088,19 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   })
 
   const store = new Store(join(home, 'state.db'))
+  // 历史 sessionKey 未迁移时拒绝启动：直接跑会用新 key 找不到旧会话，静默丢失上下文。
+  const legacySessions = store.legacySessionKeyCount()
+  if (legacySessions > 0) {
+    logger.error('session:migration-required', { pending: legacySessions })
+    output.stderr(`检测到 ${legacySessions} 条未迁移的历史会话 key，直接启动会丢失上下文。`)
+    output.stderr('请先执行：')
+    output.stderr('  ra migrate sessions --dry-run')
+    output.stderr('  ra migrate sessions --apply')
+    store.close()
+    rmSync(lockDir, { recursive: true, force: true })
+    try { unlinkSync(join(home, 'router-agent.pid')) } catch { /* 文件可能不存在 */ }
+    return 1
+  }
   const replyAlwaysChats = new Set(replyAlwaysChatsOf(config))
   const repaired = store.repairOutbox()
   if (repaired > 0) logger.warn('outbox:repaired', { count: repaired })
@@ -992,7 +1120,6 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     git: gitRunner,
   })
   const runtime = runtimes.default()
-  const sender = new FeishuSender(larkRunner, logger)
   const prTracker = new ForgeTracker({
     github: new GitHubTracker(ghRunner),
     gitlab: new GitLabTracker(glabRunner),
@@ -1021,11 +1148,6 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       logger.warn('feishu:image-vision-disabled', { message: error instanceof Error ? error.message : String(error) })
     }
   }
-  const withImageText = (trigger: Trigger): Promise<Trigger> => attachImageText(trigger, {
-    runner: larkRunner,
-    transcriber: imageTranscriber,
-    logger,
-  })
   // 没有模型配置时不装配研判引擎，RouterService 整体跳过，只保留 Web / 配置 API。
   const decisionEngine = model
     ? createDecisionEngine({
@@ -1055,22 +1177,43 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     })
   }
   const directory = new ChatDirectory(join(home, 'chats.json'), logger)
+  // 通道适配器：飞书的消费、归一化、富化、渲染、回执、文档与凭据全部收口到这里。
+  const feishuChannel = createFeishuChannel({
+    config: config.feishu,
+    reaction: config.feishu.reaction,
+    runner: larkRunner,
+    directory,
+    transcriber: imageTranscriber,
+    logger,
+    env: larkEnv(),
+    hooks: {
+      onReady: () => logger.info('feishu:ready', {}),
+      onReconnect: ({ attempt, delayMs }) => logger.warn('feishu:reconnecting', { attempt, delayMs }),
+      onError: error => {
+        if (/another event bus/i.test(error.message)) {
+          logger.warn('feishu:bus-conflict', {
+            message: '同一机器人只能有一个事件总线；请停止其它消费者，或改用专属机器人（ra init 选项 2/3）',
+          })
+          return
+        }
+        logger.warn('feishu:error', { message: error.message })
+      },
+    },
+  })
+  const channels = new ChannelRegistry(logger)
+  channels.register(feishuChannel)
 
-  const reactTo = async (messageId: string): Promise<void> => {
-    const reactionId = await sender.react(messageId, config.feishu.reaction)
-    if (reactionId) store.saveReaction(messageId, reactionId, new Date().toISOString())
-  }
   const clearReaction = async (messageId: string): Promise<void> => {
     const saved = store.getReaction(messageId)
     if (!saved) return
     try {
-      await sender.unreact(messageId, saved.reactionId)
+      await feishuChannel.clearAck(messageId, saved.reactionId)
     } finally {
       store.clearReaction(messageId)
     }
   }
 
-  const feishuOutbox = createEffectsSender(sender)
+  const feishuOutbox = new ChannelRouter(channels, logger)
   const effects = new EffectsProcessor({
     store,
     sender: {
@@ -1113,7 +1256,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     config,
     runtimeAdmin,
     update: updateService,
-    feishuBot: new FeishuBotAdmin({ lark: larkRunner }),
+    feishuBot: feishuChannel.admin,
     projectSetup: new ProjectSetup({ home, git: gitRunner, orca: orcaRunner }),
     // Web-only 模式没有 RouterService，工作区清理端点按「不支持」返回。
     ...(service
@@ -1149,66 +1292,21 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   updateTimer.unref()
 
   const consumer = service && config.feishu.chats.length > 0
-    ? new FeishuConsumer({
-      env: larkEnv(),
-      onEvent: raw => {
-        const result = normalizeFeishuEventDetailed(raw, config.feishu, directory.nameOf(String(raw.chat_id ?? '')))
-        if (!result.trigger) {
-          // 收到了但被过滤：把原因写进日志，否则用户只会看到「没反应」。
-          logger.info('trigger:dropped', {
-            reason: result.dropped,
-            chat: result.chatId,
-            name: directory.nameOf(String(result.chatId ?? '')),
-            actor: result.actorId,
-          })
-          return
-        }
-        // 引用消息要先回查被引用正文，异步补齐后再入库；图片消息再下载 image_key 转文本。
-        const base = result.trigger
-        // 只对「会被处理」的消息加回执表情：@ / 私聊 / 全量接收群，且没被准入拦截。
-        // 被群白名单挡掉的人如果也加表情，就会「有表情、永远没回复」。
-        const willReply = shouldAcknowledge(base, engine.policy(), replyAlwaysChats)
-        const react = (messageId: string): void => {
-          void reactTo(messageId)
-            .catch(error => logger.warn('feishu:reaction-failed', { message: error instanceof Error ? error.message : String(error) }))
-        }
-        // 图片要下载 + 识别，可能耗时较久；先加回执表情，避免用户以为机器人没收到。
-        const rawBase = base.raw as Record<string, unknown> | undefined
-        const needsImageWork = Boolean(base.mediaOnly) || Array.isArray(rawBase?.imageKeys)
-        if (config.feishu.reaction && willReply && needsImageWork && !store.getReaction(base.externalId)) react(base.externalId)
-        void (async () => {
-          const quoted = await attachQuotedMessage(base, larkRunner, { logger })
-          const trigger = await withImageText(quoted)
-          const stored = engine.ingest(trigger)
-          if (!stored) {
-            // 重放 / 重复投递：消息已入库但被去重，日志里说清楚，避免误判成「消息丢了」。
-            logger.info('trigger:duplicate', { id: trigger.id, chat: trigger.chatId })
-            return
-          }
-          const raw = trigger.raw as Record<string, unknown> | undefined
-          const hasQuote = Boolean(raw?.quote)
-          const imageCount = Array.isArray(raw?.images) ? raw.images.length : 0
-          logger.info('trigger:ingested', { id: trigger.id, chat: trigger.chatId, addressed: trigger.addressed, quoted: hasQuote, images: imageCount })
-          // 只对「会被处理」的消息加回执表情：口径同上面的 willReply（已排除准入拦截）。
-          // 纯附件在入库前已经加过，这里跳过避免重复。
-          if (config.feishu.reaction && willReply && !needsImageWork) react(trigger.externalId)
-        })().catch(error => logger.warn('trigger:ingest-failed', { message: error instanceof Error ? error.message : String(error) }))
-      },
-      onReady: () => logger.info('feishu:ready', {}),
-      onReconnect: ({ attempt, delayMs }) => logger.warn('feishu:reconnecting', { attempt, delayMs }),
-      onError: error => {
-        if (/another event bus/i.test(error.message)) {
-          logger.warn('feishu:bus-conflict', {
-            message: '同一机器人只能有一个事件总线；请停止其它消费者，或改用专属机器人（ra init 选项 2/3）',
-          })
-          return
-        }
-        logger.warn('feishu:error', { message: error.message })
-      },
+    ? new ChannelIngress({
+      adapter: feishuChannel,
+      engine,
+      store,
+      logger,
+      // 只对「会被处理」的消息加回执：@ / 私聊 / 全量接收群，且没被准入拦截。
+      shouldReply: trigger => shouldAcknowledge(trigger, engine.policy(), replyAlwaysChats),
+      onAck: (messageId, handle) => store.saveReaction(messageId, handle, new Date().toISOString()),
     })
     : null
-  consumer?.start()
-  if (consumer) logger.info('feishu:consumer-started', { chats: config.feishu.chats.length })
+  if (consumer) {
+    void feishuChannel.start(raw => consumer.handleRaw(raw))
+      .then(() => logger.info('feishu:consumer-started', { chats: config.feishu.chats.length }))
+      .catch(error => logger.warn('feishu:consumer-start-failed', { message: errorMessage(error) }))
+  }
   // Web-only 模式下不刷新群目录、也不启动消费循环，等配好 LLM 重启后再跑。
   const refreshChats = (): void => {
     void directory.refresh(larkRunner)
@@ -1226,7 +1324,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   }
 
   const stopRuntime = (): void => {
-    consumer?.stop()
+    feishuChannel.stop()
     if (chatTimer) clearInterval(chatTimer)
     clearInterval(updateTimer)
     if (updateRestartTimer) {

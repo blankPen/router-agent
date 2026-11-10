@@ -2,6 +2,7 @@ import type { Store } from '../store/db.js'
 import type { Clock, Engine } from '../core/engine.js'
 import { gate, type Policy } from '../core/policy.js'
 import type { SourceKind, Strength, Ticket, Trigger } from '../core/model.js'
+import { DEFAULT_CHANNEL_ID } from '../channels/port.js'
 import { noopLogger, errorMessage, type Logger } from '../infra/logger.js'
 import { activeDraft, resolveDispatch, type DispatchMissing, type DispatchSettings } from './dispatch.js'
 import { readRouterPrompt } from '../specs/index.js'
@@ -491,12 +492,13 @@ export class AgentLoop {
     this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'inferred', reason })
   }
 
-  /** 会话 key：默认按「群 + 人」隔离；thread 粒度再叠加话题。 */
+  /** 会话 key：默认按「通道 + 群 + 人」隔离；thread 粒度再叠加话题。 */
   private sessionKeyOf(trigger: Trigger): SessionKeyParts | null {
     if (!this.sessionsEnabled) return null
+    const channel = trigger.channelId ?? DEFAULT_CHANNEL_ID
     const thread = this.sessionKeyScope === 'thread' ? `:thread:${trigger.threadId}` : ''
     return {
-      key: `chat:${trigger.chatId}${thread}:user:${trigger.actorId}`,
+      key: `channel:${channel}:chat:${trigger.chatId}${thread}:user:${trigger.actorId}`,
       chatId: trigger.chatId,
       actorId: trigger.actorId,
       threadId: trigger.threadId,
