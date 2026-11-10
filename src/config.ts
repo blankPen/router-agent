@@ -4,8 +4,8 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { DEFAULT_ADMISSION, type AcceptMode, type AdmissionTable, type Policy } from './core/policy.js'
-import type { WorkerSpecMode } from './worker/spec/index.js'
 import type { ToolPolicy } from './worker/port.js'
+import { UI_EVIDENCE_MODES, type UiEvidenceMode } from './worker/evidence-gate.js'
 import { ORCA_RUNTIME_ID, isWorkerRuntimeId, normalizeRuntimeId } from './worker/runtimes/catalog.js'
 import { noopLogger, errorMessage, type Logger } from './infra/logger.js'
 
@@ -200,8 +200,7 @@ export interface AppConfig {
   router: RouterSettings
   progress: ProgressSettings
   retention: RetentionSettings
-  workerSpec: { mode: WorkerSpecMode }
-  worker: { tools: ToolPolicy }
+  worker: { tools: ToolPolicy; evidence: { ui: UiEvidenceMode } }
 runtime: { default: string; options?: Record<string, unknown>; projects?: RuntimeProjects }
   server: { port: number }
   llm?: LlmSettings
@@ -295,8 +294,7 @@ export function defaultConfig(): AppConfig {
       zombieHours: 6,
       sweepMinutes: 5,
     },
-    workerSpec: { mode: 'prompt' },
-    worker: { tools: { ...DEFAULT_WORKER_TOOLS } },
+    worker: { tools: { ...DEFAULT_WORKER_TOOLS }, evidence: { ui: 'warn' } },
     runtime: { default: 'orca' },
     server: { port: 3083 },
   }
@@ -370,9 +368,6 @@ retention:
   closeGraceHours: 6   # 提醒后多久没回复就自动关闭
   zombieHours: 6       # 执行中但多久没上报/输出算僵尸
   sweepMinutes: 5      # 扫描间隔（分钟）
-
-workerSpec:
-  mode: prompt         # prompt | agent
 
 runtime:
   default: orca         # 新工单默认 runtime：orca | claude-code | acp | acp-claude | acp-codex ...
@@ -458,7 +453,6 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
   }
 
   const acceptMode = pickAcceptMode(doc.policy?.acceptMode, base.policy.acceptMode)
-  const mode = pickMode(doc.workerSpec?.mode, base.workerSpec.mode)
   const port = Number(doc.server?.port)
   const progressDoc = doc.progress ?? {}
   const progressSyncMs = Number(progressDoc.syncMs)
@@ -525,7 +519,6 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
       zombieHours: positiveNumberOr(retentionDoc.zombieHours, base.retention.zombieHours, 1, 24 * 365),
       sweepMinutes: positiveNumberOr(retentionDoc.sweepMinutes, base.retention.sweepMinutes, 1, 24 * 60),
     },
-    workerSpec: { mode },
     worker: {
       tools: {
         fileAccess: doc.worker?.tools?.fileAccess === 'read-only' ? 'read-only' : base.worker.tools.fileAccess,
@@ -534,6 +527,9 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
           : base.worker.tools.shell) as ToolPolicy['shell'],
         shellAllow: stringArray(doc.worker?.tools?.shellAllow, base.worker.tools.shellAllow ?? []),
         allowNetwork: booleanOr(doc.worker?.tools?.allowNetwork, base.worker.tools.allowNetwork),
+      },
+      evidence: {
+        ui: pickUiEvidenceMode(doc.worker?.evidence?.ui, base.worker.evidence.ui),
       },
     },
 runtime: {
@@ -599,8 +595,8 @@ function pickAcceptMode(value: unknown, fallback: AcceptMode): AcceptMode {
   return value === 'off' || value === 'observe' || value === 'auto' ? value : fallback
 }
 
-function pickMode(value: unknown, fallback: WorkerSpecMode): WorkerSpecMode {
-  return value === 'prompt' || value === 'agent' ? value : fallback
+function pickUiEvidenceMode(value: unknown, fallback: UiEvidenceMode): UiEvidenceMode {
+  return value === 'off' || value === 'warn' || value === 'enforce' ? value : fallback
 }
 
 function parseRouter(value: unknown, base: RouterSettings): RouterSettings {
@@ -851,8 +847,7 @@ export function writeConfig(home: string, config: AppConfig): void {
       zombieHours: config.retention.zombieHours,
       sweepMinutes: config.retention.sweepMinutes,
     },
-    workerSpec: { mode: config.workerSpec.mode },
-    worker: { tools: config.worker.tools },
+    worker: { tools: config.worker.tools, evidence: config.worker.evidence },
 runtime: {
       default: config.runtime.default,
       ...(config.runtime.options ? { options: config.runtime.options } : {}),
@@ -949,7 +944,7 @@ export function publicDefaults(): Record<string, unknown> {
     router: base.router,
     progress: base.progress,
     retention: base.retention,
-    workerSpec: base.workerSpec,
+    worker: base.worker,
     runtime: base.runtime,
     server: base.server,
   }
@@ -1028,7 +1023,6 @@ function stringListValue(): Validator {
 }
 
 const ACCEPT_MODES = ['off', 'observe', 'auto']
-const WORKER_MODES = ['prompt', 'agent']
 const ADMISSION_LISTED = ['inferred', 'ignore']
 const ADMISSION_UNLISTED_ADDRESSED = ['explicit', 'inferred', 'ignore']
 
@@ -1084,8 +1078,8 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
   'retention.zombieHours': intValue(1, 8_760, ' 小时'),
   'retention.sweepMinutes': intValue(1, 1_440, ' 分钟'),
 
-  'workerSpec.mode': enumValue(WORKER_MODES),
-'runtime.default': runtimeIdValue,
+  'worker.evidence.ui': enumValue(UI_EVIDENCE_MODES),
+  'runtime.default': runtimeIdValue,
   'server.port': intValue(1, 65_535),
 
   'llm.baseUrl': stringValue,
@@ -1430,9 +1424,9 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
       if (!ADMISSION_LISTED.includes(value)) return false
       config.policy.admission.unlistedNotAddressed = value as never
       return true
-    case 'workerSpec.mode':
-      if (!WORKER_MODES.includes(value)) return false
-      config.workerSpec.mode = value as WorkerSpecMode
+    case 'worker.evidence.ui':
+      if (!UI_EVIDENCE_MODES.includes(value as UiEvidenceMode)) return false
+      config.worker.evidence.ui = value as UiEvidenceMode
       return true
     case 'router.timeoutMs': {
       const v = int(1000, 600_000)

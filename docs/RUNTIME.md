@@ -94,13 +94,25 @@ runtime:
 
 `worker.tools` 对 `claude-code` 生效（映射成 Claude 的 `allowedTools`）；`acp-*` 运行时的 `session/request_permission` 也按同一策略自动放行或拒绝；`orca` 运行时里 worker 的权限由 Orca 启动的 Claude Code 自身决定。安全字段只能由这里和 adapter 内置基线决定，`runtime.options` 写了同名键会直接启动失败。
 
+## UI 证据门禁
+
+`worker.evidence.ui` 控制 Worker 报 `ready` 时是否检查 PR / MR 里的 UI 对比证据：
+
+| 档位 | 行为 |
+|-|-|
+| `off` | 不检查 |
+| `warn`（默认） | 缺证据时记 `report:evidence-missing`，仍然放行 |
+| `enforce` | 缺证据时返回 422，`ra report` 退出码 1，Worker 必须补证据或改报 `blocked` |
+
+- **只拦 `ready`**：`progress` / `waiting` / `blocked` / `failed` / `dropped` 一律放行；拿不到截图时 Worker 应报 `blocked` 并在 `--human-action` 说明限制。
+- **UI 工单判定**：Worker 用 `--ui-change` 显式声明（`true` / `false`）；不声明时 Router 用 `git merge-base` 找到改动文件，命中前端扩展名或常见前端目录即视为 UI 改动。
+- **证据规则**：PR / MR 描述里必须同时出现 Before 和 After 标识，且至少有 2 个截图 / 录屏链接；只有 After 不算完整。
+- **无法判断时放行**：workdir 丢失、git 查询失败、`gh` / `glab` 查询失败或拿不到描述正文时，记 `report:evidence-unverified` 后放行，避免把「验证不了」误判成「缺证据」。
+- **兜底通道**：服务不可达时 Worker 写 `state.json`，poller 走同一门禁；命中拒绝时无法回 422，Router 会置 attention 并通知发起人，要求补齐或确认接受。
+- 修改档位后需要重启服务生效。
+
 ## Worker 规范注入
 
-`workerSpec.mode` 有两种：
+Worker 手册（`worker/spec/prompt-mode.md`）会拼进启动 prompt；非 Orca 运行时使用运行时中立的 `worker/spec/contract.md`。两者都不改项目自己的 `CLAUDE.md`。
 
-- `prompt`：把 Worker 手册拼进启动 prompt（默认，已验证可行）。
-- `agent`：只发工单，由全局 `~/.claude/agents/router-agent-worker.md` 提供规范（`ra init` 会生成）。
-
-两种模式都不改项目自己的 `CLAUDE.md`。
-
-这些规范 markdown 统一存放在状态目录的 `specs/` 下，可在 Web 面板「配置 → 规范文件」直接编辑或恢复默认。`agent` 模式的全局规范文件仍由 `ra init` 写入，修改 Worker 手册后重新执行一次 `ra init` 即可同步。
+这些规范 markdown 统一存放在状态目录的 `specs/` 下，可在 Web 面板「配置 → 规范文件」直接编辑或恢复默认；保存后对之后派出的新工单生效。

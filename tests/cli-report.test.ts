@@ -47,6 +47,21 @@ describe('ra report', () => {
     expect(deps.out[0]).toContain('turn=2')
   })
 
+  it('透传 --ui-change 声明', async () => {
+    let sent: any = null
+    const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+      sent = JSON.parse(String(init!.body))
+      return new Response('{"ok":true,"turn":1}', { status: 201 })
+    }) as typeof fetch
+
+    const code = await runReport(makeDeps('/tmp/ra-report-none', fetchImpl), {
+      ticket: 'tk_1', state: 'ready', summary: '改了按钮', uiChange: true,
+    })
+
+    expect(code).toBe(0)
+    expect(sent.uiChange).toBe(true)
+  })
+
   it('正文支持 @文件，避免长文本被 shell 转义', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'ra-report-'))
     const answer = join(dir, 'answer.md')
@@ -73,13 +88,13 @@ describe('ra report', () => {
     const fetchImpl = (async () => { throw new Error('ECONNREFUSED') }) as typeof fetch
 
     const deps = makeDeps(home, fetchImpl)
-    const code = await runReport(deps, { ticket: 'tk_1', state: 'ready', summary: '完成', reply: '正文' })
+    const code = await runReport(deps, { ticket: 'tk_1', state: 'ready', summary: '完成', reply: '正文', uiChange: true })
 
     expect(code).toBe(0)
     const file = JSON.parse(readFileSync(join(home, 'workers', 'tk_1', 'state.json'), 'utf8'))
     expect(file).toMatchObject({
       ticket_id: 'tk_1', assignment_id: 'as_1', turn: 4, state: 'ready', summary: '完成',
-      reply: '正文',
+      reply: '正文', ui_change: true,
     })
     expect(deps.err.join('\n')).toContain('不可达')
   })
@@ -93,6 +108,17 @@ describe('ra report', () => {
 
     expect(code).toBe(1)
     expect(deps.err.join('\n')).toContain('404')
+  })
+
+  it('422 证据门禁把 message 完整带出，便于 worker 按指引修正', async () => {
+    const message = 'UI 工单缺少 PR / MR 证据：Before 标识。\n请补齐后重新上报；如果确实无法截图，请改用 --state blocked。'
+    const fetchImpl = (async () => new Response(JSON.stringify({ error: 'evidence-missing', message }), { status: 422 })) as typeof fetch
+    const deps = makeDeps('/tmp/ra-report-none', fetchImpl)
+
+    const code = await runReport(deps, { ticket: 'tk_1', state: 'ready', summary: '完成' })
+
+    expect(code).toBe(1)
+    expect(deps.err.join('\n')).toContain('--state blocked')
   })
 
   it('拒绝非法 state', async () => {

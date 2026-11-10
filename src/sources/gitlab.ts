@@ -25,6 +25,7 @@ function toPrInfo(raw: Record<string, unknown>): PrInfo | null {
     state: normalizeGitlabState(String(raw.state ?? 'opened')),
     title: String(raw.title ?? ''),
     branch: String(raw.source_branch ?? raw.headRefName ?? ''),
+    ...(typeof raw.description === 'string' ? { body: raw.description } : {}),
   }
 }
 

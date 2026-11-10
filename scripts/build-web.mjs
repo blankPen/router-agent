@@ -29,7 +29,6 @@ cpSync(join(root, 'src', 'web', 'assets'), join(distWeb, 'assets'), { recursive:
 // tsc 只编译 TS，Markdown 资产需要单独复制到 dist。
 const assets = [
   'src/worker/spec/prompt-mode.md',
-  'src/worker/spec/agent-mode.md',
   'src/worker/spec/contract.md',
   'src/router/prompts/orchestrator.md',
   'src/router/prompts/admission.md',

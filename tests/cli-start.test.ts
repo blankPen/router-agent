@@ -19,7 +19,7 @@ function io(homeDir: string): CliIo & { out: string[]; err: string[] } {
 
 async function initHome(dir: string): Promise<void> {
   const output = io(dir)
-  const code = await runCli(['init', '--home', dir, '--agents-dir', join(dir, '.claude/agents'), '--yes'], output)
+  const code = await runCli(['init', '--home', dir, '--yes'], output)
   expect(code).toBe(0)
 }
 

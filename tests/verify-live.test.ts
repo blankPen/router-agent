@@ -86,7 +86,6 @@ describe.runIf(LIVE)('真实环境验证', () => {
     const adapter = new OrcaRuntime({
       runner: realRunner('orca'),
       workersDir: mkdtempSync(join(tmpdir(), 'ra-live-orca-')),
-      spec: 'prompt',
     })
     // 不存在的 handle 应返回 null 而不是抛错，证明 terminal list 解析路径可用
     const missing = await adapter.inspect('no-such-handle')

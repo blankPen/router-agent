@@ -100,23 +100,12 @@ ra init → 配置 port 3099 → ra start → curl /api/status → curl / → ra
 | worker 会话不可控 | Orca 默认开成 chat 会话（handle `structured-agent-session-…`），不在 terminal list 里，send/close/inspect 都失效，重启必判死并重开 | `worktree create` 固定 `--surface terminal` |
 | 模型二次回复 | `router_reply` 与系统自动 ack 重复，且常传内部 id 导致发送失败 | 该工具改为 no-op；回复统一由系统发送 |
 | 同线程排队期消息 | 会重复开第二张工单 | 派工前也可投递，派工时重新绑定 Assignment |
-| `ra init` 的 worker 规范 | 写在状态目录下，Orca 启动的 claude 读不到 | 默认写入全局 `~/.claude/agents/`（可用 `--agents-dir` 覆盖） |
 
 ## 4. 需要你执行的剩余验证
 
-以下三项依赖真实的飞书群配置或需要人确认，未在本次自动验证中执行：
+以下两项依赖真实的飞书群配置或需要人确认，未在本次自动验证中执行：
 
-### 4.1 模式二（B1/P0-3）：Orca 启动的 claude 是否加载 `~/.claude/agents/`
-
-```bash
-ra init                       # 生成 ~/.claude/agents/router-agent-worker.md
-# 在 Orca 里新建一个 worktree（任意仓库），打开后问：
-#   "你当前可用哪些自定义 agent？是否包含 router-agent-worker？"
-```
-
-若加载不到，把 `workerSpec.mode` 保持为 `prompt`（默认，已验证可行）。
-
-### 4.2 真实飞书消息端到端
+### 4.1 真实飞书消息端到端
 
 1. 在 `~/.router-agent/config.yaml` 填入真实群与自己的 open_id：
    ```yaml
@@ -132,7 +121,7 @@ ra init                       # 生成 ~/.claude/agents/router-agent-worker.md
 
 这一步会真实创建 worktree 并启动 Claude Code，因此没有自动执行。
 
-### 4.3 真实 PR 闭环
+### 4.2 真实 PR 闭环
 
 worker 开 PR 后：
 
@@ -144,7 +133,7 @@ ra status               # 工单应变为 closed
 
 验证点：Orca `linkedPR` 优先读取、`gh` 兜底、合并/关闭只通知一次。
 
-### 4.4 多项目 / 多分支派工（本轮新增）
+### 4.3 多项目 / 多分支派工（本轮新增）
 
 ```bash
 ra config set project.router-agent "name:dsh/router-agent@main"

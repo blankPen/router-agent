@@ -82,7 +82,7 @@ describe('PR 状态查询的仓库兜底', () => {
 
     expect(info?.state).toBe('merged')
     expect(calls).toHaveLength(1)
-    expect(calls[0]!.argv).toEqual(['pr', 'view', '7', '--json', 'number,url,state,title,headRefName'])
+    expect(calls[0]!.argv).toEqual(['pr', 'view', '7', '--json', 'number,url,state,title,headRefName,body'])
     expect(calls[0]!.cwd).toBe('/Users/me/orca/workspaces/router-agent/ra-tk-7')
   })
 

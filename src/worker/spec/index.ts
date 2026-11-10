@@ -1,10 +1,7 @@
 import type { Attachment, Ticket } from '../../core/model.js'
 import { readWorkerSpec } from '../../specs/index.js'
 
-export type WorkerSpecMode = 'prompt' | 'agent'
-
 export interface WorkerPromptInput {
-  mode: WorkerSpecMode
   ticket: Ticket
   mandateScope: string
   statePath: string
@@ -21,10 +18,9 @@ export interface WorkerPromptInput {
   home?: string
 }
 
-/** 注入给 worker 的完整手册（prompt 模式）或简短指令（agent 模式）。 */
+/** 注入给 worker 的完整手册。 */
 export function buildWorkerPrompt(input: WorkerPromptInput): string {
-  const file = input.mode === 'agent' ? 'agent-mode.md' : 'prompt-mode.md'
-  const template = readSpec(file, input.home)
+  const template = readSpec('prompt-mode.md', input.home)
   return render(template, {
     ticketId: input.ticket.id,
     title: input.ticket.title,
@@ -94,16 +90,4 @@ function attachmentsSection(attachments: Attachment[]): string {
 
 function render(template: string, vars: Record<string, string>): string {
   return template.replace(/\{\{(\w+)\}\}/g, (_m, key: string) => vars[key] ?? '')
-}
-
-/** agent 模式的全局规范文件内容，供 `ra init` 写入 ~/.claude/agents/。 */
-export function agentSpecDocument(home?: string): string {
-  return `---
-name: router-agent-worker
-description: router-agent 派出的工单 worker；按 router-agent 的状态上报协议工作
-tools: Read, Write, Edit, Bash, Glob, Grep
----
-
-${readSpec('prompt-mode.md', home)}
-`
 }

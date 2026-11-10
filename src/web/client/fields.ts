@@ -74,11 +74,6 @@ const PERSONA_STYLE_OPTIONS: FieldOption[] = [
   { value: 'professional', label: 'professional · 专业' },
 ]
 
-const WORKER_MODE_OPTIONS: FieldOption[] = [
-  { value: 'prompt', label: 'prompt · 每次拼完整 prompt' },
-  { value: 'agent', label: 'agent · Agent 模式，上下文更深' },
-]
-
 /**
  * LLM Provider：Router 研判与图片转写用的大模型接入。
  *
@@ -239,13 +234,23 @@ export const SECTIONS: SectionDef[] = [
     title: '派工与服务',
     description: 'Worker 执行方式与监听端口。',
     fields: [
-      { path: 'workerSpec.mode', label: 'Worker 规格模式', kind: 'select', options: WORKER_MODE_OPTIONS },
       {
         path: 'runtime.default',
         label: 'Worker 运行时',
         kind: 'select',
         options: WORKER_RUNTIMES.map(runtime => ({ value: runtime.id, label: runtime.label, hint: runtime.hint })),
         hint: '只影响新工单；已派出的工单继续使用创建时的运行时',
+      },
+      {
+        path: 'worker.evidence.ui',
+        label: 'UI 证据门禁',
+        kind: 'select',
+        options: [
+          { value: 'off', label: 'off · 关闭' },
+          { value: 'warn', label: 'warn · 只记日志' },
+          { value: 'enforce', label: 'enforce · 拦截 ready' },
+        ],
+        hint: 'UI 工单报 ready 时检查 PR / MR 是否有 Before / After 证据；修改后需重启服务',
       },
       { path: 'server.port', label: '面板端口', kind: 'number', min: 1, max: 65_535, unit: '端口' },
     ],

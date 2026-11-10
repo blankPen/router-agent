@@ -7,7 +7,7 @@ import { claudeProjectSlug, describeToolInfo, describeToolUse } from '../../src/
 import { worktreeCreate, terminalSend, terminalClose, terminalList, terminalRead, worktreeRemove, agentLaunch } from '../../src/worker/orca/commands.js'
 import type { CommandRunner, CommandResult } from '../../src/worker/orca/commands.js'
 import type { Assignment, Ticket } from '../../src/core/model.js'
-import { buildWorkerPrompt } from '../../src/worker/spec/index.js'
+import { buildNeutralContract, buildWorkerPrompt } from '../../src/worker/spec/index.js'
 
 class FakeRunner implements CommandRunner {
   calls: { argv: string[]; cwd?: string }[] = []
@@ -115,7 +115,7 @@ describe('OrcaRuntime', () => {
       }),
       stderr: '',
     }])
-    const adapter = new OrcaRuntime({ runner, workersDir: dir, spec: 'prompt' })
+    const adapter = new OrcaRuntime({ runner, workersDir: dir })
 
     const error = await adapter.start({ ticket, assignment, workdir: '/tmp/wt' }).catch(item => item)
     expect(error).toBeInstanceOf(OrcaCommandError)
@@ -140,7 +140,7 @@ describe('OrcaRuntime', () => {
   it('stdout 不是 JSON 时回退到 stdout 尾部，仍能定位命令参数', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'ra-workers-'))
     const runner = new FakeRunner([{ code: 2, stdout: 'fatal: not a git repository', stderr: '' }])
-    const adapter = new OrcaRuntime({ runner, workersDir: dir, spec: 'prompt' })
+    const adapter = new OrcaRuntime({ runner, workersDir: dir })
     const error = await adapter.start({ ticket, assignment, workdir: '/tmp/wt' }).catch(item => item)
     expect(error).toBeInstanceOf(OrcaCommandError)
     expect(error.message).toContain('fatal: not a git repository')
@@ -158,7 +158,7 @@ describe('OrcaRuntime', () => {
     const runner = new FakeRunner([
       { code: 0, stdout: JSON.stringify({ ok: true, result: { launch: { outcome: { handle: 'term-9' } }, worktree: { path: '/tmp/wt-9' } } }), stderr: '' },
     ])
-    const adapter = new OrcaRuntime({ runner, workersDir: dir, spec: 'prompt' })
+    const adapter = new OrcaRuntime({ runner, workersDir: dir })
     const { handle, workdir } = await adapter.start({ ticket, assignment, workdir: '/tmp/wt-9' })
 
     expect(handle).toBe('term-9')
@@ -178,7 +178,7 @@ describe('OrcaRuntime', () => {
   it('prompt 模式把 worker 手册与 Mandate 一起拼进启动 prompt', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'ra-workers-'))
     const runner = new FakeRunner([{ code: 0, stdout: JSON.stringify({ ok: true, result: { launch: { outcome: { handle: 'H' } } } }), stderr: '' }])
-    const adapter = new OrcaRuntime({ runner, workersDir: dir, spec: 'prompt' })
+    const adapter = new OrcaRuntime({ runner, workersDir: dir })
     await adapter.start({ ticket, assignment, workdir: '/tmp/wt' })
     const argv = runner.calls[0]!.argv
     const prompt = argv[argv.indexOf('--prompt') + 1]!
@@ -189,7 +189,7 @@ describe('OrcaRuntime', () => {
 
   it('deliver 逐条发送输入文本，并带上可回写的输入 id', async () => {
     const runner = new FakeRunner()
-    const adapter = new OrcaRuntime({ runner, workersDir: '/tmp', spec: 'prompt' })
+    const adapter = new OrcaRuntime({ runner, workersDir: '/tmp' })
     await adapter.deliver('term-1', [
       { id: 'in_1', kind: 'followup', text: '第一件事' },
       { id: 'in_2', kind: 'ci', text: 'CI 失败了' },
@@ -202,7 +202,7 @@ describe('OrcaRuntime', () => {
 
   it('registerContext 把上下文拼成一段发送', async () => {
     const runner = new FakeRunner()
-    const adapter = new OrcaRuntime({ runner, workersDir: '/tmp', spec: 'prompt' })
+    const adapter = new OrcaRuntime({ runner, workersDir: '/tmp' })
     await adapter.registerContext('term-1', [
       { kind: 'env', key: 'RA_STATE', value: '/tmp/state.json' },
       { kind: 'dir', path: '/tmp/repo' },
@@ -214,7 +214,7 @@ describe('OrcaRuntime', () => {
 
   it('stop 关闭终端', async () => {
     const runner = new FakeRunner()
-    const adapter = new OrcaRuntime({ runner, workersDir: '/tmp', spec: 'prompt' })
+    const adapter = new OrcaRuntime({ runner, workersDir: '/tmp' })
     await adapter.stop('term-1', '人工停止')
     expect(runner.calls[0]!.argv).toEqual(terminalClose('term-1'))
   })
@@ -225,7 +225,7 @@ describe('OrcaRuntime', () => {
       stdout: JSON.stringify({ ok: true, result: { terminals: [{ handle: 'term-1', connected: true, writable: true, orphaned: false, lastOutputAt: 1793897105303, worktreePath: '/tmp/wt', branch: 'ra/tk_1' }] } }),
       stderr: '',
     }])
-    const adapter = new OrcaRuntime({ runner, workersDir: '/tmp', spec: 'prompt' })
+    const adapter = new OrcaRuntime({ runner, workersDir: '/tmp' })
     const info = await adapter.inspect('term-1')
     expect(info).toMatchObject({ handle: 'term-1', connected: true, orphaned: false, worktreePath: '/tmp/wt' })
     // Orca 实测返回毫秒数字，必须归一化成 ISO，否则 idle 判定永远失效
@@ -241,7 +241,7 @@ describe('OrcaRuntime', () => {
       }),
       stderr: '',
     }])
-    const adapter = new OrcaRuntime({ runner, workersDir: '/tmp', spec: 'prompt' })
+    const adapter = new OrcaRuntime({ runner, workersDir: '/tmp' })
     const output = await adapter.read('term-1', { limit: 20 })
     expect(runner.calls[0]!.argv).toEqual(terminalRead('term-1', { limit: 20 }))
     expect(output).toEqual({ status: 'running', source: 'screen', lines: ['⏺ 正在改登录超时', '⎿ pnpm test'] })
@@ -252,7 +252,7 @@ describe('OrcaRuntime', () => {
       { code: 0, stdout: JSON.stringify({ ok: true, result: { terminal: { status: 'weird', tail: [] } } }), stderr: '' },
       { code: 0, stdout: JSON.stringify({ ok: true, result: {} }), stderr: '' },
     ])
-    const adapter = new OrcaRuntime({ runner, workersDir: '/tmp', spec: 'prompt' })
+    const adapter = new OrcaRuntime({ runner, workersDir: '/tmp' })
     expect(await adapter.read('term-1')).toEqual({ status: 'unknown', lines: [] })
     expect(await adapter.read('term-1')).toBeNull()
   })
@@ -280,7 +280,7 @@ describe('Claude 会话记录', () => {
       }),
     ].join('\n'))
 
-    const adapter = new OrcaRuntime({ runner: new FakeRunner(), workersDir: '/tmp', spec: 'prompt', claudeProjectsDir: projects })
+    const adapter = new OrcaRuntime({ runner: new FakeRunner(), workersDir: '/tmp', claudeProjectsDir: projects })
     const snapshot = await adapter.session(workdir)
 
     expect(snapshot?.at).toBe('2026-11-06T10:02:00.000Z')
@@ -294,7 +294,7 @@ describe('Claude 会话记录', () => {
 
   it('找不到 workdir 对应的会话目录时返回 null', async () => {
     const projects = mkdtempSync(join(tmpdir(), 'ra-claude-projects-'))
-    const adapter = new OrcaRuntime({ runner: new FakeRunner(), workersDir: '/tmp', spec: 'prompt', claudeProjectsDir: projects })
+    const adapter = new OrcaRuntime({ runner: new FakeRunner(), workersDir: '/tmp', claudeProjectsDir: projects })
     expect(await adapter.session('/tmp/not-there')).toBeNull()
   })
 
@@ -312,7 +312,7 @@ describe('Claude 会话记录', () => {
 
 describe('Worker 提示词', () => {
   it('要求用 ra report 上报，并覆盖交付物 / PR / 禁止直连 IM 的约束', () => {
-    const prompt = buildWorkerPrompt({ mode: 'prompt', ticket, mandateScope: '只改登录超时', statePath: '/tmp/s.json', eventsPath: '/tmp/e.log', repo: 'dsh/router-agent' })
+    const prompt = buildWorkerPrompt({ ticket, mandateScope: '只改登录超时', statePath: '/tmp/s.json', eventsPath: '/tmp/e.log', repo: 'dsh/router-agent' })
     expect(prompt).toContain('ra report')
     expect(prompt).toContain('--reply')
     expect(prompt).toContain('--ack')
@@ -329,7 +329,7 @@ describe('Worker 提示词', () => {
         { path: '/tmp/ra-images/tk_1/img_b.png', mimeType: 'image/png', quoted: true },
       ],
     }
-    const prompt = buildWorkerPrompt({ mode: 'prompt', ticket: withImages, mandateScope: '按图改', statePath: '/tmp/s.json', eventsPath: '/tmp/e.log', repo: 'dsh/router-agent' })
+    const prompt = buildWorkerPrompt({ ticket: withImages, mandateScope: '按图改', statePath: '/tmp/s.json', eventsPath: '/tmp/e.log', repo: 'dsh/router-agent' })
     expect(prompt).toContain('附件图片（原图）')
     expect(prompt).toContain('/tmp/ra-images/tk_1/img_a.png')
     expect(prompt).toContain('/tmp/ra-images/tk_1/img_b.png')
@@ -337,12 +337,26 @@ describe('Worker 提示词', () => {
     expect(prompt).toContain('Read 工具')
   })
 
-  it('agent 模式指示 worker 按全局 agent 规范执行，只发 Mandate', () => {
-    const prompt = buildWorkerPrompt({ mode: 'agent', ticket, mandateScope: '只改登录超时', statePath: '/tmp/s.json', eventsPath: '/tmp/e.log', repo: 'dsh/router-agent' })
-    expect(prompt).toContain('router-agent-worker')
-    expect(prompt).toContain('ra report')
-    expect(prompt).toContain('/tmp/e.log')
-    expect(prompt.length).toBeLessThan(buildWorkerPrompt({ mode: 'prompt', ticket, mandateScope: '只改登录超时', statePath: '/tmp/s.json', eventsPath: '/tmp/e.log', repo: 'dsh/router-agent' }).length)
+  it('改 UI 的工单要求 PR / MR 描述带 Before / After 对比', () => {
+    const base = { ticket, mandateScope: '只改登录超时', statePath: '/tmp/s.json', eventsPath: '/tmp/e.log', repo: 'dsh/router-agent' }
+    const prompt = buildWorkerPrompt(base)
+    expect(prompt).toContain('UI 改动：必须交 Before / After 对比')
+    expect(prompt).toContain('只有 After 不算完整交付')
+    expect(prompt).toContain('不要报 `ready`')
+    expect(prompt).toContain('改了 UI 却没在 PR / MR 描述里给出 Before / After 对比，不能报 `ready`')
+    expect(prompt).toContain('--ui-change')
+    expect(prompt).toContain('补不了就改用 `blocked`')
+
+    const contract = buildNeutralContract({
+      ticketId: 'tk_1',
+      title: '调整登录超时',
+      scope: '只改登录超时',
+      repo: 'dsh/router-agent',
+      statePath: '/tmp/s.json',
+      eventsPath: '/tmp/e.log',
+    })
+    expect(contract).toContain('UI 改动：必须交 Before / After 对比')
+    expect(contract).toContain('只有 After 不算完整交付')
   })
 })
 
@@ -360,7 +374,7 @@ describe('多项目 / 多分支派工', () => {
   it('start 优先用工单自带的 repo/branch，而不是适配器上的全局 repo', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'ra-workers-'))
     const runner = new FakeRunner([{ code: 0, stdout: JSON.stringify({ ok: true, result: { launch: { outcome: { handle: 'H' } } } }), stderr: '' }])
-    const adapter = new OrcaRuntime({ runner, workersDir: dir, spec: 'prompt' })
+    const adapter = new OrcaRuntime({ runner, workersDir: dir })
     const scoped = { ...ticket, repo: 'name:other/repo', branch: 'release' }
     await adapter.start({ ticket: scoped, assignment, workdir: '/tmp/wt' })
 

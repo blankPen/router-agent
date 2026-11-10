@@ -6,6 +6,8 @@
 > 版本：v1.9（设计定稿 + 一期 P0–P3 实施 + 实现代码评审修复；Claude Code CLI 已接入）
 > 仓库基线：`main` @ `5f90fa6`
 > 编写：ra worker（tk-15）
+>
+> 注：本文是设计记录；其中 Worker 规范注入的「agent 模式」后来已移除，Worker 统一使用 prompt 模式。
 
 ---
 

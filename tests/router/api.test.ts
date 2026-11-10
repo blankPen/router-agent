@@ -11,6 +11,7 @@ import { InstallStartError } from '../../src/worker/runtimes/acp/admin.js'
 import type { ResumeHint } from '../../src/worker/port.js'
 import { defaultConfig, loadConfig, policyOf, projectsForRuntime, type AppConfig, chatEntry } from '../../src/config.js'
 import { FeishuBotAdmin } from '../../src/sources/feishu-bot-admin.js'
+import { ReportRejectedError } from '../../src/worker/evidence-gate.js'
 
 function call(server: ApiServer, method: string, path: string, body?: unknown): Promise<{ status: number; json: any }> {
   return new Promise((resolve, reject) => {
@@ -48,6 +49,7 @@ describe('HTTP 管理 API', () => {
   let reports: Record<string, unknown>[]
   let resumeHints: Record<string, ResumeHint | null>
   let resumeCalls: string[]
+  let reportRejection: Error | null
 
   beforeEach(async () => {
     store = new Store(':memory:')
@@ -58,11 +60,15 @@ describe('HTTP 管理 API', () => {
     reports = []
     resumeHints = {}
     resumeCalls = []
+    reportRejection = null
     server = await createApiServer({
       engine, store, config,
       clock: { now: () => '2026-11-06T10:00:05.000Z' },
       onEvent: event => events.push(event),
-      onReport: state => { reports.push(state as unknown as Record<string, unknown>) },
+      onReport: state => {
+        if (reportRejection) throw reportRejection
+        reports.push(state as unknown as Record<string, unknown>)
+      },
       resumeHint: ticketId => {
         resumeCalls.push(ticketId)
         return resumeHints[ticketId] ?? null
@@ -530,6 +536,37 @@ describe('HTTP 管理 API', () => {
       reply: '## 结论\n- A',
       ackedInputs: ['in_1'],
     })
+  })
+
+  it('POST /api/reports 透传 --ui-change 声明', async () => {
+    const res = await call(server, 'POST', '/api/reports', {
+      ticketId,
+      state: 'ready',
+      summary: '改了按钮',
+      uiChange: true,
+    })
+    expect(res.status).toBe(201)
+    expect(reports[0]).toMatchObject({ uiChange: true })
+  })
+
+  it('POST /api/reports 证据门禁拒绝时返回 422 与补证指引', async () => {
+    reportRejection = new ReportRejectedError('evidence-missing', 'UI 工单缺少 PR / MR 证据：Before 标识。', {
+      ticketId,
+      missing: ['Before 标识'],
+    })
+    const res = await call(server, 'POST', '/api/reports', {
+      ticketId,
+      state: 'ready',
+      summary: '改了按钮',
+      uiChange: true,
+    })
+    expect(res.status).toBe(422)
+    expect(res.json).toMatchObject({
+      error: 'evidence-missing',
+      message: expect.stringContaining('Before 标识'),
+      missing: ['Before 标识'],
+    })
+    expect(reports).toHaveLength(0)
   })
 
   it('POST /api/reports 兼容旧版 deliverable 字段', async () => {

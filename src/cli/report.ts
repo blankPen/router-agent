@@ -10,6 +10,8 @@ export interface ReportOptions {
   humanAction?: string
   prNumber?: string
   prUrl?: string
+  /** 显式声明本次改动是否涉及 UI；不传时 Router 按改动文件推断。 */
+  uiChange?: boolean
   /** 要发给发起人的完整回复（Markdown）：字面量、`@文件路径` 或 `-`（从 stdin 读）。 */
   reply?: string
   ack?: string[]
@@ -57,6 +59,7 @@ export async function runReport(deps: ReportDeps, opts: ReportOptions): Promise<
     ...(opts.humanAction ? { humanAction: opts.humanAction } : {}),
     ...(opts.prNumber ? { prNumber: Number(opts.prNumber) } : {}),
     ...(opts.prUrl ? { prUrl: opts.prUrl } : {}),
+    ...(opts.uiChange !== undefined ? { uiChange: opts.uiChange } : {}),
     ...(reply ? { reply } : {}),
     ackedInputs: opts.ack ?? [],
     updatedAt: (deps.now ?? (() => new Date().toISOString()))(),
@@ -77,7 +80,9 @@ export async function runReport(deps: ReportDeps, opts: ReportOptions): Promise<
     }
     // 4xx 是参数问题，落文件也没用；直接告诉调用方。
     if (res.status < 500) {
-      deps.stderr(`上报失败(${res.status})：${text.slice(0, 300)}`)
+      // 门禁拒绝等可预期错误把 message 完整带出来，Worker 才能按指引补齐或改报 blocked。
+      const reason = safeJson(text)?.message
+      deps.stderr(`上报失败(${res.status})：${typeof reason === 'string' && reason ? reason : text.slice(0, 300)}`)
       return 1
     }
     deps.stderr(`Router 服务异常(${res.status})，改为写入本地 state.json`)
@@ -107,6 +112,7 @@ function writeFallback(
     humanAction?: string
     prNumber?: number
     prUrl?: string
+    uiChange?: boolean
     reply?: string
     ackedInputs: string[]
     updatedAt: string
@@ -128,6 +134,7 @@ function writeFallback(
     human_action: payload.humanAction ?? null,
     pr_number: payload.prNumber ?? 0,
     pr_url: payload.prUrl ?? '',
+    ...(payload.uiChange !== undefined ? { ui_change: payload.uiChange } : {}),
     ...(payload.reply ? { reply: payload.reply } : {}),
     acked_inputs: payload.ackedInputs,
     updated_at: payload.updatedAt,

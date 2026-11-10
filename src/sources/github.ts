@@ -6,6 +6,8 @@ export interface PrInfo {
   state: 'open' | 'merged' | 'closed'
   title: string
   branch: string
+  /** PR 描述正文；UI 证据门禁用它检查 Before / After。列表查询不返回时为 undefined。 */
+  body?: string
 }
 
 function normalizeState(state: string): PrInfo['state'] {
@@ -23,6 +25,7 @@ function toPrInfo(raw: Record<string, unknown>): PrInfo | null {
     state: normalizeState(String(raw.state ?? 'OPEN')),
     title: String(raw.title ?? ''),
     branch: String(raw.headRefName ?? ''),
+    ...(typeof raw.body === 'string' ? { body: raw.body } : {}),
   }
 }
 
@@ -47,17 +50,17 @@ export function parsePrList(stdout: string): PrInfo | null {
 }
 
 export function ghPrViewCommand(repo: string, number: number): string[] {
-  return ['pr', 'view', String(number), '--repo', ghRepoOf(repo), '--json', 'number,url,state,title,headRefName']
+  return ['pr', 'view', String(number), '--repo', ghRepoOf(repo), '--json', 'number,url,state,title,headRefName,body']
 }
 
 /** 直接按 PR 链接查询：gh 自己解析 host/owner/repo，绕开项目名与 path 选择器。 */
 export function ghPrViewUrlCommand(url: string): string[] {
-  return ['pr', 'view', url, '--json', 'number,url,state,title,headRefName']
+  return ['pr', 'view', url, '--json', 'number,url,state,title,headRefName,body']
 }
 
 /** 不给 --repo，交给 gh 在 workdir 里从 git remote 推断仓库。 */
 export function ghPrViewFromCwdCommand(number: number): string[] {
-  return ['pr', 'view', String(number), '--json', 'number,url,state,title,headRefName']
+  return ['pr', 'view', String(number), '--json', 'number,url,state,title,headRefName,body']
 }
 
 /** 只有常规 GitHub PR 链接能交给 gh；GitLab MR 链接不要让 gh 去试。 */

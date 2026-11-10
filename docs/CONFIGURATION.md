@@ -78,9 +78,6 @@ retention:
   zombieHours: 6       # 执行中但多久没上报/输出算僵尸
   sweepMinutes: 5      # 扫描间隔（分钟）
 
-workerSpec:
-  mode: prompt         # prompt | agent
-
 # Worker 工具策略：安全基线，runtime.options 不允许覆盖这些字段
 worker:
   tools:
@@ -89,6 +86,9 @@ worker:
     shellAllow: [ra report, ra doc, git, gh, pnpm, npm, npx, node, yarn, bun,
                  python, python3, pytest, cargo, go, make, mvn, gradle]
     allowNetwork: false      # 预留字段：当前只解析，未用于收窄网络
+  # UI 证据门禁：UI 工单报 ready 时检查 PR / MR 描述里的 Before / After 对比
+  evidence:
+    ui: warn               # off=关闭 | warn=只记日志 | enforce=拦截 ready（保存后需重启）
 
 runtime:
   default: orca            # orca | claude-code | acp | acp-*（非 orca 运行时的项目必须是本地路径，见 RUNTIME.md）
@@ -122,7 +122,6 @@ server:
 ```bash
 ra config set policy.acceptMode observe   # 先观察，不开工
 ra config set policy.maxWorkers 2
-ra config set workerSpec.mode agent
 ra config edit                            # 用 $EDITOR 编辑整份配置（不是 --edit）
 ```
 
@@ -138,7 +137,7 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 | `router.timeoutMs` / `router.tokenBudget` / `router.agentDir` | 毫秒（1s–600s） / token（0=不限） / Pi 配置目录 |
 | `progress.syncMs` / `probeMs` / `silenceMs` / `repeatMs` | 毫秒；前两项 0 = 关闭 |
 | `retention.enabled` / `idleHours` / `closeGraceHours` / `zombieHours` / `sweepMinutes` | 见「闲置工单治理」 |
-| `workerSpec.mode` | `prompt` / `agent` |
+| `worker.evidence.ui` | `off` / `warn` / `enforce`；UI 证据门禁档位（保存后需重启） |
 | `runtime.default` | `orca` / `claude-code` / `acp` / `acp-*` |
 | `server.port` | 1–65535 |
 | `feishu.appId` / `reaction` / `directMessages` / `allowed` / `bots` / `botOpenIds` / `botNames` | 字符串、布尔或逗号分隔列表 |

@@ -40,7 +40,6 @@ import { RouterService, type Logger } from '../service.js'
 import { EffectsProcessor } from '../core/effects.js'
 import { createApiServer } from '../router/api.js'
 import { ProjectSetup } from '../router/project-setup.js'
-import { agentSpecDocument } from '../worker/spec/index.js'
 
 // 版本号以 package.json 为唯一来源（见 src/update/index.ts），`ra -v` 与更新检查共用同一个值。
 export const VERSION: string = PACKAGE_VERSION
@@ -107,8 +106,7 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
 
   withHome(program.command('init').description('交互式初始化：仓库 → 飞书凭据 → 群 → 授权成员'))
     .option('--yes', '跳过提问，只写默认配置')
-    .option('--agents-dir <dir>', 'worker 全局规范目录', join(homedir(), '.claude', 'agents'))
-    .action(async (opts: { home?: string; yes?: boolean; agentsDir?: string }) => {
+    .action(async (opts: { home?: string; yes?: boolean }) => {
       setCode(await cmdInit(homeOf(opts, output), opts, output))
     })
 
@@ -198,6 +196,7 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
     .option('--human-action <text>', 'blocked 时要人做的事')
     .option('--pr-number <n>', 'PR 编号')
     .option('--pr-url <url>', 'PR 链接')
+    .option('--ui-change [value]', '声明本次改动是否涉及 UI（true / false）；不传由 Router 按改动文件推断')
     .option('--reply <text>', '要发给发起人的完整回复：字面量 / @文件 / - 读 stdin')
     .option('--ack <id>', '确认已读的输入 ID，可重复', collect, [])
     .option('--port <n>', 'Router 端口（默认读 config/server.port 或 RA_PORT）')
@@ -310,7 +309,6 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
     runtime = createRuntimes(config, {
       home,
       workersDir: join(home, 'workers'),
-      spec: config.workerSpec.mode,
       orca: output.orca ?? realRunner('orca'),
       claude: output.claude ?? realRunner('claude'),
       git: output.git ?? realRunner('git'),
@@ -357,14 +355,30 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
   return checks.some(check => check.status === 'fail') ? 1 : 0
 }
 
-async function cmdReport(home: string, opts: ReportOptions & { port?: string }, output: CliIo): Promise<number> {
+async function cmdReport(home: string, opts: ReportOptions & { port?: string; uiChange?: boolean | string }, output: CliIo): Promise<number> {
   const config = loadConfig(home)
   const envPort = Number(output.env.RA_PORT)
   const port = Number(opts.port) > 0 ? Number(opts.port) : (Number.isFinite(envPort) && envPort > 0 ? envPort : config.server.port)
+  const { uiChange: rawUiChange, ...rest } = opts
+  const uiChange = parseUiChange(rawUiChange)
+  if (uiChange === null) {
+    output.stderr('--ui-change 只接受 true / false')
+    return 2
+  }
   return runReport(
     { home, port, stdout: output.stdout, stderr: output.stderr },
-    opts,
+    { ...rest, ...(uiChange !== undefined ? { uiChange } : {}) },
   )
+}
+
+/** `--ui-change` 不带值视为 true；带值时只认 true/false（含 yes/no/1/0）。 */
+function parseUiChange(value: boolean | string | undefined): boolean | undefined | null {
+  if (value === undefined) return undefined
+  if (value === true || value === false) return value
+  const text = String(value).trim().toLowerCase()
+  if (text === 'true' || text === 'yes' || text === '1') return true
+  if (text === 'false' || text === 'no' || text === '0') return false
+  return null
 }
 
 async function cmdDoc(_home: string, opts: { title: string; content?: string }, output: CliIo): Promise<number> {
@@ -447,7 +461,7 @@ function isPortFree(port: number): Promise<boolean> {
   })
 }
 
-async function cmdInit(home: string, opts: { yes?: boolean; agentsDir?: string }, output: CliIo): Promise<number> {
+async function cmdInit(home: string, opts: { yes?: boolean }, output: CliIo): Promise<number> {
   ensureHome(home)
   await runInitWizard({
     home,
@@ -459,12 +473,8 @@ async function cmdInit(home: string, opts: { yes?: boolean; agentsDir?: string }
     ...(output.stream ? { stream: output.stream } : {}),
   })
 
-  const agentsDir = opts.agentsDir ?? join(homedir(), '.claude', 'agents')
-  mkdirSync(agentsDir, { recursive: true })
-  writeFileSync(join(agentsDir, 'router-agent-worker.md'), agentSpecDocument(home), 'utf8')
   output.stdout('')
   output.stdout(`状态目录: ${home}`)
-  output.stdout(`worker 全局规范: ${join(agentsDir, 'router-agent-worker.md')}`)
   return 0
 }
 
@@ -1114,7 +1124,6 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   const runtimes = createRuntimes(config, {
     home,
     workersDir: join(home, 'workers'),
-    spec: config.workerSpec.mode,
     orca: orcaRunner,
     claude: claudeRunner,
     git: gitRunner,
@@ -1240,6 +1249,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       runtime,
       runtimes,
       prTracker,
+      git: gitRunner,
       logger,
       effects,
       sender: feishuOutbox,
@@ -1273,7 +1283,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     onEvent: sink,
     ...(service
       ? {
-          onReport: (state: WorkerStateFile) => service.onWorkerState(state),
+          onReport: (state: WorkerStateFile) => service.ingestWorkerState(state),
           resumeHint: (ticketId: string) => service.resumeHint(ticketId),
         }
       : {}),
