@@ -13,7 +13,7 @@ import {
   runtimeOptionString,
   validateRuntimeOption,
 } from '../../src/worker/runtimes/options.js'
-import { runtimeOptionFields, sectionsFor } from '../../src/web/client/fields.js'
+import { allRuntimeOptionFields, runtimeOptionFields, sectionsFor } from '../../src/web/client/fields.js'
 
 describe('运行时选项：通用声明与路径', () => {
   it('路径形状可解析，配置落点是 runtime.options.<runtimeId>.<key>', () => {
@@ -87,9 +87,14 @@ describe('运行时选项：面板渲染', () => {
     expect(runtimeOptionFields('claude-code')).toEqual([])
   })
 
-  it('选项字段挂到「派工与服务」分区', () => {
+  it('选项不在页面上平铺：走卡片上的「设置」弹窗', () => {
     const sections = sectionsFor(undefined, 'orca')
-    const delivery = sections.find(section => section.id === 'delivery')!
-    expect(delivery.fields.map(field => field.path)).toContain('runtime.options.orca.agent')
+    const paths = sections.flatMap(section => section.fields.map(field => field.path))
+    expect(paths).not.toContain('runtime.options.orca.agent')
+  })
+
+  it('保存前校验覆盖所有已声明运行时的选项', () => {
+    const fields = allRuntimeOptionFields()
+    expect(fields.map(field => field.path)).toEqual(['runtime.options.orca.agent'])
   })
 })

@@ -1505,6 +1505,15 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 .runtime-check-result svg { flex-shrink: 0; }
 .runtime-check-dot { flex: none; width: 5px; height: 5px; margin: 0 3.5px; border-radius: 50%; background: var(--muted); }
 .runtime-card-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; padding-top: 8px; }
+.runtime-settings { width: min(620px, calc(100vw - 32px)); }
+.runtime-settings .modal-body .setting { align-items: center; }
+.runtime-settings .modal-hint code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--raised);
+  font-family: var(--mono);
+  font-size: 11px;
+}
 .runtime-job {
   margin-top: 8px;
   padding: 10px;

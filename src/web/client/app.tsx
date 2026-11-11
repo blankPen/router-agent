@@ -4,20 +4,18 @@ import {
   FIELD_PATHS,
   LLM_FIELDS,
   SECTIONS,
+  allRuntimeOptionFields,
   fieldError,
   fieldValue,
-  fromInputValue,
   getByPath,
-  humanizeMs,
   humanizeTime,
-  runtimeOptionFields,
   sectionsFor,
   setByPath,
-  toInputValue,
   type FieldDef,
   type RuntimeChoiceView,
   type SectionDef,
 } from './fields.js'
+import { FieldRow } from './field-row.js'
 import { runtimeOptionPaths } from '../../worker/runtimes/options.js'
 import {
   importLocalProvider,
@@ -1524,6 +1522,9 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
                     onDetecting={setDetecting}
                     onNotice={setNotice}
                     onPendingRestart={() => setPendingRestart(true)}
+                    draft={draft}
+                    defaults={defaults}
+                    onOptionChange={(path, value) => setField(path, value)}
                   />
                 )}
 
@@ -1851,8 +1852,9 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
   const activeProjects = draft ? projectsOf(draft, runtimeId) : []
   const selectedRuntime = runtimeCatalog.find(runtime => runtime.id === runtimeId)
   const runtimeLabel = selectedRuntime ? runtimeDisplayName(selectedRuntime) : runtimeId
-  // 运行时自己声明的选项（例如 Orca 用哪个 Agent）：面板按声明渲染，不写死运行时。
-  const setupOptionFields = useMemo(() => runtimeOptionFields(runtimeId), [runtimeId])
+  // 运行时自己声明的选项（例如 Orca 用哪个 Agent）在卡片的「设置」弹窗里编辑；
+  // 这里只保留字段声明用于保存前校验，不写死任何运行时。
+  const optionFields = useMemo(() => allRuntimeOptionFields(), [])
 
   const changed = useMemo(() => {
     if (!draft || !original) return []
@@ -1877,7 +1879,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       const message = fieldError(field, getByPath(draft, field.path))
       if (message) map.set(field.path, message)
     }
-    for (const field of setupOptionFields) {
+    for (const field of optionFields) {
       const message = fieldError(field, getByPath(draft, field.path))
       if (message) map.set(field.path, message)
     }
@@ -1898,7 +1900,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       map.set('runtime.default', '自定义 acp 未配置 runtime.options.acp.command，重启后服务会启动失败')
     }
     return map
-  }, [draft, changed, runtimeCatalog, runtimeId, setupOptionFields])
+  }, [draft, changed, runtimeCatalog, runtimeId, optionFields])
 
   const setField = (path: string, value: unknown): void => {
     setDraft(current => (current ? setByPath(current, path, value) : current))
@@ -2093,21 +2095,10 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
           onDetecting={setDetecting}
           onNotice={setNotice}
           onPendingRestart={() => setPendingRestart(true)}
+          draft={draft}
+          defaults={defaults}
+          onOptionChange={(path, value) => setField(path, value)}
         />
-        {setupOptionFields.length > 0 && (
-          <div className="settings-rows">
-            {setupOptionFields.map(field => (
-              <FieldRow
-                key={field.path}
-                field={field}
-                value={getByPath(draft, field.path)}
-                defaultValue={getByPath(defaults, field.path)}
-                error={errors.get(field.path)}
-                onChange={value => setField(field.path, value)}
-              />
-            ))}
-          </div>
-        )}
       </section>
 
       <section className="settings-card" id="setup-projects">
@@ -2217,115 +2208,6 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
         />
       )}
     </>
-  )
-}
-
-function FieldRow({ field, value, defaultValue, error, onChange }: {
-  field: FieldDef
-  value: unknown
-  defaultValue: unknown
-  error?: string
-  onChange: (value: unknown) => void
-}): JSX.Element {
-  const changedFromDefault = defaultValue !== undefined && JSON.stringify(value) !== JSON.stringify(defaultValue)
-  const hint = error
-    ? <span className="field-error">{error}</span>
-    : <>
-        {field.hint && <span>{field.hint}</span>}
-        {field.ms && <span>{humanizeMs(value)}</span>}
-      </>
-
-  return (
-    <div className={`setting ${error ? 'has-error' : ''}`}>
-      <div className="setting-info">
-        <div className="setting-label">
-          <span>{field.label}</span>
-          {changedFromDefault && (
-            <button
-              className="reset-link"
-              title={`恢复默认值：${JSON.stringify(defaultValue)}`}
-              onClick={() => onChange(defaultValue)}
-            >
-              恢复默认
-            </button>
-          )}
-        </div>
-        {(field.hint || field.ms || error) && <div className="setting-hint">{hint}</div>}
-      </div>
-      <div className="setting-control">{control(field, value, onChange)}</div>
-    </div>
-  )
-}
-
-function control(field: FieldDef, value: unknown, onChange: (value: unknown) => void): JSX.Element {
-  if (field.kind === 'switch') {
-    const on = value === true
-    return (
-      <button
-        type="button"
-        role="switch"
-        aria-checked={on}
-        className={`toggle ${on ? 'on' : ''}`}
-        onClick={() => onChange(!on)}
-      >
-        <span className="toggle-track"><span className="toggle-knob" /></span>
-        <span className="toggle-label">{on ? '开启' : '关闭'}</span>
-      </button>
-    )
-  }
-  if (field.kind === 'password') {
-    return (
-      <input
-        className="text-input"
-        type="password"
-        autoComplete="off"
-        spellCheck={false}
-        value={toInputValue(value, 'text')}
-        onChange={event => onChange(event.target.value)}
-        placeholder={field.placeholder}
-      />
-    )
-  }
-  if (field.kind === 'select') {
-    return (
-      <span className="select-wrap">
-        <select value={String(value ?? '')} onChange={event => onChange(event.target.value)}>
-          {field.options?.map(option => (
-            <option
-              key={option.value}
-              value={option.value}
-              disabled={option.disabled}
-              title={option.reason ?? option.hint}
-            >
-              {option.label}
-            </option>
-          ))}
-        </select>
-        <Icon name="chevron" size={13} className="select-chevron" />
-      </span>
-    )
-  }
-  if (field.kind === 'number') {
-    return (
-      <span className="input-box">
-        <input
-          type="number"
-          min={field.min}
-          max={field.max}
-          value={typeof value === 'number' ? value : ''}
-          onChange={event => onChange(fromInputValue(event.target.value, 'number'))}
-        />
-        {field.unit && <span className="input-unit">{field.unit}</span>}
-      </span>
-    )
-  }
-  return (
-    <input
-      className="text-input"
-      value={toInputValue(value, field.kind)}
-      onChange={event => onChange(fromInputValue(event.target.value, field.kind))}
-      placeholder={field.placeholder}
-    />
   )
 }
 

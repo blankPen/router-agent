@@ -19,6 +19,8 @@ import {
   type RuntimeChoiceView,
 } from './runtime-model.js'
 import { RuntimeLogo, runtimeLogoOf } from './runtime-logos.js'
+import { runtimeOptionFields } from './fields.js'
+import { RuntimeSettingsDialog } from './runtime-settings.js'
 
 export interface RuntimeNotice {
   kind: 'ok' | 'warn' | 'error'
@@ -53,6 +55,11 @@ interface RuntimeCardsProps {
   onNotice: (notice: RuntimeNotice | null) => void
   /** 安装成功等操作改变了冷配置，父级可据此显示持久的「需重启」提示。 */
   onPendingRestart?: () => void
+  /** 配置草稿与默认值：运行时选项弹窗直接读写父级 draft。 */
+  draft?: unknown
+  defaults?: unknown
+  /** 运行时选项改动；缺省时设置按钮不可用。 */
+  onOptionChange?: (path: string, value: unknown) => void
 }
 
 function errorText(error: unknown): string {
@@ -78,11 +85,15 @@ export function RuntimeCards({
   onDetecting,
   onNotice,
   onPendingRestart,
+  draft,
+  defaults,
+  onOptionChange,
 }: RuntimeCardsProps): JSX.Element {
   const [busy, setBusy] = useState<Record<string, 'check' | 'install'>>({})
   const [jobs, setJobs] = useState<Record<string, InstallJobView>>({})
   const [openLogs, setOpenLogs] = useState<Record<string, boolean>>({})
   const [checks, setChecks] = useState<Record<string, CheckResult>>({})
+  const [settingsFor, setSettingsFor] = useState<string | null>(null)
   const mounted = useRef(true)
   const autoDetected = useRef(false)
 
@@ -91,6 +102,8 @@ export function RuntimeCards({
   const cards = useMemo(() => mergeRuntimeChoices(choices), [choices])
   const selectedId = normalizeRuntimeId(selected)
   const selectedChoice = cards.find(choice => choice.id === selectedId)
+  // 打开设置弹窗的运行时；探测结果刷新后卡片可能消失，这里兜底成 null。
+  const settingsChoice = settingsFor ? cards.find(choice => choice.id === settingsFor) ?? null : null
 
   const refresh = async (): Promise<void> => {
     onDetecting(true)
@@ -314,6 +327,16 @@ export function RuntimeCards({
                   </p>
 
                   <div className="runtime-card-actions">
+                    {runtimeOptionFields(choice.id).length > 0 && (
+                      <button
+                        className="btn ghost tiny"
+                        disabled={!onOptionChange}
+                        title={onOptionChange ? `设置 ${runtimeDisplayName(choice)}` : '当前页面不支持修改运行时设置'}
+                        onClick={() => setSettingsFor(choice.id)}
+                      >
+                        <Icon name="sliders" size={12} />设置
+                      </button>
+                    )}
                     <button
                       className={`btn tiny ${isSelected ? '' : 'primary'}`}
                       disabled={!selectable || isSelected}
@@ -368,6 +391,16 @@ export function RuntimeCards({
           </div>
         </div>
       ))}
+
+      {settingsChoice && onOptionChange && (
+        <RuntimeSettingsDialog
+          choice={settingsChoice}
+          draft={draft}
+          defaults={defaults}
+          onChange={onOptionChange}
+          onClose={() => setSettingsFor(null)}
+        />
+      )}
     </div>
   )
 }
