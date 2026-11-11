@@ -1783,6 +1783,311 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 }
 
 /* ---------------------------------------------------------------------------
+   智能问题排查助手
+   右下角常驻的悬浮按钮 + 弹窗：日志里出现错误时按钮变红，
+   移上去展开快捷操作，点开是排查弹窗。
+   --------------------------------------------------------------------------- */
+
+.assistant-fab-wrap {
+  position: fixed;
+  right: 26px;
+  bottom: 26px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.assistant-fab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 50px;
+  height: 50px;
+  border: none;
+  border-radius: 50%;
+  background: var(--primary);
+  color: var(--on-primary);
+  cursor: pointer;
+  box-shadow: var(--shadow-md);
+  transition: transform 0.16s, background 0.16s;
+}
+.assistant-fab:hover { transform: translateY(-1px); background: var(--primary-hover); }
+.assistant-fab:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+/* 有错误时按钮变红并挂角标：一眼能看出「出事了」。 */
+.assistant-fab-wrap.has-error .assistant-fab { background: var(--negative); }
+.assistant-fab-wrap.has-error .assistant-fab:hover { background: var(--negative); }
+.assistant-fab-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 20px;
+  padding: 0 5px;
+  border: 2px solid var(--surface);
+  border-radius: 999px;
+  background: var(--negative);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 快捷操作：默认收起，鼠标移上去或键盘聚焦时展开。 */
+.assistant-fab-menu {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+  opacity: 0;
+  transform: translateY(6px);
+  pointer-events: none;
+  transition: opacity 0.16s, transform 0.16s;
+}
+.assistant-fab-wrap:hover .assistant-fab-menu,
+.assistant-fab-wrap:focus-within .assistant-fab-menu {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+.assistant-fab-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: none;
+  border-radius: var(--radius-control);
+  background: none;
+  color: var(--text);
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+  text-align: left;
+}
+.assistant-fab-menu button:hover:not(:disabled) { background: var(--raised); }
+.assistant-fab-menu button:disabled { color: var(--faint); cursor: not-allowed; }
+.assistant-fab-menu svg { color: var(--muted); flex: none; }
+
+.assistant-toast {
+  position: fixed;
+  right: 26px;
+  /* 悬浮按钮上面留出快捷菜单展开的高度，避免提醒被菜单盖住。 */
+  bottom: 218px;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 320px;
+  padding: 9px 12px;
+  border: 1px solid color-mix(in srgb, var(--negative) 35%, var(--border));
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: var(--shadow-md);
+}
+.assistant-toast svg { color: var(--negative); flex: none; }
+
+.assistant-modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 20px;
+  background: rgba(15, 18, 20, 0.42);
+}
+.assistant-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(760px, 100%);
+  max-height: min(84vh, 900px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sheet);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+.assistant-modal-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid var(--rule);
+}
+.assistant-modal-head strong { display: block; font-size: 15px; }
+.assistant-modal-head small { display: block; margin-top: 2px; color: var(--faint); font-size: 12px; }
+.assistant-modal-head .icon-btn { margin-left: auto; flex: none; }
+
+.assistant-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 18px;
+  overflow: auto;
+}
+
+.assistant-input { display: flex; gap: 8px; align-items: stretch; }
+.assistant-input textarea {
+  flex: 1;
+  min-height: 50px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--raised);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.6;
+  resize: vertical;
+}
+.assistant-input textarea:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  outline-offset: -1px;
+}
+.assistant-input .btn { flex: none; align-self: flex-start; }
+
+.assistant-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.assistant-chip {
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--raised);
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.14s, color 0.14s;
+}
+.assistant-chip:hover { background: var(--active); color: var(--text); }
+
+.assistant-note { color: var(--faint); font-size: 12px; line-height: 1.6; }
+.assistant-note.warn { color: var(--warning); }
+
+.assistant-result {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--rule);
+}
+.assistant-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text);
+}
+.assistant-summary svg { flex: none; margin-top: 3px; color: var(--accent); }
+.assistant-summary span:first-of-type { flex: 1; }
+.assistant-tag {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.assistant-tag.llm { background: var(--accent-soft); color: var(--accent-deep); }
+.assistant-tag.rules { background: var(--pill-neutral-bg); color: var(--pill-neutral-ink); }
+
+.assistant-block h4 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.assistant-block > summary {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+}
+.assistant-list {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text);
+}
+.assistant-list li strong { display: block; font-weight: 600; }
+.assistant-list li span { color: var(--muted); }
+.assistant-events { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.assistant-events code {
+  padding: 0 5px;
+  border-radius: var(--radius-chip);
+  background: var(--raised);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.assistant-evidence {
+  margin-top: 6px;
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.assistant-evidence-row {
+  display: grid;
+  grid-template-columns: 68px 46px minmax(0, 1fr);
+  gap: 10px;
+  padding: 2px 10px;
+  border-left: 2px solid transparent;
+  line-height: 1.6;
+}
+.assistant-evidence-row.level-warn { border-left-color: var(--warning); }
+.assistant-evidence-row.level-error { border-left-color: var(--negative); }
+
+.assistant-issue-done {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: var(--radius-control);
+  background: var(--accent-soft);
+  color: var(--accent-deep);
+  font-size: 12px;
+}
+.assistant-issue-done a { color: inherit; font-weight: 600; }
+
+.assistant-modal-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 12px 18px;
+  border-top: 1px solid var(--rule);
+  background: var(--raised);
+}
+.assistant-foot-note { color: var(--faint); font-size: 12px; }
+
+@media (max-width: 620px) {
+  .assistant-fab-wrap { right: 14px; bottom: 14px; }
+  .assistant-toast { right: 14px; bottom: 200px; max-width: 260px; }
+  .assistant-modal-mask { padding: 12px; }
+  .assistant-modal { max-height: 90vh; }
+}
+.log-assistant-evidence-row.level-error { border-left-color: var(--negative); }
+
+/* ---------------------------------------------------------------------------
    响应式
    --------------------------------------------------------------------------- */
 

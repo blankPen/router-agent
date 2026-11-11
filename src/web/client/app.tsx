@@ -40,6 +40,7 @@ import {
 } from './identity-status.js'
 import { RuntimeCards, type RuntimeNotice } from './runtime-cards.js'
 import { FeishuBotPanel } from './feishu-panel.js'
+import { LogAssistantFab } from './log-assistant.js'
 import { SpecsEditor } from './specs-editor.js'
 import {
   mergeRuntimeChoices,
@@ -261,6 +262,8 @@ function App(): JSX.Element {
   const [skippedVersion, setSkippedVersion] = useState<string | null>(readSkippedVersion)
   const [updatePhase, setUpdatePhase] = useState<UpdateRunPhase>('idle')
   const [updateError, setUpdateError] = useState<string | null>(null)
+  // 排查助手给的配置引导：切到配置页后滚到对应小节。
+  const [configTarget, setConfigTarget] = useState<string | null>(null)
   const [updatedTo, setUpdatedTo] = useState<string | null>(null)
   // 主题是纯前端偏好：不进配置页，也不写服务端配置，只落在浏览器 localStorage。
   const theme = useThemeMode()
@@ -282,6 +285,8 @@ function App(): JSX.Element {
     // 让地址栏与当前页签保持同步：刷新页面或分享链接时能回到同一页。
     window.history.replaceState(null, '', hashForTab(next))
   }, [tab])
+
+  // `configTarget` 只负责把「要滚到哪个小节」交给配置页；滚动与高亮由配置页自己处理。
 
   // 外部直接改 hash（例如再次执行 ra start）时切到对应页签。
   useEffect(() => {
@@ -499,10 +504,18 @@ function App(): JSX.Element {
             restarting={restartPhase === 'restarting'}
             onRestart={() => void restartDaemon()}
             onDirtyChange={dirty => { dirtyRef.current = dirty }}
+            focusSection={configTarget}
+            onFocusHandled={() => setConfigTarget(null)}
           />
         )}
         {tab === 'sources' && <SourcesView />}
       </div>
+
+      {/* 智能排查助手：常驻右下角，任何页面都能开。 */}
+      <LogAssistantFab onOpenConfig={section => {
+        setConfigTarget(section ?? null)
+        switchTab('config')
+      }} />
     </div>
   )
 }
@@ -1199,10 +1212,13 @@ function chatsIssue(chats: unknown): string | null {
   return null
 }
 
-function ConfigView({ restarting, onRestart, onDirtyChange }: {
+function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocusHandled }: {
   restarting: boolean
   onRestart: () => void
   onDirtyChange?: (dirty: boolean) => void
+  /** 排查助手的配置引导目标：滚到该小节并高亮左栏。 */
+  focusSection?: string | null
+  onFocusHandled?: () => void
 }): JSX.Element {
   const [original, setOriginal] = useState<ConfigDoc | null>(null)
   const [draft, setDraft] = useState<ConfigDoc | null>(null)
@@ -1268,6 +1284,36 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
   useEffect(() => {
     onDirtyChange?.(changed.length > 0)
   }, [changed.length, onDirtyChange])
+
+  // 排查助手给的配置引导：滚到对应小节并把左栏高亮切过去。
+  // 配置数据是异步拉的，刚切过来时小节可能还没渲染，重试一小段时间。
+  useEffect(() => {
+    if (!focusSection) return
+    let cancelled = false
+    let attempts = 0
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const tryScroll = (): void => {
+      if (cancelled) return
+      const target = document.getElementById(`sec-${focusSection}`)
+      if (target) {
+        setActive(focusSection)
+        target.scrollIntoView({ block: 'start' })
+        onFocusHandled?.()
+        return
+      }
+      attempts += 1
+      if (attempts >= 20) {
+        onFocusHandled?.()
+        return
+      }
+      timer = setTimeout(tryScroll, 100)
+    }
+    timer = setTimeout(tryScroll, 0)
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [focusSection, onFocusHandled])
 
   const errors = useMemo(() => {
     if (!draft) return new Map<string, string>()

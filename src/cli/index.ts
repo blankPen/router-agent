@@ -1,11 +1,11 @@
 import { appendFileSync, closeSync, mkdirSync, existsSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync, unlinkSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { spawn, spawnSync } from 'node:child_process'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { Command, CommanderError } from 'commander'
-import { ensureHome, loadConfig, policyOf, projectsForRuntime, replyAlwaysChatsOf, setConfigValue, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
+import { ensureHome, loadConfig, policyOf, projectsForRuntime, publicConfig, replyAlwaysChatsOf, setConfigValue, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
 import { Store, type SessionMigrationState } from '../store/db.js'
 import { Engine } from '../core/engine.js'
 import { effectiveAllowed, effectiveAllowedByChat, shouldAcknowledge } from '../core/policy.js'
@@ -42,9 +42,23 @@ import { RouterService, type Logger } from '../service.js'
 import { EffectsProcessor } from '../core/effects.js'
 import { createApiServer, emptyIdentityStatus, type IdentityPort } from '../router/api.js'
 import { ProjectSetup } from '../router/project-setup.js'
+import { createLogAssistant } from '../router/log-assistant.js'
+import { createDiagnosisTools } from '../router/diagnosis-tools.js'
+import { createIssueReporter } from '../router/issue-report.js'
 
 // 版本号以 package.json 为唯一来源（见 src/update/index.ts），`ra -v` 与更新检查共用同一个值。
 export const VERSION: string = PACKAGE_VERSION
+
+/**
+ * router-agent 的安装根目录（npm 包根 / 仓库根）。
+ *
+ * 排查助手要读本机装的代码来判断「是不是 ra 的 bug」，得知道代码在哪；
+ * 源码运行时是 <repo>/src/cli/index.ts，编译后是 <pkg>/dist/cli/index.js，
+ * 两种情况下往上两层都是安装根。
+ */
+function packageRoot(): string {
+  return dirname(dirname(fileURLToPath(import.meta.url)))
+}
 
 export interface CliIo {
   stdout(line: string): void
@@ -1442,6 +1456,21 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     : null
 
   const webRoot = fileURLToPath(new URL('../web', import.meta.url))
+  // 日志页的智能排查助手：复用研判模型，没配模型时自动降级为规则式排查。
+  // 助手还能读本机装的 router-agent 代码与当前配置，用来判断「是不是 ra 的 bug」。
+  const logAssistant = createLogAssistant({
+    logPath: join(home, 'logs', 'router-agent.log'),
+    model,
+    tools: createDiagnosisTools({
+      codeRoot: packageRoot(),
+      config: publicConfig(config),
+      configPath: join(home, 'config.yaml'),
+      version: PACKAGE_VERSION,
+    }),
+    logger,
+  })
+  // 一键上报 issue：走 gh CLI，与 PR 跟踪共用同一套登录态。
+  const issueReporter = createIssueReporter({ runner: ghRunner, logger })
   // onRestart 需要在 api 创建时注入，真正的重启函数在 service/consumer 就绪后再赋值。
   const api = await createApiServer({
     engine,
@@ -1451,6 +1480,8 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     update: updateService,
     feishuBot: feishuChannel.admin,
     identity: identityPort,
+    logAssistant,
+    issueReporter,
     projectSetup: new ProjectSetup({ home, git: gitRunner, orca: orcaRunner }),
     // Web-only 模式没有 RouterService，工作区清理端点按「不支持」返回。
     ...(service
