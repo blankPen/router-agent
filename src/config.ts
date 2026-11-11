@@ -577,8 +577,23 @@ function parseLlm(value: unknown): LlmSettings {
   return out
 }
 
+/**
+ * 名单条目的解析结果（邮箱 → open_id）。
+ *
+ * 由解析层在运行时算好后注入：配置层负责把用户填的邮箱变成 open_id，
+ * 运行时只按 open_id 匹配，不再查任何外部服务。
+ */
+export interface PolicyResolution {
+  /** 全局名单解析出的 open_id。 */
+  allowedOpenIds?: string[]
+  /** 群级名单解析出的 open_id。 */
+  allowedByChatOpenIds?: Record<string, string[]>
+  /** open_id → 通讯录显示名；只用于展示。 */
+  names?: Record<string, string>
+}
+
 /** 把配置折算成领域 Policy；版本号是规则的指纹。 */
-export function policyOf(config: AppConfig): Policy {
+export function policyOf(config: AppConfig, resolved?: PolicyResolution): Policy {
   const admission = config.policy.admission
   const allowedByChat = Object.fromEntries(
     config.feishu.chats.filter(chat => chat.allowed.length > 0).map(chat => [chat.chat, chat.allowed]),
@@ -595,6 +610,10 @@ export function policyOf(config: AppConfig): Policy {
   return {
     version: createHash('sha1').update(JSON.stringify(body)).digest('hex').slice(0, 12),
     ...body,
+    // 解析结果不进版本指纹：解析抖动（缓存过期、通讯录临时查不通）不得触发 policy 变更。
+    ...(resolved?.allowedOpenIds !== undefined ? { allowedOpenIds: resolved.allowedOpenIds } : {}),
+    ...(resolved?.allowedByChatOpenIds !== undefined ? { allowedByChatOpenIds: resolved.allowedByChatOpenIds } : {}),
+    ...(resolved?.names !== undefined ? { names: resolved.names } : {}),
   }
 }
 

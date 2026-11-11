@@ -1,6 +1,6 @@
 import type { Store } from '../store/db.js'
 import type { Clock, Engine } from '../core/engine.js'
-import { gate, type Policy } from '../core/policy.js'
+import { effectiveAllowed, effectiveAllowedByChat, gate, type Policy } from '../core/policy.js'
 import type { SourceKind, Strength, Ticket, Trigger } from '../core/model.js'
 import { DEFAULT_CHANNEL_ID } from '../channels/port.js'
 import { noopLogger, errorMessage, type Logger } from '../infra/logger.js'
@@ -429,8 +429,8 @@ export class AgentLoop {
   private canMutate(trigger: Trigger): boolean {
     if (trigger.isBot || trigger.addressed === 'none') return false
     const policy = this.engine.policy()
-    const scoped = policy.allowedByChat?.[trigger.chatId]
-    const allowed = scoped && scoped.length > 0 ? scoped : policy.allowed
+    const scoped = effectiveAllowedByChat(policy, trigger.chatId)
+    const allowed = scoped ?? effectiveAllowed(policy)
     return allowed.includes(trigger.actorId)
   }
 
@@ -508,8 +508,8 @@ export class AgentLoop {
   /** 发送人是否在当前群的 allowed 名单内（不看 @）。 */
   private isAllowed(trigger: Trigger): boolean {
     const policy = this.engine.policy()
-    const scoped = policy.allowedByChat?.[trigger.chatId]
-    const allowed = scoped && scoped.length > 0 ? scoped : policy.allowed
+    const scoped = effectiveAllowedByChat(policy, trigger.chatId)
+    const allowed = scoped ?? effectiveAllowed(policy)
     return allowed.includes(trigger.actorId)
   }
 
@@ -760,7 +760,7 @@ export class AgentLoop {
       policy: {
         version: policy.version,
         acceptMode: policy.acceptMode,
-        allowed: policy.allowed,
+        allowed: displayAllowed(policy),
         admission: policy.admission,
       },
       trigger: {
@@ -874,6 +874,22 @@ function failedResult(triggerId: string, error: unknown): DecisionEngineResult {
       unavailableReason: message,
     },
   }
+}
+
+/**
+ * 给模型看的名单：按生效名单列 open_id，有显示名时写成「名字(ou_xxx)」。
+ *
+ * 邮箱不喂给模型：模型只需要知道「谁有资格」，邮箱对它没有意义，
+ * 而且会把用户的邮箱地址带进上下文与日志链路。
+ */
+function displayAllowed(policy: Policy): string[] {
+  const out: string[] = []
+  for (const id of effectiveAllowed(policy)) {
+    const name = policy.names?.[id]
+    if (name) out.push(`${name}(${id})`)
+    else if (!id.includes('@')) out.push(id)
+  }
+  return out
 }
 
 function policySection(policy: Policy): string {

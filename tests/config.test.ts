@@ -107,6 +107,22 @@ describe('全局状态目录与配置', () => {
     expect(p1.receiveAll).toBe(true)
   })
 
+  it('名单解析结果写进 Policy，但不进版本指纹', () => {
+    const base = { ...loadConfig(home()), feishu: { ...loadConfig(home()).feishu, chats: [chatEntry('oc_a')], allowed: ['a@b.com'] } }
+    const plain = policyOf(base)
+    const resolved = policyOf(base, {
+      allowedOpenIds: ['ou_alice'],
+      allowedByChatOpenIds: { oc_a: ['ou_alice'] },
+      names: { ou_alice: 'Alice' },
+    })
+    // 版本指纹只由原始配置决定：解析结果抖动不得触发 policy 变更
+    expect(resolved.version).toBe(plain.version)
+    expect(resolved.allowedOpenIds).toEqual(['ou_alice'])
+    expect(resolved.allowedByChatOpenIds).toEqual({ oc_a: ['ou_alice'] })
+    expect(resolved.names).toEqual({ ou_alice: 'Alice' })
+    expect(plain.allowedOpenIds).toBeUndefined()
+  })
+
   it('群级白名单：解析、写回、折算进 Policy', () => {
     const dir = home()
     ensureHome(dir)

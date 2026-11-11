@@ -580,6 +580,87 @@ describe('群级白名单', () => {
     const decision = store.getDecision(store.listTriggers()[0]!.decisionId!)
     expect(decision?.reason).toBe('admission:not-in-chat-allowlist')
   })
+
+  it('群白名单配了但解析为空：该群所有人都被拒，不退回全局名单', async () => {
+    const { engine, loop, llm, store } = setup([])
+    engine.updatePolicy({
+      ...policy,
+      allowed: ['ou_alice'],
+      allowedByChat: { oc_dev: ['a@b.com'] },
+      allowedByChatOpenIds: { oc_dev: [] },
+    })
+    engine.ingest(trigger({ actorId: 'ou_alice' }))
+
+    const result = await loop.tick()
+
+    expect(result.ignored).toBe(1)
+    expect(llm.requests).toHaveLength(0)
+    const decision = store.getDecision(store.listTriggers()[0]!.decisionId!)
+    expect(decision?.reason).toBe('admission:chat-allowlist-empty')
+  })
+})
+
+describe('名单解析结果', () => {
+  /** 配置里写的是邮箱，运行时按解析出的 open_id 匹配。 */
+  const emailPolicy: Policy = { ...policy, allowed: ['a@b.com'], allowedOpenIds: ['ou_alice'] }
+
+  it('写工具授权按解析出的 open_id 判定', async () => {
+    const { engine, llm, loop } = setup([], undefined, undefined, false, emailPolicy)
+    engine.ingest(trigger({ id: 't_a', externalId: 'om_a', threadId: 'feishu:oc_dev:om_a', actorId: 'ou_alice', addressed: 'mention' }))
+    engine.ingest(trigger({ id: 't_b', externalId: 'om_b', threadId: 'feishu:oc_dev:om_b', actorId: 'ou_bob', addressed: 'mention' }))
+
+    await loop.tick()
+
+    const assessed = llm.requests
+      .filter(item => item.kind === 'assess')
+      .map(item => {
+        const prompt = JSON.parse(item.userPrompt) as { trigger: { actor: string } }
+        return { actor: prompt.trigger.actor, canMutate: item.canMutate }
+      })
+    expect(assessed).toEqual(expect.arrayContaining([
+      { actor: 'ou_alice', canMutate: true },
+      { actor: 'ou_bob', canMutate: false },
+    ]))
+  })
+
+  it('会话复用按解析出的 open_id 判定名单内', async () => {
+    const { engine, llm, loop } = setup([IGNORE(), IGNORE()], undefined, undefined, true, emailPolicy)
+    engine.ingest(trigger({ id: 't_a', externalId: 'om_a', threadId: 'feishu:oc_dev:om_a', actorId: 'ou_alice' }))
+    engine.ingest(trigger({ id: 't_b', externalId: 'om_b', threadId: 'feishu:oc_dev:om_b', actorId: 'ou_bob' }))
+
+    await loop.tick()
+
+    const sessions = llm.requests
+      .filter(item => item.kind === 'assess')
+      .map(item => ({ actor: (JSON.parse(item.userPrompt) as { trigger: { actor: string } }).trigger.actor, key: item.session?.key }))
+    expect(sessions).toEqual(expect.arrayContaining([
+      { actor: 'ou_alice', key: 'channel:feishu:chat:oc_dev:user:ou_alice' },
+      { actor: 'ou_bob', key: undefined },
+    ]))
+  })
+
+  it('给模型的名单用显示名，且不出现邮箱', async () => {
+    const named: Policy = { ...emailPolicy, names: { ou_alice: 'Alice' } }
+    const { engine, llm, loop } = setup([IGNORE()], undefined, undefined, false, named)
+    engine.ingest(trigger({ actorId: 'ou_alice' }))
+
+    await loop.tick()
+
+    const prompt = JSON.parse(llm.requests[0]!.userPrompt) as { policy: { allowed: string[] } }
+    expect(prompt.policy.allowed).toEqual(['Alice(ou_alice)'])
+    expect(llm.requests[0]!.userPrompt).not.toContain('a@b.com')
+  })
+
+  it('没有显示名时只给 open_id，同样不出现邮箱', async () => {
+    const { engine, llm, loop } = setup([IGNORE()], undefined, undefined, false, emailPolicy)
+    engine.ingest(trigger({ actorId: 'ou_alice' }))
+
+    await loop.tick()
+
+    const prompt = JSON.parse(llm.requests[0]!.userPrompt) as { policy: { allowed: string[] } }
+    expect(prompt.policy.allowed).toEqual(['ou_alice'])
+    expect(llm.requests[0]!.userPrompt).not.toContain('a@b.com')
+  })
 })
 
 describe('已关闭工单话题', () => {

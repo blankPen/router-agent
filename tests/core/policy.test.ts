@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { gate, negotiateAcceptance, revalidateMandate, shouldAcknowledge, type Policy } from '../../src/core/policy.js'
+import {
+  effectiveAllowed,
+  effectiveAllowedByChat,
+  gate,
+  negotiateAcceptance,
+  revalidateMandate,
+  shouldAcknowledge,
+  type Policy,
+} from '../../src/core/policy.js'
 import type { Mandate, Trigger } from '../../src/core/model.js'
 
 const policy: Policy = {
@@ -172,6 +180,77 @@ describe('群级白名单', () => {
     }
     expect(revalidateMandate(mandate, scoped)).toEqual({ valid: false, reason: 'sender:not-allowed' })
     expect(revalidateMandate({ ...mandate, actorId: 'ou_bob' }, scoped)).toEqual({ valid: true })
+  })
+})
+
+describe('名单解析结果', () => {
+  /** 配置里写的是邮箱，运行时按解析出的 open_id 匹配。 */
+  const emailPolicy: Policy = { ...policy, allowed: ['a@b.com'], allowedOpenIds: ['ou_alice'] }
+
+  const mandate: Mandate = {
+    id: 'md1',
+    ticketId: 'tk1',
+    policyVersion: 'p1',
+    strength: 'inferred',
+    scope: 'x',
+    rules: [],
+    actorId: 'ou_alice',
+    actorName: 'Alice',
+    source: 'feishu',
+    chatId: 'oc_chat',
+    threadId: 'feishu:oc_chat:om_1',
+    createdAt: '2026-11-06T10:00:00.000Z',
+  }
+
+  it('邮箱条目按解析出的 open_id 命中名单', () => {
+    expect(gate(trigger({ actorId: 'ou_alice', addressed: 'mention' }), emailPolicy)).toEqual({ action: 'explicit', strength: 'explicit' })
+  })
+
+  it('不在解析结果里的人不算名单内', () => {
+    expect(gate(trigger({ actorId: 'ou_bob', addressed: 'mention' }), emailPolicy).action).not.toBe('explicit')
+  })
+
+  it('旧库里没有解析结果的 Policy 仍按原始条目匹配', () => {
+    const legacy: Policy = { ...policy, allowed: ['ou_alice'] }
+    expect('allowedOpenIds' in legacy).toBe(false)
+    expect(gate(trigger({ actorId: 'ou_alice' }), legacy)).toEqual({ action: 'explicit', strength: 'explicit' })
+  })
+
+  it('effectiveAllowed 优先用解析结果，缺失时回退原始条目', () => {
+    expect(effectiveAllowed(emailPolicy)).toEqual(['ou_alice'])
+    expect(effectiveAllowed({ ...policy, allowed: ['ou_alice'] })).toEqual(['ou_alice'])
+  })
+
+  it('effectiveAllowedByChat 区分「未配置该群」与「配了但解析为空」', () => {
+    expect(effectiveAllowedByChat(policy, 'oc_chat')).toBeUndefined()
+    expect(effectiveAllowedByChat({ ...policy, allowedByChat: { oc_chat: [] } }, 'oc_chat')).toBeUndefined()
+    expect(effectiveAllowedByChat({ ...policy, allowedByChat: { oc_chat: ['a@b.com'] } }, 'oc_chat')).toEqual(['a@b.com'])
+    expect(effectiveAllowedByChat({ ...policy, allowedByChat: { oc_chat: ['a@b.com'] }, allowedByChatOpenIds: { oc_chat: [] } }, 'oc_chat')).toEqual([])
+  })
+
+  it('群级名单按解析出的 open_id 匹配', () => {
+    const scoped: Policy = {
+      ...policy,
+      allowedByChat: { oc_chat: ['a@b.com'] },
+      allowedByChatOpenIds: { oc_chat: ['ou_alice'] },
+    }
+    expect(gate(trigger({ actorId: 'ou_alice' }), scoped)).toEqual({ action: 'explicit', strength: 'explicit' })
+    expect(gate(trigger({ actorId: 'ou_bob' }), scoped)).toEqual({ action: 'ignore', reason: 'admission:not-in-chat-allowlist' })
+  })
+
+  it('群级名单配了但解析为空：该群拒绝所有人，不退回全局名单', () => {
+    const scoped: Policy = {
+      ...policy,
+      allowedByChat: { oc_chat: ['a@b.com'] },
+      allowedByChatOpenIds: { oc_chat: [] },
+    }
+    // ou_alice 在全局名单里，但这个群的名单一个都没解析出来 → 谁都不许进
+    expect(gate(trigger({ actorId: 'ou_alice' }), scoped)).toEqual({ action: 'ignore', reason: 'admission:chat-allowlist-empty' })
+  })
+
+  it('Mandate 重新校验按解析结果判定发起人是否仍在名单内', () => {
+    expect(revalidateMandate(mandate, emailPolicy)).toEqual({ valid: true })
+    expect(revalidateMandate({ ...mandate, actorId: 'ou_bob' }, emailPolicy)).toEqual({ valid: false, reason: 'sender:not-allowed' })
   })
 })
 
