@@ -66,6 +66,7 @@ Router 不做对话，只在必要时说话：
 | `outbox:sent` / `outbox:failed` | Outbox | `key` `text` / `error` | 对外通知结果 |
 | `api:input` / `api:stop` / `api:policy` / `api:config` | HTTP API | — | 面板 / CLI 的操作 |
 | `idle:nudge` / `idle:stale` | Service | — | 空闲唤醒与失联标记 |
+| `retention:baseline` | Service | `baselineAt` `openTickets` | 服务启动时重置闲置治理计时基线：启动前就已无进展的工单不补发提醒 |
 | `pr:linked` / `pr:state` | Service | — | PR / MR 跟踪 |
 | `pr:track-failed` | Service | `ticketId` `prNumber` `repo` `detail` | PR / MR 状态查询无结果；同一工单 + PR 只记一次 |
 | `recover:*` | Service | — | 重启对账 |

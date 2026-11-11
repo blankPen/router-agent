@@ -905,6 +905,78 @@ describe('RouterService 编排', () => {
       expect(runtime.stopped).toContain('term-1')
       expect(runtime.removed).toHaveLength(0)
     })
+
+    /** 用可控时钟重建服务，模拟「停机一段时间后重新启动」。 */
+    function restartService(at: string): RouterService {
+      return new RouterService({
+        config, store, engine, runtime, decisionEngine: new AcceptEngine(), prTracker,
+        clock: { now: () => at },
+        logger: {
+          info: (message, extra) => logs.push({ level: 'info', message, ...(extra ? { extra } : {}) }),
+          warn: (message, extra) => logs.push({ level: 'warn', message, ...(extra ? { extra } : {}) }),
+          error: (message, extra) => logs.push({ level: 'error', message, ...(extra ? { extra } : {}) }),
+        },
+        agentLoopOptions: { batchWindowMs: 0 },
+      })
+    }
+
+    it('服务启动后不补发闲置提醒：启动前就闲置的工单从启动时刻重新计时', async () => {
+      const ticketId = seed()
+
+      const startedAt = T0 + 24 * HOUR
+      const restarted = restartService(new Date(startedAt).toISOString())
+      await restarted.start()
+      restarted.stop()
+
+      // 启动后的第一轮巡检：积压的闲置工单不补发提醒。
+      await restarted.sweepRetention(startedAt + 5 * 60 * 1000)
+      expect(store.getCursor(`retention:reminder:${ticketId}`)).toBeNull()
+      expect(store.listOutbox(50).some(item => item.text.includes('24 小时没有新的进展'))).toBe(false)
+
+      // 计时从启动时刻重新开始：满 24 小时后照常提醒。
+      await restarted.sweepRetention(startedAt + 24 * HOUR + 1000)
+      expect(store.getCursor(`retention:reminder:${ticketId}`)).not.toBeNull()
+      expect(store.listOutbox(50).some(item => item.text.includes('24 小时没有新的进展'))).toBe(true)
+    })
+
+    it('服务启动前发出的提醒：不再补发，关单时间跟着启动基线重排', async () => {
+      const ticketId = seed()
+
+      // 运行期先提醒一次，并让提醒真正发出去。
+      await service.sweepRetention(T0 + 24 * HOUR + 1000)
+      await service.runOnce()
+      expect(store.getCursor(`retention:reminder:${ticketId}`)).not.toBeNull()
+
+      // 停机一天后重新启动：旧的宽限期早就过了。
+      const startedAt = T0 + 48 * HOUR
+      const restarted = restartService(new Date(startedAt).toISOString())
+      await restarted.start()
+      restarted.stop()
+
+      // 启动后的第一轮巡检：不关单，也不补发提醒。
+      await restarted.sweepRetention(startedAt + 5 * 60 * 1000)
+      expect(store.getTicket(ticketId)?.stage).not.toBe('done')
+      expect(store.getCursor(`retention:reminder:${ticketId}`)).not.toBeNull()
+      expect(store.listOutbox(50).filter(item => item.text.includes('24 小时没有新的进展'))).toHaveLength(1)
+
+      // 启动后满 24 小时仍未关单：宽限期从启动时刻重新起算。
+      await restarted.sweepRetention(startedAt + 24 * HOUR + 1000)
+      expect(store.getTicket(ticketId)?.stage).not.toBe('done')
+
+      // 启动后 24 小时提醒 + 6 小时宽限到齐：照常自动关闭。
+      await restarted.sweepRetention(startedAt + 30 * HOUR + 1000)
+      expect(store.getTicket(ticketId)?.stage).toBe('done')
+    })
+
+    it('启动时记录闲置治理计时基线，便于排查为什么没有立刻提醒', async () => {
+      const restarted = restartService(new Date(T0 + 24 * HOUR).toISOString())
+      await restarted.start()
+      restarted.stop()
+
+      const baseline = logs.find(entry => entry.message === 'retention:baseline')
+      expect(baseline).toBeTruthy()
+      expect(baseline?.extra?.baselineAt).toBe(new Date(T0 + 24 * HOUR).toISOString())
+    })
   })
 
   describe('关单后的工作区回收', () => {

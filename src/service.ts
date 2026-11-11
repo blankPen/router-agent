@@ -508,6 +508,8 @@ export class RouterService {
   private retention: RetentionSettings
   /** 防止上一轮扫描还没结束、下一轮又进来。 */
   private retentionSweeping = false
+  /** 闲置治理的计时基线（服务启动时刻）：启动前就已无进展的工单从启动时重新计时。 */
+  private retentionBaselineMs = 0
   /** 关单后工作区的保留期与扫描间隔。 */
   private workspace: WorkspaceSettings
   /** 防止上一轮回收扫描还没结束、下一轮又进来。 */
@@ -912,6 +914,13 @@ export class RouterService {
   async start(): Promise<void> {
     if (this.running) return
     this.running = true
+    // 闲置治理计时基线：服务启动前就已经闲置的工单不补发通知，计时从启动时刻重新开始。
+    const baseline = Date.parse(this.clock.now())
+    this.retentionBaselineMs = Number.isFinite(baseline) ? baseline : Date.now()
+    this.logger.info('retention:baseline', {
+      baselineAt: new Date(this.retentionBaselineMs).toISOString(),
+      openTickets: this.store.listOpenTickets().length,
+    })
     await this.recover()
     const every = (ms: number, fn: () => Promise<void> | void): void => {
       const timer = setInterval(() => {
@@ -1416,9 +1425,12 @@ export class RouterService {
     const graceMs = this.retention.closeGraceHours * 3_600_000
     const zombieMs = this.retention.zombieHours * 3_600_000
     const lastProgress = this.lastProgressAt(ticket)
+    // 启动基线：服务启动前就已经没有进展的工单，闲置计时从启动时刻重新开始，
+    // 避免启动后的第一轮巡检把积压的工单一次性补发提醒 / 催办 / 关单通知。
+    const idleSince = Math.max(lastProgress, this.retentionBaselineMs)
 
     // 1) 僵尸进程：先转人工，明确不自动关闭。
-    if ((ticket.stage === 'running') && (await this.isZombie(ticket, nowMs, zombieMs))) {
+    if ((ticket.stage === 'running') && (await this.isZombie(ticket, nowMs, zombieMs, idleSince))) {
       this.markZombie(ticket)
       return
     }
@@ -1429,7 +1441,7 @@ export class RouterService {
     // 3) 已经转过人工的僵尸工单：不再提醒、不再自动关闭，直到出现新的进展。
     if (this.store.getCursor(zombieCursorKey(ticket.id)) !== null) return
 
-    if (nowMs - lastProgress < idleMs) return
+    if (nowMs - idleSince < idleMs) return
 
     // 2) PR 还开着：只催办一次，不关闭。
     if (ticket.prState === 'open') {
@@ -1443,7 +1455,12 @@ export class RouterService {
       this.sendCloseReminder(ticket, nowMs, graceMs)
       return
     }
-    if (nowMs < reminder.closeAt) return
+    // 启动前发出的提醒：不再补发，但关单时间跟着启动基线重排，
+    // 和「新提醒」的节奏一致（启动后 idleHours + closeGraceHours 才关单）。
+    const closeAt = this.retentionBaselineMs > 0
+      ? Math.max(reminder.closeAt, this.retentionBaselineMs + idleMs + graceMs)
+      : reminder.closeAt
+    if (nowMs < closeAt) return
     // 提醒还没真正发出去（飞书不可用 / 正在重试）时不要关单，否则用户没看到提醒就被关了。
     if (reminder.outboxKey) {
       const status = this.store.getOutboxStatus(reminder.outboxKey)
@@ -1473,10 +1490,10 @@ export class RouterService {
   }
 
   /** 显示在执行、但长时间没有上报且终端无输出/已失联。 */
-  private async isZombie(ticket: Ticket, nowMs: number, zombieMs: number): Promise<boolean> {
+  private async isZombie(ticket: Ticket, nowMs: number, zombieMs: number, idleSince: number): Promise<boolean> {
     const assignment = this.store.latestAssignment(ticket.id)
     if (!assignment || assignment.status === 'ended') return false
-    if (nowMs - this.lastProgressAt(ticket) < zombieMs) return false
+    if (nowMs - idleSince < zombieMs) return false
     const runtime = this.runtimeFor(assignment)
     if (!assignment.handle || !runtime.status) return false
     const status = await this.statusOf(assignment)
