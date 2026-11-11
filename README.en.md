@@ -94,7 +94,7 @@ ra web                # reopen the dashboard later
 The page only covers the five things needed to get running, with a completion checklist at the top:
 
 1. **LLM Provider**: Base URL / model / API key — all three are required; both OpenAI-compatible and Anthropic-compatible APIs are supported. The key is written only to `config.yaml` and never echoed back; `RA_LLM_*` environment variables can override it. **Import from local config** in the card header opens a picker to import an existing provider from Claude Code, CCSwitch, Pi, OpenCode or Magpie (the source files are read-only and the key is never sent back to the page).
-2. **Worker runtime**: Orca / Claude Code / ACP Agent cards, with automatic checks for the CLI, version, ACP dependencies and login state, plus install guidance and a real handshake test.
+2. **Worker runtime**: Orca / Claude Code / ACP Agent cards, with automatic checks for the CLI, version, ACP dependencies and login state, plus install guidance and a real handshake test. The runtime's own options show up under the cards (for Orca: which **Agent** to launch — leave it empty to follow Orca's own default, or pick `codex` etc.).
 3. **Projects**: add a local project (system directory picker + Git detection) or a Git project (cloned into `~/.router-agent/repos`; `RA_HOME` changes the root).
 4. **Feishu bot**: enter App ID / App Secret (the secret is written only to lark-cli's encrypted store); router-agent always uses the fixed `~/.router-agent-lark` profile. After saving you can check authorization status and complete the Device Flow login from the same page.
 5. **Chats and bindings**: at least one monitored chat; bind it to a project so dispatch stops asking.
@@ -127,7 +127,7 @@ For a real acceptance run, mention the bot in a chat with a small request, then 
 
 1. `ra logs | grep trigger:ingested` shows the message arriving;
 2. `ra tickets` shows a ticket, and `ra ticket <id>` shows its scope and strength;
-3. `orca worktree list --json` (for the `orca` runtime; use `git worktree list` for other runtimes) shows `ra-tk-<number>-<semantic slug>` with branch `ra/tk-<number>-<semantic slug>` (the directory name matches the branch, with `/` replaced by `-`), and the runtime shows an agent session (a Claude Code terminal for Orca);
+3. `orca worktree list --json` (for the `orca` runtime; use `git worktree list` for other runtimes) shows `ra-tk-<number>-<semantic slug>` with branch `ra/tk-<number>-<semantic slug>` (the directory name matches the branch, with `/` replaced by `-`), and the runtime shows an agent session (an agent terminal for Orca);
 4. after the Worker runs `ra report`, the stage in `ra ticket <id>` moves between `running → review/blocked`;
 5. when the PR / MR is merged or closed, the ticket becomes `done` and Feishu gets one closure notification; the workspace is kept for 24 hours and then reclaimed by the scheduled task (a manual stop reclaims it immediately).
 
@@ -178,7 +178,7 @@ Workers don't run inside the Router process. The Router picks an adapter from `r
 
 | runtime id | How it launches | Best for |
 |-|-|-|
-| `orca` (default) | Orca creates the worktree + Claude Code terminal | You already manage repos with Orca and want to watch the terminal |
+| `orca` (default) | Orca creates the worktree + agent terminal (follows Orca's own default) | You already manage repos with Orca and want to watch the terminal |
 | `claude-code` | `git worktree` + background `claude --bg` session | You don't use Orca and just want Claude Code |
 | `codex-app` | `git worktree` + `codex app-server`, preferring the CLI bundled with the Codex app | Use Codex and want Router-created threads visible in the Codex desktop app |
 | `acp` / `acp-*` | ACP child process (Claude / Codex / Gemini / OpenCode and friends) | You want to plug in another ACP agent |
@@ -221,10 +221,11 @@ ra config set policy.acceptMode observe          # observe first, no dispatch
 ra config set project.router-agent "name:dsh/router-agent@main"
 ra config set chatBinding.oc_xxx "router-agent@main"
 ra config set runtime.default claude-code
+ra config set runtime.options.orca.agent codex   # Orca dispatches with Codex; empty = follow Orca's default
 ra config edit                                   # edit the whole file in $EDITOR
 ```
 
-Every field, the `ra config set` allowlist, environment variables, model / Feishu bot / project setup, the admission matrix and idle governance are in [docs/CONFIGURATION.md](docs/CONFIGURATION.md) (Chinese).
+Every field, the `ra config set` allowlist, runtime options, environment variables, model / Feishu bot / project setup, the admission matrix and idle governance are in [docs/CONFIGURATION.md](docs/CONFIGURATION.md) (Chinese).
 
 ## Commands
 

@@ -88,4 +88,42 @@ describe('RuntimeRegistry', () => {
       tools: { fileAccess: 'read-write', shell: 'allow', allowNetwork: false },
     } as never)).rejects.toMatchObject({ code: 'runtime:unavailable' })
   })
+
+  it('Orca 的 Agent 走通用运行时选项：配了就用，没配就跟随 Orca 默认', async () => {
+    const config = defaultConfig()
+    config.runtime.options = { orca: { agent: 'codex' } }
+    const calls: string[][] = []
+    const deps = {
+      home: '/tmp/ra-home',
+      workersDir: '/tmp/ra-home/workers',
+      orca: {
+        async run(argv: string[]) {
+          calls.push(argv)
+          return {
+            code: 0,
+            stdout: JSON.stringify({ ok: true, result: { launch: { outcome: { handle: 'term-1' } } } }),
+            stderr: '',
+          }
+        },
+      },
+      claude: runner(),
+      git: runner(),
+    }
+    const ticket = {
+      id: 'tk-1', title: 't', threadId: 't', source: 'feishu', chatId: 'c',
+      repo: 'dsh/repo', branch: 'main', task: 't', stage: 'running',
+    } as never
+    const assignment = { id: 'as-1', ticketId: 'tk-1', runtimeId: 'orca', handle: '', workdir: '', status: 'pending', startedAt: '' } as never
+
+    const registry = createRuntimes(config, deps)
+    await registry.get('orca').start({ ticket, assignment, workdir: '/tmp/wt' } as never)
+    const argv = calls[0]!
+    expect(argv[argv.indexOf('--agent') + 1]).toBe('codex')
+
+    // 没配置时不传 --agent：由 Orca 自己的配置决定用哪个 Agent。
+    calls.length = 0
+    const plain = defaultConfig()
+    await createRuntimes(plain, deps).get('orca').start({ ticket, assignment, workdir: '/tmp/wt' } as never)
+    expect(calls[0]).not.toContain('--agent')
+  })
 })

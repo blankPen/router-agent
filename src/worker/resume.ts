@@ -7,11 +7,12 @@
  */
 import type { ResumeHint } from './port.js'
 import { CLAUDE_CODE_RUNTIME_ID, ORCA_RUNTIME_ID, normalizeRuntimeId } from './runtimes/catalog.js'
+import { agentProfileOf } from './agents/registry.js'
 
 /** 单个运行时的 CLI 恢复模板。 */
 export interface ResumeSpec {
   /** 有真实 sessionId 时执行的命令。 */
-  command: string
+  command?: string
   /** 有真实 sessionId 时的参数模板，支持 {sessionId}。 */
   args?: readonly string[]
   /** 没有 sessionId、但有运行时 handle 时的备用命令；缺省复用 command。 */
@@ -27,52 +28,63 @@ export interface ResumeSpec {
 }
 
 /**
+ * 由 Agent 档案生成恢复模板：Agent 决定「用什么命令接回去」，
+ * 运行时只补充自己的兜底（handle 接管方式）。
+ */
+function agentResumeSpec(agentId: string, extra: Partial<ResumeSpec> = {}): ResumeSpec {
+  const template = agentProfileOf(agentId)?.resume
+  const note = [template?.note, extra.note].filter(Boolean).join(' ')
+  return {
+    ...(template ? { command: template.command, args: template.args } : {}),
+    ...extra,
+    ...(note ? { note } : {}),
+  }
+}
+
+/**
  * runtime id → CLI 恢复模板。
  *
  * 只收录已核实 session id 语义和 CLI 语法的运行时；未收录的运行时不出按钮，
  * 避免复制出打不开正确会话的命令。
  */
 const RESUME_SPECS: Record<string, ResumeSpec> = {
-  [CLAUDE_CODE_RUNTIME_ID]: {
-    command: 'claude',
-    args: ['--resume', '{sessionId}'],
+  [CLAUDE_CODE_RUNTIME_ID]: agentResumeSpec('claude', {
     handleArgs: ['attach', '{handle}'],
     handleNote: '未读到 sessionId，改用 attach 接管后台会话。',
-  },
-  // Orca 的 meta 只存终端句柄，sessionId 由 service 按 workdir 从 Claude 会话记录里补；
-  // 找不到会话记录时退回 Orca 自己的终端切换命令，作为最后的兜底。
-  [ORCA_RUNTIME_ID]: {
-    command: 'claude',
-    args: ['--resume', '{sessionId}'],
+  }),
+  'acp-claude': agentResumeSpec('claude'),
+  'acp-codex': agentResumeSpec('codex'),
+  'codex-app': agentResumeSpec('codex', {
+    note: '也可以在 Codex 桌面端用 codex://threads/<threadId> 打开。',
+  }),
+  'acp-opencode': agentResumeSpec('opencode'),
+}
+
+/**
+ * Orca 的恢复模板：用哪个 Agent 由配置决定，meta 里只有终端句柄。
+ *
+ * sessionId 由 service 按 workdir 从 Agent 自己的会话记录里补；
+ * 找不到会话记录时退回 Orca 的终端切换命令，作为最后的兜底。
+ */
+function orcaResumeSpec(agentId?: string): ResumeSpec {
+  const base = {
     handleCommand: 'orca',
     handleArgs: ['terminal', 'switch', '--terminal', '{handle}'],
     handleRequiresWorkdir: false,
-    note: '按工作目录定位到的 Claude 会话恢复；接回的是普通终端会话，不再由 Orca 托管。',
-    handleNote: '未找到 Claude 会话记录，改为在 Orca 中切回原终端。',
-  },
-  'acp-claude': {
-    command: 'claude',
-    args: ['--resume', '{sessionId}'],
-  },
-  'acp-codex': {
-    command: 'codex',
-    args: ['resume', '{sessionId}'],
-    note: 'Codex 会话恢复为 best-effort；若找不到会话，请在 worktree 内运行 codex resume 选择历史会话。',
-  },
-  'codex-app': {
-    command: 'codex',
-    args: ['resume', '{sessionId}'],
-    note: 'Codex thread 恢复；也可以在 Codex 桌面端用 codex://threads/<threadId> 打开。',
-  },
-  'acp-opencode': {
-    command: 'opencode',
-    args: ['--session', '{sessionId}'],
-  },
+    handleNote: '未找到 Agent 会话记录，改为在 Orca 中切回原终端。',
+  }
+  if (!agentId) return base
+  return agentResumeSpec(agentId, {
+    ...base,
+    note: '按工作目录定位到的 Agent 会话恢复；接回的是普通终端会话，不再由 Orca 托管。',
+  })
 }
 
 /** 按运行时 id 取恢复模板；未知/未核实返回 null。 */
-export function resumeSpecOf(runtimeId: string): ResumeSpec | null {
-  return RESUME_SPECS[normalizeRuntimeId(runtimeId.trim())] ?? null
+export function resumeSpecOf(runtimeId: string, agentId?: string): ResumeSpec | null {
+  const id = normalizeRuntimeId(runtimeId.trim())
+  if (id === ORCA_RUNTIME_ID) return orcaResumeSpec(agentId)
+  return RESUME_SPECS[id] ?? null
 }
 
 export interface ResumeSource {
@@ -81,6 +93,8 @@ export interface ResumeSource {
   sessionId?: string
   /** 运行时自己的短句柄；没有 sessionId 时用于 attach 类命令。 */
   handle?: string
+  /** 由外部决定用哪个 Agent 的运行时（如 Orca）需要它来选恢复命令。 */
+  agentId?: string
 }
 
 /**
@@ -93,18 +107,20 @@ export function buildResumeHint(
   source: ResumeSource,
   opts: { workdirExists?: boolean } = {},
 ): ResumeHint | null {
-  const spec = resumeSpecOf(runtimeId)
+  const spec = resumeSpecOf(runtimeId, source.agentId)
   if (!spec || !source.workdir) return null
 
-  const useSession = Boolean(spec.args && source.sessionId)
-  const useHandle = !useSession && Boolean(spec.handleArgs && source.handle)
+  const useSession = Boolean(spec.command && spec.args && source.sessionId)
+  // 没有单独的 handle 命令时，沿用 session 命令（例如 claude attach <handle>）。
+  const handleCommand = spec.handleCommand ?? spec.command
+  const useHandle = !useSession && Boolean(handleCommand && spec.handleArgs && source.handle)
   if (!useSession && !useHandle) return null
 
   const template = (useSession ? spec.args : spec.handleArgs)!
   const args = template.map(arg => arg
     .replaceAll('{sessionId}', source.sessionId ?? '')
     .replaceAll('{handle}', source.handle ?? ''))
-  const command = useSession ? spec.command : (spec.handleCommand ?? spec.command)
+  const command = useSession ? spec.command! : handleCommand!
   const requiresWorkdir = useSession || (spec.handleRequiresWorkdir ?? true)
 
   const note = [

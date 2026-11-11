@@ -3,7 +3,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { CommandRunner } from '../../../infra/process.js'
 import { GitWorktreeProvider } from '../../workspaces/git-worktree.js'
-import { readClaudeSession } from '../../orca/session.js'
+import { readClaudeSession } from '../../agents/claude.js'
 import { workBranch, worktreeName } from '../../naming.js'
 import { normalizeRuntimeId } from '../catalog.js'
 import {

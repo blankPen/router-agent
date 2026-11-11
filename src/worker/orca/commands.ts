@@ -16,6 +16,8 @@ export interface CreateOptions {
   baseBranch?: string
   /** 新 worktree 的 git 分支名（绕过 Orca 配置的用户前缀），用于语义化命名。 */
   branch?: string
+  /** 启动哪个 Agent；留空 = 不传 --agent，由 Orca 自己的配置决定。 */
+  agent?: string
 }
 
 export function worktreeCreate(opts: CreateOptions): string[] {
@@ -25,7 +27,7 @@ export function worktreeCreate(opts: CreateOptions): string[] {
     '--name', opts.name,
     ...(opts.baseBranch ? ['--base-branch', opts.baseBranch] : []),
     ...(opts.branch ? ['--branch', opts.branch] : []),
-    '--agent', 'claude',
+    ...(opts.agent ? ['--agent', opts.agent] : []),
     // 必须是终端 surface：chat 会话不在 terminal list 里，send/close/inspect 都用不了。
     '--surface', 'terminal',
     '--prompt', opts.prompt,
@@ -76,6 +78,11 @@ export function worktreeRemove(selector: string, opts: { force?: boolean } = {})
   ]
 }
 
-export function agentLaunch(opts: { worktree: string; prompt: string }): string[] {
-  return ['agent', 'launch', '--agent', 'claude', '--worktree', opts.worktree, '--prompt', opts.prompt]
+export function agentLaunch(opts: { worktree: string; prompt: string; agent?: string }): string[] {
+  return [
+    'agent', 'launch',
+    ...(opts.agent ? ['--agent', opts.agent] : []),
+    '--worktree', opts.worktree,
+    '--prompt', opts.prompt,
+  ]
 }

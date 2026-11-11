@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { Store } from '../src/store/db.js'
 import { Engine } from '../src/core/engine.js'
 import { RouterService, extractTerminalSnippet, extractSessionSnippet, formatProbeMessage } from '../src/service.js'
-import { claudeProjectSlug } from '../src/worker/orca/session.js'
+import { claudeProjectSlug } from '../src/worker/agents/claude.js'
 import { defaultConfig, policyOf, type AppConfig, chatEntry } from '../src/config.js'
 import { DEFAULT_ADMISSION } from '../src/core/policy.js'
 import type {
@@ -733,12 +733,23 @@ describe('运行时机制', () => {
     now += 1_000
     engine.startAssignment(ticketId, { runtimeId: 'orca', handle: 'term-2', workdir })
     writeFileSync(metaPath, JSON.stringify({
-      ticketId, runtime: 'orca', handle: 'term-2', workdir, sessionId: 'sess_1',
+      ticketId, runtime: 'orca', handle: 'term-2', workdir, sessionId: 'sess_1', agent: 'claude',
     }))
     expect(await service.resumeHint(ticketId)).toEqual({
       command: `cd '${workdir}' && claude '--resume' 'sess_1'`,
       sessionId: 'sess_1',
       note: expect.stringContaining('不再由 Orca 托管'),
+    })
+
+    // meta 里没记 Agent（跟随 Orca 默认）又找不到会话记录：退回切回 Orca 终端。
+    now += 1_000
+    engine.startAssignment(ticketId, { runtimeId: 'orca', handle: 'term-3', workdir })
+    writeFileSync(metaPath, JSON.stringify({
+      ticketId, runtime: 'orca', handle: 'term-3', workdir, sessionId: 'sess_1',
+    }))
+    expect(await service.resumeHint(ticketId)).toEqual({
+      command: `orca 'terminal' 'switch' '--terminal' 'term-3'`,
+      note: expect.stringContaining('Orca'),
     })
     expect(await service.resumeHint('tk_missing')).toBeNull()
   })

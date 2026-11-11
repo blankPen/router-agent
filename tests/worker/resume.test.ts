@@ -32,7 +32,9 @@ describe('运行时恢复映射', () => {
     expect(resumeSpecOf('codex-app')?.command).toBe('codex')
     expect(resumeSpecOf('acp-opencode')?.command).toBe('opencode')
     expect(resumeSpecOf('claude-cli')?.command).toBe('claude')
-    expect(resumeSpecOf('orca')?.command).toBe('claude')
+    // Orca 用哪个 Agent 由配置决定：没指定时只有「切回 Orca 终端」这条兜底。
+    expect(resumeSpecOf('orca')?.command).toBeUndefined()
+    expect(resumeSpecOf('orca', 'codex')?.command).toBe('codex')
     expect(resumeSpecOf('acp-gemini')).toBeNull()
   })
 
@@ -55,10 +57,13 @@ describe('运行时恢复映射', () => {
     expect(hint?.note).toContain('attach')
   })
 
-  it('orca 有会话记录时按 workdir 补出的 sessionId 恢复 Claude', () => {
-    const hint = buildResumeHint('orca', { workdir: '/tmp/wt', sessionId: 'sess_orca' })
+  it('orca 有会话记录时按 Agent 的语法恢复', () => {
+    const hint = buildResumeHint('orca', { workdir: '/tmp/wt', sessionId: 'sess_orca', agentId: 'claude' })
     expect(hint?.command).toBe("cd '/tmp/wt' && claude '--resume' 'sess_orca'")
     expect(hint?.note).toContain('不再由 Orca 托管')
+
+    const codex = buildResumeHint('orca', { workdir: '/tmp/wt', sessionId: 'thread_1', agentId: 'codex' })
+    expect(codex?.command).toBe("cd '/tmp/wt' && codex 'resume' 'thread_1'")
   })
 
   it('orca 没有会话记录时退回 orca terminal switch，且不依赖 workdir', () => {

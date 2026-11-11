@@ -5,10 +5,12 @@ import {
   LLM_FIELDS,
   SECTIONS,
   fieldError,
+  fieldValue,
   fromInputValue,
   getByPath,
   humanizeMs,
   humanizeTime,
+  runtimeOptionFields,
   sectionsFor,
   setByPath,
   toInputValue,
@@ -16,6 +18,7 @@ import {
   type RuntimeChoiceView,
   type SectionDef,
 } from './fields.js'
+import { runtimeOptionPaths } from '../../worker/runtimes/options.js'
 import {
   importLocalProvider,
   listLocalProviders,
@@ -1252,7 +1255,9 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
 
   const changed = useMemo(() => {
     if (!draft || !original) return []
-    const paths = FIELD_PATHS.filter(path => JSON.stringify(getByPath(draft, path)) !== JSON.stringify(getByPath(original, path)))
+    // 运行时的专属选项是动态字段，路径来自各运行时的声明，不在静态 FIELD_PATHS 里。
+    const paths = [...FIELD_PATHS, ...runtimeOptionPaths()]
+      .filter(path => JSON.stringify(fieldValue(draft, path)) !== JSON.stringify(fieldValue(original, path)))
     for (const runtime of runtimeCatalog) {
       if (JSON.stringify(projectsOf(draft, runtime.id)) !== JSON.stringify(projectsOf(original, runtime.id))) {
         paths.push(projectPatchPath(runtime.id))
@@ -1846,12 +1851,14 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
   const activeProjects = draft ? projectsOf(draft, runtimeId) : []
   const selectedRuntime = runtimeCatalog.find(runtime => runtime.id === runtimeId)
   const runtimeLabel = selectedRuntime ? runtimeDisplayName(selectedRuntime) : runtimeId
+  // 运行时自己声明的选项（例如 Orca 用哪个 Agent）：面板按声明渲染，不写死运行时。
+  const setupOptionFields = useMemo(() => runtimeOptionFields(runtimeId), [runtimeId])
 
   const changed = useMemo(() => {
     if (!draft || !original) return []
-    const paths = ['llm.baseUrl', 'llm.model', 'llm.apiKey', 'llm.api', 'llm.authHeader', 'runtime.default', 'feishu.appId', 'feishu.directMessages', 'feishu.chats']
+    const paths = ['llm.baseUrl', 'llm.model', 'llm.apiKey', 'llm.api', 'llm.authHeader', 'runtime.default', 'feishu.appId', 'feishu.directMessages', 'feishu.chats', ...runtimeOptionPaths()]
     for (const runtime of runtimeCatalog) paths.push(projectPatchPath(runtime.id))
-    return paths.filter(path => JSON.stringify(getByPath(draft, path)) !== JSON.stringify(getByPath(original, path)))
+    return paths.filter(path => JSON.stringify(fieldValue(draft, path)) !== JSON.stringify(fieldValue(original, path)))
   }, [draft, original, runtimeCatalog])
 
   useEffect(() => {
@@ -1867,6 +1874,10 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       if (message) map.set(field.path, message)
     }
     for (const field of SETUP_FEISHU_FIELDS) {
+      const message = fieldError(field, getByPath(draft, field.path))
+      if (message) map.set(field.path, message)
+    }
+    for (const field of setupOptionFields) {
       const message = fieldError(field, getByPath(draft, field.path))
       if (message) map.set(field.path, message)
     }
@@ -1887,7 +1898,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       map.set('runtime.default', '自定义 acp 未配置 runtime.options.acp.command，重启后服务会启动失败')
     }
     return map
-  }, [draft, changed, runtimeCatalog, runtimeId])
+  }, [draft, changed, runtimeCatalog, runtimeId, setupOptionFields])
 
   const setField = (path: string, value: unknown): void => {
     setDraft(current => (current ? setByPath(current, path, value) : current))
@@ -2083,6 +2094,20 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
           onNotice={setNotice}
           onPendingRestart={() => setPendingRestart(true)}
         />
+        {setupOptionFields.length > 0 && (
+          <div className="settings-rows">
+            {setupOptionFields.map(field => (
+              <FieldRow
+                key={field.path}
+                field={field}
+                value={getByPath(draft, field.path)}
+                defaultValue={getByPath(defaults, field.path)}
+                error={errors.get(field.path)}
+                onChange={value => setField(field.path, value)}
+              />
+            ))}
+          </div>
+        )}
       </section>
 
       <section className="settings-card" id="setup-projects">

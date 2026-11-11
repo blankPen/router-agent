@@ -19,7 +19,8 @@ import { buildNeutralContract, buildWorkerPrompt } from './worker/spec/index.js'
 import { migrateLegacySoul } from './specs/index.js'
 import { workBranch } from './worker/naming.js'
 import { buildResumeHint } from './worker/resume.js'
-import { latestClaudeSessionId } from './worker/orca/session.js'
+import { resolveSession } from './worker/agents/registry.js'
+import { runtimeOptionString } from './worker/runtimes/options.js'
 import {
   workspaceRuntimeLabel,
   type WorkspaceCleanupRequest,
@@ -655,21 +656,40 @@ export class RouterService {
 
     const runtimeId = metaRuntime || assignment.runtimeId
     let sessionId = typeof meta.sessionId === 'string' && meta.sessionId ? meta.sessionId : undefined
-    // Orca 的 meta 只记录终端句柄；按 workdir 从 Claude 会话记录里补出真实 session id。
-    // 找不到记录时 resume 模块会退回 orca terminal switch。
-    if (!sessionId && normalizeRuntimeId(runtimeId) === ORCA_RUNTIME_ID) {
-      sessionId = latestClaudeSessionId(
-        workdir,
-        this.claudeProjectsDir ? { projectsDir: this.claudeProjectsDir } : {},
-      ) ?? undefined
+    // 恢复命令要用「真正在跑的那个 Agent」的语法：meta 里记了就用它，
+    // 其次看配置，最后看这个 workdir 里到底是哪个 Agent 留下了会话。
+    let agentId = typeof meta.agent === 'string' ? meta.agent : ''
+    if (normalizeRuntimeId(runtimeId) === ORCA_RUNTIME_ID) {
+      const configured = agentId || this.orcaAgentId()
+      if (!sessionId) {
+        // Orca 的 meta 只记录终端句柄；按 workdir 从 Agent 自己的会话记录里补出真实 session id。
+        // 找不到记录时 resume 模块会退回 orca terminal switch。
+        const resolved = resolveSession(workdir, configured, {
+          ...(this.claudeProjectsDir ? { roots: { claude: this.claudeProjectsDir } } : {}),
+        })
+        sessionId = resolved?.reader.latestSessionId(workdir) ?? undefined
+        agentId = resolved?.profile.id ?? configured
+      } else {
+        agentId = configured
+      }
     }
     const handle = (typeof meta.handle === 'string' && meta.handle) || assignment.handle
 
     return buildResumeHint(
       runtimeId,
-      { workdir, sessionId, handle },
+      {
+        workdir,
+        sessionId,
+        handle,
+        ...(agentId ? { agentId } : {}),
+      },
       { workdirExists: existsSync(workdir) },
     )
+  }
+
+  /** Orca 派工时用的 Agent；没配置 = 跟随 Orca 自己的默认。 */
+  private orcaAgentId(): string {
+    return runtimeOptionString(this.config.runtime.options, ORCA_RUNTIME_ID, 'agent')
   }
 
   /**
