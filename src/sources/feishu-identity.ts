@@ -1,5 +1,7 @@
 import type { CommandRunner } from '../infra/process.js'
 import { errorMessage, noopLogger, type Logger } from '../infra/logger.js'
+import type { AppConfig } from '../config.js'
+import { parseLarkMembers } from './lark.js'
 
 /**
  * 飞书身份条目解析器。
@@ -335,6 +337,235 @@ export class IdentityResolver {
   }
 }
 
+/** 机器人自身身份的识别结果。 */
+export interface BotIdentity {
+  botOpenIds: string[]
+  botNames: string[]
+  /** 是否拿到了可用的机器人身份（自动识别成功或用户手动填了）。 */
+  resolved: boolean
+  /** 识别过程的可读说明（成功时说明来源，失败时说明原因）。 */
+  detail: string
+}
+
+/** 名单与机器人身份的解析状态快照，供面板只读展示。 */
+export interface IdentityStatusView {
+  /** 全局名单 + 群级名单的条目状态。 */
+  entries: IdentityEntry[]
+  bot: BotIdentity
+  invalidCount: number
+  pendingCount: number
+}
+
+/** 运行时需要的全部身份信息。 */
+export interface RuntimeIdentity {
+  /**
+   * 全局允许名单解析出的 open_id。
+   *
+   * 空数组表示「一个都没解析出来」：调用方不要把它当成「确认没有任何人」直接断言，
+   * 应当按「暂时查不到」处理（错误原因见 `feishu:allowlist-empty` 事件）。
+   */
+  allowedOpenIds: string[]
+  /**
+   * 群级允许名单解析出的 open_id。
+   *
+   * 每个配了 allowed 的群都必须出现在这里：整体解析不出来时给 `[]`（该群拒绝所有人），
+   * 省略 key 会让运行时回退到原始条目，指向错误的排查方向。
+   */
+  allowedByChatOpenIds: Record<string, string[]>
+  /** open_id → 通讯录显示名；入站只读，不发任何请求。 */
+  names: Map<string, string>
+  bot: BotIdentity
+  status: IdentityStatusView
+}
+
+/** 读取群成员列表的超时。 */
+const MEMBER_TIMEOUT_MS = 20_000
+
+/**
+ * 自动识别机器人自身身份。
+ *
+ * 机器人没有邮箱，只能按 `app_id` 匹配群成员列表里的 bot 条目：
+ * 用户不再需要手填 `ou_xxx`（那是「应用 × 用户」维度的 id，用户既看不到也校验不了）。
+ *
+ * 扫描范围只给 `mode: mention` 的群——只有这些群靠 @ 机器人判定消息是否该收，
+ * 识别不到就会把整群消息丢掉（2026-11-11 事故的形态）。
+ */
+export async function resolveBotIdentity(opts: {
+  appId: string
+  chatIds: readonly string[]
+  lark: CommandRunner
+  logger?: Logger
+}): Promise<BotIdentity> {
+  const logger = opts.logger ?? noopLogger
+  const botOpenIds: string[] = []
+  const botNames: string[] = []
+  /** 机器人 open_id → 显示名；同一个机器人可能在多个群里出现。 */
+  const names = new Map<string, string>()
+  /** 读不到成员的群：调用失败。 */
+  const failures: string[] = []
+  /** 读到成员但没有匹配到机器人的群。 */
+  const missing: string[] = []
+
+  // 没有 mention 群时不需要识别：不是故障，不写错误日志。
+  if (opts.chatIds.length === 0) {
+    return { botOpenIds: [], botNames: [], resolved: false, detail: '没有配置 mode=mention 的群，无需识别机器人身份' }
+  }
+  if (!opts.appId) {
+    const detail = '没有配置 feishu.appId，无法识别机器人身份'
+    logger.error('feishu:bot-identity-failed', { detail })
+    return { botOpenIds: [], botNames: [], resolved: false, detail }
+  }
+
+  for (const chatId of opts.chatIds) {
+    const argv = ['im', '+chat-members-list', '--chat-id', chatId, '--as', 'bot', '--format', 'json']
+    let stdout = ''
+    try {
+      const result = await opts.lark.run(argv, { timeoutMs: MEMBER_TIMEOUT_MS })
+      if (result.code !== 0) {
+        failures.push(`群 ${chatId} 读取成员失败（code=${result.code}）：${detailText(result.stderr)}`)
+        continue
+      }
+      stdout = result.stdout
+    } catch (error) {
+      failures.push(`群 ${chatId} 读取成员异常：${detailText(errorMessage(error))}`)
+      continue
+    }
+    if (!isJson(stdout)) {
+      failures.push(`群 ${chatId} 成员列表输出无法解析`)
+      continue
+    }
+    const matched = parseLarkMembers(stdout).filter(member => member.type === 'bot' && member.appId === opts.appId)
+    if (matched.length === 0) {
+      missing.push(chatId)
+      continue
+    }
+    for (const member of matched) {
+      if (!botOpenIds.includes(member.openId)) botOpenIds.push(member.openId)
+      if (member.name) {
+        names.set(member.openId, member.name)
+        if (!botNames.includes(member.name)) botNames.push(member.name)
+      }
+    }
+  }
+
+  if (botOpenIds.length > 0) {
+    for (const openId of botOpenIds) {
+      logger.info('feishu:bot-identity-resolved', { bot: openId, name: names.get(openId) ?? '' })
+    }
+    return {
+      botOpenIds,
+      botNames,
+      resolved: true,
+      detail: `已在群 ${opts.chatIds.join('、')} 里识别到机器人`,
+    }
+  }
+
+  // 没有 mention 群时不需要识别：不是故障，不写错误日志。
+  if (opts.chatIds.length === 0) {
+    return { botOpenIds: [], botNames: [], resolved: false, detail: '没有配置 mode=mention 的群，无需识别机器人身份' }
+  }
+
+  const detail = failures.length > 0
+    ? failures.join('；')
+    : `群 ${missing.join('、')} 里没找到 appId=${opts.appId} 的机器人`
+  logger.error('feishu:bot-identity-failed', { detail })
+  return { botOpenIds: [], botNames: [], resolved: false, detail }
+}
+
+/**
+ * 启动装配用的运行时身份解析。
+ *
+ * 只在这里查通讯录：解析完的结果（open_id 名单 + 名字表）进内存，
+ * 消息入站链路只读内存，不再发任何外部请求。
+ */
+export async function resolveRuntimeIdentity(opts: {
+  config: AppConfig
+  lark: CommandRunner
+  cache?: IdentityCache
+  logger?: Logger
+  /** 群 id → 群名；只用于日志里写清是哪个群。 */
+  chatNames?: (chatId: string) => string
+}): Promise<RuntimeIdentity> {
+  const logger = opts.logger ?? noopLogger
+  const feishu = opts.config.feishu
+  // appId 必须传：没有它就查不了也写不了缓存，缓存命中才是「通讯录挂了名单仍然可用」的前提。
+  const resolver = new IdentityResolver({ lark: opts.lark, appId: feishu.appId, cache: opts.cache, logger })
+
+  const names = new Map<string, string>()
+  const entries: IdentityEntry[] = []
+  const invalid: IdentityEntry[] = []
+  const pending: IdentityEntry[] = []
+  const collect = (resolution: IdentityResolution): void => {
+    entries.push(...resolution.entries)
+    invalid.push(...resolution.invalid)
+    pending.push(...resolution.pending)
+    for (const [openId, name] of resolution.names) names.set(openId, name)
+  }
+
+  const global = await resolver.resolveEntries(feishu.allowed)
+  collect(global)
+  // 全局名单配了却一个都解析不出来：运行时等于谁都不许，必须显式报错而不是静默。
+  if (feishu.allowed.length > 0 && global.openIds.length === 0) {
+    logger.error('feishu:allowlist-empty', {
+      count: global.entries.length,
+      detail: `全局允许名单一个都解析不出来：${global.pending.length} 条待重试、${global.invalid.length} 条查无此人`,
+    })
+  }
+
+  const allowedByChatOpenIds: Record<string, string[]> = {}
+  for (const chat of feishu.chats) {
+    if (chat.allowed.length === 0) continue
+    const resolution = await resolver.resolveEntries(chat.allowed)
+    collect(resolution)
+    allowedByChatOpenIds[chat.chat] = resolution.openIds
+    // 配了名单却一个都没解析出来：这个群按「拒绝所有人」处理，绝不退回全局名单。
+    if (resolution.openIds.length === 0) {
+      logger.error('feishu:chat-allowlist-empty', {
+        chat: chat.chat,
+        name: opts.chatNames?.(chat.chat) ?? '',
+        count: resolution.entries.length,
+      })
+    }
+  }
+
+  const bot = await resolveBotIdentityOf(opts.config, opts.lark, logger)
+
+  if (invalid.length > 0 || pending.length > 0) {
+    const masked = [...invalid, ...pending].map(entry => maskEntry(entry.entry)).slice(0, 10)
+    logger.warn('config:identity-invalid', {
+      count: invalid.length + pending.length,
+      detail: `${invalid.length} 条解析不到人、${pending.length} 条暂时查不了待重试：${masked.join('、')}`,
+    })
+  }
+
+  return {
+    allowedOpenIds: global.openIds,
+    allowedByChatOpenIds,
+    names,
+    bot,
+    status: { entries, bot, invalidCount: invalid.length, pendingCount: pending.length },
+  }
+}
+
+/** 机器人身份：用户手动填了就用用户的，否则按 app_id 自动识别。 */
+async function resolveBotIdentityOf(config: AppConfig, lark: CommandRunner, logger: Logger): Promise<BotIdentity> {
+  const feishu = config.feishu
+  // 手动填了就是手动覆盖：不再自动识别，保留逃生口。
+  if (feishu.botOpenIds.length > 0 || feishu.botNames.length > 0) {
+    feishu.botOpenIds.forEach((openId, index) => {
+      logger.info('feishu:bot-identity-resolved', { bot: openId, name: feishu.botNames[index] ?? '' })
+    })
+    return {
+      botOpenIds: [...feishu.botOpenIds],
+      botNames: [...feishu.botNames],
+      resolved: true,
+      detail: '使用配置里手动填写的机器人身份',
+    }
+  }
+  const chatIds = feishu.chats.filter(chat => chat.mode === 'mention').map(chat => chat.chat)
+  return resolveBotIdentity({ appId: feishu.appId, chatIds, lark, logger })
+}
+
 interface ContactPayload {
   status: 'ok' | 'invalid' | 'unknown'
   user: { openId: string; userId: string; name: string; email: string } | null
@@ -437,6 +668,16 @@ function detailText(text: string): string {
 /** 入日志 / 进 detail 的条目：邮箱要掩码，open_id 与非法条目原样保留。 */
 function maskEntry(entry: string): string {
   return entry.includes('@') ? maskEmail(entry.trim()) : entry
+}
+
+/** 输出是不是 JSON：不是的话不能当「没找到机器人」，那会把接口异常说成业务结论。 */
+function isJson(text: string): boolean {
+  try {
+    JSON.parse(text)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** 按固定大小切片。 */

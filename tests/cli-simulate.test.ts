@@ -101,3 +101,22 @@ describe('ra simulate', () => {
     expect(existsSync(join(home, 'state.db'))).toBe(false)
   })
 })
+describe('ra simulate 的名单解析', () => {
+  it('注入解析结果后按 open_id 判定名单内外', async () => {
+    const cfg = config()
+    cfg.feishu.allowed = ['pengzhen02@dewu.com']
+    const engine = new CountingEngine('{"decision":"accept","reason":"ok","title":"改超时","scope":"x"}')
+    const home = mkdtempSync(join(tmpdir(), 'ra-sim-'))
+
+    // 没有解析结果：原始条目是邮箱，和 open_id 对不上 → 名单外
+    const without = await simulate({ home, config: cfg, decisionEngine: engine }, { text: 'x', actorId: 'ou_me', dryRun: true })
+    expect(without.decision?.strength).toBe('inferred')
+
+    // 注入解析结果：邮箱已换成 open_id → 名单内
+    const withIdentity = await simulate(
+      { home, config: cfg, decisionEngine: engine, identity: { allowedOpenIds: ['ou_me'] } },
+      { text: 'x', actorId: 'ou_me', dryRun: true },
+    )
+    expect(withIdentity.decision?.strength).toBe('explicit')
+  })
+})

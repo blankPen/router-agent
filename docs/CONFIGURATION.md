@@ -14,11 +14,11 @@ feishu:
       mode: all        # all=全部消息且不 @ 也回复；mention=只收 @机器人
       repo: router-agent   # 可选：群绑定项目（只能是当前后端项目清单里的项目名）
       branch: main         # 由项目默认分支自动决定，面板不可单独编辑
-      allowed: [ou_xxx]    # 可选：本群只允许这些人操作（空=沿用全局 allowed）
+      allowed: [ou_xxx]    # 可选：本群只允许这些人操作（空=沿用全局 allowed）；支持邮箱（推荐）或 ou_xxx
   directMessages: true
-  allowed: []          # 允许发起工作的 open_id
+  allowed: []          # 允许发起工作的人（邮箱，推荐；兼容 ou_xxx）
   bots: []             # 允许产生推断候选的机器人
-  botOpenIds: []       # 机器人自己的 open_id / app_id
+  botOpenIds: []       # 机器人自己的 open_id（留空=按 appId 自动识别群成员里的机器人；填了就不自动识别）
   botNames: []         # 机器人显示名
   images:              # 图片消息：原图落盘并透传给 Worker，同时转文本进入研判
     enabled: true

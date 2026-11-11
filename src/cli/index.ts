@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { Command, CommanderError } from 'commander'
-import { ensureHome, loadConfig, policyOf, projectsForRuntime, replyAlwaysChatsOf, setConfigValue, writeConfig } from '../config.js'
+import { ensureHome, loadConfig, policyOf, projectsForRuntime, replyAlwaysChatsOf, setConfigValue, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
 import { Store, type SessionMigrationState } from '../store/db.js'
 import { Engine } from '../core/engine.js'
 import { shouldAcknowledge } from '../core/policy.js'
@@ -21,6 +21,7 @@ import { ChannelIngress } from '../channels/ingress.js'
 import { ChannelRegistry } from '../channels/registry.js'
 import { ChannelRouter } from '../channels/router.js'
 import { ChatDirectory } from '../sources/feishu-directory.js'
+import { resolveRuntimeIdentity, type IdentityCache, type RuntimeIdentity } from '../sources/feishu-identity.js'
 import { createLarkRunner, larkEnv } from '../sources/lark.js'
 import { createVisionTranscriber, type ImageTranscriber } from '../infra/vision.js'
 import { runInitWizard } from './init.js'
@@ -405,8 +406,11 @@ async function cmdSimulate(
   }
   const decisionEngine = (store: Store, engine: Engine) => createDecisionEngine({ config, store, model, engine })
 
+  // 名单是邮箱时必须先解析成 open_id，否则模拟出来的准入判断与线上不一致。
+  const identity = await resolveIdentityForCli(home, config, output.lark ?? createLarkRunner(), createLogger(home, output, false))
+
   const result = await simulate(
-    { home, config, decisionEngine },
+    { home, config, decisionEngine, ...(identity ? { identity: policyResolutionOf(identity) } : {}) },
     {
       text: opts.text,
       ...(opts.chat ? { chatId: opts.chat } : {}),
@@ -673,6 +677,8 @@ async function cmdTicketStop(home: string, ticketId: string, output: CliIo): Pro
       output.stdout(`工单已关闭: ${ticketId}`)
       return 0
     }
+    // 这里只用 Engine 关工单，stopTicket 不看允许名单：不解析身份，
+    // 免得「停工单」这种应急操作还要先连通讯录、卡在超时上。
     const engine = new Engine({ store, policy: policyOf(config) })
     const stopped = engine.stopTicket(ticketId, 'ra ticket --stop')
     // 服务未运行时先把回收任务落到 effects 队列，下次启动会按同一套逻辑删 worktree。
@@ -1115,13 +1121,30 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   const replyAlwaysChats = new Set(replyAlwaysChatsOf(config))
   const repaired = store.repairOutbox()
   if (repaired > 0) logger.warn('outbox:repaired', { count: repaired })
-  const engine = new Engine({ store, policy: policyOf(config), onEvent: sink })
   const orcaRunner = realRunner('orca')
   const claudeRunner = output.claude ?? realRunner('claude')
   const gitRunner = output.git ?? realRunner('git')
   const larkRunner = output.lark ?? createLarkRunner()
   const ghRunner = realRunner('gh')
   const glabRunner = realRunner('glab')
+  // 群名目录要先建好：身份装配失败时要在日志里写清是哪个群。
+  const directory = new ChatDirectory(join(home, 'chats.json'), logger)
+  // 身份装配：把允许名单里的邮箱解析成 open_id，并自动识别机器人自身身份。
+  // 解析只发生在这里，消息入站链路不再查通讯录。
+  const identity = await resolveRuntimeIdentitySafely({ config, lark: larkRunner, cache: identityCacheOf(store), logger, directory })
+  // 通道侧必须用装配后的配置：mention 判定读的就是 botOpenIds / botNames。
+  const feishuConfig = {
+    ...config.feishu,
+    botOpenIds: identity?.bot.botOpenIds ?? config.feishu.botOpenIds,
+    botNames: identity?.bot.botNames ?? config.feishu.botNames,
+    actorNames: identity?.names,
+  }
+  const engine = new Engine({
+    store,
+    // 装配失败时退回原始配置：宁可按用户填的原始条目跑，也不要凭空把名单清空。
+    policy: policyOf(config, identity ? policyResolutionOf(identity) : undefined),
+    onEvent: sink,
+  })
   const runtimes = createRuntimes(config, {
     home,
     workersDir: join(home, 'workers'),
@@ -1188,10 +1211,9 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       ...(audit.unavailableReason ? { unavailable: audit.unavailableReason } : {}),
     })
   }
-  const directory = new ChatDirectory(join(home, 'chats.json'), logger)
   // 通道适配器：飞书的消费、归一化、富化、渲染、回执、文档与凭据全部收口到这里。
   const feishuChannel = createFeishuChannel({
-    config: config.feishu,
+    config: feishuConfig,
     reaction: config.feishu.reaction,
     runner: larkRunner,
     directory,
@@ -1395,6 +1417,98 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   return new Promise<number>(() => {
     // 常驻直到收到信号
   })
+}
+
+/**
+ * 装配运行时身份（允许名单 + 机器人身份）。
+ *
+ * 装配失败不能挡住服务启动：这里降级成 null，调用方按原始配置继续跑，
+ * 并留下一条 error 说明原因——静默启动成功、但消息全被丢掉才是这次要消灭的故障形态。
+ */
+async function resolveRuntimeIdentitySafely(opts: {
+  config: AppConfig
+  lark: CommandRunner
+  cache: IdentityCache
+  logger: Logger
+  directory: ChatDirectory
+}): Promise<RuntimeIdentity | null> {
+  try {
+    return await resolveRuntimeIdentity({
+      config: opts.config,
+      lark: opts.lark,
+      cache: opts.cache,
+      logger: opts.logger,
+      chatNames: (chatId: string) => opts.directory.nameOf(chatId),
+    })
+  } catch (error) {
+    opts.logger.error('config:identity-resolve-failed', { detail: errorMessage(error) })
+    return null
+  }
+}
+
+/** 身份解析缓存：读写 state.db 的 identity_aliases（键带 app_id，换应用自然失效）。 */
+function identityCacheOf(store: Store): IdentityCache {
+  return {
+    get: (appId, kind, value) => {
+      const row = store.getIdentityAlias(appId, kind, value)
+      return row ? { openId: row.openId, name: row.name } : null
+    },
+    set: (appId, kind, value, openId, name) => store.setIdentityAlias(appId, kind, value, openId, name),
+  }
+}
+
+/** 没有缓存可用时用这个：既不读也不写。 */
+const NO_IDENTITY_CACHE: IdentityCache = { get: () => null, set: () => {} }
+
+/**
+ * 命令行场景的身份装配。
+ *
+ * 只读缓存、且不新建 state.db：模拟命令不该往库里写东西（dry run 的承诺），
+ * 也不该凭空多出一个库文件。库不存在时就没有缓存可用，直接查通讯录。
+ */
+async function resolveIdentityForCli(
+  home: string,
+  config: AppConfig,
+  lark: CommandRunner,
+  logger: Logger,
+): Promise<RuntimeIdentity | null> {
+  const directory = new ChatDirectory(join(home, 'chats.json'), logger)
+  const dbPath = join(home, 'state.db')
+  if (!existsSync(dbPath)) {
+    return resolveRuntimeIdentitySafely({ config, lark, cache: NO_IDENTITY_CACHE, logger, directory })
+  }
+  const store = openStore(home)
+  try {
+    return await resolveRuntimeIdentitySafely({
+      config,
+      lark,
+      cache: {
+        get: (appId, kind, value) => {
+          const row = store.getIdentityAlias(appId, kind, value)
+          return row ? { openId: row.openId, name: row.name } : null
+        },
+        set: () => { /* 只读缓存：模拟命令不往 state.db 里写 */ },
+      },
+      logger,
+      directory,
+    })
+  } finally {
+    store.close()
+  }
+}
+
+/**
+ * 把解析结果折算成策略层要注入的形态。
+ *
+ * 全局名单一个都没解析出来时不注入空集合：空集合等于断言「谁都不许」，
+ * 而实际可能只是通讯录暂时查不通（原因见 `feishu:allowlist-empty` 事件）。
+ */
+function policyResolutionOf(identity: RuntimeIdentity): PolicyResolution {
+  return {
+    ...(identity.allowedOpenIds.length > 0 ? { allowedOpenIds: identity.allowedOpenIds } : {}),
+    allowedByChatOpenIds: identity.allowedByChatOpenIds,
+    names: Object.fromEntries(identity.names),
+  }
 }
 
 function createLogger(home: string, output: CliIo, echo = true): Logger {

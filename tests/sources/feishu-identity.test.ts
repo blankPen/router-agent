@@ -5,8 +5,11 @@ import {
   maskEmail,
   parseBatchGetId,
   parseContactUser,
+  resolveBotIdentity,
+  resolveRuntimeIdentity,
   type IdentityCache,
 } from '../../src/sources/feishu-identity.js'
+import { chatEntry, defaultConfig, type AppConfig, type FeishuSettings } from '../../src/config.js'
 import type { CommandRunner } from '../../src/infra/process.js'
 import type { Logger } from '../../src/infra/logger.js'
 
@@ -478,5 +481,270 @@ describe('解析日志', () => {
     expect(deferred?.level).toBe('warn')
     expect(deferred?.extra?.entry).toBe('p***@dewu.com')
     expect(JSON.stringify(events)).not.toContain('pengzhen02@dewu.com')
+  })
+})
+
+/** 群成员列表的返回：机器人条目带 app_id。 */
+const MEMBERS = (bots: Record<string, unknown>[] = [], users: Record<string, unknown>[] = []): Reply => ({
+  code: 0,
+  stdout: JSON.stringify({ ok: true, data: { users, bots } }),
+  stderr: '',
+})
+
+/** 造一个只改了飞书段的配置。 */
+function appConfig(feishu: Partial<FeishuSettings> = {}): AppConfig {
+  const base = defaultConfig()
+  return { ...base, feishu: { ...base.feishu, ...feishu } }
+}
+
+describe('机器人身份自动识别', () => {
+  it('群成员里 app_id 匹配的机器人被识别出来', async () => {
+    const runner = makeRunner(() => MEMBERS([{ member_id: 'ou_bot', name: 'Pz小助手', app_id: 'cli_a' }]))
+    const { events, logger } = captureLogger()
+
+    const bot = await resolveBotIdentity({ appId: 'cli_a', chatIds: ['oc_1'], lark: runner, logger })
+
+    expect(runner.calls[0]).toEqual(['im', '+chat-members-list', '--chat-id', 'oc_1', '--as', 'bot', '--format', 'json'])
+    expect(bot.botOpenIds).toEqual(['ou_bot'])
+    expect(bot.botNames).toEqual(['Pz小助手'])
+    expect(bot.resolved).toBe(true)
+    const resolved = events.find(event => event.message === 'feishu:bot-identity-resolved')
+    expect(resolved?.level).toBe('info')
+    expect(resolved?.extra).toMatchObject({ bot: 'ou_bot', name: 'Pz小助手' })
+  })
+
+  it('群成员里没有匹配 appId 的机器人时判定为未识别并说明原因', async () => {
+    const runner = makeRunner(() => MEMBERS(
+      [{ member_id: 'ou_other_bot', name: '别的机器人', app_id: 'cli_other' }],
+      [{ member_id: 'ou_alice', name: '阿振' }],
+    ))
+    const { events, logger } = captureLogger()
+
+    const bot = await resolveBotIdentity({ appId: 'cli_a', chatIds: ['oc_1'], lark: runner, logger })
+
+    expect(bot.resolved).toBe(false)
+    expect(bot.botOpenIds).toEqual([])
+    expect(bot.botNames).toEqual([])
+    expect(bot.detail).toContain('oc_1')
+    expect(bot.detail).toContain('cli_a')
+    expect(bot.detail).toContain('没找到')
+    const failed = events.find(event => event.message === 'feishu:bot-identity-failed')
+    expect(failed?.level).toBe('error')
+    expect(failed?.extra?.detail).toContain('没找到')
+  })
+
+  it('读取群成员抛异常时判定为未识别并带上原因', async () => {
+    const runner = makeRunner(() => { throw new Error('spawn lark-cli ENOENT') })
+
+    const bot = await resolveBotIdentity({ appId: 'cli_a', chatIds: ['oc_1'], lark: runner })
+
+    expect(bot.resolved).toBe(false)
+    expect(bot.detail).toContain('spawn lark-cli ENOENT')
+  })
+
+  it('lark-cli 非零退出时判定为未识别并带上 stderr', async () => {
+    const runner = makeRunner(() => ({ code: 1, stdout: '', stderr: 'permission denied' }))
+
+    const bot = await resolveBotIdentity({ appId: 'cli_a', chatIds: ['oc_1'], lark: runner })
+
+    expect(bot.resolved).toBe(false)
+    expect(bot.detail).toContain('permission denied')
+  })
+
+  it('多个群的结果取并集', async () => {
+    const runner = makeRunner((argv) => {
+      const chatId = argv[argv.indexOf('--chat-id') + 1]
+      if (chatId === 'oc_1') return MEMBERS([{ member_id: 'ou_bot_1', name: '小助手', app_id: 'cli_a' }])
+      return MEMBERS([{ member_id: 'ou_bot_2', name: '小助手二号', app_id: 'cli_a' }])
+    })
+
+    const bot = await resolveBotIdentity({ appId: 'cli_a', chatIds: ['oc_1', 'oc_2'], lark: runner })
+
+    expect(bot.botOpenIds).toEqual(['ou_bot_1', 'ou_bot_2'])
+    expect(bot.botNames).toEqual(['小助手', '小助手二号'])
+    expect(bot.resolved).toBe(true)
+  })
+
+  it('没有 appId 时不调用 lark-cli，直接判定为未识别', async () => {
+    const runner = makeRunner(() => { throw new Error('不该被调用') })
+    const { events, logger } = captureLogger()
+
+    const bot = await resolveBotIdentity({ appId: '', chatIds: ['oc_1'], lark: runner, logger })
+
+    expect(runner.calls).toHaveLength(0)
+    expect(bot.resolved).toBe(false)
+    expect(bot.detail).toContain('appId')
+    expect(events.find(event => event.message === 'feishu:bot-identity-failed')?.level).toBe('error')
+  })
+
+  it('没有 mention 群时不扫描也不写错误事件', async () => {
+    const runner = makeRunner(() => { throw new Error('不该被调用') })
+    const { events, logger } = captureLogger()
+
+    const bot = await resolveBotIdentity({ appId: 'cli_a', chatIds: [], lark: runner, logger })
+
+    expect(runner.calls).toHaveLength(0)
+    expect(bot.resolved).toBe(false)
+    expect(events.find(event => event.message === 'feishu:bot-identity-failed')).toBeUndefined()
+  })
+})
+
+describe('运行时身份装配', () => {
+  const OPEN_ID = 'ou_aa94092a6fd14dd0672a7f327a00fd61'
+
+  it('全局名单里的邮箱被解析成 open_id 并带出显示名', async () => {
+    const runner = makeRunner(argv => {
+      if (isBatch(argv)) return OK_BATCH('pengzhen02@dewu.com', OPEN_ID)
+      if (requestedUserId(argv) === OPEN_ID) return OK_USER(OPEN_ID, '阿振(Pz)')
+      return MEMBERS()
+    })
+    const config = appConfig({ appId: 'cli_a', allowed: ['pengzhen02@dewu.com'] })
+
+    const identity = await resolveRuntimeIdentity({ config, lark: runner })
+
+    expect(identity.allowedOpenIds).toEqual([OPEN_ID])
+    expect(identity.names.get(OPEN_ID)).toBe('阿振(Pz)')
+    expect(identity.status.invalidCount).toBe(0)
+    expect(identity.status.pendingCount).toBe(0)
+    expect(identity.status.entries).toHaveLength(1)
+  })
+
+  it('群级名单单独解析并按群归位', async () => {
+    const runner = makeRunner(argv => {
+      if (isBatch(argv)) return OK_BATCH('pengzhen02@dewu.com', OPEN_ID)
+      if (requestedUserId(argv) === OPEN_ID) return OK_USER(OPEN_ID, '阿振(Pz)')
+      return MEMBERS()
+    })
+    const config = appConfig({
+      appId: 'cli_a',
+      chats: [chatEntry('oc_1', { mode: 'mention', allowed: ['pengzhen02@dewu.com'] })],
+    })
+
+    const identity = await resolveRuntimeIdentity({ config, lark: runner })
+
+    expect(identity.allowedByChatOpenIds).toEqual({ oc_1: [OPEN_ID] })
+    expect(identity.names.get(OPEN_ID)).toBe('阿振(Pz)')
+  })
+
+  it('群级名单配了却一个都解析不出来时写 error 事件，该群拒绝所有人', async () => {
+    const runner = makeRunner(() => ({ code: 1, stdout: '', stderr: 'permission denied' }))
+    const { events, logger } = captureLogger()
+    const config = appConfig({
+      appId: 'cli_a',
+      chats: [chatEntry('oc_1', { mode: 'mention', allowed: ['pengzhen02@dewu.com'] })],
+    })
+
+    const identity = await resolveRuntimeIdentity({ config, lark: runner, logger })
+
+    expect(identity.allowedByChatOpenIds).toEqual({ oc_1: [] })
+    const empty = events.find(event => event.message === 'feishu:chat-allowlist-empty')
+    expect(empty?.level).toBe('error')
+    expect(empty?.extra?.chat).toBe('oc_1')
+  })
+
+  it('有条目解析不出来时写 warn 事件并计数', async () => {
+    const runner = makeRunner(() => ({ code: 0, stdout: JSON.stringify({ ok: false, error: { code: '99992361', msg: 'cross app' } }), stderr: '' }))
+    const { events, logger } = captureLogger()
+    const config = appConfig({ appId: 'cli_a', allowed: ['ou_82fb106b096ac2a7563f9a2a6077a44d'] })
+
+    const identity = await resolveRuntimeIdentity({ config, lark: runner, logger })
+
+    expect(identity.allowedOpenIds).toEqual([])
+    expect(identity.status.invalidCount).toBe(1)
+    const invalid = events.find(event => event.message === 'config:identity-invalid')
+    expect(invalid?.level).toBe('warn')
+    expect(invalid?.extra?.count).toBe(1)
+  })
+
+  it('手动填了 botOpenIds 时不扫描群成员', async () => {
+    const runner = makeRunner(() => { throw new Error('不该被调用') })
+    const config = appConfig({
+      appId: 'cli_a',
+      botOpenIds: ['ou_manual_bot'],
+      botNames: ['手动机器人'],
+      chats: [chatEntry('oc_1', { mode: 'mention' })],
+    })
+
+    const identity = await resolveRuntimeIdentity({ config, lark: runner })
+
+    expect(runner.calls).toHaveLength(0)
+    expect(identity.bot.botOpenIds).toEqual(['ou_manual_bot'])
+    expect(identity.bot.botNames).toEqual(['手动机器人'])
+    expect(identity.bot.resolved).toBe(true)
+  })
+
+  it('只扫描 mode=mention 的群来识别机器人身份', async () => {
+    const runner = makeRunner(() => MEMBERS([{ member_id: 'ou_bot', name: '小助手', app_id: 'cli_a' }]))
+    const config = appConfig({
+      appId: 'cli_a',
+      chats: [chatEntry('oc_all', { mode: 'all' }), chatEntry('oc_mention', { mode: 'mention' })],
+    })
+
+    const identity = await resolveRuntimeIdentity({ config, lark: runner })
+
+    const scanned = runner.calls.map(call => call[call.indexOf('--chat-id') + 1])
+    expect(scanned).toEqual(['oc_mention'])
+    expect(identity.bot.botOpenIds).toEqual(['ou_bot'])
+    expect(identity.bot.resolved).toBe(true)
+  })
+
+  it('缓存命中时不调用通讯录，名单仍然可用', async () => {
+    const runner = makeRunner(() => { throw new Error('不该被调用') })
+    const cache: IdentityCache = {
+      get: () => ({ openId: 'ou_cached', name: '阿振(Pz)' }),
+      set: () => {},
+    }
+    const config = appConfig({ appId: 'cli_a', allowed: ['pengzhen02@dewu.com'] })
+
+    const identity = await resolveRuntimeIdentity({ config, lark: runner, cache })
+
+    expect(runner.calls).toHaveLength(0)
+    expect(identity.allowedOpenIds).toEqual(['ou_cached'])
+    expect(identity.names.get('ou_cached')).toBe('阿振(Pz)')
+  })
+})
+
+describe('全局名单为空时的告警', () => {
+  it('一个都解析不出来时写 error 事件，并说明是待重试还是查无此人', async () => {
+    const runner = makeRunner(() => ({ code: 1, stdout: '', stderr: 'permission denied' }))
+    const { events, logger } = captureLogger()
+    const config = appConfig({ appId: 'cli_a', allowed: ['pengzhen02@dewu.com'] })
+
+    const identity = await resolveRuntimeIdentity({ config, lark: runner, logger })
+
+    expect(identity.allowedOpenIds).toEqual([])
+    const empty = events.find(event => event.message === 'feishu:allowlist-empty')
+    expect(empty?.level).toBe('error')
+    expect(empty?.extra?.count).toBe(1)
+    expect(String(empty?.extra?.detail)).toContain('待重试')
+    // 状态快照里能看出这条是「待重试」而不是「查无此人」
+    expect(identity.status.pendingCount).toBe(1)
+    expect(identity.status.invalidCount).toBe(0)
+  })
+
+  it('确认查无此人时 error 事件里写明是查无此人', async () => {
+    const runner = makeRunner(() => ({
+      code: 0,
+      stdout: JSON.stringify({ ok: true, data: { user_list: [{ email: 'pengzhen02@dewu.com' }] } }),
+      stderr: '',
+    }))
+    const { events, logger } = captureLogger()
+    const config = appConfig({ appId: 'cli_a', allowed: ['pengzhen02@dewu.com'] })
+
+    await resolveRuntimeIdentity({ config, lark: runner, logger })
+
+    const empty = events.find(event => event.message === 'feishu:allowlist-empty')
+    expect(empty?.level).toBe('error')
+    expect(String(empty?.extra?.detail)).toContain('查无此人')
+  })
+
+  it('名单没配时不写这个错误事件', async () => {
+    const runner = makeRunner(() => { throw new Error('不该被调用') })
+    const { events, logger } = captureLogger()
+    const config = appConfig({ appId: 'cli_a' })
+
+    await resolveRuntimeIdentity({ config, lark: runner, logger })
+
+    expect(events.find(event => event.message === 'feishu:allowlist-empty')).toBeUndefined()
   })
 })
