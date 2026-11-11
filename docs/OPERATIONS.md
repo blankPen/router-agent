@@ -53,6 +53,7 @@ Router 不做对话，只在必要时说话：
 | `feishu:ready` | 事件消费者 | — | 事件流已连上 |
 | `trigger:ingested` | Source | `id` `chat` `addressed` `threadKeys` `topic` | 用户消息进入系统；`topic=true` 表示事件带了话题 ID（omt_） |
 | `trigger:dropped` | Source | `reason` `chat` `actor` | 收到但被过滤 |
+| `trigger:admitted-unaddressed` | CLI | `chat` `actor` `keys` | 已绑定工单的话题里，名单内成员没 @ 机器人也放行处理（tk-59） |
 | `thread:created` | Engine | `threadId` `source` `chat` | 首次见到某条线程，登记规范 ID |
 | `thread:resolved` | Engine | `threadId` `rawThreadId` `triggerId` `source` | 消息自带线程标识没对上，靠别名收敛到了已有线程（排查「消息没进工单」先看这条） |
 | `thread:backfilled` / `thread:backfill-failed` | CLI | `filled` `failed` / `batch` `code` `detail` | `ra migrate threads --apply` 的回填结果 |

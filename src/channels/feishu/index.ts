@@ -11,6 +11,7 @@ import {
   normalizeFeishuEventDetailed,
   shouldSendAsText,
   type FeishuConfig,
+  type UnaddressedAdmission,
 } from '../../sources/feishu.js'
 import { createLarkRunner, larkEnv } from '../../sources/lark.js'
 import { DEFAULT_CHANNEL_ID, type ChannelAdapter, type ChannelCapabilities, type NormalizedInbound, type OutboundMessage, type SendReceipt } from '../port.js'
@@ -52,6 +53,13 @@ export interface FeishuChannelOptions {
   /** 注入点：测试里替换为假 sender/admin。 */
   sender?: FeishuSenderLike
   admin?: FeishuBotAdmin
+  /**
+   * 未 @ 机器人的消息要不要放行。
+   *
+   * `mode: mention` 的群默认只收 @；已绑定工单的话题内，名单内成员不 @ 也要触发回复，
+   * 这个判定需要 store（话题有没有绑在办工单）与 policy（谁在名单里），由装配层注入。
+   */
+  allowUnaddressed?: UnaddressedAdmission
 }
 
 /**
@@ -104,7 +112,7 @@ export class FeishuChannel implements ChannelAdapter {
     const event = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
     const chatId = String(event.chat_id ?? '')
     const targetName = this.directory?.nameOf(chatId) ?? ''
-    const result = normalizeFeishuEventDetailed(event, this.config, targetName)
+    const result = normalizeFeishuEventDetailed(event, this.config, targetName, this.opts.allowUnaddressed)
     if (!result.trigger) {
       return {
         dropped: result.dropped,

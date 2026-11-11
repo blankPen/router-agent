@@ -103,3 +103,34 @@ describe('飞书通道适配器', () => {
     expect(off.capabilities.ack).toBe(false)
   })
 })
+describe('飞书通道的未寻址放行', () => {
+  it('注入放行判定后，只 @ 模式群里没 @ 的消息也能归一化', () => {
+    const ch = new FeishuChannel({ config: cfg, runner, sender: new FakeSender(), allowUnaddressed: () => true })
+    const result = ch.normalize(evt({ chat_id: 'oc_other' }))
+    expect(result.trigger).toBeDefined()
+    expect(result.trigger?.addressed).toBe('none')
+  })
+
+  it('不注入放行判定时行为不变：没 @ 的消息被丢弃', () => {
+    const ch = new FeishuChannel({ config: cfg, runner, sender: new FakeSender() })
+    const result = ch.normalize(evt({ chat_id: 'oc_other' }))
+    expect(result.trigger).toBeUndefined()
+    expect(result.dropped).toBe('mention:required')
+  })
+
+  it('放行判定拿得到群、发送者与线程标识', () => {
+    const seen: { chatId: string; actorId: string; threadKeys: string[] }[] = []
+    const ch = new FeishuChannel({
+      config: cfg,
+      runner,
+      sender: new FakeSender(),
+      allowUnaddressed: ctx => {
+        seen.push(ctx)
+        return true
+      },
+    })
+    ch.normalize(evt({ chat_id: 'oc_other', thread_id: 'omt_topic_1' }))
+    expect(seen[0]).toMatchObject({ chatId: 'oc_other', actorId: 'ou_alice' })
+    expect(seen[0]?.threadKeys).toEqual(['omt_topic_1', 'om_100'])
+  })
+})

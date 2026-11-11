@@ -8,7 +8,7 @@ import { Command, CommanderError } from 'commander'
 import { ensureHome, loadConfig, policyOf, projectsForRuntime, replyAlwaysChatsOf, setConfigValue, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
 import { Store, type SessionMigrationState } from '../store/db.js'
 import { Engine } from '../core/engine.js'
-import { shouldAcknowledge } from '../core/policy.js'
+import { effectiveAllowed, effectiveAllowedByChat, shouldAcknowledge } from '../core/policy.js'
 import { createRuntimes } from '../worker/registry.js'
 import { AcpRuntimeAdmin } from '../worker/runtimes/acp/admin.js'
 import { readDetectionSnapshot } from '../worker/runtimes/acp/detect.js'
@@ -23,7 +23,7 @@ import { ChannelRouter } from '../channels/router.js'
 import { ChatDirectory } from '../sources/feishu-directory.js'
 import { resolveRuntimeIdentity, detailText, type IdentityCache, type IdentityStatusView, type RuntimeIdentity } from '../sources/feishu-identity.js'
 import { createLarkRunner, larkEnv } from '../sources/lark.js'
-import { parseMessageThreadIds } from '../sources/feishu.js'
+import { parseMessageThreadIds, type UnaddressedAdmission } from '../sources/feishu.js'
 import { createVisionTranscriber, type ImageTranscriber } from '../infra/vision.js'
 import { runInitWizard } from './init.js'
 import { formatChecks, runDoctor } from './doctor.js'
@@ -1347,6 +1347,27 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       ...(audit.unavailableReason ? { unavailable: audit.unavailableReason } : {}),
     })
   }
+  /**
+   * 未 @ 机器人的消息要不要放行：已绑定工单的话题内，名单内成员也触发回复（tk-59）。
+   *
+   * 两个条件同时成立才放行：话题上订阅着在办工单，且发送者在该群白名单（未配则用全局名单）内。
+   * 放行后由 agent-loop 的订阅扇出把消息投给 worker，无需再走开单研判。
+   *
+   * 名单口径必须和 gate() 一致：群级名单优先、否则全局名单，且要按解析后的 open_id 匹配
+   * （allowedOpenIds / allowedByChatOpenIds）——名单改成邮箱后，原始条目里存的是邮箱，
+   * 直接拿 allowed 去比 open_id 会永远匹配不上。
+   */
+  const allowUnaddressed: UnaddressedAdmission = ({ chatId, actorId, threadKeys }) => {
+    const policy = engine.policy()
+    const scoped = effectiveAllowedByChat(policy, chatId)
+    // 配了群名单但一个都没解析出来：该群谁都不许进，不能退回全局名单（与 gate() 同口径）。
+    if (scoped && scoped.length === 0) return false
+    const allowed = scoped ?? effectiveAllowed(policy)
+    if (!allowed.includes(actorId)) return false
+    if (!store.hasLiveTicketForThreadKeys('feishu', threadKeys)) return false
+    logger.info('trigger:admitted-unaddressed', { chat: chatId, actor: actorId, keys: threadKeys.length })
+    return true
+  }
   // 通道适配器：飞书的消费、归一化、富化、渲染、回执、文档与凭据全部收口到这里。
   const feishuChannel = createFeishuChannel({
     config: feishuConfig,
@@ -1356,6 +1377,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     transcriber: imageTranscriber,
     logger,
     env: larkEnv(),
+    allowUnaddressed,
     hooks: {
       onReady: () => logger.info('feishu:ready', {}),
       onReconnect: ({ attempt, delayMs }) => logger.warn('feishu:reconnecting', { attempt, delayMs }),

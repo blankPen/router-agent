@@ -59,8 +59,26 @@ export interface NormalizedEvent {
   addressed?: 'mention' | 'direct' | 'none'
 }
 
+/** 判断「未 @ 机器人的消息是否放行」时能拿到的上下文。 */
+export interface UnaddressedContext {
+  /** 消息所在群。 */
+  chatId: string
+  /** 发送者 open_id。 */
+  actorId: string
+  /** 消息携带的线程标识：话题 ID / 根消息 ID / 消息自身 ID。 */
+  threadKeys: string[]
+}
+
+/**
+ * 未寻址消息的放行判定；返回 true 表示这条没 @ 机器人的消息也要继续处理。
+ *
+ * 归一化阶段是纯函数，拿不到工单与白名单，只能由装配层（同时持有 store 与 policy）
+ * 注入这个只读判定：已绑定工单的话题内，名单内成员不 @ 也要触发回复（tk-59）。
+ */
+export type UnaddressedAdmission = (ctx: UnaddressedContext) => boolean
+
 /** 归一化并返回丢弃原因；正常路径用 normalizeFeishuEvent。 */
-export function normalizeFeishuEventDetailed(raw: Record<string, unknown>, cfg: FeishuConfig, chatName = ''): NormalizedEvent {
+export function normalizeFeishuEventDetailed(raw: Record<string, unknown>, cfg: FeishuConfig, chatName = '', allowUnaddressed?: UnaddressedAdmission): NormalizedEvent {
   const event = raw as FeishuEvent
   const messageId = event.message_id ?? event.id
   const chatId = event.chat_id
@@ -83,25 +101,31 @@ export function normalizeFeishuEventDetailed(raw: Record<string, unknown>, cfg: 
   if (messageType === 'interactive') return { dropped: 'card-message', chatId }
   const mediaOnly = MEDIA_MESSAGE_TYPES.has(messageType)
 
-  // 只接收 @ 的群里，未 @ 的消息不进入领域。
-  const mentionIds = (event.mentions ?? []).map(m => m.id ?? '').filter(Boolean)
-  const mentionNames = (event.mentions ?? []).map(m => m.name ?? '').filter(Boolean)
-  const mentionedBot = mentionIds.some(id => cfg.botOpenIds.includes(id)) || mentionNames.some(name => cfg.botNames.includes(name))
-  if (!isP2p && chat?.mode === 'mention' && !mentionedBot) {
-    return { dropped: 'mention:required', chatId, actorId: senderId }
-  }
-
-  const text = (event.content ?? '').trim()
-  if (!text && !mediaOnly) return { dropped: 'empty-content', chatId, actorId: senderId }
-
   // 线程归属：话题 ID 最稳定，用来把同一话题的消息收敛到一条线程。
   // 实测飞书在话题面板里直接发言时 root_id / parent_id 都为空，只剩 thread_id；
   // 只认 root_id 会把同一话题的消息拆成独立线程，导致订阅扇出丢失（见 tk-56 的「合并」）。
+  // 放在 @ 判断之前算：未寻址消息放行时也要拿线程标识去查「这个话题绑没绑工单」。
   const topicId = String(event.thread_id ?? '')
   const rootId = event.root_id ?? ''
   // 规范线程 ID 的尾段必须是 om_ 消息 ID：飞书 `+messages-reply --message-id` 只接受 om_，
   // 话题 ID（omt_）只参与归属匹配，不能写进规范 ID，否则回复会打不出去。
   const threadKey = rootId || messageId
+  // 线程标识全集：话题 ID / 根消息 ID / 消息自身 ID，任一到场都能落回同一条线程。
+  const threadKeys = uniqueKeys(topicId, rootId, messageId)
+
+  // 只接收 @ 的群里，未 @ 的消息不进入领域。
+  const mentionIds = (event.mentions ?? []).map(m => m.id ?? '').filter(Boolean)
+  const mentionNames = (event.mentions ?? []).map(m => m.name ?? '').filter(Boolean)
+  const mentionedBot = mentionIds.some(id => cfg.botOpenIds.includes(id)) || mentionNames.some(name => cfg.botNames.includes(name))
+  if (!isP2p && chat?.mode === 'mention' && !mentionedBot) {
+    // 已绑定工单的话题内，名单内成员不 @ 也要触发回复（tk-59）：由装配层注入的判定决定。
+    const admitted = allowUnaddressed?.({ chatId, actorId: senderId, threadKeys }) ?? false
+    if (!admitted) return { dropped: 'mention:required', chatId, actorId: senderId }
+  }
+
+  const text = (event.content ?? '').trim()
+  if (!text && !mediaOnly) return { dropped: 'empty-content', chatId, actorId: senderId }
+
   // 被引用消息：lark-cli 用 reply_to，飞书原始事件用 parent_id。正文不在 content 里，必须回查。
   const replyTo = event.reply_to || event.parent_id || ''
   const imageKeys = mediaOnly || messageType === 'post' ? parseImageKeysFromContent(text) : []
@@ -114,7 +138,7 @@ export function normalizeFeishuEventDetailed(raw: Record<string, unknown>, cfg: 
     source: 'feishu',
     externalId: messageId,
     threadId: `feishu:${chatId}:${threadKey}`,
-    threadKeys: uniqueKeys(topicId, rootId, messageId),
+    threadKeys,
     chatId,
     chatName,
     actorId: senderId,
@@ -133,8 +157,8 @@ export function normalizeFeishuEventDetailed(raw: Record<string, unknown>, cfg: 
 }
 
 /** 把一条飞书事件翻译成领域 Trigger；不在监听范围内的消息返回 null。 */
-export function normalizeFeishuEvent(raw: Record<string, unknown>, cfg: FeishuConfig, chatName = ''): Trigger | null {
-  return normalizeFeishuEventDetailed(raw, cfg, chatName).trigger ?? null
+export function normalizeFeishuEvent(raw: Record<string, unknown>, cfg: FeishuConfig, chatName = '', allowUnaddressed?: UnaddressedAdmission): Trigger | null {
+  return normalizeFeishuEventDetailed(raw, cfg, chatName, allowUnaddressed).trigger ?? null
 }
 
 function toIso(ms?: string): string {
