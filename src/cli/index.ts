@@ -22,7 +22,7 @@ import { ChannelRegistry } from '../channels/registry.js'
 import { ChannelRouter } from '../channels/router.js'
 import { ChatDirectory } from '../sources/feishu-directory.js'
 import { createLarkRunner, larkEnv } from '../sources/lark.js'
-import { parseMessageThreadIds } from '../sources/feishu.js'
+import { parseMessageThreadIds, type UnaddressedAdmission } from '../sources/feishu.js'
 import { createVisionTranscriber, type ImageTranscriber } from '../infra/vision.js'
 import { runInitWizard } from './init.js'
 import { formatChecks, runDoctor } from './doctor.js'
@@ -1301,6 +1301,21 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     })
   }
   const directory = new ChatDirectory(join(home, 'chats.json'), logger)
+  /**
+   * 未 @ 机器人的消息要不要放行：已绑定工单的话题内，名单内成员也触发回复（tk-59）。
+   *
+   * 两个条件同时成立才放行：话题上订阅着在办工单，且发送者在该群白名单（未配则用全局名单）内。
+   * 放行后由 agent-loop 的订阅扇出把消息投给 worker，无需再走开单研判。
+   */
+  const allowUnaddressed: UnaddressedAdmission = ({ chatId, actorId, threadKeys }) => {
+    const policy = engine.policy()
+    const scoped = policy.allowedByChat?.[chatId]
+    const allowed = scoped && scoped.length > 0 ? scoped : policy.allowed
+    if (!allowed.includes(actorId)) return false
+    if (!store.hasLiveTicketForThreadKeys('feishu', threadKeys)) return false
+    logger.info('trigger:admitted-unaddressed', { chat: chatId, actor: actorId, keys: threadKeys.length })
+    return true
+  }
   // 通道适配器：飞书的消费、归一化、富化、渲染、回执、文档与凭据全部收口到这里。
   const feishuChannel = createFeishuChannel({
     config: config.feishu,
@@ -1310,6 +1325,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     transcriber: imageTranscriber,
     logger,
     env: larkEnv(),
+    allowUnaddressed,
     hooks: {
       onReady: () => logger.info('feishu:ready', {}),
       onReconnect: ({ attempt, delayMs }) => logger.warn('feishu:reconnecting', { attempt, delayMs }),

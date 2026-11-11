@@ -1,6 +1,6 @@
 import { chatEntry } from '../../src/config.js'
 import { describe, expect, it } from 'vitest'
-import { attachQuotedMessage, FeishuSender, feishuCard, feishuCardSendCommand, feishuCreateDocCommand, feishuReactionCommand, fitIdempotencyKey, normalizeCardMarkdown, normalizeFeishuEvent, normalizeFeishuEventDetailed, parseDocumentUrl, parseMessageThreadIds, parseQuotedMessage, quotedMessageCommand, shouldSendAsText, type FeishuConfig } from '../../src/sources/feishu.js'
+import { attachQuotedMessage, FeishuSender, feishuCard, feishuCardSendCommand, feishuCreateDocCommand, feishuReactionCommand, fitIdempotencyKey, normalizeCardMarkdown, normalizeFeishuEvent, normalizeFeishuEventDetailed, parseDocumentUrl, parseMessageThreadIds, parseQuotedMessage, quotedMessageCommand, shouldSendAsText, type FeishuConfig, type UnaddressedContext } from '../../src/sources/feishu.js'
 
 const cfg: FeishuConfig = {
   chats: [chatEntry('oc_dev'), chatEntry('oc_other', { mode: 'mention' })],
@@ -507,5 +507,39 @@ describe('飞书通信日志', () => {
     expect(t).toBe(base)
     expect(logs[0]).toMatchObject({ level: 'warn', message: 'feishu:quote-fetch-failed' })
     expect(logs[0]?.extra).toMatchObject({ messageId: 'om_parent', code: 1 })
+  })
+})
+
+describe('未寻址消息放行（tk-59：已绑定工单话题内名单内成员）', () => {
+  const mentionCfg: FeishuConfig = { ...cfg, chats: [chatEntry('oc_only_at', { mode: 'mention' })] }
+
+  it('判定放行时不丢弃消息，地址类型保持 none', () => {
+    const result = normalizeFeishuEventDetailed(evt({ chat_id: 'oc_only_at', thread_id: 'omt_topic_1' }), mentionCfg, '', () => true)
+    expect(result.dropped).toBeUndefined()
+    expect(result.trigger?.addressed).toBe('none')
+  })
+
+  it('放行判定拿得到群、发送者与线程标识', () => {
+    const seen: UnaddressedContext[] = []
+    normalizeFeishuEventDetailed(evt({ chat_id: 'oc_only_at', thread_id: 'omt_topic_1' }), mentionCfg, '', ctx => {
+      seen.push(ctx)
+      return true
+    })
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toMatchObject({ chatId: 'oc_only_at', actorId: 'ou_alice' })
+    expect(seen[0]?.threadKeys).toEqual(['omt_topic_1', 'om_100'])
+  })
+
+  it('判定不放行时照旧丢弃', () => {
+    expect(normalizeFeishuEventDetailed(evt({ chat_id: 'oc_only_at' }), mentionCfg, '', () => false)).toMatchObject({ dropped: 'mention:required' })
+  })
+
+  it('没有注入判定时行为不变：只 @ 模式群仍然只收 @', () => {
+    expect(normalizeFeishuEventDetailed(evt({ chat_id: 'oc_only_at' }), mentionCfg)).toMatchObject({ dropped: 'mention:required' })
+  })
+
+  it('全量接收的群不受影响，本来就不丢弃', () => {
+    const result = normalizeFeishuEventDetailed(evt({ chat_id: 'oc_dev' }), cfg, '', () => false)
+    expect(result.dropped).toBeUndefined()
   })
 })

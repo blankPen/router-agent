@@ -621,6 +621,39 @@ export class Store {
     return { threadId: input.canonicalId, created: true }
   }
 
+  /**
+   * 只读：按外部标识反查规范 Thread ID；没有登记过别名时返回 null。
+   *
+   * 与 resolveThread 的区别：不创建线程、不写别名表，只做查询。
+   */
+  findThreadIdByAlias(source: SourceKind, alias: string): string | null {
+    const key = alias.trim()
+    if (!key) return null
+    const row = this.db
+      .prepare('SELECT thread_id FROM thread_aliases WHERE source = ? AND alias = ?')
+      .get(source, key) as Row | undefined
+    return row ? String(row.thread_id) : null
+  }
+
+  /**
+   * 只读：这些线程标识里，是否有任意一个命中「在办工单」的订阅。
+   *
+   * 用于判断「这个话题是不是已绑定工单」：工单订阅的是规范 Thread ID，
+   * 消息带的是话题 / 根消息 / 消息自身的标识，要靠别名表换算。
+   * 已关闭（stage=done）的工单不算绑定。
+   */
+  hasLiveTicketForThreadKeys(source: SourceKind, keys: string[]): boolean {
+    for (const key of keys) {
+      const threadId = this.findThreadIdByAlias(source, key)
+      if (!threadId) continue
+      for (const sub of this.listSubscriptions(threadId)) {
+        const ticket = this.getTicket(sub.ticketId)
+        if (ticket && ticket.stage !== 'done') return true
+      }
+    }
+    return false
+  }
+
   // ---------- Decision ----------
 
   insertDecision(d: DecisionRecord): void {

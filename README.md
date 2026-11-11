@@ -249,6 +249,8 @@ projects:
 
 `mode: mention` 的群必须配置 `botOpenIds`（或 `botNames`），否则识别不到「@机器人」，消息会被当作未 @ 丢弃；`allowed` 为空时 `ra doctor` 也会报必填缺失。
 
+例外：**已绑定工单的话题内**，名单内的成员（`allowed`，或该群自己的 `chats[].allowed`）不 @ 机器人也会触发处理——消息会直接投给该工单的 worker，不会新开工单。
+
 常用调整不必编辑整份文件：
 
 ```bash
