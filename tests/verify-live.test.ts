@@ -23,7 +23,7 @@ describe.runIf(LIVE)('真实环境验证', () => {
     const home = mkdtempSync(join(tmpdir(), 'ra-live-'))
     const store = new Store(':memory:')
     const config = { ...defaultConfig(), home }
-    config.policy = { acceptMode: 'auto', maxWorkers: 2, admission: { listedNotAddressed: 'inferred', unlistedAddressed: 'inferred', unlistedNotAddressed: 'ignore' } }
+    config.policy = { acceptMode: 'auto', maxWorkers: 2, admission: { listedNotAddressed: 'inferred', unlistedAddressed: 'inferred', unlistedNotAddressed: 'ignore' }, interruptedRecovery: 'auto', maxAutoRecover: 1 }
     config.feishu = { ...config.feishu, chats: [chatEntry('oc_dev')], allowed: ['ou_alice'] }
     const engine = new Engine({ store, policy: policyOf(config) })
     const model = resolvePiModelConfig({ configPath: join(home, 'config.yaml') })
@@ -86,7 +86,6 @@ describe.runIf(LIVE)('真实环境验证', () => {
     const adapter = new OrcaRuntime({
       runner: realRunner('orca'),
       workersDir: mkdtempSync(join(tmpdir(), 'ra-live-orca-')),
-      spec: 'prompt',
     })
     // 不存在的 handle 应返回 null 而不是抛错，证明 terminal list 解析路径可用
     const missing = await adapter.inspect('no-such-handle')

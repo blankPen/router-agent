@@ -21,7 +21,6 @@ import {
 export interface RuntimeDeps {
   home: string
   workersDir: string
-  spec: 'prompt' | 'agent'
   /** 已绑定 orca 的 runner。 */
   orca: CommandRunner
   /** 已绑定 claude 的 runner。 */
@@ -73,7 +72,6 @@ export function createRuntimes(config: AppConfig, deps: RuntimeDeps): RuntimeReg
   runtimes.set(ORCA_RUNTIME_ID, new OrcaRuntime({
     runner: deps.orca,
     workersDir: deps.workersDir,
-    spec: deps.spec,
     home: deps.home,
   }))
 

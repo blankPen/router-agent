@@ -94,7 +94,14 @@ export function normalizeFeishuEventDetailed(raw: Record<string, unknown>, cfg: 
   const text = (event.content ?? '').trim()
   if (!text && !mediaOnly) return { dropped: 'empty-content', chatId, actorId: senderId }
 
-  const rootId = event.root_id || messageId
+  // 线程归属：话题 ID 最稳定，用来把同一话题的消息收敛到一条线程。
+  // 实测飞书在话题面板里直接发言时 root_id / parent_id 都为空，只剩 thread_id；
+  // 只认 root_id 会把同一话题的消息拆成独立线程，导致订阅扇出丢失（见 tk-56 的「合并」）。
+  const topicId = String(event.thread_id ?? '')
+  const rootId = event.root_id ?? ''
+  // 规范线程 ID 的尾段必须是 om_ 消息 ID：飞书 `+messages-reply --message-id` 只接受 om_，
+  // 话题 ID（omt_）只参与归属匹配，不能写进规范 ID，否则回复会打不出去。
+  const threadKey = rootId || messageId
   // 被引用消息：lark-cli 用 reply_to，飞书原始事件用 parent_id。正文不在 content 里，必须回查。
   const replyTo = event.reply_to || event.parent_id || ''
   const imageKeys = mediaOnly || messageType === 'post' ? parseImageKeysFromContent(text) : []
@@ -106,7 +113,8 @@ export function normalizeFeishuEventDetailed(raw: Record<string, unknown>, cfg: 
     id: `feishu_${messageId}`,
     source: 'feishu',
     externalId: messageId,
-    threadId: `feishu:${chatId}:${rootId}`,
+    threadId: `feishu:${chatId}:${threadKey}`,
+    threadKeys: uniqueKeys(topicId, rootId, messageId),
     chatId,
     chatName,
     actorId: senderId,
@@ -133,6 +141,19 @@ function toIso(ms?: string): string {
   const value = Number(ms)
   if (!Number.isFinite(value) || value <= 0) return new Date().toISOString()
   return new Date(value).toISOString()
+}
+
+/** 去掉空串与重复项的线程标识列表；顺序即优先级。 */
+function uniqueKeys(...values: string[]): string[] {
+  const seen = new Set<string>()
+  const keys: string[] = []
+  for (const value of values) {
+    const key = value.trim()
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    keys.push(key)
+  }
+  return keys
 }
 
 /** 被引用消息的正文。飞书事件只带 parent_id，正文必须回查。 */
@@ -170,6 +191,29 @@ export function parseQuotedMessage(stdout: string, fallbackId = ''): QuotedMessa
     author: String(message.sender?.name ?? ''),
     images,
   }
+}
+
+/**
+ * 从 `+messages-mget` 的输出里取每条消息的话题 ID（`thread_id`，前缀 omt_）。
+ * 用于给存量线程回填别名：老线程用根消息 ID 当线程 ID，需要补上话题 ID 才能命中话题内直发的消息。
+ */
+export function parseMessageThreadIds(stdout: string): Map<string, string> {
+  const result = new Map<string, string>()
+  let json: unknown
+  try {
+    json = JSON.parse(stdout)
+  } catch {
+    return result
+  }
+  const root = json as Record<string, any>
+  const list = root?.data?.messages ?? root?.messages
+  if (!Array.isArray(list)) return result
+  for (const item of list as Record<string, any>[]) {
+    const id = String(item?.message_id ?? '')
+    const threadId = String(item?.thread_id ?? '')
+    if (id && threadId) result.set(id, threadId)
+  }
+  return result
 }
 
 /** text / post 两种消息取正文；其余类型（图片、文件等）没有可读文本。 */

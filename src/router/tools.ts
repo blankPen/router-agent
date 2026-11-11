@@ -173,7 +173,8 @@ export class RouterToolbox {
   /**
    * 关闭工单，并按需把 workspace 回收排进 Effects。
    * - PR 还开着时默认拒绝（Engine 的保护），只有 force 才走 stopTicket 强制关闭；
-   * - remove_workspace=false 时只结束 worker，不删 worktree。
+   * - 默认只结束 worker、保留 worktree：目录由定时任务按保留期回收，或用户手动回收；
+   * - 只有用户明确要求立即清理时才传 remove_workspace=true。
    */
   close(args: Record<string, unknown>, ctx: ToolContext): unknown {
     if (!ctx.canMutate) return { error: 'permission:not-authorized', hint: '关单要求发送人在准入名单内，且消息是 @ 机器人或私聊' }
@@ -183,7 +184,7 @@ export class RouterToolbox {
     if (!ticketId) return { error: 'router_ticket_close:missing-ticket_id' }
     const reason = String(args.reason ?? '').trim() || '用户要求关闭'
     const force = args.force === true
-    const removeWorkspace = args.remove_workspace !== false
+    const removeWorkspace = args.remove_workspace === true
 
     const before = this.store.getTicket(ticketId)
     if (!before) return { error: 'ticket:not-found' }

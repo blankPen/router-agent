@@ -7,6 +7,7 @@ import type { Engine } from '../core/engine.js'
 import { applyConfigPatch, policyOf, publicConfig, publicDefaults, requiresRestart, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
 import { InstallStartError, type AcpRuntimeAdmin } from '../worker/runtimes/acp/admin.js'
 import { isWorkerRuntimeId, normalizeRuntimeId } from '../worker/runtimes/catalog.js'
+import { ReportRejectedError } from '../worker/evidence-gate.js'
 import { ProjectSetupError, type ProjectSetupPort } from './project-setup.js'
 import type { ChannelAdmin } from '../channels/port.js'
 import type { AcceptMode } from '../core/policy.js'
@@ -305,6 +306,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       const requestedTurn = Number(body.turn)
       const turn = Number.isFinite(requestedTurn) && requestedTurn >= 0 ? requestedTurn : (latest?.turn ?? 0) + 1
       const reply = String(body.reply ?? legacyReply(body.deliverable) ?? '').trim()
+      const uiChange = optionalBoolean(body.uiChange)
 
       const payload: WorkerStateFile = {
         ticketId,
@@ -315,12 +317,21 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         ...(body.humanAction ? { humanAction: String(body.humanAction) } : {}),
         prNumber: Number(body.prNumber ?? 0) || 0,
         prUrl: String(body.prUrl ?? ''),
+        ...(uiChange !== undefined ? { uiChange } : {}),
         ...(reply ? { reply } : {}),
         ackedInputs: Array.isArray(body.ackedInputs) ? body.ackedInputs.map(String) : [],
         updatedAt: String(body.updatedAt ?? clock.now()),
       }
 
-      await opts.onReport(payload)
+      try {
+        await opts.onReport(payload)
+      } catch (error) {
+        // UI 证据门禁的可预期拒绝：回 422，而不是 500，让 worker 能按文案修正或改报 blocked。
+        if (error instanceof ReportRejectedError) {
+          return respond(res, 422, { error: error.code, message: error.message, ...error.detail })
+        }
+        throw error
+      }
       onEvent({ event: 'api:report', ticketId, state, turn, replyChars: reply.length })
       return respond(res, 201, { ok: true, ticketId, assignmentId: assignment.id, turn, state, reply: Boolean(reply) })
     }
@@ -797,6 +808,14 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+/** 上报里的三态布尔：true / false / 未声明。字符串兼容旧客户端。 */
+function optionalBoolean(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') return value
+  if (value === 'true') return true
+  if (value === 'false') return false
+  return undefined
 }
 
 /** 配置面板的读/写都用同一份口径：安全快照 + 默认值 + 配置文件路径。 */

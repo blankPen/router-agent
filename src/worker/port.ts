@@ -142,6 +142,22 @@ export interface AgentOutput {
   source?: string
 }
 
+/**
+ * 被中断的一轮执行。
+ *
+ * 运行时重启后用来回答「上一轮做到哪、是不是被中途打断的」。
+ * 只有进程会随 Router 一起死的运行时（capabilities.agent.processExit=true）
+ * 才有这个概念；常驻 worker 不会因为 Router 重启而中断，不需要实现。
+ */
+export interface InterruptedTurn {
+ /** 运行时自己的轮次 id；用于去重，保证同一轮只提醒一次。 */
+ turnId: string
+ /** 已执行到哪一步的简要描述；用来生成有意义的恢复提示。 */
+ summary?: string
+ /** 中断发生时间（ISO），尽力而为。 */
+ at?: string
+}
+
 /** 兼容旧命名。 */
 export type TerminalOutput = AgentOutput
 
@@ -255,6 +271,14 @@ export interface WorkerRuntime {
   nudge?(ref: WorkerRef): Promise<void>
   /** 可选：进程重启后把仍可恢复的会话接回来；接不回返回 false，不算丢失。 */
   reattach?(ref: WorkerRef): Promise<boolean>
+  /**
+   * 可选：查询上一轮是否被中途打断。
+   *
+   * 只有 worker 进程会随 Router 一起死的运行时（capabilities.agent.processExit=true）
+   * 才需要实现：这类运行时重启后「上一轮」确实可能停在半路。
+   * 返回 null 表示「没有被打断的轮次」或「判断不了」，不触发任何恢复动作。
+   */
+  interruptedTurn?(ref: WorkerRef): Promise<InterruptedTurn | null>
   /** 可选：结构化活性；返回 null 表示「无法判断」，不是「已丢失」。 */
   status?(ref: WorkerRef): Promise<AgentStatus | null>
   /** 可选：输出尾部；没有则巡检跳过这一路。 */

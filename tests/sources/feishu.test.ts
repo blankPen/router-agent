@@ -1,6 +1,6 @@
 import { chatEntry } from '../../src/config.js'
 import { describe, expect, it } from 'vitest'
-import { attachQuotedMessage, FeishuSender, feishuCard, feishuCardSendCommand, feishuCreateDocCommand, feishuReactionCommand, fitIdempotencyKey, normalizeCardMarkdown, normalizeFeishuEvent, normalizeFeishuEventDetailed, parseDocumentUrl, parseQuotedMessage, quotedMessageCommand, shouldSendAsText, type FeishuConfig } from '../../src/sources/feishu.js'
+import { attachQuotedMessage, FeishuSender, feishuCard, feishuCardSendCommand, feishuCreateDocCommand, feishuReactionCommand, fitIdempotencyKey, normalizeCardMarkdown, normalizeFeishuEvent, normalizeFeishuEventDetailed, parseDocumentUrl, parseMessageThreadIds, parseQuotedMessage, quotedMessageCommand, shouldSendAsText, type FeishuConfig } from '../../src/sources/feishu.js'
 
 const cfg: FeishuConfig = {
   chats: [chatEntry('oc_dev'), chatEntry('oc_other', { mode: 'mention' })],
@@ -153,6 +153,60 @@ describe('飞书事件归一化', () => {
   it('时间戳转成 ISO，非法时间回退到当前时间', () => {
     expect(normalizeFeishuEvent(evt(), cfg)!.receivedAt).toMatch(/^20\d\d-\d\d-\d\dT/)
     expect(normalizeFeishuEvent(evt({ create_time: 'abc' }), cfg)!.receivedAt).toMatch(/^20\d\d-/)
+  })
+})
+
+describe('线程归属（话题 ID 参与别名收敛）', () => {
+  it('话题内直接回复：只有 thread_id、没有 root_id，话题 ID 也要带进别名', () => {
+    // 实测飞书：在话题面板里直接发言时 root_id / parent_id 都为空，只有 thread_id。
+    // 规范 ID 仍用可回复的消息 ID，话题 ID 交给 Store 别名收敛到已有线程。
+    const t = normalizeFeishuEvent(evt({ thread_id: 'omt_topic_1' }), cfg)!
+    expect(t.threadId).toBe('feishu:oc_dev:om_100')
+    expect(t.threadKeys).toEqual(['omt_topic_1', 'om_100'])
+  })
+
+  it('话题内引用回复：别名同时登记话题 ID 与被引用消息', () => {
+    const t = normalizeFeishuEvent(evt({ thread_id: 'omt_topic_1', root_id: 'om_quoted', parent_id: 'om_quoted' }), cfg)!
+    expect(t.threadId).toBe('feishu:oc_dev:om_quoted')
+    expect(t.threadKeys).toEqual(['omt_topic_1', 'om_quoted', 'om_100'])
+  })
+
+  it('普通群引用回复：没有 thread_id 时按 root_id 归并', () => {
+    const t = normalizeFeishuEvent(evt({ root_id: 'om_root' }), cfg)!
+    expect(t.threadId).toBe('feishu:oc_dev:om_root')
+    expect(t.threadKeys).toEqual(['om_root', 'om_100'])
+  })
+
+  it('没有 thread_id 也没有 root_id：消息自身即线程根', () => {
+    const t = normalizeFeishuEvent(evt(), cfg)!
+    expect(t.threadId).toBe('feishu:oc_dev:om_100')
+    expect(t.threadKeys).toEqual(['om_100'])
+  })
+
+  it('线程标识去重：root_id 与 message_id 相同时不重复登记', () => {
+    const t = normalizeFeishuEvent(evt({ root_id: 'om_100' }), cfg)!
+    expect(t.threadKeys).toEqual(['om_100'])
+  })
+})
+
+describe('线程标识回查', () => {
+  it('从 mget 输出里取每条消息的 thread_id', () => {
+    const map = parseMessageThreadIds(JSON.stringify({
+      ok: true,
+      data: {
+        messages: [
+          { message_id: 'om_a', thread_id: 'omt_1' },
+          { message_id: 'om_b' },
+          { message_id: 'om_c', thread_id: 'omt_2' },
+        ],
+      },
+    }))
+    expect([...map.entries()]).toEqual([['om_a', 'omt_1'], ['om_c', 'omt_2']])
+  })
+
+  it('输出不是 JSON 或没有 messages 时返回空表，不抛错', () => {
+    expect(parseMessageThreadIds('not json').size).toBe(0)
+    expect(parseMessageThreadIds(JSON.stringify({ ok: true, data: {} })).size).toBe(0)
   })
 })
 

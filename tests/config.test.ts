@@ -27,15 +27,17 @@ describe('全局状态目录与配置', () => {
     for (const sub of ['logs', 'workers']) expect(existsSync(join(dir, sub))).toBe(true)
     const text = readFileSync(join(dir, 'config.yaml'), 'utf8')
     expect(text).toContain('acceptMode')
-    expect(text).toContain('workerSpec')
+    expect(text).toContain('runtime')
   })
 
-  it('没有配置时使用默认值：auto + 并发 4 + prompt 模式 + orca 运行时', () => {
+  it('没有配置时使用默认值：auto + 并发 4 + orca 运行时', () => {
     const cfg = loadConfig(home())
     expect(cfg.policy.acceptMode).toBe('auto')
     expect(cfg.policy.maxWorkers).toBe(4)
+    expect(cfg.policy.interruptedRecovery).toBe('auto')
+    expect(cfg.policy.maxAutoRecover).toBe(1)
     expect(cfg.feishu.reaction).toBe('Typing')
-    expect(cfg.workerSpec.mode).toBe('prompt')
+    expect(cfg.worker.evidence.ui).toBe('warn')
     expect(cfg.runtime.default).toBe('orca')
   })
 
@@ -69,8 +71,9 @@ describe('全局状态目录与配置', () => {
       'policy:',
       '  acceptMode: observe',
       '  maxWorkers: 2',
-      'workerSpec:',
-      '  mode: agent',
+      'worker:',
+      '  evidence:',
+      '    ui: enforce',
       'feishu:',
       '  chats: [oc_a]',
       '  otherChats: [oc_b]',
@@ -82,20 +85,42 @@ describe('全局状态目录与配置', () => {
     ].join('\n'))
     const cfg = loadConfig(dir)
     expect(cfg.policy.acceptMode).toBe('observe')
-    expect(cfg.workerSpec.mode).toBe('agent')
     expect(cfg.server.port).toBe(3999)
+    expect(cfg.policy.maxWorkers).toBe(2)
+    expect(cfg.worker.evidence.ui).toBe('enforce')
     expect(cfg.feishu.chats).toEqual([chatEntry('oc_a'), chatEntry('oc_b', { mode: 'mention' })])
   })
 
-  it('非法 acceptMode / mode / port 回退到默认值而不是崩溃', () => {
+  it('非法 acceptMode / port 回退到默认值而不是崩溃', () => {
     const dir = home()
     ensureHome(dir)
     const { writeFileSync } = require('node:fs') as typeof import('node:fs')
-    writeFileSync(join(dir, 'config.yaml'), ['policy:', '  acceptMode: yolo', 'workerSpec:', '  mode: magic', 'server:', '  port: abc'].join('\n'))
+    writeFileSync(join(dir, 'config.yaml'), ['policy:', '  acceptMode: yolo', 'server:', '  port: abc'].join('\n'))
     const cfg = loadConfig(dir)
     expect(cfg.policy.acceptMode).toBe('auto')
-    expect(cfg.workerSpec.mode).toBe('prompt')
     expect(cfg.server.port).toBe(defaultConfig().server.port)
+  })
+
+  it('interruptedRecovery 可配置，非法值回退到 auto', () => {
+    const dir = home()
+    ensureHome(dir)
+    writeFileSync(
+      join(dir, 'config.yaml'),
+      ['policy:', '  interruptedRecovery: notify', '  maxAutoRecover: 3'].join('\n'),
+    )
+    const cfg = loadConfig(dir)
+    expect(cfg.policy.interruptedRecovery).toBe('notify')
+    expect(cfg.policy.maxAutoRecover).toBe(3)
+
+    const bad = home()
+    ensureHome(bad)
+    writeFileSync(
+      join(bad, 'config.yaml'),
+      ['policy:', '  interruptedRecovery: whatever', '  maxAutoRecover: -5'].join('\n'),
+    )
+    const fallback = loadConfig(bad)
+    expect(fallback.policy.interruptedRecovery).toBe('auto')
+    expect(fallback.policy.maxAutoRecover).toBe(1)
   })
 
   it('配置映射成 Policy：版本号随关键字段变化', () => {
@@ -230,9 +255,9 @@ describe('全局状态目录与配置', () => {
     expect(cfg.feishu.reaction).toBe('OnIt')
     expect(setConfigValue(cfg, 'feishu.reaction', '')).toBe(true)
     expect(cfg.feishu.reaction).toBe('')
-    expect(setConfigValue(cfg, 'workerSpec.mode', 'agent')).toBe(true)
-    expect(cfg.workerSpec.mode).toBe('agent')
-    expect(setConfigValue(cfg, 'workerSpec.mode', 'magic')).toBe(false)
+    expect(setConfigValue(cfg, 'worker.evidence.ui', 'enforce')).toBe(true)
+    expect(cfg.worker.evidence.ui).toBe('enforce')
+    expect(setConfigValue(cfg, 'worker.evidence.ui', 'magic')).toBe(false)
     expect(setConfigValue(cfg, 'llm.api', 'anthropic-messages')).toBe(true)
     expect(cfg.llm?.api).toBe('anthropic-messages')
     expect(setConfigValue(cfg, 'llm.api', 'bogus')).toBe(false)
@@ -685,5 +710,44 @@ describe('配置链路日志', () => {
     const entry = logs.find(log => log.message === 'config:invalid-security-override')
     expect(entry?.level).toBe('error')
     expect(entry?.extra?.keys).toEqual(['allowNetwork'])
+  })
+})
+
+describe('关单后的工作区回收配置', () => {
+  it('默认保留 24 小时、每 30 分钟扫描一次', () => {
+    const cfg = loadConfig(home())
+    expect(cfg.workspace).toMatchObject({ enabled: true, keepHours: 24, sweepMinutes: 30 })
+  })
+
+  it('YAML 覆盖 workspace 段后能读回', () => {
+    const dir = home()
+    ensureHome(dir)
+    const { writeFileSync } = require('node:fs') as typeof import('node:fs')
+    writeFileSync(join(dir, 'config.yaml'), [
+      'workspace:',
+      '  enabled: false',
+      '  keepHours: 6',
+      '  sweepMinutes: 10',
+    ].join('\n'))
+    const cfg = loadConfig(dir)
+    expect(cfg.workspace.enabled).toBe(false)
+    expect(cfg.workspace.keepHours).toBe(6)
+    expect(cfg.workspace.sweepMinutes).toBe(10)
+  })
+
+  it('setConfigValue 支持 workspace.* 点路径，非法值被拒绝', () => {
+    const cfg = loadConfig(home())
+    expect(setConfigValue(cfg, 'workspace.enabled', 'false')).toBe(true)
+    expect(cfg.workspace.enabled).toBe(false)
+    expect(setConfigValue(cfg, 'workspace.enabled', 'yes')).toBe(false)
+    expect(setConfigValue(cfg, 'workspace.keepHours', '12')).toBe(true)
+    expect(cfg.workspace.keepHours).toBe(12)
+    // 0 合法：关单后下个扫描周期就回收
+    expect(setConfigValue(cfg, 'workspace.keepHours', '0')).toBe(true)
+    expect(cfg.workspace.keepHours).toBe(0)
+    expect(setConfigValue(cfg, 'workspace.keepHours', '-1')).toBe(false)
+    expect(setConfigValue(cfg, 'workspace.sweepMinutes', '15')).toBe(true)
+    expect(cfg.workspace.sweepMinutes).toBe(15)
+    expect(setConfigValue(cfg, 'workspace.sweepMinutes', '0')).toBe(false)
   })
 })

@@ -28,6 +28,13 @@ feishu:
 policy:
   acceptMode: auto     # off / observe / auto
   maxWorkers: 4
+  # worker 被服务重启打断后的恢复策略（只影响 codex-app / acp-* 这类
+  # worker 进程随 Router 一起死的运行时）：
+  #   auto   = 发中断提示后自动补一条输入，让 worker 从中断处接着做
+  #   notify = 只发中断提示，等用户回复「继续」才恢复
+  #   off    = 不处理
+  interruptedRecovery: auto
+  maxAutoRecover: 1    # 同一工单最多自动恢复几次，超出后降级为 notify
   # 准入表：按「名单内外 × 是否 @」逐格配置，默认值如下（含义见「准入规则」）
   admission:
     listedNotAddressed: inferred    # 名单内、未 @：inferred | ignore
@@ -70,7 +77,7 @@ progress:
   silenceMs: 600000    # 多久没有新上报 / 新输入才算静默
   repeatMs: 900000     # 同一静默期内重复提醒的最小间隔
 
-# 闲置工单治理：先提醒，宽限期后自动关闭并回收 workspace
+# 闲置工单治理：先提醒，宽限期后自动关闭（只停 worker，workspace 交给定时任务回收）
 retention:
   enabled: true
   idleHours: 24        # 多久没有新进展就发关单提醒
@@ -78,8 +85,11 @@ retention:
   zombieHours: 6       # 执行中但多久没上报/输出算僵尸
   sweepMinutes: 5      # 扫描间隔（分钟）
 
-workerSpec:
-  mode: prompt         # prompt | agent
+# 关单后的工作区回收：关单只停 worker，目录保留一段时间后由定时任务回收
+workspace:
+  enabled: true
+  keepHours: 24        # 关单后保留多久；0 = 下个扫描周期就回收
+  sweepMinutes: 30     # 扫描间隔（分钟）
 
 # Worker 工具策略：安全基线，runtime.options 不允许覆盖这些字段
 worker:
@@ -89,6 +99,9 @@ worker:
     shellAllow: [ra report, ra doc, git, gh, pnpm, npm, npx, node, yarn, bun,
                  python, python3, pytest, cargo, go, make, mvn, gradle]
     allowNetwork: false      # 预留字段：当前只解析，未用于收窄网络
+  # UI 证据门禁：UI 工单报 ready 时检查 PR / MR 描述里的 Before / After 对比
+  evidence:
+    ui: warn               # off=关闭 | warn=只记日志 | enforce=拦截 ready（保存后需重启）
 
 runtime:
   default: orca            # orca | claude-code | acp | acp-*（非 orca 运行时的项目必须是本地路径，见 RUNTIME.md）
@@ -122,7 +135,6 @@ server:
 ```bash
 ra config set policy.acceptMode observe   # 先观察，不开工
 ra config set policy.maxWorkers 2
-ra config set workerSpec.mode agent
 ra config edit                            # 用 $EDITOR 编辑整份配置（不是 --edit）
 ```
 
@@ -134,11 +146,14 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 |-|-|
 | `policy.acceptMode` | `off` / `observe` / `auto` |
 | `policy.maxWorkers` | 1–64 |
+| `policy.interruptedRecovery` | `auto` / `notify` / `off` |
+| `policy.maxAutoRecover` | 0–100 |
 | `policy.admission.listedNotAddressed` / `unlistedAddressed` / `unlistedNotAddressed` | 见「准入规则」 |
 | `router.timeoutMs` / `router.tokenBudget` / `router.agentDir` | 毫秒（1s–600s） / token（0=不限） / Pi 配置目录 |
 | `progress.syncMs` / `probeMs` / `silenceMs` / `repeatMs` | 毫秒；前两项 0 = 关闭 |
 | `retention.enabled` / `idleHours` / `closeGraceHours` / `zombieHours` / `sweepMinutes` | 见「闲置工单治理」 |
-| `workerSpec.mode` | `prompt` / `agent` |
+| `workspace.enabled` / `keepHours` / `sweepMinutes` | 见「关单后的工作区回收」 |
+| `worker.evidence.ui` | `off` / `warn` / `enforce`；UI 证据门禁档位（保存后需重启） |
 | `runtime.default` | `orca` / `claude-code` / `acp` / `acp-*` |
 | `server.port` | 1–65535 |
 | `feishu.appId` / `reaction` / `directMessages` / `allowed` / `bots` / `botOpenIds` / `botNames` | 字符串、布尔或逗号分隔列表 |
@@ -281,10 +296,12 @@ Web 面板的「登记项目」提供两种添加方式：
 长时间没有新进展的工单会被自动收口，避免工单和 Orca workspace 越积越多：
 
 - **24 小时没有任何新进展**（worker 上报 / 用户输入 / 派工启动）→ 在话题里发一次关单提醒；
-- **提醒后 6 小时仍无回复** → 自动关闭工单，并关闭终端、删除对应的 worktree；脏工作区不强删，会通知人工；
+- **提醒后 6 小时仍无回复** → 自动关闭工单，只停终端；对应的 workspace 保留到定时任务回收（见「关单后的工作区回收」），脏工作区不强删，会通知人工；
 - **PR 仍开着** → 只催办一次，不自动关闭；
 - **执行中但 6 小时无上报且终端无输出** → 转人工，不自动关闭；
 - **已关闭话题再次被回复** → 固定回复「工单已关闭」；回复「重新开工」会基于原工单的仓库 / 起点分支创建新工单，并带上之前描述的需求。
+
+**服务启动时不补发闲置通知**：闲置计时以服务启动时刻为基线重新开始。启动前就已经没有进展的工单，不会因为服务重启而被一次性补发提醒、催办或关单通知；它们会在启动后满 `idleHours` 时照常提醒，再满 `closeGraceHours` 后自动关闭。启动前已经提醒过、但还没到关单时间的工单同样不重复提醒，只把关单时间按新基线顺延。
 
 ```bash
 ra config set retention.enabled false        # 关闭
@@ -295,3 +312,20 @@ ra config set retention.sweepMinutes 5       # 扫描间隔
 ```
 
 `ra status` 会显示当前治理阈值；阈值改动需要重启服务后生效。
+
+## 关单后的工作区回收
+
+关单和回收 workspace 是两件事：**关单只停 worker，不删目录**。目录只会在下面两个时机被回收：
+
+- **定时任务**：关单后保留满 `keepHours`（默认 24 小时）后，由扫描任务回收；
+- **用户手动回收**：面板「清理工作区」里勾选清理，或在飞书里让 Router 调用 `router_workspace_remove`。
+
+闲置超时自动关单、PR 合并 / 关闭自动关单走的都是「保留后回收」。**人工停止工单**（面板「停止」/ `ra ticket --stop`）是用户明确表示不要这个目录，仍然立即回收。
+
+```bash
+ra config set workspace.enabled false       # 关掉定时回收，只能手动回收
+ra config set workspace.keepHours 48        # 关单后保留多久；0 = 下个扫描周期就回收
+ra config set workspace.sweepMinutes 15    # 扫描间隔（分钟）
+```
+
+`ra status` 会显示当前回收策略；`workspace.*` 改动需要重启服务后生效。

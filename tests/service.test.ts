@@ -179,7 +179,7 @@ describe('RouterService 编排', () => {
     store = new Store(':memory:')
     config = { ...defaultConfig(), home }
     config.projects = [{ name: 'acme/web', repo: 'acme/web', defaultBranch: 'main' }]
-    config.policy = { acceptMode: 'auto', maxWorkers: 2, admission: { ...DEFAULT_ADMISSION } }
+    config.policy = { acceptMode: 'auto', maxWorkers: 2, admission: { ...DEFAULT_ADMISSION }, interruptedRecovery: 'auto', maxAutoRecover: 1 }
     config.feishu = { ...config.feishu, chats: [chatEntry('oc_dev')], allowed: ['ou_alice'] }
     let n = 0
     engine = new Engine({ store, policy: policyOf(config), clock: { now: () => '2026-11-06T10:00:00.000Z' }, ids: { next: p => `${p}_${++n}` } })
@@ -440,10 +440,10 @@ describe('RouterService 编排', () => {
     const outbox = store.claimOutbox('2026-11-06T10:10:00.000Z', 10)
     expect(outbox.some(item => item.text.includes('已合并'))).toBe(true)
 
-    // PR 合并关单也要回收 workspace，不能只关单不删目录。
+    // PR 合并关单只停 worker：目录留给定时任务 / 用户手动回收。
     await service.runOnce()
     expect(runtime.stopped).toContain(assignment.handle)
-    expect(runtime.removed).toContain(`path:/tmp/${ticket.id}`)
+    expect(runtime.removed).toHaveLength(0)
   })
 
   it('PR 仍开时不关闭工单', async () => {
@@ -811,7 +811,7 @@ describe('RouterService 编排', () => {
       return ticket.id
     }
 
-    it('24 小时无进展先提醒，6 小时未回复后自动关闭并回收 workspace', async () => {
+    it('24 小时无进展先提醒，6 小时未回复后自动关闭；关单只停 worker，不删 workspace', async () => {
       const ticketId = seed()
 
       await service.sweepRetention(T0 + 24 * HOUR + 1000)
@@ -832,10 +832,10 @@ describe('RouterService 编排', () => {
       expect(texts.some(text => text.includes('24 小时没有新的进展'))).toBe(true)
       expect(texts.some(text => text.includes('已自动关闭'))).toBe(true)
 
-      // 关闭后由 Effects 回收 workspace
+      // 关闭后只停 worker，目录留给定时任务 / 用户手动回收
       await service.runOnce()
       expect(runtime.stopped).toContain('term-1')
-      expect(runtime.removed).toContain('path:/tmp/tk-1')
+      expect(runtime.removed).toHaveLength(0)
     })
 
     it('提醒还没发出去时不会自动关闭，避免用户没看到通知就被关单', async () => {
@@ -893,9 +893,8 @@ describe('RouterService 编排', () => {
       expect(store.getCursor(`retention:reminder:${ticketId}`)).toBeNull()
     })
 
-    it('workspace 有未提交改动时不强删，并通知人工处理', async () => {
+    it('关单只停 worker，目录留给定时任务 / 用户手动回收', async () => {
       const ticketId = seed()
-      runtime.removeError = 'worktree has uncommitted changes'
 
       await service.sweepRetention(T0 + 24 * HOUR + 1000)
       await service.runOnce()
@@ -903,8 +902,180 @@ describe('RouterService 编排', () => {
       expect(store.getTicket(ticketId)?.stage).toBe('done')
 
       await service.runOnce()
+      expect(runtime.stopped).toContain('term-1')
+      expect(runtime.removed).toHaveLength(0)
+    })
+
+    /** 用可控时钟重建服务，模拟「停机一段时间后重新启动」。 */
+    function restartService(at: string): RouterService {
+      return new RouterService({
+        config, store, engine, runtime, decisionEngine: new AcceptEngine(), prTracker,
+        clock: { now: () => at },
+        logger: {
+          info: (message, extra) => logs.push({ level: 'info', message, ...(extra ? { extra } : {}) }),
+          warn: (message, extra) => logs.push({ level: 'warn', message, ...(extra ? { extra } : {}) }),
+          error: (message, extra) => logs.push({ level: 'error', message, ...(extra ? { extra } : {}) }),
+        },
+        agentLoopOptions: { batchWindowMs: 0 },
+      })
+    }
+
+    it('服务启动后不补发闲置提醒：启动前就闲置的工单从启动时刻重新计时', async () => {
+      const ticketId = seed()
+
+      const startedAt = T0 + 24 * HOUR
+      const restarted = restartService(new Date(startedAt).toISOString())
+      await restarted.start()
+      restarted.stop()
+
+      // 启动后的第一轮巡检：积压的闲置工单不补发提醒。
+      await restarted.sweepRetention(startedAt + 5 * 60 * 1000)
+      expect(store.getCursor(`retention:reminder:${ticketId}`)).toBeNull()
+      expect(store.listOutbox(50).some(item => item.text.includes('24 小时没有新的进展'))).toBe(false)
+
+      // 计时从启动时刻重新开始：满 24 小时后照常提醒。
+      await restarted.sweepRetention(startedAt + 24 * HOUR + 1000)
+      expect(store.getCursor(`retention:reminder:${ticketId}`)).not.toBeNull()
+      expect(store.listOutbox(50).some(item => item.text.includes('24 小时没有新的进展'))).toBe(true)
+    })
+
+    it('服务启动前发出的提醒：不再补发，关单时间跟着启动基线重排', async () => {
+      const ticketId = seed()
+
+      // 运行期先提醒一次，并让提醒真正发出去。
+      await service.sweepRetention(T0 + 24 * HOUR + 1000)
+      await service.runOnce()
+      expect(store.getCursor(`retention:reminder:${ticketId}`)).not.toBeNull()
+
+      // 停机一天后重新启动：旧的宽限期早就过了。
+      const startedAt = T0 + 48 * HOUR
+      const restarted = restartService(new Date(startedAt).toISOString())
+      await restarted.start()
+      restarted.stop()
+
+      // 启动后的第一轮巡检：不关单，也不补发提醒。
+      await restarted.sweepRetention(startedAt + 5 * 60 * 1000)
+      expect(store.getTicket(ticketId)?.stage).not.toBe('done')
+      expect(store.getCursor(`retention:reminder:${ticketId}`)).not.toBeNull()
+      expect(store.listOutbox(50).filter(item => item.text.includes('24 小时没有新的进展'))).toHaveLength(1)
+
+      // 启动后满 24 小时仍未关单：宽限期从启动时刻重新起算。
+      await restarted.sweepRetention(startedAt + 24 * HOUR + 1000)
+      expect(store.getTicket(ticketId)?.stage).not.toBe('done')
+
+      // 启动后 24 小时提醒 + 6 小时宽限到齐：照常自动关闭。
+      await restarted.sweepRetention(startedAt + 30 * HOUR + 1000)
+      expect(store.getTicket(ticketId)?.stage).toBe('done')
+    })
+
+    it('启动时记录闲置治理计时基线，便于排查为什么没有立刻提醒', async () => {
+      const restarted = restartService(new Date(T0 + 24 * HOUR).toISOString())
+      await restarted.start()
+      restarted.stop()
+
+      const baseline = logs.find(entry => entry.message === 'retention:baseline')
+      expect(baseline).toBeTruthy()
+      expect(baseline?.extra?.baselineAt).toBe(new Date(T0 + 24 * HOUR).toISOString())
+    })
+  })
+
+  describe('关单后的工作区回收', () => {
+    const T0 = Date.parse('2026-11-06T10:00:00.000Z')
+    const HOUR = 3_600_000
+    let workdir = ''
+
+    beforeEach(() => {
+      workdir = mkdtempSync(join(tmpdir(), 'ra-ws-'))
+    })
+
+    /**
+     * 建一张「已关闭 + 工作区仍在磁盘上」的工单。
+     * closedAt 用 Engine 的 clock（固定在 T0），保留期靠 sweep 的 nowMs 控制。
+     */
+    function seedClosed(stage: 'done' | 'running' = 'done'): string {
+      const triggerId = 'rt-ws'
+      engine.ingest(makeTrigger({ id: triggerId, externalId: 'om_ws' }))
+      const outcome = engine.decide({
+        triggerId,
+        decision: 'accept',
+        strength: 'explicit',
+        reason: 'test',
+        title: '回收工单',
+        scope: '测试',
+        repo: 'acme/web',
+        branch: 'main',
+      })
+      const ticket = outcome.ticket!
+      const assignment = engine.startAssignment(ticket.id, { runtimeId: 'orca', handle: 'term-1', workdir })
+      store.updateAssignment({ ...assignment, workdir })
+      if (stage === 'done') engine.closeTicket(ticket.id, 'test')
+      return ticket.id
+    }
+
+    it('关单超过保留期后，定时任务回收 workspace', async () => {
+      seedClosed()
+
+      // 还没到保留期不动
+      await service.sweepClosedWorkspaces(T0 + 10 * HOUR)
+      expect(runtime.removed).toHaveLength(0)
+
+      // 超过保留期（默认 24 小时）才回收
+      await service.sweepClosedWorkspaces(T0 + 25 * HOUR)
+      expect(runtime.removed).toContain(`path:${workdir}`)
+      expect(runtime.stopped).toContain('term-1')
+    })
+
+    it('在办工单的工作区不会被定时任务回收', async () => {
+      seedClosed('running')
+
+      await service.sweepClosedWorkspaces(T0 + 25 * HOUR)
+      expect(runtime.removed).toHaveLength(0)
+    })
+
+    it('关掉定时回收开关后不回收目录', async () => {
+      seedClosed()
+      const offService = new RouterService({
+        config: { ...config, workspace: { ...config.workspace, enabled: false } },
+        store, engine, runtime, decisionEngine: new AcceptEngine(), prTracker,
+        clock: { now: () => '2026-11-06T10:00:10.000Z' },
+        logger: {
+          info: (message, extra) => logs.push({ level: 'info', message, ...(extra ? { extra } : {}) }),
+          warn: (message, extra) => logs.push({ level: 'warn', message, ...(extra ? { extra } : {}) }),
+          error: (message, extra) => logs.push({ level: 'error', message, ...(extra ? { extra } : {}) }),
+        },
+        agentLoopOptions: { batchWindowMs: 0 },
+      })
+
+      await offService.sweepClosedWorkspaces(T0 + 25 * HOUR)
+      expect(runtime.removed).toHaveLength(0)
+    })
+
+    it('workspace 有未提交改动时不强删，并通知人工处理', async () => {
+      seedClosed()
+      runtime.removeError = 'worktree has uncommitted changes'
+
+      await service.sweepClosedWorkspaces(T0 + 25 * HOUR)
       expect(runtime.removed).toHaveLength(0)
       expect(store.listOutbox(50).some(item => item.text.includes('未能自动回收'))).toBe(true)
+    })
+
+    it('定时回收记 workspace:sweep 汇总', async () => {
+      seedClosed()
+
+      await service.sweepClosedWorkspaces(T0 + 25 * HOUR)
+      const entry = logs.find(item => item.message === 'workspace:sweep')
+      expect(entry?.level).toBe('info')
+      expect(entry?.extra).toMatchObject({ due: 1, removed: 1, skipped: 0, keepHours: 24 })
+    })
+
+    it('定时回收异常时记 workspace:sweep-failed，不影响主流程', async () => {
+      seedClosed()
+      service.cleanupWorkspaces = async () => { throw new Error('disk down') }
+
+      await service.sweepClosedWorkspaces(T0 + 25 * HOUR)
+      const entry = logs.find(item => item.message === 'workspace:sweep-failed')
+      expect(entry?.level).toBe('warn')
+      expect(entry?.extra).toMatchObject({ message: 'disk down' })
     })
   })
 

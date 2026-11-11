@@ -72,6 +72,7 @@ export class ChannelIngress {
         return
       }
       const raw = trigger.raw as Record<string, unknown> | undefined
+      const threadKeys = trigger.threadKeys ?? []
       this.logger.info('trigger:ingested', {
         channel: this.adapter.id,
         id: trigger.id,
@@ -79,6 +80,9 @@ export class ChannelIngress {
         addressed: trigger.addressed,
         quoted: Boolean(raw?.quote),
         images: Array.isArray(raw?.images) ? raw.images.length : 0,
+        // 事件到底带了哪些线程标识：排查「消息没进工单」时先看 topic 是否为 true。
+        threadKeys: threadKeys.length,
+        topic: threadKeys.some(key => key.startsWith('omt_')),
       })
       // 纯附件在入库前已经加过，这里跳过避免重复。
       if (canAck && willReply && !needsEnrichment) this.react(trigger.externalId)

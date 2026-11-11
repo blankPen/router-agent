@@ -26,4 +26,4 @@ Router 在 `server.port`（默认 3083）上提供本地 HTTP API，供 Web 面�
 | POST | `/api/projects/register` | 本地项目登记（Orca 运行时执行 `orca repo add`） |
 | POST | `/api/projects/clone` | Git 项目：clone 到 `<RA_HOME>/repos` 并按需登记 Orca |
 
-`/api/reports` 的请求体与状态语义见 [ARCHITECTURE.md · 上报协议](ARCHITECTURE.md#上报协议)；配置补丁的字段白名单见 [CONFIGURATION.md](CONFIGURATION.md)。
+`/api/reports` 的请求体与状态语义见 [ARCHITECTURE.md · 上报协议](ARCHITECTURE.md#上报协议)；配置补丁的字段白名单见 [CONFIGURATION.md](CONFIGURATION.md)。请求体可带 `uiChange: true|false` 显式声明是否改了 UI；门禁档位为 `enforce` 且证据不足时返回 422（`error: evidence-missing` + `message` + `missing`）。

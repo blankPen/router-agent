@@ -38,7 +38,6 @@ export interface OrcaRuntimeOptions {
   runner: CommandRunner
   /** ~/.router-agent/workers */
   workersDir: string
-  spec: 'prompt' | 'agent'
   /** 状态目录；传入后 Worker 规范优先读 `<home>/specs/worker/` 下的覆盖文件。 */
   home?: string
   /** Claude Code 会话记录目录；默认 ~/.claude/projects，测试可注入临时目录。 */
@@ -207,14 +206,12 @@ export class OrcaRuntime implements WorkerRuntime {
   } as const
   private runner: CommandRunner
   private workersDir: string
-  private spec: 'prompt' | 'agent'
   private home?: string
   private claudeProjectsDir?: string
 
   constructor(opts: OrcaRuntimeOptions) {
     this.runner = opts.runner
     this.workersDir = opts.workersDir
-    this.spec = opts.spec
     this.home = opts.home
     this.claudeProjectsDir = opts.claudeProjectsDir
   }
@@ -231,7 +228,6 @@ export class OrcaRuntime implements WorkerRuntime {
     if (!repo) throw new Error('orca:missing-repo: 工单没有指定仓库，拒绝创建 worktree')
     if (!baseBranch) throw new Error('orca:missing-branch: 工单没有指定起始分支，拒绝创建 worktree')
     const prompt = ctx.brief?.contract ?? buildWorkerPrompt({
-      mode: this.spec,
       ticket: ctx.ticket,
       mandateScope: ctx.ticket.title,
       statePath,

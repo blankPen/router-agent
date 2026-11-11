@@ -52,7 +52,6 @@ describe('RuntimeRegistry', () => {
     const deps = {
       home: '/tmp/ra-home',
       workersDir: '/tmp/ra-home/workers',
-      spec: 'prompt' as const,
       orca: runner(),
       claude: runner(),
       git: runner(),
@@ -73,7 +72,6 @@ describe('RuntimeRegistry', () => {
     const registry = createRuntimes(config, {
       home: '/tmp/ra-home',
       workersDir: '/tmp/ra-home/workers',
-      spec: 'prompt' as const,
       orca: runner(),
       claude: runner(),
       git: runner(),

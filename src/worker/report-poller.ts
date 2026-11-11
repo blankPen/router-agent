@@ -20,6 +20,8 @@ const StateSchema = z.object({
   human_action: z.string().nullable().optional(),
   pr_number: z.coerce.number().int().min(0).default(0),
   pr_url: z.string().default(''),
+  /** Worker 显式声明是否改了 UI；缺省时由 Router 按改动文件推断。 */
+  ui_change: z.boolean().optional(),
   /** Worker 要发给发起人的完整回复（Markdown）。 */
   reply: z.string().optional().default(''),
   /** 旧版交付物字段，读取时拼进 reply。 */
@@ -37,6 +39,8 @@ export interface WorkerStateFile {
   humanAction?: string
   prNumber: number
   prUrl: string
+  /** Worker 显式声明是否改了 UI；缺省时由 Router 按改动文件推断。 */
+  uiChange?: boolean
   reply?: string
   ackedInputs: string[]
   updatedAt: string
@@ -139,6 +143,7 @@ export function parseStateFile(content: string, expectedTicketId?: string): { ti
       ...(data.human_action ? { humanAction: data.human_action } : {}),
       prNumber: data.pr_number,
       prUrl: data.pr_url,
+      ...(data.ui_change !== undefined ? { uiChange: data.ui_change } : {}),
       ...(reply ? { reply } : {}),
       ackedInputs: data.acked_inputs,
       updatedAt: data.updated_at,

@@ -93,6 +93,49 @@ describe('Engine', () => {
     expect(store.listSubscriptions('feishu:oc_chat:om_root').map(s => s.ticketId)).toEqual([ticket!.id])
   })
 
+  it('话题内直接回复（只有 thread_id）也能落到工单线程上', () => {
+    // 首帖：话题 ID + 自己的 message_id；规范线程 ID 用可回复的消息 ID
+    engine.ingest(makeTrigger({
+      id: 't1',
+      externalId: 'om_first',
+      threadId: 'feishu:oc_chat:om_first',
+      threadKeys: ['omt_topic', 'om_first'],
+    }))
+    const { ticket } = engine.decide({ triggerId: 't1', decision: 'accept', strength: 'explicit', reason: 'ok' })
+
+    // 话题内直发：事件只给话题 ID + 新的 message_id，没有 root_id
+    engine.ingest(makeTrigger({
+      id: 't2',
+      externalId: 'om_second',
+      text: '合并',
+      threadId: 'feishu:oc_chat:om_second',
+      threadKeys: ['omt_topic', 'om_second'],
+    }))
+
+    const stored = store.getTrigger('t2')!
+    // 靠话题 ID 别名收敛回首帖那条线程
+    expect(stored.threadId).toBe('feishu:oc_chat:om_first')
+    expect(store.listSubscriptions(stored.threadId).map(s => s.ticketId)).toEqual([ticket!.id])
+  })
+
+  it('存量线程（om_ 根）能被后续只带话题 ID 的消息命中', () => {
+    engine.ingest(makeTrigger({ id: 't1', externalId: 'om_root', threadId: 'feishu:oc_chat:om_root', threadKeys: ['om_root'] }))
+    const { ticket } = engine.decide({ triggerId: 't1', decision: 'accept', strength: 'explicit', reason: 'ok' })
+    // 存量线程的规范 ID 是 om_ 根；回填把话题 ID 登记成别名。
+    store.registerThreadAlias({ source: 'feishu', alias: 'omt_topic', threadId: 'feishu:oc_chat:om_root', createdAt: clock.now() })
+
+    engine.ingest(makeTrigger({
+      id: 't2',
+      externalId: 'om_second',
+      text: '合并',
+      threadId: 'feishu:oc_chat:omt_topic',
+      threadKeys: ['omt_topic', 'om_second'],
+    }))
+
+    expect(store.getTrigger('t2')!.threadId).toBe('feishu:oc_chat:om_root')
+    expect(store.listSubscriptions('feishu:oc_chat:om_root').map(s => s.ticketId)).toEqual([ticket!.id])
+  })
+
   it('ignore / stop / unavailable 不创建工单', () => {
     engine.ingest(makeTrigger({ id: 't1', externalId: 'e1' }))
     engine.ingest(makeTrigger({ id: 't2', externalId: 'e2' }))

@@ -76,6 +76,28 @@ runtime:
 - 原生处理 `item/commandExecution/requestApproval`、`item/fileChange/requestApproval`、`item/permissions/requestApproval` 等审批请求；
 - threadId 同时写入 `meta.handle` / `meta.sessionId`，Web 面板会显示「Codex 打开」按钮，用 `codex://threads/<threadId>` 在 Codex 桌面端打开同一 thread。
 
+### 重启后被中断的任务怎么恢复
+
+`codex-app` 的 app-server 是 Router 的子进程，**Router 重启会把正在跑的那一轮一起带走**。
+会话上下文不会丢（Codex 从磁盘 rollout 重建），但**任务本身停住了**，需要恢复动作接着做。
+
+Router 用 `thread/turns/list` 读回最后一轮的状态：被打断的那轮状态是 `interrupted`，
+这是一个精确信号，不需要靠时间窗口猜。恢复策略由 `policy.interruptedRecovery` 控制：
+
+| 值 | 行为 |
+| --- | --- |
+| `auto`（默认） | 发中断提示后，自动补一条 `kind=retry` 的输入，让 worker 检查现场并接着做完；同时发恢复提示 |
+| `notify` | 只发中断提示，等用户回复「继续」才恢复 |
+| `off` | 不处理 |
+
+`policy.maxAutoRecover` 限制同一工单的自动恢复次数，超出后自动降级为 `notify`。
+中断提示里会带上被中断那一轮的执行摘要（`thread/turns/list` 的 `itemsView=full`），
+worker 能据此判断哪些步骤需要重做，避免重复写入只写了一半的文件。
+
+> 只有 worker 进程随 Router 一起死的运行时需要这套机制
+> （`capabilities.agent.processExit=true`，即 `codex-app` / `acp-*`）。
+> `orca` / `claude-code` 的 worker 活在自己的常驻服务里，Router 重启期间照常干活，不受影响。
+
 ### 二进制发现（优先 Codex App 内置）
 
 按以下顺序探测，取第一个既能跑 `codex --version`、又支持 `codex app-server` 的版本：
@@ -176,13 +198,25 @@ runtime:
 
 `worker.tools` 对 `claude-code` 生效（映射成 Claude 的 `allowedTools`）；`acp-*` 运行时的 `session/request_permission` 也按同一策略自动放行或拒绝；`codex-app` 在 `approvalPolicy: on-request` / `untrusted` 时按同一策略处理命令审批，`approvalPolicy: never` 时不再逐条审批；`orca` 运行时里 worker 的权限由 Orca 启动的 Claude Code 自身决定。安全字段只能由这里和 adapter 内置基线决定，`runtime.options` 写了同名键会直接启动失败。
 
+## UI 证据门禁
+
+`worker.evidence.ui` 控制 Worker 报 `ready` 时是否检查 PR / MR 里的 UI 对比证据：
+
+| 档位 | 行为 |
+|-|-|
+| `off` | 不检查 |
+| `warn`（默认） | 缺证据时记 `report:evidence-missing`，仍然放行 |
+| `enforce` | 缺证据时返回 422，`ra report` 退出码 1，Worker 必须补证据或改报 `blocked` |
+
+- **只拦 `ready`**：`progress` / `waiting` / `blocked` / `failed` / `dropped` 一律放行；拿不到截图时 Worker 应报 `blocked` 并在 `--human-action` 说明限制。
+- **UI 工单判定**：Worker 用 `--ui-change` 显式声明（`true` / `false`）；不声明时 Router 用 `git merge-base` 找到改动文件，命中前端扩展名或常见前端目录即视为 UI 改动。
+- **证据规则**：PR / MR 描述里必须同时出现 Before 和 After 标识，且至少有 2 个截图 / 录屏链接；只有 After 不算完整。
+- **无法判断时放行**：workdir 丢失、git 查询失败、`gh` / `glab` 查询失败或拿不到描述正文时，记 `report:evidence-unverified` 后放行，避免把「验证不了」误判成「缺证据」。
+- **兜底通道**：服务不可达时 Worker 写 `state.json`，poller 走同一门禁；命中拒绝时无法回 422，Router 会置 attention 并通知发起人，要求补齐或确认接受。
+- 修改档位后需要重启服务生效。
+
 ## Worker 规范注入
 
-`workerSpec.mode` 有两种：
+Worker 手册（`worker/spec/prompt-mode.md`）会拼进启动 prompt；非 Orca 运行时使用运行时中立的 `worker/spec/contract.md`。两者都不改项目自己的 `CLAUDE.md`。
 
-- `prompt`：把 Worker 手册拼进启动 prompt（默认，已验证可行）。
-- `agent`：只发工单，由全局 `~/.claude/agents/router-agent-worker.md` 提供规范（`ra init` 会生成）。
-
-两种模式都不改项目自己的 `CLAUDE.md`。
-
-这些规范 markdown 统一存放在状态目录的 `specs/` 下，可在 Web 面板「配置 → 规范文件」直接编辑或恢复默认。`agent` 模式的全局规范文件仍由 `ra init` 写入，修改 Worker 手册后重新执行一次 `ra init` 即可同步。
+这些规范 markdown 统一存放在状态目录的 `specs/` 下，可在 Web 面板「配置 → 规范文件」直接编辑或恢复默认；保存后对之后派出的新工单生效。

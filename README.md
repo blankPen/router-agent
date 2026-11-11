@@ -137,7 +137,7 @@ ra tickets                                             # 模拟产生的工单�
 2. `ra tickets` 出现工单，`ra ticket <id>` 能看到授权范围与强度；
 3. `orca worktree list --json`（`orca` 运行时；其它运行时用 `git worktree list`）出现 `ra-tk-<编号>-<语义slug>`，分支名为 `ra/tk-<编号>-<语义slug>`（目录名与分支名一一对应，只把 `/` 换成 `-`），对应运行时里出现 Agent 会话（Orca 为 Claude Code 终端）；
 4. Worker 执行 `ra report` 后，`ra ticket <id>` 的阶段在 `running → review/blocked` 之间变化；
-5. 合并或关闭 PR / MR 后，工单变 `done`，飞书收到一次闭环通知，对应 workspace 自动回收；闲置超时关单、面板停止也同样会回收 workspace。
+5. 合并或关闭 PR / MR 后，工单变 `done`，飞书收到一次闭环通知；对应 workspace 保留 24 小时后由定时任务回收（人工停止工单会立即回收）。
 
 </details>
 

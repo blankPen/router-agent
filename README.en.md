@@ -76,7 +76,7 @@ pnpm link --global      # then use `ra` directly; without linking, use `node bin
 
 **2 · Initialize: two ways, pick either one**
 
-Initialization results in `~/.router-agent/config.yaml` (`ra init` also writes the global worker spec). Both paths write the same config, so you can mix them and run them repeatedly.
+Initialization results in `~/.router-agent/config.yaml`. Both paths write the same config, so you can mix them and run them repeatedly.
 
 | Path | Best for | Entry point |
 |-|-|-|
@@ -129,7 +129,7 @@ For a real acceptance run, mention the bot in a chat with a small request, then 
 2. `ra tickets` shows a ticket, and `ra ticket <id>` shows its scope and strength;
 3. `orca worktree list --json` (for the `orca` runtime; use `git worktree list` for other runtimes) shows `ra-tk-<number>-<semantic slug>` with branch `ra/tk-<number>-<semantic slug>` (the directory name matches the branch, with `/` replaced by `-`), and the runtime shows an agent session (a Claude Code terminal for Orca);
 4. after the Worker runs `ra report`, the stage in `ra ticket <id>` moves between `running → review/blocked`;
-5. when the PR / MR is merged or closed, the ticket becomes `done` and Feishu gets one closure notification.
+5. when the PR / MR is merged or closed, the ticket becomes `done` and Feishu gets one closure notification; the workspace is kept for 24 hours and then reclaimed by the scheduled task (a manual stop reclaims it immediately).
 
 ## How it works
 

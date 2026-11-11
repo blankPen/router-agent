@@ -16,6 +16,7 @@ import {
   type DeliveryReceipt,
   type DiagnosticCheck,
   type InboundMessage,
+  type InterruptedTurn,
   type RuntimeCapabilities,
   type SessionEvent,
   type SessionSnapshot,
@@ -120,6 +121,15 @@ interface CodexSession {
   assistantText: string
   /** 已通过 delta 记录过的 agentMessage item，避免 completed 时重复写活动。 */
   streamedItems: Set<string>
+}
+
+/** `thread/turns/list` 返回的一轮摘要；这里只用到判断与恢复提示需要的字段。 */
+interface CodexTurnSummary {
+  id?: string
+  status?: string
+  startedAt?: number
+  error?: unknown
+  items?: Array<Record<string, unknown>>
 }
 
 const READ_ONLY_TOOLS: ToolPolicy = { fileAccess: 'read-only', shell: 'deny', allowNetwork: false }
@@ -403,6 +413,50 @@ export class CodexAppRuntime implements WorkerRuntime {
     if (session?.client.alive) return true
     if (session) this.dropSession(session)
     return (await this.revive(this.readMeta(ref.ticketId))) !== null
+  }
+
+  /**
+   * 查询最后一轮是否被中途打断。
+   *
+   * Codex 把每轮的执行记录落在磁盘 rollout 里，`thread/turns/list` 能读回
+   * 每一轮的状态。被 ra 重启打断的那一轮状态是 `interrupted` —— 这是精确信号，
+   * 不需要靠时间窗口或内存状态去猜。
+   *
+   * 只在「上一轮没跑完」时返回；正常完成 / 没有历史 / 查不到都返回 null。
+   */
+  async interruptedTurn(ref: WorkerRef): Promise<InterruptedTurn | null> {
+    const meta = this.readMeta(ref.ticketId)
+    const threadId = ref.sessionId ?? meta?.sessionId
+    if (!threadId) return null
+    const session = this.sessions.get(ref.ticketId)
+    const client = session?.client
+    if (!client?.alive) return null
+    try {
+      const response = await client.request<{ data?: CodexTurnSummary[] }>('thread/turns/list', {
+        threadId,
+        limit: 5,
+        itemsView: 'full',
+      }, this.initializeTimeoutMs)
+      const turns = Array.isArray(response?.data) ? response.data : []
+      const last = turns[0]
+      if (!last || typeof last.id !== 'string') return null
+      // 只有 interrupted 才是「被中途打断」；failed 是 worker 自己报错，交给别的路径处理。
+      if (last.status !== 'interrupted') return null
+      const summary = summarizeTurnItems(last.items)
+      return {
+        turnId: last.id,
+        ...(summary ? { summary } : {}),
+        ...(typeof last.startedAt === 'number' ? { at: new Date(last.startedAt * 1000).toISOString() } : {}),
+      }
+    } catch (error) {
+      // 查不到不算失败：只是无法判定有没有被中断，不触发任何恢复动作。
+      this.logger.warn('codex:interrupted-turn-check-failed', {
+        ticketId: ref.ticketId,
+        threadId,
+        reason: errorMessage(error),
+      })
+      return null
+    }
   }
 
   async status(ref: WorkerRef): Promise<AgentStatus | null> {
@@ -1081,4 +1135,58 @@ function toolItemOf(item: Record<string, unknown>): { name: string; text: string
     default:
       return null
   }
+}
+
+/**
+ * 把被中断那一轮的 items 压成一句人话，用作恢复提示。
+ *
+ * 目标是让 worker 知道自己「做到哪一步」，从而自己判断该不该重做——
+ * 中断的现场可能是半成品（命令写了一半文件），盲目重跑会留下重复内容。
+ */
+function summarizeTurnItems(items: unknown): string | undefined {
+  if (!Array.isArray(items) || items.length === 0) return undefined
+  const parts: string[] = []
+  for (const raw of items) {
+    if (!raw || typeof raw !== 'object') continue
+    const item = raw as Record<string, unknown>
+    const type = typeof item.type === 'string' ? item.type : ''
+    if (type === 'userMessage') {
+      const text = userMessageText(item)
+      if (text) parts.push(`要求：${text}`)
+      continue
+    }
+    if (type === 'commandExecution') {
+      const command = typeof item.command === 'string' ? item.command : ''
+      const status = typeof item.status === 'string' ? item.status : ''
+      if (command) parts.push(`执行命令${status ? `（${status}）` : ''}：${command}`)
+      continue
+    }
+    if (type === 'fileChange') {
+      const changes = Array.isArray(item.changes) ? item.changes : []
+      const paths = changes
+        .map(change => change && typeof change === 'object' ? (change as Record<string, unknown>).path : undefined)
+        .filter((path): path is string => typeof path === 'string')
+      if (paths.length > 0) parts.push(`修改文件：${paths.join('、')}`)
+      continue
+    }
+    if (type === 'agentMessage') {
+      const text = typeof item.text === 'string' ? item.text.trim() : ''
+      if (text) parts.push(`助手输出：${text}`)
+      continue
+    }
+  }
+  if (parts.length === 0) return undefined
+  return parts.slice(0, 6).join('；')
+}
+
+function userMessageText(item: Record<string, unknown>): string {
+  const content = Array.isArray(item.content) ? item.content : []
+  const texts: string[] = []
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue
+    const value = (block as Record<string, unknown>).text
+    if (typeof value === 'string' && value.trim()) texts.push(value.trim())
+  }
+  const joined = texts.join(' ')
+  return joined.length > 200 ? `${joined.slice(0, 200)}…` : joined
 }

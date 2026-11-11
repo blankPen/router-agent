@@ -74,11 +74,6 @@ const PERSONA_STYLE_OPTIONS: FieldOption[] = [
   { value: 'professional', label: 'professional · 专业' },
 ]
 
-const WORKER_MODE_OPTIONS: FieldOption[] = [
-  { value: 'prompt', label: 'prompt · 每次拼完整 prompt' },
-  { value: 'agent', label: 'agent · Agent 模式，上下文更深' },
-]
-
 /**
  * LLM Provider：Router 研判与图片转写用的大模型接入。
  *
@@ -208,13 +203,23 @@ export const SECTIONS: SectionDef[] = [
   {
     id: 'retention',
     title: '闲置治理',
-    description: '长时间没有进展的工单，先提醒、再自动关单并回收 workspace。',
+    description: '长时间没有进展的工单，先提醒、再自动关单。',
     fields: [
       { path: 'retention.enabled', label: '启用闲置治理', kind: 'switch' },
       { path: 'retention.idleHours', label: '多久没进展发提醒', kind: 'number', min: 1, max: 8_760, unit: '小时' },
       { path: 'retention.closeGraceHours', label: '提醒后多久自动关单', kind: 'number', min: 1, max: 8_760, unit: '小时' },
       { path: 'retention.zombieHours', label: '僵尸进程判定', kind: 'number', min: 1, max: 8_760, unit: '小时' },
       { path: 'retention.sweepMinutes', label: '扫描间隔', kind: 'number', min: 1, max: 1_440, unit: '分钟' },
+    ],
+  },
+  {
+    id: 'workspace',
+    title: '工作区回收',
+    description: '工单关闭后只停 worker，workspace 先保留一段时间，再由定时任务回收；也可以随时在「清理工作区」里手动回收。',
+    fields: [
+      { path: 'workspace.enabled', label: '启用定时回收', kind: 'switch' },
+      { path: 'workspace.keepHours', label: '关单后保留多久', kind: 'number', min: 0, max: 8_760, unit: '小时', hint: '0 = 下个扫描周期就回收' },
+      { path: 'workspace.sweepMinutes', label: '扫描间隔', kind: 'number', min: 1, max: 1_440, unit: '分钟' },
     ],
   },
   {
@@ -239,13 +244,23 @@ export const SECTIONS: SectionDef[] = [
     title: '派工与服务',
     description: 'Worker 执行方式与监听端口。',
     fields: [
-      { path: 'workerSpec.mode', label: 'Worker 规格模式', kind: 'select', options: WORKER_MODE_OPTIONS },
       {
         path: 'runtime.default',
         label: 'Worker 运行时',
         kind: 'select',
         options: WORKER_RUNTIMES.map(runtime => ({ value: runtime.id, label: runtime.label, hint: runtime.hint })),
         hint: '只影响新工单；已派出的工单继续使用创建时的运行时',
+      },
+      {
+        path: 'worker.evidence.ui',
+        label: 'UI 证据门禁',
+        kind: 'select',
+        options: [
+          { value: 'off', label: 'off · 关闭' },
+          { value: 'warn', label: 'warn · 只记日志' },
+          { value: 'enforce', label: 'enforce · 拦截 ready' },
+        ],
+        hint: 'UI 工单报 ready 时检查 PR / MR 是否有 Before / After 证据；修改后需重启服务',
       },
       { path: 'server.port', label: '面板端口', kind: 'number', min: 1, max: 65_535, unit: '端口' },
     ],

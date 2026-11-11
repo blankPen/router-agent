@@ -2,6 +2,15 @@ import type { Decision, Mandate, Strength, Trigger } from './model.js'
 
 export type AcceptMode = 'off' | 'observe' | 'auto'
 
+/**
+ * worker 被服务重启打断后的恢复策略。
+ *
+ * auto：自动补一条输入让 worker 从中断处接着做。
+ * notify：只发飞书提醒，等用户回复才恢复。
+ * off：完全不处理。
+ */
+export type InterruptedRecoveryMode = 'auto' | 'notify' | 'off'
+
 /** 准入表：三列分别对应「名单内未寻址 / 名单外已寻址 / 名单外未寻址」。 */
 export interface AdmissionTable {
   listedNotAddressed: 'inferred' | 'ignore'

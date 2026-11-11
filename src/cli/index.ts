@@ -23,6 +23,7 @@ import { ChannelRouter } from '../channels/router.js'
 import { ChatDirectory } from '../sources/feishu-directory.js'
 import { resolveRuntimeIdentity, detailText, type IdentityCache, type IdentityStatusView, type RuntimeIdentity } from '../sources/feishu-identity.js'
 import { createLarkRunner, larkEnv } from '../sources/lark.js'
+import { parseMessageThreadIds } from '../sources/feishu.js'
 import { createVisionTranscriber, type ImageTranscriber } from '../infra/vision.js'
 import { runInitWizard } from './init.js'
 import { formatChecks, runDoctor } from './doctor.js'
@@ -41,7 +42,6 @@ import { RouterService, type Logger } from '../service.js'
 import { EffectsProcessor } from '../core/effects.js'
 import { createApiServer, emptyIdentityStatus, type IdentityPort } from '../router/api.js'
 import { ProjectSetup } from '../router/project-setup.js'
-import { agentSpecDocument } from '../worker/spec/index.js'
 
 // 版本号以 package.json 为唯一来源（见 src/update/index.ts），`ra -v` 与更新检查共用同一个值。
 export const VERSION: string = PACKAGE_VERSION
@@ -108,8 +108,7 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
 
   withHome(program.command('init').description('交互式初始化：仓库 → 飞书凭据 → 群 → 授权成员'))
     .option('--yes', '跳过提问，只写默认配置')
-    .option('--agents-dir <dir>', 'worker 全局规范目录', join(homedir(), '.claude', 'agents'))
-    .action(async (opts: { home?: string; yes?: boolean; agentsDir?: string }) => {
+    .action(async (opts: { home?: string; yes?: boolean }) => {
       setCode(await cmdInit(homeOf(opts, output), opts, output))
     })
 
@@ -199,6 +198,7 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
     .option('--human-action <text>', 'blocked 时要人做的事')
     .option('--pr-number <n>', 'PR 编号')
     .option('--pr-url <url>', 'PR 链接')
+    .option('--ui-change [value]', '声明本次改动是否涉及 UI（true / false）；不传由 Router 按改动文件推断')
     .option('--reply <text>', '要发给发起人的完整回复：字面量 / @文件 / - 读 stdin')
     .option('--ack <id>', '确认已读的输入 ID，可重复', collect, [])
     .option('--port <n>', 'Router 端口（默认读 config/server.port 或 RA_PORT）')
@@ -214,7 +214,7 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
     })
 
   withHome(program.command('migrate [action]')
-    .description('数据迁移：migrate sessions --dry-run | --apply | --verify（人工手动执行）')
+    .description('数据迁移：migrate sessions | threads --dry-run | --apply | --verify（人工手动执行）')
     .option('--dry-run', '只读检查，不写库（默认行为）')
     .option('--apply', '执行迁移；默认要求交互确认，非交互环境需 --yes')
     .option('--verify', '迁移后校验')
@@ -311,7 +311,6 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
     runtime = createRuntimes(config, {
       home,
       workersDir: join(home, 'workers'),
-      spec: config.workerSpec.mode,
       orca: output.orca ?? realRunner('orca'),
       claude: output.claude ?? realRunner('claude'),
       git: output.git ?? realRunner('git'),
@@ -359,14 +358,30 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
   return checks.some(check => check.status === 'fail') ? 1 : 0
 }
 
-async function cmdReport(home: string, opts: ReportOptions & { port?: string }, output: CliIo): Promise<number> {
+async function cmdReport(home: string, opts: ReportOptions & { port?: string; uiChange?: boolean | string }, output: CliIo): Promise<number> {
   const config = loadConfig(home)
   const envPort = Number(output.env.RA_PORT)
   const port = Number(opts.port) > 0 ? Number(opts.port) : (Number.isFinite(envPort) && envPort > 0 ? envPort : config.server.port)
+  const { uiChange: rawUiChange, ...rest } = opts
+  const uiChange = parseUiChange(rawUiChange)
+  if (uiChange === null) {
+    output.stderr('--ui-change 只接受 true / false')
+    return 2
+  }
   return runReport(
     { home, port, stdout: output.stdout, stderr: output.stderr },
-    opts,
+    { ...rest, ...(uiChange !== undefined ? { uiChange } : {}) },
   )
+}
+
+/** `--ui-change` 不带值视为 true；带值时只认 true/false（含 yes/no/1/0）。 */
+function parseUiChange(value: boolean | string | undefined): boolean | undefined | null {
+  if (value === undefined) return undefined
+  if (value === true || value === false) return value
+  const text = String(value).trim().toLowerCase()
+  if (text === 'true' || text === 'yes' || text === '1') return true
+  if (text === 'false' || text === 'no' || text === '0') return false
+  return null
 }
 
 async function cmdDoc(_home: string, opts: { title: string; content?: string }, output: CliIo): Promise<number> {
@@ -452,7 +467,7 @@ function isPortFree(port: number): Promise<boolean> {
   })
 }
 
-async function cmdInit(home: string, opts: { yes?: boolean; agentsDir?: string }, output: CliIo): Promise<number> {
+async function cmdInit(home: string, opts: { yes?: boolean }, output: CliIo): Promise<number> {
   ensureHome(home)
   await runInitWizard({
     home,
@@ -464,12 +479,8 @@ async function cmdInit(home: string, opts: { yes?: boolean; agentsDir?: string }
     ...(output.stream ? { stream: output.stream } : {}),
   })
 
-  const agentsDir = opts.agentsDir ?? join(homedir(), '.claude', 'agents')
-  mkdirSync(agentsDir, { recursive: true })
-  writeFileSync(join(agentsDir, 'router-agent-worker.md'), agentSpecDocument(home), 'utf8')
   output.stdout('')
   output.stdout(`状态目录: ${home}`)
-  output.stdout(`worker 全局规范: ${join(agentsDir, 'router-agent-worker.md')}`)
   return 0
 }
 
@@ -490,8 +501,9 @@ async function cmdMigrate(
   opts: { dryRun?: boolean; apply?: boolean; verify?: boolean; yes?: boolean },
   output: CliIo,
 ): Promise<number> {
+  if (action === 'threads') return cmdMigrateThreads(home, opts, output)
   if (action !== 'sessions') {
-    output.stderr('用法：ra migrate sessions [--dry-run | --apply | --verify]')
+    output.stderr('用法：ra migrate <sessions|threads> [--dry-run | --apply | --verify]')
     return 2
   }
   const store = openStore(home)
@@ -564,6 +576,102 @@ async function cmdMigrate(
     // 默认与 --dry-run 都是只读。
     printSessionMigrationState(store.sessionMigrationState(), output)
     output.stdout('未写入任何数据。确认后执行：ra migrate sessions --apply')
+    return 0
+  } finally {
+    store.close()
+  }
+}
+
+/** `+messages-mget` 单次最多查 50 条消息。 */
+const MGET_BATCH = 50
+
+/**
+ * 线程别名回填：给存量线程补上话题 ID（omt_）。
+ *
+ * 老线程用根消息 ID（om_）当线程 ID；飞书在话题面板里直接发言时事件只带话题 ID，
+ * 不回填的话这类消息仍然匹配不上已有工单。只由人手动执行，默认 dry-run 不写库。
+ */
+async function cmdMigrateThreads(
+  home: string,
+  opts: { dryRun?: boolean; apply?: boolean; verify?: boolean; yes?: boolean },
+  output: CliIo,
+): Promise<number> {
+  const store = openStore(home)
+  const logger = createLogger(home, output)
+  try {
+    const total = store.listThreads('feishu').length
+    const backlog = store.threadAliasBacklog('feishu')
+
+    if (opts.verify) {
+      output.stdout(`飞书线程总数：${total}`)
+      output.stdout(`待回填话题 ID：${backlog.length}`)
+      if (backlog.length === 0) {
+        output.stdout('校验通过：所有线程都已登记话题 ID 别名。')
+        return 0
+      }
+      logger.warn('thread:backfill-incomplete', { total, pending: backlog.length })
+      output.stderr('仍有线程缺少话题 ID 别名，请执行：ra migrate threads --apply')
+      return 1
+    }
+
+    output.stdout(`飞书线程总数：${total}`)
+    output.stdout(`待回填话题 ID：${backlog.length}`)
+    if (backlog.length === 0) {
+      output.stdout('没有需要回填的线程。')
+      return 0
+    }
+    for (const thread of backlog.slice(0, 5)) output.stdout(`  ${thread.id}（根 ${thread.rootId}）`)
+    if (backlog.length > 5) output.stdout(`  ... 另有 ${backlog.length - 5} 条`)
+
+    if (!opts.apply) {
+      output.stdout('未写入任何数据。确认后执行：ra migrate threads --apply')
+      return 0
+    }
+    if (!opts.yes) {
+      const confirmed = output.prompts
+        ? await output.prompts.confirm({ message: `确认回填 ${backlog.length} 条线程的话题 ID 别名？`, default: false })
+        : false
+      if (!confirmed) {
+        output.stderr('已取消，未写入任何数据。非交互环境请显式传 --yes。')
+        return 1
+      }
+    }
+
+    // 先把每个线程的根消息 ID 登记为自身别名，保证老消息按根 ID 也能命中；INSERT OR IGNORE 幂等。
+    for (const thread of store.listThreads('feishu')) {
+      store.registerThreadAlias({ source: 'feishu', alias: thread.rootId, threadId: thread.id, createdAt: thread.createdAt })
+    }
+
+    const lark = output.lark ?? createLarkRunner()
+    const roots = backlog.map(thread => thread.rootId)
+    let filled = 0
+    let failed = 0
+    for (let i = 0; i < roots.length; i += MGET_BATCH) {
+      const batch = roots.slice(i, i + MGET_BATCH)
+      const res = await lark.run(['im', '+messages-mget', '--message-ids', batch.join(','), '--as', 'bot', '--format', 'json'])
+      if (res.code !== 0) {
+        failed += batch.length
+        logger.warn('thread:backfill-failed', { batch: batch.length, code: res.code, message: res.stderr.slice(0, 200) })
+        continue
+      }
+      const topicIds = parseMessageThreadIds(res.stdout)
+      for (const thread of backlog.filter(item => batch.includes(item.rootId))) {
+        const topicId = topicIds.get(thread.rootId)
+        if (!topicId) {
+          failed += 1
+          continue
+        }
+        store.registerThreadAlias({ source: 'feishu', alias: topicId, threadId: thread.id, createdAt: thread.createdAt })
+        filled += 1
+      }
+    }
+
+    logger.info('thread:backfilled', { filled, failed })
+    output.stdout(`回填完成：${filled} 条，失败 ${failed} 条。`)
+    if (failed > 0) {
+      output.stderr('部分线程没有查到话题 ID（消息可能已删除或无权限），这些线程仍只能按根消息 ID 归并。')
+      return 1
+    }
     return 0
   } finally {
     store.close()
@@ -716,6 +824,11 @@ function cmdStatus(home: string, output: CliIo): number {
       config.retention.enabled
         ? `闲置治理: 开启（${config.retention.idleHours}h 无进展提醒，${config.retention.closeGraceHours}h 未回复自动关闭）`
         : '闲置治理: 关闭',
+    )
+    output.stdout(
+      config.workspace.enabled
+        ? `工作区回收: 开启（关单后保留 ${config.workspace.keepHours}h，由定时任务回收）`
+        : '工作区回收: 关闭（只能手动回收）',
     )
     return 0
   } finally {
@@ -1172,7 +1285,6 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   const runtimes = createRuntimes(config, {
     home,
     workersDir: join(home, 'workers'),
-    spec: config.workerSpec.mode,
     orca: orcaRunner,
     claude: claudeRunner,
     git: gitRunner,
@@ -1298,6 +1410,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       runtime,
       runtimes,
       prTracker,
+      git: gitRunner,
       logger,
       effects,
       sender: feishuOutbox,
@@ -1334,7 +1447,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     onEvent: sink,
     ...(service
       ? {
-          onReport: (state: WorkerStateFile) => service.onWorkerState(state),
+          onReport: (state: WorkerStateFile) => service.ingestWorkerState(state),
           resumeHint: (ticketId: string) => service.resumeHint(ticketId),
         }
       : {}),
