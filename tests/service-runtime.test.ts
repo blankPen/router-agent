@@ -63,6 +63,9 @@ class FakeRuntime implements WorkerRuntime {
   starts: WorkerContext[] = []
   delivered: { handle: string; text: string }[] = []
   reattachCalls: string[] = []
+  /** 模拟「上一轮被重启打断」；null 表示没有被打断的轮次。 */
+  interrupted: { turnId: string; summary?: string } | null = null
+  interruptedCalls: string[] = []
   /** 模拟 ACP 回合未结束：始终返回 queued。 */
   deliverQueue = false
   handles = new Map<string, { lastOutputAt: string }>()
@@ -88,6 +91,10 @@ class FakeRuntime implements WorkerRuntime {
   async reattach(ref: WorkerRef | string) {
     this.reattachCalls.push(typeof ref === 'string' ? ref : ref.handle)
     return true
+  }
+  async interruptedTurn(ref: WorkerRef | string) {
+    this.interruptedCalls.push(typeof ref === 'string' ? ref : ref.handle)
+    return this.interrupted
   }
   async registerContext() {}
   async stop() {}
@@ -157,6 +164,8 @@ describe('运行时机制', () => {
   let config: AppConfig
   let service: RouterService
   let now: number
+  /** 收集服务日志，断言关键事件名与字段。 */
+  let logs: Array<{ level: string; message: string; extra?: Record<string, unknown> }>
 
   beforeEach(() => {
     now = Date.parse('2026-11-06T10:05:00.000Z')
@@ -164,17 +173,22 @@ describe('运行时机制', () => {
     store = new Store(':memory:')
     config = { ...defaultConfig(), home }
     config.projects = [{ name: 'acme/web', repo: 'acme/web', defaultBranch: 'main' }]
-    config.policy = { acceptMode: 'auto', maxWorkers: 4, admission: { ...DEFAULT_ADMISSION } }
+    config.policy = { acceptMode: 'auto', maxWorkers: 4, admission: { ...DEFAULT_ADMISSION }, interruptedRecovery: 'auto', maxAutoRecover: 1 }
     config.feishu = { ...config.feishu, chats: [chatEntry('oc_dev')], allowed: ['ou_alice'] }
     let n = 0
     engine = new Engine({ store, policy: policyOf(config), clock: { now: () => new Date(now).toISOString() }, ids: { next: p => `${p}_${++n}` } })
     runtime = new FakeRuntime()
+    logs = []
     service = new RouterService({
       config, store, engine, runtime,
       decisionEngine: acceptEngine(),
       prTracker: new NullPrTracker(),
       clock: { now: () => new Date(now).toISOString() },
-      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      logger: {
+        info: (message, extra) => { logs.push({ level: 'info', message, ...(extra ? { extra } : {}) }) },
+        warn: (message, extra) => { logs.push({ level: 'warn', message, ...(extra ? { extra } : {}) }) },
+        error: (message, extra) => { logs.push({ level: 'error', message, ...(extra ? { extra } : {}) }) },
+      },
       agentLoopOptions: { batchWindowMs: 0 },
       claudeProjectsDir: join(home, 'claude-projects'),
     })
@@ -503,6 +517,166 @@ describe('运行时机制', () => {
     expect(runtime.reattachCalls).toHaveLength(1)
     expect(runtime.starts).toHaveLength(1)
     expect(store.getAttention(ticketId)).toBeNull()
+  })
+
+  it('重启对账：worker 上一轮被中断时自动补一条 retry 输入，并发中断与恢复提示', async () => {
+    const { ticketId } = await launchOne()
+    // 只有进程随 Router 一起死的运行时才需要中断恢复。
+    runtime.capabilities.agent.processExit = true
+    runtime.status = async () => ({
+      alive: false,
+      phase: 'exited',
+      acceptingInput: true,
+      lastActivityAt: new Date(now).toISOString(),
+    })
+    runtime.interrupted = { turnId: 'turn_x', summary: '执行命令：npm test' }
+
+    await service.recover()
+
+    expect(runtime.interruptedCalls).toHaveLength(1)
+    // 自动恢复：补一条 kind=retry 的输入。
+    const inputs = store.listInputs(ticketId)
+    const retry = inputs.find(input => input.kind === 'retry')
+    expect(retry).toBeDefined()
+    expect(retry!.text).toContain('npm test')
+    expect(retry!.text).toContain('检查当前现场')
+
+    // 中断提示与恢复提示都要发出去。
+    const outbox = store.listOutbox(50)
+    const texts = outbox.map(item => item.text).join('\n')
+    expect(texts).toContain('因服务重启被中断')
+    expect(texts).toContain('已自动从中断处恢复')
+
+    // 关键事件要能在日志里查到（排查「任务为什么停了」的第一入口）。
+    const interrupted = logs.find(item => item.message === 'recover:interrupted')
+    expect(interrupted).toBeDefined()
+    expect(interrupted!.extra?.turnId).toBe('turn_x')
+    expect(interrupted!.extra?.mode).toBe('auto')
+    const resumed = logs.find(item => item.message === 'recover:auto-resume')
+    expect(resumed).toBeDefined()
+    expect(resumed!.extra?.turnId).toBe('turn_x')
+  })
+
+  it('重启对账：interruptedRecovery=notify 时只提醒，不自动补输入', async () => {
+    const { ticketId } = await launchOne()
+    config.policy.interruptedRecovery = 'notify'
+    runtime.capabilities.agent.processExit = true
+    runtime.status = async () => ({
+      alive: false,
+      phase: 'exited',
+      acceptingInput: true,
+      lastActivityAt: new Date(now).toISOString(),
+    })
+    runtime.interrupted = { turnId: 'turn_y', summary: '写入文件：a.txt' }
+
+    await service.recover()
+
+    expect(store.listInputs(ticketId).filter(input => input.kind === 'retry')).toHaveLength(0)
+    const texts = store.listOutbox(50).map(item => item.text).join('\n')
+    expect(texts).toContain('因服务重启被中断')
+    expect(texts).toContain('回复「继续」')
+    expect(texts).not.toContain('已自动从中断处恢复')
+  })
+
+  it('重启对账：同一个被中断的轮次不会重复恢复', async () => {
+    const { ticketId } = await launchOne()
+    runtime.capabilities.agent.processExit = true
+    runtime.status = async () => ({
+      alive: false,
+      phase: 'exited',
+      acceptingInput: true,
+      lastActivityAt: new Date(now).toISOString(),
+    })
+    runtime.interrupted = { turnId: 'turn_z', summary: '步骤 1' }
+
+    await service.recover()
+    const first = store.listInputs(ticketId).filter(input => input.kind === 'retry').length
+    expect(first).toBe(1)
+
+    // 再次重启：同一轮不再重复恢复。
+    await service.recover()
+    expect(store.listInputs(ticketId).filter(input => input.kind === 'retry')).toHaveLength(first)
+  })
+
+  it('重启对账：自动恢复次数用完后降级为提醒', async () => {
+    const { ticketId } = await launchOne()
+    config.policy.maxAutoRecover = 1
+    runtime.capabilities.agent.processExit = true
+    runtime.status = async () => ({
+      alive: false,
+      phase: 'exited',
+      acceptingInput: true,
+      lastActivityAt: new Date(now).toISOString(),
+    })
+    runtime.interrupted = { turnId: 'turn_1', summary: '步骤 A' }
+    await service.recover()
+    expect(store.listInputs(ticketId).filter(input => input.kind === 'retry')).toHaveLength(1)
+
+    // 换一个被中断的轮次，但自动恢复次数已经用完。
+    runtime.interrupted = { turnId: 'turn_2', summary: '步骤 B' }
+    await service.recover()
+    expect(store.listInputs(ticketId).filter(input => input.kind === 'retry')).toHaveLength(1)
+    const texts = store.listOutbox(50).map(item => item.text).join('\n')
+    expect(texts).toContain('自动恢复次数已达上限')
+  })
+
+  it('重启对账：worker 进程不随 Router 死时不触发中断恢复', async () => {
+    const { ticketId } = await launchOne()
+    // orca / claude-code 的 worker 活在自己的常驻服务里，重启期间照常干活。
+    runtime.capabilities.agent.processExit = false
+    runtime.status = async () => ({
+      alive: false,
+      phase: 'exited',
+      acceptingInput: true,
+      lastActivityAt: new Date(now).toISOString(),
+    })
+    runtime.interrupted = { turnId: 'turn_no', summary: '不该被处理' }
+
+    await service.recover()
+
+    expect(runtime.interruptedCalls).toHaveLength(0)
+    expect(store.listInputs(ticketId).filter(input => input.kind === 'retry')).toHaveLength(0)
+  })
+
+  it('重启对账：interruptedRecovery=off 时完全不处理', async () => {
+    const { ticketId } = await launchOne()
+    config.policy.interruptedRecovery = 'off'
+    runtime.capabilities.agent.processExit = true
+    runtime.status = async () => ({
+      alive: false,
+      phase: 'exited',
+      acceptingInput: true,
+      lastActivityAt: new Date(now).toISOString(),
+    })
+    runtime.interrupted = { turnId: 'turn_off', summary: '不该被处理' }
+
+    await service.recover()
+
+    expect(runtime.interruptedCalls).toHaveLength(0)
+    expect(store.listInputs(ticketId).filter(input => input.kind === 'retry')).toHaveLength(0)
+  })
+
+  it('重启对账：自动恢复投递失败时记 warn 并提示用户手动继续', async () => {
+    const { ticketId } = await launchOne()
+    runtime.capabilities.agent.processExit = true
+    runtime.status = async () => ({
+      alive: false,
+      phase: 'exited',
+      acceptingInput: true,
+      lastActivityAt: new Date(now).toISOString(),
+    })
+    runtime.interrupted = { turnId: 'turn_fail', summary: '步骤 C' }
+    // 投递队列炸了：恢复动作发不出去。
+    engine.deliverInput = () => { throw new Error('engine:closed') }
+
+    await service.recover()
+
+    const failed = logs.find(item => item.message === 'recover:auto-resume-failed')
+    expect(failed).toBeDefined()
+    expect(failed!.extra?.turnId).toBe('turn_fail')
+    expect(typeof failed!.extra?.message).toBe('string')
+    const texts = store.listOutbox(50).map(item => item.text).join('\n')
+    expect(texts).toContain('自动恢复失败')
   })
 
   it('worktree 已被删除时 PR 跟踪静默跳过，不抛错也不刷日志', async () => {

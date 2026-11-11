@@ -179,7 +179,7 @@ describe('RouterService 编排', () => {
     store = new Store(':memory:')
     config = { ...defaultConfig(), home }
     config.projects = [{ name: 'acme/web', repo: 'acme/web', defaultBranch: 'main' }]
-    config.policy = { acceptMode: 'auto', maxWorkers: 2, admission: { ...DEFAULT_ADMISSION } }
+    config.policy = { acceptMode: 'auto', maxWorkers: 2, admission: { ...DEFAULT_ADMISSION }, interruptedRecovery: 'auto', maxAutoRecover: 1 }
     config.feishu = { ...config.feishu, chats: [chatEntry('oc_dev')], allowed: ['ou_alice'] }
     let n = 0
     engine = new Engine({ store, policy: policyOf(config), clock: { now: () => '2026-11-06T10:00:00.000Z' }, ids: { next: p => `${p}_${++n}` } })

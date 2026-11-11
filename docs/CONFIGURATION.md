@@ -28,6 +28,13 @@ feishu:
 policy:
   acceptMode: auto     # off / observe / auto
   maxWorkers: 4
+  # worker 被服务重启打断后的恢复策略（只影响 codex-app / acp-* 这类
+  # worker 进程随 Router 一起死的运行时）：
+  #   auto   = 发中断提示后自动补一条输入，让 worker 从中断处接着做
+  #   notify = 只发中断提示，等用户回复「继续」才恢复
+  #   off    = 不处理
+  interruptedRecovery: auto
+  maxAutoRecover: 1    # 同一工单最多自动恢复几次，超出后降级为 notify
   # 准入表：按「名单内外 × 是否 @」逐格配置，默认值如下（含义见「准入规则」）
   admission:
     listedNotAddressed: inferred    # 名单内、未 @：inferred | ignore
@@ -134,6 +141,8 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 |-|-|
 | `policy.acceptMode` | `off` / `observe` / `auto` |
 | `policy.maxWorkers` | 1–64 |
+| `policy.interruptedRecovery` | `auto` / `notify` / `off` |
+| `policy.maxAutoRecover` | 0–100 |
 | `policy.admission.listedNotAddressed` / `unlistedAddressed` / `unlistedNotAddressed` | 见「准入规则」 |
 | `router.timeoutMs` / `router.tokenBudget` / `router.agentDir` | 毫秒（1s–600s） / token（0=不限） / Pi 配置目录 |
 | `progress.syncMs` / `probeMs` / `silenceMs` / `repeatMs` | 毫秒；前两项 0 = 关闭 |
