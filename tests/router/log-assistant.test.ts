@@ -6,6 +6,7 @@ import {
   createLogAssistant,
   ensureEvidence,
   matchSymptoms,
+  redactFields,
   ruleDiagnosis,
   selectEvidence,
   tokenize,
@@ -118,6 +119,20 @@ describe('ruleDiagnosis', () => {
   })
 })
 
+describe('redactFields', () => {
+  it('抹掉带用户消息正文的字段，保留其它字段', () => {
+    const text = redactFields({ text: '帮我改一下 README 的端口', reason: 'not-allowed', count: 3 })
+    expect(text).toContain('text=（内容已省略）')
+    expect(text).not.toContain('README')
+    expect(text).toContain('reason=not-allowed')
+    expect(text).toContain('count=3')
+  })
+
+  it('没有字段时返回空串', () => {
+    expect(redactFields(undefined)).toBe('')
+  })
+})
+
 describe('createLogAssistant', () => {
   let home: string
   let logPath: string
@@ -130,6 +145,7 @@ describe('createLogAssistant', () => {
       `${JSON.stringify({ at: '2026-11-09T10:00:00.000Z', level: 'info', message: 'feishu:ready' })}`,
       `${JSON.stringify({ at: '2026-11-09T10:01:00.000Z', level: 'warn', message: 'trigger:dropped', reason: 'not-allowed', chat: 'oc_x' })}`,
       `${JSON.stringify({ at: '2026-11-09T10:02:00.000Z', level: 'error', message: 'outbox:failed', error: 'http-500' })}`,
+      `${JSON.stringify({ at: '2026-11-09T10:03:00.000Z', level: 'info', message: 'input:queued', ticketId: 'tk-7', text: '帮我改一下 README 的端口' })}`,
     ].join('\n') + '\n', 'utf8')
   })
 
@@ -148,13 +164,17 @@ describe('createLogAssistant', () => {
   })
 
   it('配了模型时用模型总结', async () => {
-    const fetchImpl = (async () => jsonResponse({
-      choices: [{ message: { content: JSON.stringify({
-        summary: '消息被允许名单挡掉了',
-        causes: [{ title: '允许名单没解析出来', detail: 'trigger:dropped reason=not-allowed', events: ['trigger:dropped'] }],
-        actions: ['检查允许名单里的邮箱'],
-      }) } }],
-    })) as unknown as typeof fetch
+    let sent = ''
+    const fetchImpl = (async (_url: string, init?: RequestInit) => {
+      sent = String(init?.body ?? '')
+      return jsonResponse({
+        choices: [{ message: { content: JSON.stringify({
+          summary: '消息被允许名单挡掉了',
+          causes: [{ title: '允许名单没解析出来', detail: 'trigger:dropped reason=not-allowed', events: ['trigger:dropped'] }],
+          actions: ['检查允许名单里的邮箱'],
+        }) } }],
+      })
+    }) as unknown as typeof fetch
 
     const assistant = createLogAssistant({
       logPath,
@@ -167,6 +187,9 @@ describe('createLogAssistant', () => {
     expect(diagnosis.source).toBe('llm')
     expect(diagnosis.summary).toBe('消息被允许名单挡掉了')
     expect(diagnosis.causes[0]?.events).toEqual(['trigger:dropped'])
+    // 发给模型的请求里带上证据，但正文类字段要抹掉。
+    expect(sent).toContain('trigger:dropped')
+    expect(sent).toContain('（内容已省略）')
   })
 
   it('模型调用失败时降级为规则排查并说明原因', async () => {

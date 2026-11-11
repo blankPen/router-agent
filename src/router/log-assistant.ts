@@ -21,6 +21,8 @@ import { readLogs, type LogEntry } from './log-tail.js'
 export const MAX_ASSISTANT_EVIDENCE = 40
 /** 读取日志时一次回看的行数上限。 */
 const READ_LIMIT = 500
+/** 用户问题的字符上限，超出部分截断。 */
+const MAX_QUESTION_CHARS = 2_000
 
 export interface LogAssistantQuestion {
   /** 用户描述的问题。 */
@@ -38,6 +40,8 @@ export interface LogEvidence {
   message: string
   /** 事件里的关键字段摘要。 */
   detail?: string
+  /** 事件里的原始字段；发给模型前按 key 脱敏。 */
+  data?: Record<string, unknown>
 }
 
 export interface LogCause {
@@ -244,6 +248,16 @@ export function createLogAssistant(opts: LogAssistantOptions): LogAssistant {
     })
   }
 
+  // 串行化：面板并发点「分析」时排队，避免一次风暴把模型打爆。
+  let queue: Promise<unknown> = Promise.resolve()
+
+  const run = <T>(task: () => Promise<T>): Promise<T> => {
+    const next = queue.then(task, task)
+    // 队列本身吞掉异常，避免一次失败卡住后面的请求。
+    queue = next.catch(() => undefined)
+    return next
+  }
+
   return {
     llmConfigured(): boolean {
       return llmReady
@@ -253,49 +267,51 @@ export function createLogAssistant(opts: LogAssistantOptions): LogAssistant {
       return logSuggestions()
     },
 
-    async diagnose(question: LogAssistantQuestion): Promise<LogDiagnosis> {
-      const text = question.question.trim()
-      const read = readLogs(opts.logPath, { limit: READ_LIMIT })
-      const entries = read.entries
-      // 助手与日志页共用同一套过滤：用户看到的范围就是排查范围。
-      const scoped = filterEntries(entries, {
-        ...(question.level ? { level: question.level } : {}),
-        ...(question.keyword ? { keyword: question.keyword } : {}),
-      })
-      const hits = matchSymptoms(scoped)
-      const evidence = selectEvidence(scoped, { question: text })
-      // 结论里提到的事件必须在证据里看得见，否则用户无法自行核对。
-      const withEvidence = ensureEvidence(evidence, scoped, hits.flatMap(hit => hit.events))
+    diagnose(question: LogAssistantQuestion): Promise<LogDiagnosis> {
+      return run(async () => {
+        const text = question.question.trim().slice(0, MAX_QUESTION_CHARS)
+        const read = readLogs(opts.logPath, { limit: READ_LIMIT })
+        const entries = read.entries
+        // 助手与日志页共用同一套过滤：用户看到的范围就是排查范围。
+        const scoped = filterEntries(entries, {
+          ...(question.level ? { level: question.level } : {}),
+          ...(question.keyword ? { keyword: question.keyword } : {}),
+        })
+        const hits = matchSymptoms(scoped)
+        const evidence = selectEvidence(scoped, { question: text })
+        // 结论里提到的事件必须在证据里看得见，否则用户无法自行核对。
+        const withEvidence = ensureEvidence(evidence, scoped, hits.flatMap(hit => hit.events))
 
-      if (client) {
-        try {
-          const answer = await askModel(client, text, withEvidence)
-          logger.info('logs:assistant-answered', {
-            question: preview(text, 120),
-            evidence: withEvidence.length,
-            source: 'llm',
-          })
-          return answer
-        } catch (error) {
-          const reason = errorMessage(error)
-          logger.warn('logs:assistant-model-failed', {
-            question: preview(text, 120),
-            detail: preview(reason, 200),
-          })
-          return {
-            ...ruleDiagnosis(text, withEvidence, hits),
-            degraded: `模型总结失败，已退回规则排查：${reason}`,
+        if (client) {
+          try {
+            const answer = await askModel(client, text, withEvidence)
+            logger.info('logs:assistant-answered', {
+              question: preview(text, 120),
+              evidence: withEvidence.length,
+              source: 'llm',
+            })
+            return answer
+          } catch (error) {
+            const reason = errorMessage(error)
+            logger.warn('logs:assistant-model-failed', {
+              question: preview(text, 120),
+              detail: preview(reason, 200),
+            })
+            return {
+              ...ruleDiagnosis(text, withEvidence, hits),
+              degraded: `模型总结失败，已退回规则排查：${reason}`,
+            }
           }
         }
-      }
 
-      const diagnosis = ruleDiagnosis(text, withEvidence, hits)
-      logger.info('logs:assistant-answered', {
-        question: preview(text, 120),
-        evidence: withEvidence.length,
-        source: 'rules',
+        const diagnosis = ruleDiagnosis(text, withEvidence, hits)
+        logger.info('logs:assistant-answered', {
+          question: preview(text, 120),
+          evidence: withEvidence.length,
+          source: 'rules',
+        })
+        return diagnosis
       })
-      return diagnosis
     },
   }
 }
@@ -382,8 +398,25 @@ function toEvidence(entry: LogEntry): LogEvidence {
     level: entry.level,
     message: entry.message,
     ...(detail ? { detail } : {}),
+    ...(Object.keys(data).length > 0 ? { data } : {}),
   }
 }
+
+/**
+ * 发给模型前抹掉正文类字段。
+ *
+ * 日志里有 `input:queued.text`、`outbox:sent.text` 这类带用户消息正文的字段，
+ * 排查并不需要它们，但把它们原样发给外部模型就是泄露用户内容。
+ * 按 key 脱敏而不是按字符串猜：字段值里可能有空格，猜不准就会漏。
+ */
+export function redactFields(data: Record<string, unknown> | undefined): string {
+  if (!data) return ''
+  return Object.entries(data)
+    .map(([key, value]) => `${key}=${REDACT_KEYS.has(key) ? '（内容已省略）' : formatValue(value)}`)
+    .join(' ')
+}
+
+const REDACT_KEYS = new Set(['text', 'reply', 'summary', 'preview', 'content', 'body', 'prompt'])
 
 function formatValue(value: unknown): string {
   if (typeof value === 'string') return value
@@ -539,7 +572,10 @@ const SYSTEM_PROMPT = [
 
 /** 让模型基于证据总结结论；解析失败会抛错，由调用方降级到规则式判断。 */
 export async function askModel(client: ChatClient, question: string, evidence: LogEvidence[]): Promise<LogDiagnosis> {
-  const lines = evidence.map(item => `${item.at || '-'} ${item.level.toUpperCase()} ${item.message}${item.detail ? ` ${item.detail}` : ''}`)
+  const lines = evidence.map(item => {
+    const fields = item.data ? redactFields(item.data) : (item.detail ?? '')
+    return `${item.at || '-'} ${item.level.toUpperCase()} ${item.message}${fields ? ` ${fields}` : ''}`
+  })
   const user = [
     `问题：${question || '（用户没有描述具体问题，请总结最近日志里最值得关注的事）'}`,
     '',
