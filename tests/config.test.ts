@@ -696,3 +696,42 @@ describe('配置链路日志', () => {
     expect(entry?.extra?.keys).toEqual(['allowNetwork'])
   })
 })
+
+describe('关单后的工作区回收配置', () => {
+  it('默认保留 24 小时、每 30 分钟扫描一次', () => {
+    const cfg = loadConfig(home())
+    expect(cfg.workspace).toMatchObject({ enabled: true, keepHours: 24, sweepMinutes: 30 })
+  })
+
+  it('YAML 覆盖 workspace 段后能读回', () => {
+    const dir = home()
+    ensureHome(dir)
+    const { writeFileSync } = require('node:fs') as typeof import('node:fs')
+    writeFileSync(join(dir, 'config.yaml'), [
+      'workspace:',
+      '  enabled: false',
+      '  keepHours: 6',
+      '  sweepMinutes: 10',
+    ].join('\n'))
+    const cfg = loadConfig(dir)
+    expect(cfg.workspace.enabled).toBe(false)
+    expect(cfg.workspace.keepHours).toBe(6)
+    expect(cfg.workspace.sweepMinutes).toBe(10)
+  })
+
+  it('setConfigValue 支持 workspace.* 点路径，非法值被拒绝', () => {
+    const cfg = loadConfig(home())
+    expect(setConfigValue(cfg, 'workspace.enabled', 'false')).toBe(true)
+    expect(cfg.workspace.enabled).toBe(false)
+    expect(setConfigValue(cfg, 'workspace.enabled', 'yes')).toBe(false)
+    expect(setConfigValue(cfg, 'workspace.keepHours', '12')).toBe(true)
+    expect(cfg.workspace.keepHours).toBe(12)
+    // 0 合法：关单后下个扫描周期就回收
+    expect(setConfigValue(cfg, 'workspace.keepHours', '0')).toBe(true)
+    expect(cfg.workspace.keepHours).toBe(0)
+    expect(setConfigValue(cfg, 'workspace.keepHours', '-1')).toBe(false)
+    expect(setConfigValue(cfg, 'workspace.sweepMinutes', '15')).toBe(true)
+    expect(cfg.workspace.sweepMinutes).toBe(15)
+    expect(setConfigValue(cfg, 'workspace.sweepMinutes', '0')).toBe(false)
+  })
+})

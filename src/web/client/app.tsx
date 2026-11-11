@@ -868,7 +868,7 @@ function WorkspaceCleanupDialog({ onClose }: { onClose: () => void }): JSX.Eleme
           )}
           {!overview && !error && <p className="modal-hint">正在读取工作区…</p>}
           {overview && overview.runtimes.length === 0 && (
-            <p className="modal-hint">没有发现遗留工作区。已关闭工单的 worktree 会在关单后自动回收。</p>
+            <p className="modal-hint">没有发现遗留工作区。已关闭工单的 worktree 会保留一段时间后由定时任务回收，也可以在这里手动清理。</p>
           )}
           {overview?.runtimes.map(group => {
             const cleanable = group.entries.filter(entry => entry.cleanable)

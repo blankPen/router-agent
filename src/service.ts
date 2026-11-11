@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path'
 import type { Clock, Engine } from './core/engine.js'
 import type { Assignment, Report, Ticket, Trigger } from './core/model.js'
 import type { Store } from './store/db.js'
-import type { AppConfig, RetentionSettings } from './config.js'
+import type { AppConfig, RetentionSettings, WorkspaceSettings } from './config.js'
 import { replyAlwaysChatsOf } from './config.js'
 import { STAGE_LABELS } from './core/stage.js'
 import { WorkerRuntimeError, type WorkerRuntime, type WorkerContext, type SessionEvent, type WorkerRef, type AgentStatus, type ResumeHint } from './worker/port.js'
@@ -508,6 +508,10 @@ export class RouterService {
   private retention: RetentionSettings
   /** 防止上一轮扫描还没结束、下一轮又进来。 */
   private retentionSweeping = false
+  /** 关单后工作区的保留期与扫描间隔。 */
+  private workspace: WorkspaceSettings
+  /** 防止上一轮回收扫描还没结束、下一轮又进来。 */
+  private workspaceSweeping = false
 
   constructor(opts: RouterServiceOptions) {
     this.store = opts.store
@@ -531,6 +535,11 @@ export class RouterService {
       closeGraceHours: 6,
       zombieHours: 6,
       sweepMinutes: 5,
+    }
+    this.workspace = opts.config.workspace ?? {
+      enabled: true,
+      keepHours: 24,
+      sweepMinutes: 30,
     }
     this.decisionEngine = opts.decisionEngine
     // 旧版「自定义人格文件路径」迁移到内置规范存储；原文件保留，失败不阻断启动。
@@ -700,6 +709,7 @@ export class RouterService {
         runtimeId,
         workdir,
         startedAt: assignment.startedAt,
+        closedAt: ticket.closedAt ?? '',
         cleanable,
         ...(cleanable ? {} : {
           reason: ticket.stage !== 'done'
@@ -822,6 +832,54 @@ export class RouterService {
     return result
   }
 
+  /**
+   * 定时任务：回收「已关闭工单」残留的 workspace。
+   *
+   * 关单只停 worker、不删目录；目录在这里按保留期统一回收（用户也可以随时在面板手动回收）。
+   * 判定复用 `listWorkspaces()`：目录仍在磁盘 + 工单已关闭 + 运行时支持回收 + 没被在办工单占用；
+   * 这里额外要求关单时间已经超过保留期。
+   */
+  async sweepClosedWorkspaces(nowMs: number = Date.parse(this.clock.now())): Promise<void> {
+    if (!this.workspace.enabled || this.workspaceSweeping) return
+    this.workspaceSweeping = true
+    try {
+      const keepMs = this.workspace.keepHours * 3_600_000
+      const due = this.listWorkspaces().runtimes
+        .flatMap(group => group.entries)
+        .filter(entry => {
+          if (!entry.cleanable || !entry.closedAt) return false
+          const closedAt = Date.parse(entry.closedAt)
+          return Number.isFinite(closedAt) && nowMs - closedAt >= keepMs
+        })
+        .map(entry => entry.ticketId)
+      if (due.length === 0) return
+      const result = await this.cleanupWorkspaces({ ticketIds: due })
+      // 脏目录回收不掉时告诉发起人一次，避免目录一直留着却没人知道。
+      for (const skipped of result.skipped) {
+        const ticket = this.store.getTicket(skipped.ticketId)
+        if (!ticket) continue
+        this.notify(
+          ticket,
+          `工单「${ticket.title}」已关闭，但对应的 workspace 未能自动回收：${skipped.reason}\n`
+          + '请在 Orca / git worktree 中确认（可能有未提交改动或目录已被占用），也可以在面板「清理工作区」里手动处理。',
+          `workspace:sweep-skip:${skipped.ticketId}`,
+        )
+      }
+      this.logger.info('workspace:sweep', {
+        due: due.length,
+        removed: result.removed.length,
+        skipped: result.skipped.length,
+        keepHours: this.workspace.keepHours,
+      })
+    } catch (error) {
+      this.logger.warn('workspace:sweep-failed', {
+        message: error instanceof Error ? error.message : String(error),
+      })
+    } finally {
+      this.workspaceSweeping = false
+    }
+  }
+
   /** 目录存在且不是根目录 / home：避免脏数据把系统目录交给 provider 回收。 */
   private isWorkspaceOnDisk(workdir: string): boolean {
     if (!workdir || !workdir.startsWith('/')) return false
@@ -874,6 +932,7 @@ export class RouterService {
     if (this.progressSyncMs > 0) every(this.progressSyncMs, () => this.syncProgress())
     if (this.progressProbeMs > 0) every(this.progressProbeMs, () => this.probeProgress())
     if (this.retention.enabled) every(this.retention.sweepMinutes * 60_000, () => this.sweepRetention())
+    if (this.workspace.enabled) every(this.workspace.sweepMinutes * 60_000, () => this.sweepClosedWorkspaces())
   }
 
   stop(): void {
@@ -1493,7 +1552,8 @@ export class RouterService {
       `工单「${ticket.title}」（${ticket.id}）已经 ${this.retention.idleHours} 小时没有新的进展。`,
       ...(attention ? ['', `当前在等你确认：${attention.question}`] : []),
       '',
-      `如果还需要继续，请直接在本话题回复任意内容；否则 ${this.retention.closeGraceHours} 小时后将自动关闭，并回收对应的 workspace。`,
+      `如果还需要继续，请直接在本话题回复任意内容；否则 ${this.retention.closeGraceHours} 小时后将自动关闭，`
+      + `workspace 会保留 ${this.workspace.keepHours} 小时后自动回收。`,
     ]
     // 先发通知再落水位：即使进程在两者之间崩溃，重复通知也会被 outbox key 去重；
     // 反过来则可能只落了关闭时间、却没提醒到人。key 用最后进展时间，下一段闲置期可以再次提醒。
@@ -1531,18 +1591,37 @@ export class RouterService {
       throw error
     }
     this.store.deleteCursor(reminderCursorKey(ticket.id))
-    this.enqueueWorkspaceCleanup(closed, 'idle')
+    // 关单只停 worker：目录保留，由定时任务按保留期回收（或用户手动回收）。
+    this.enqueueStopWorker(closed, 'idle')
     this.notify(
       closed,
-      `工单「${closed.title}」已 ${this.retention.idleHours} 小时无进展且 ${this.retention.closeGraceHours} 小时未回复，已自动关闭，正在回收对应的 workspace。`,
+      `工单「${closed.title}」已 ${this.retention.idleHours} 小时无进展且 ${this.retention.closeGraceHours} 小时未回复，已自动关闭。`
+      + `workspace 会保留 ${this.workspace.keepHours} 小时后自动回收，也可以随时手动回收。`,
       `retention:closed:${closed.id}`,
     )
     this.log('retention:closed', closed.id, { reason: 'idle' })
   }
 
   /**
-   * 投递 workspace 回收任务。所有自动关单来源（闲置超时、PR 合并 / 关闭、派工半成功、人工停止）
-   * 都必须走这里，否则工单会关掉、worktree 却留在磁盘上。
+   * 投递「只停 worker」的收尾任务：自动关单（闲置超时、PR 合并 / 关闭）都走这里。
+   * 目录不删 —— 关单和回收 workspace 是两件事，回收交给定时任务或用户手动触发。
+   */
+  private enqueueStopWorker(ticket: Ticket, source: string): void {
+    const queued = this.store.enqueueEffect({
+      id: `ef_stop_${ticket.id}`,
+      key: `stop:${ticket.id}`,
+      kind: 'stop-worker',
+      payload: { ticketId: ticket.id },
+      now: this.clock.now(),
+    })
+    // 队列按 id 去重，重复入队时不重复打日志。
+    if (queued) this.log('worker:stop-queued', ticket.id, { source })
+  }
+
+  /**
+   * 投递 workspace 回收任务。只有「人工停止」和「派工半成功」走这里：
+   * 前者是用户明确表示不要这个目录了，后者是工单仍在办的脏目录。
+   * 自动关单只停 worker，目录由定时任务（`sweepClosedWorkspaces`）按保留期回收。
    */
   private enqueueWorkspaceCleanup(ticket: Ticket, source: string): void {
     const suffix = ticket.closedAt ?? this.clock.now()
@@ -1959,8 +2038,8 @@ export class RouterService {
 
   stopTicket(ticketId: string, reason: string): Ticket {
     const ticket = this.engine.stopTicket(ticketId, reason)
-    // 人工停止同样要回收 workspace：cleanup-workspace 会先停终端再删 worktree，
-    // 比单独排 stop-worker 更完整（旧实现只停进程，目录会一直留在磁盘上）。
+    // 人工停止是用户明确表达「不要这个目录了」：仍立即回收 workspace。
+    // cleanup-workspace 会先停终端再删 worktree，比单独排 stop-worker 更完整。
     this.enqueueWorkspaceCleanup(ticket, 'stop')
     return ticket
   }
@@ -2048,10 +2127,15 @@ let repo = ticket.repo
       if ((info.state === 'merged' || info.state === 'closed') && updated.stage !== 'done') {
         const closed = this.engine.closeTicket(ticket.id, `pr:${info.state}`)
         appendEvent(join(this.config.home, 'workers', ticket.id, 'events.log'), { kind: 'pr', state: info.state, at: this.clock.now() })
-        // PR 闭环也是自动关单：和闲置超时关单一样回收 workspace，否则目录会一直留在磁盘上。
-        this.enqueueWorkspaceCleanup(closed, `pr:${info.state}`)
+        // PR 闭环也是自动关单：和闲置超时关单一样只停 worker，目录留给定时任务 / 用户回收。
+        this.enqueueStopWorker(closed, `pr:${info.state}`)
         const label = info.state === 'merged' ? '已合并' : '已关闭'
-        this.notify(closed, `工单「${closed.title}」的 PR ${info.url} ${label}，工单闭环，正在回收对应的 workspace。`, `pr:${ticket.id}:${info.state}`)
+        this.notify(
+          closed,
+          `工单「${closed.title}」的 PR ${info.url} ${label}，工单闭环。`
+          + `workspace 会保留 ${this.workspace.keepHours} 小时后自动回收，也可以随时手动回收。`,
+          `pr:${ticket.id}:${info.state}`,
+        )
       }
     }
   }
