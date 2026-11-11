@@ -6,8 +6,8 @@
  * - `anthropic-messages`：POST `{baseUrl}/v1/messages`，密钥走 `x-api-key`
  *   （配置了 `authHeader` 时按 `ANTHROPIC_AUTH_TOKEN` 的语义改成 `Authorization: Bearer`）。
  *
- * 用途：面板上的智能排查助手需要一个「问一句、答一句」的能力，
- * 不值得为此把 Agent 循环整套拉起来。
+ * 支持工具调用（tool use）：模型可以要求执行只读工具（读配置、读本地代码），
+ * 再基于工具结果给结论——这正是「排查助手要能看本机代码与配置」需要的形态。
  */
 
 export type ChatApi = 'openai-completions' | 'anthropic-messages'
@@ -22,9 +22,36 @@ export interface ChatModelConfig {
   temperature?: number
 }
 
+/** 工具声明（JSON Schema 形式的参数说明）。 */
+export interface ChatToolSpec {
+  name: string
+  description: string
+  parameters: Record<string, unknown>
+}
+
+/** 模型发起的一次工具调用。 */
+export interface ChatToolCall {
+  id: string
+  name: string
+  /** 已解析的参数对象。 */
+  arguments: Record<string, unknown>
+}
+
 export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant'
+  role: 'system' | 'user' | 'assistant' | 'tool'
   content: string
+  /** assistant 发起工具调用时带上。 */
+  toolCalls?: ChatToolCall[]
+  /** tool 消息指回哪一次调用。 */
+  toolCallId?: string
+}
+
+/** 一轮对话的结果。 */
+export interface ChatTurn {
+  /** 模型的文字输出（发起工具调用时可以为空）。 */
+  content: string
+  /** 模型请求执行的工具。 */
+  toolCalls: ChatToolCall[]
 }
 
 export interface ChatClientOptions {
@@ -37,7 +64,7 @@ export interface ChatClientOptions {
 }
 
 export interface ChatClient {
-  complete(messages: ChatMessage[]): Promise<string>
+  complete(messages: ChatMessage[], opts?: { tools?: ChatToolSpec[] }): Promise<ChatTurn>
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000
@@ -52,7 +79,7 @@ export function createChatClient(model: ChatModelConfig, opts: ChatClientOptions
   const url = api === 'anthropic-messages' ? anthropicMessagesUrl(model.baseUrl) : chatCompletionsUrl(model.baseUrl)
 
   return {
-    async complete(messages: ChatMessage[]): Promise<string> {
+    async complete(messages: ChatMessage[], completeOpts: { tools?: ChatToolSpec[] } = {}): Promise<ChatTurn> {
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), timeoutMs)
       let response: Response
@@ -63,7 +90,7 @@ export function createChatClient(model: ChatModelConfig, opts: ChatClientOptions
             'Content-Type': 'application/json',
             ...authHeaders(model, api),
           },
-          body: JSON.stringify(requestBody(model, api, messages, maxTokens)),
+          body: JSON.stringify(requestBody(model, api, messages, maxTokens, completeOpts.tools)),
           signal: controller.signal,
         })
       } catch (error) {
@@ -85,9 +112,10 @@ export function createChatClient(model: ChatModelConfig, opts: ChatClientOptions
         throw new Error(`chat:invalid-json: ${errorText(error)}`)
       }
 
-      const text = parseChatText(payload, api)
-      if (!text) throw new Error('chat:empty-response')
-      return text
+      const turn = parseChatTurn(payload, api)
+      // 既没有文字也没有工具调用，说明模型没给出可用的东西，直接报错让上层降级。
+      if (!turn.content && turn.toolCalls.length === 0) throw new Error('chat:empty-response')
+      return turn
     },
   }
 }
@@ -124,6 +152,7 @@ function requestBody(
   api: ChatApi,
   messages: ChatMessage[],
   maxTokens: number,
+  tools?: ChatToolSpec[],
 ): Record<string, unknown> {
   const temperature = model.temperature ?? 0.2
   if (api === 'anthropic-messages') {
@@ -134,15 +163,95 @@ function requestBody(
       max_tokens: maxTokens,
       temperature,
       ...(system ? { system } : {}),
-      messages: rest.map(item => ({ role: item.role, content: item.content })),
+      ...(tools && tools.length > 0 ? { tools: tools.map(anthropicTool) } : {}),
+      messages: rest.map(anthropicMessage),
     }
   }
   return {
     model: model.model,
     max_tokens: maxTokens,
     temperature,
-    messages: messages.map(item => ({ role: item.role, content: item.content })),
+    ...(tools && tools.length > 0 ? { tools: tools.map(openaiTool) } : {}),
+    messages: messages.map(openaiMessage),
   }
+}
+
+function openaiTool(tool: ChatToolSpec): Record<string, unknown> {
+  return {
+    type: 'function',
+    function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+  }
+}
+
+function anthropicTool(tool: ChatToolSpec): Record<string, unknown> {
+  return { name: tool.name, description: tool.description, input_schema: tool.parameters }
+}
+
+function openaiMessage(message: ChatMessage): Record<string, unknown> {
+  if (message.role === 'tool') {
+    return { role: 'tool', tool_call_id: message.toolCallId ?? '', content: message.content }
+  }
+  if (message.role === 'assistant' && message.toolCalls && message.toolCalls.length > 0) {
+    return {
+      role: 'assistant',
+      content: message.content || null,
+      tool_calls: message.toolCalls.map(call => ({
+        id: call.id,
+        type: 'function',
+        function: { name: call.name, arguments: JSON.stringify(call.arguments ?? {}) },
+      })),
+    }
+  }
+  return { role: message.role, content: message.content }
+}
+
+function anthropicMessage(message: ChatMessage): Record<string, unknown> {
+  if (message.role === 'tool') {
+    return {
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: message.toolCallId ?? '', content: message.content }],
+    }
+  }
+  if (message.role === 'assistant' && message.toolCalls && message.toolCalls.length > 0) {
+    const blocks: Record<string, unknown>[] = []
+    if (message.content) blocks.push({ type: 'text', text: message.content })
+    for (const call of message.toolCalls) {
+      blocks.push({ type: 'tool_use', id: call.id, name: call.name, input: call.arguments ?? {} })
+    }
+    return { role: 'assistant', content: blocks }
+  }
+  return { role: message.role, content: message.content }
+}
+
+/** 解析一轮响应：文字 + 工具调用。 */
+export function parseChatTurn(payload: unknown, api: ChatApi = 'openai-completions'): ChatTurn {
+  const root = payload as Record<string, any> | null
+  if (!root) return { content: '', toolCalls: [] }
+  if (api === 'anthropic-messages') {
+    const blocks = Array.isArray(root.content) ? root.content : []
+    const content = blocks
+      .filter((block: Record<string, unknown>) => block?.type === 'text')
+      .map((block: Record<string, unknown>) => String(block.text ?? ''))
+      .join('')
+      .trim()
+    const toolCalls = blocks
+      .filter((block: Record<string, unknown>) => block?.type === 'tool_use')
+      .map((block: Record<string, unknown>) => ({
+        id: String(block.id ?? ''),
+        name: String(block.name ?? ''),
+        arguments: (block.input as Record<string, unknown>) ?? {},
+      }))
+    return { content, toolCalls }
+  }
+  const message = root.choices?.[0]?.message
+  const content = parseChatContent(message?.content)
+  const rawCalls = Array.isArray(message?.tool_calls) ? message.tool_calls : []
+  const toolCalls = rawCalls.map((call: Record<string, any>) => ({
+    id: String(call?.id ?? ''),
+    name: String(call?.function?.name ?? ''),
+    arguments: parseToolArguments(call?.function?.arguments),
+  }))
+  return { content, toolCalls }
 }
 
 /** 从返回里取文本；兼容 OpenAI 的字符串 / 分段数组与 Anthropic 的 content 数组。 */
@@ -156,7 +265,10 @@ export function parseChatText(payload: unknown, api: ChatApi = 'openai-completio
       .join('')
       .trim()
   }
-  const content = root.choices?.[0]?.message?.content
+  return parseChatContent(root.choices?.[0]?.message?.content)
+}
+
+function parseChatContent(content: unknown): string {
   if (typeof content === 'string') return content.trim()
   if (Array.isArray(content)) {
     return content
@@ -165,6 +277,18 @@ export function parseChatText(payload: unknown, api: ChatApi = 'openai-completio
       .trim()
   }
   return ''
+}
+
+/** 工具参数可能是 JSON 字符串，也可能是已经解析好的对象。 */
+export function parseToolArguments(raw: unknown): Record<string, unknown> {
+  if (raw && typeof raw === 'object') return raw as Record<string, unknown>
+  if (typeof raw !== 'string' || !raw.trim()) return {}
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}
+  } catch {
+    return {}
+  }
 }
 
 function isAbortError(error: unknown): boolean {

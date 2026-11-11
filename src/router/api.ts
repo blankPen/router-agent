@@ -20,6 +20,7 @@ import type { ResumeHint } from '../worker/port.js'
 import type { WorkspaceAdminPort } from '../worker/workspaces/overview.js'
 import { readLogs } from './log-tail.js'
 import type { LogAssistantQuestion, LogDiagnosis, LogSuggestion } from './log-assistant.js'
+import { buildIssueBody, type IssueReporter } from './issue-report.js'
 import { getSpec, listSpecs, resetSpec, saveSpec, SpecError } from '../specs/index.js'
 import { PACKAGE_VERSION, type UpdateSnapshot } from '../update/index.js'
 import {
@@ -121,6 +122,8 @@ export interface ApiServerOptions {
   identity?: IdentityPort
   /** 日志页的智能排查助手；缺省时相关端点返回 404。 */
   logAssistant?: LogAssistantPort
+  /** 排查结果一键上报 GitHub issue；缺省时端点返回 404。 */
+  issueReporter?: IssueReporter
   /** 请求级异常与配置写入失败的日志出口。 */
   logger?: Logger
 }
@@ -622,6 +625,31 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         }
       }
       return respond(res, 405, { error: 'method-not-allowed' })
+    }
+
+    // 排查结论一键上报 GitHub issue：问题描述 + 结论 + 证据日志直接贴成 issue。
+    if (path === '/api/logs/assistant/issue' && req.method === 'POST') {
+      if (!opts.issueReporter) return respond(res, 404, { error: 'issue-report-not-available' })
+      const body = await readJson(req)
+      const question = typeof body.question === 'string' ? body.question.trim() : ''
+      const diagnosis = body.diagnosis as LogDiagnosis | undefined
+      if (!diagnosis || typeof diagnosis.summary !== 'string') {
+        return respond(res, 400, { error: 'diagnosis-required', message: '缺少排查结论' })
+      }
+      const title = typeof body.title === 'string' && body.title.trim()
+        ? body.title.trim().slice(0, 200)
+        : `[排查助手] ${(question || diagnosis.summary).slice(0, 120)}`
+      try {
+        const issue = await opts.issueReporter.create({
+          title,
+          body: buildIssueBody({ question, diagnosis, version: PACKAGE_VERSION }),
+        })
+        onEvent({ event: 'api:issue', number: issue.number, url: issue.url })
+        return respond(res, 200, { issue })
+      } catch (error) {
+        logger.error('api:issue-create-failed', { detail: errorMessage(error) })
+        return respond(res, 500, { error: 'issue-create-failed', message: errorMessage(error) })
+      }
     }
 
     // 规范 markdown：列表 / 读取 / 保存 / 恢复默认。内容落在 `<home>/specs/`，不再配置外部路径。

@@ -106,3 +106,107 @@ describe('/api/logs/assistant', () => {
     }
   })
 })
+
+describe('/api/logs/assistant/issue', () => {
+  let store: Store
+  let engine: Engine
+  let config: AppConfig
+  let server: ApiServer
+  let home: string
+  let logPath: string
+  let created: { title: string; body: string }[]
+
+  beforeEach(async () => {
+    store = new Store(':memory:')
+    home = mkdtempSync(join(tmpdir(), 'ra-api-assistant-issue-'))
+    mkdirSync(join(home, 'logs'), { recursive: true })
+    logPath = join(home, 'logs', 'router-agent.log')
+    writeFileSync(logPath, line('outbox:failed', 'error'), 'utf8')
+    config = { ...defaultConfig(), home }
+    engine = new Engine({ store, policy: policyOf(config) })
+    created = []
+    server = await createApiServer({
+      engine,
+      store,
+      config,
+      logPath,
+      logAssistant: createLogAssistant({ logPath }),
+      issueReporter: {
+        async create(input) {
+          created.push(input)
+          return { number: 7, url: 'https://github.com/blankPen/router-agent/issues/7' }
+        },
+      },
+    })
+  })
+
+  afterEach(async () => {
+    await server.close()
+    store.close()
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  const diagnosis = {
+    summary: '投递失败了',
+    causes: [{ title: '通道没注册', detail: 'outbox:failed', events: ['outbox:failed'] }],
+    actions: ['检查通道注册'],
+    evidence: [{ at: '2026-11-09T10:00:00.000Z', level: 'error', message: 'outbox:failed', detail: 'error=http-500' }],
+    source: 'rules',
+  }
+
+  it('把问题与结论贴成 issue 并返回链接', async () => {
+    const res = await call(server, '/api/logs/assistant/issue', 'POST', { question: '消息没发出去', diagnosis })
+    expect(res.status).toBe(200)
+    expect(res.json.issue).toEqual({ number: 7, url: 'https://github.com/blankPen/router-agent/issues/7' })
+    expect(created[0]?.title).toContain('消息没发出去')
+    expect(created[0]?.body).toContain('## 证据日志')
+    expect(created[0]?.body).toContain('outbox:failed')
+  })
+
+  it('缺少排查结论时返回 400', async () => {
+    const res = await call(server, '/api/logs/assistant/issue', 'POST', { question: '消息没发出去' })
+    expect(res.status).toBe(400)
+    expect(res.json.error).toBe('diagnosis-required')
+    expect(created).toHaveLength(0)
+  })
+
+  it('没装上报器时端点返回 404', async () => {
+    const bare = await createApiServer({ engine, store, config, logPath })
+    try {
+      const res = await call(bare, '/api/logs/assistant/issue', 'POST', { question: 'x', diagnosis })
+      expect(res.status).toBe(404)
+      expect(res.json.error).toBe('issue-report-not-available')
+    } finally {
+      await bare.close()
+    }
+  })
+
+  it('上报失败时返回 500 并记录 api:issue-create-failed 事件', async () => {
+    const events: { level: string; message: string; extra: Record<string, unknown> }[] = []
+    const push = (level: string) => (message: string, extra: Record<string, unknown> = {}) => {
+      events.push({ level, message, extra })
+    }
+    const failing = await createApiServer({
+      engine,
+      store,
+      config,
+      logPath,
+      logger: { info: push('info'), warn: push('warn'), error: push('error') },
+      issueReporter: {
+        async create() {
+          throw new Error('gh 退出码 1')
+        },
+      },
+    })
+    try {
+      const res = await call(failing, '/api/logs/assistant/issue', 'POST', { question: 'x', diagnosis })
+      expect(res.status).toBe(500)
+      expect(res.json.error).toBe('issue-create-failed')
+      const event = events.find(item => item.message === 'api:issue-create-failed')
+      expect(event?.level).toBe('error')
+      expect(String(event?.extra.detail)).toContain('gh 退出码 1')
+    } finally {
+      await failing.close()
+    }
+  })
+})

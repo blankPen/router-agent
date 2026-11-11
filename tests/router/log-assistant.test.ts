@@ -6,12 +6,15 @@ import {
   createLogAssistant,
   ensureEvidence,
   matchSymptoms,
+  nextStepsFor,
+  nextStepsFromCauses,
   redactFields,
   ruleDiagnosis,
   selectEvidence,
   tokenize,
 } from '../../src/router/log-assistant.js'
 import type { LogEntry } from '../../src/router/log-tail.js'
+import type { DiagnosisTool } from '../../src/router/diagnosis-tools.js'
 
 function entry(at: string, level: string, message: string, data?: Record<string, unknown>): LogEntry {
   return { at, level, message, ...(data ? { data } : {}) }
@@ -117,6 +120,18 @@ describe('ruleDiagnosis', () => {
     expect(diagnosis.summary).toContain('最可能是')
     expect(diagnosis.causes.length).toBeLessThanOrEqual(3)
   })
+
+  it('同时点名两类症状时，命中关键词多的那类排最前', () => {
+    const entries = [
+      entry('2026-11-09T10:00:00.000Z', 'info', 'router:decision', { triggerId: 'om_x' }),
+      entry('2026-11-09T10:01:00.000Z', 'info', 'trigger:ingested', { triggerId: 'om_x' }),
+      entry('2026-11-09T10:02:00.000Z', 'error', 'codex:turn-failed', { ticketId: 'tk-1' }),
+    ]
+    const hits = matchSymptoms(entries)
+    // 问题同时提到「工单」与「worker 卡住」，worker 类命中两个关键词应当排最前。
+    const diagnosis = ruleDiagnosis('工单里的 worker 好像卡住了，一直没有进展', [], hits)
+    expect(diagnosis.causes[0]?.title).toContain('Worker 卡住')
+  })
 })
 
 describe('redactFields', () => {
@@ -217,5 +232,155 @@ describe('createLogAssistant', () => {
     const diagnosis = await assistant.diagnose({ question: '消息没反应' })
     expect(diagnosis.source).toBe('rules')
     expect(diagnosis.degraded).toContain('模型总结失败')
+  })
+})
+
+describe('nextStepsFor', () => {
+  it('配置类症状引导去配置页', () => {
+    const hits = matchSymptoms([entry('2026-11-09T10:01:00.000Z', 'warn', 'trigger:dropped')])
+    const steps = nextStepsFor(hits, '机器人没反应')
+    expect(steps[0]?.kind).toBe('config')
+    expect(steps[0]?.section).toBe('feishu')
+  })
+
+  it('缺陷类症状给出一键上报 issue', () => {
+    const hits = matchSymptoms([entry('2026-11-09T10:02:00.000Z', 'error', 'codex:turn-failed')])
+    const steps = nextStepsFor(hits, 'worker 卡住了')
+    expect(steps.map(step => step.kind)).toContain('issue')
+    expect(steps.find(step => step.kind === 'issue')?.issueTitle).toContain('Worker')
+  })
+
+  it('问题点名配置类症状但日志没命中时也给配置引导', () => {
+    const steps = nextStepsFor([], '配置改了不生效')
+    expect(steps[0]?.kind).toBe('config')
+  })
+})
+
+describe('nextStepsFromCauses', () => {
+  it('模型标了分类才给按钮：config 给配置引导、defect 给上报', () => {
+    expect(nextStepsFromCauses([{ title: 'a', detail: '', events: [], category: 'config' }]).map(step => step.kind))
+      .toEqual(['config'])
+    expect(nextStepsFromCauses([{ title: 'a', detail: '', events: [], category: 'defect' }]).map(step => step.kind))
+      .toEqual(['issue'])
+  })
+
+  it('没有分类时不给按钮，避免给错方向', () => {
+    expect(nextStepsFromCauses([{ title: 'a', detail: '', events: [] }])).toEqual([])
+  })
+
+  it('多条原因分类不同时，按最可能的第一条给动作', () => {
+    expect(nextStepsFromCauses([
+      { title: '主因', detail: '', events: [], category: 'defect' },
+      { title: '次因', detail: '', events: [], category: 'config' },
+    ]).map(step => step.kind)).toEqual(['issue'])
+  })
+})
+
+describe('工具调用', () => {
+  let home: string
+  let logPath: string
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'ra-log-assistant-tools-'))
+    mkdirSync(join(home, 'logs'), { recursive: true })
+    logPath = join(home, 'logs', 'router-agent.log')
+    writeFileSync(logPath, [
+      `${JSON.stringify({ at: '2026-11-09T10:00:00.000Z', level: 'error', message: 'outbox:failed', error: 'http-500' })}`,
+    ].join('\n') + '\n', 'utf8')
+  })
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  function fakeTool(): DiagnosisTool {
+    return {
+      spec: {
+        name: 'read_config',
+        description: '读配置',
+        parameters: { type: 'object', properties: {} },
+      },
+      run: () => '配置文件：/tmp/config.yaml',
+    }
+  }
+
+  it('模型请求工具时执行工具并把结果回灌，结论里记录用过的工具', async () => {
+    const bodies: string[] = []
+    let round = 0
+    const fetchImpl = (async (_url: string, init?: RequestInit) => {
+      bodies.push(String(init?.body ?? ''))
+      round += 1
+      if (round === 1) {
+        return jsonResponse({
+          choices: [{
+            message: {
+              content: '',
+              tool_calls: [{
+                id: 'call_1',
+                type: 'function',
+                function: { name: 'read_config', arguments: '{}' },
+              }],
+            },
+          }],
+        })
+      }
+      return jsonResponse({
+        choices: [{ message: { content: JSON.stringify({
+          summary: '配置里允许名单是空的',
+          causes: [{ title: '允许名单为空', detail: 'read_config 显示名单为空', events: [], category: 'config' }],
+          actions: ['去面板补上允许名单'],
+        }) } }],
+      })
+    }) as unknown as typeof fetch
+
+    const assistant = createLogAssistant({
+      logPath,
+      model: { baseUrl: 'https://api.example.com/v1', apiKey: 'sk-test', model: 'chat-model' },
+      tools: [fakeTool()],
+      fetchImpl,
+    })
+
+    const diagnosis = await assistant.diagnose({ question: '消息没反应' })
+
+    expect(diagnosis.source).toBe('llm')
+    expect(diagnosis.toolsUsed).toEqual(['read_config'])
+    expect(diagnosis.causes[0]?.category).toBe('config')
+    expect(diagnosis.next?.map(step => step.kind)).toEqual(['config'])
+    // 第二次请求里带上了工具结果。
+    expect(bodies[1]).toContain('/tmp/config.yaml')
+    expect(bodies[1]).toContain('read_config')
+  })
+
+  it('模型请求不存在的工具时把可用工具告诉它，不中断排查', async () => {
+    let round = 0
+    const fetchImpl = (async () => {
+      round += 1
+      if (round === 1) {
+        return jsonResponse({
+          choices: [{
+            message: {
+              content: '',
+              tool_calls: [{
+                id: 'call_1',
+                type: 'function',
+                function: { name: 'rm_rf', arguments: '{}' },
+              }],
+            },
+          }],
+        })
+      }
+      return jsonResponse({ choices: [{ message: { content: JSON.stringify({ summary: '结论', causes: [], actions: [] }) } }] })
+    }) as unknown as typeof fetch
+
+    const assistant = createLogAssistant({
+      logPath,
+      model: { baseUrl: 'https://api.example.com/v1', apiKey: 'sk-test', model: 'chat-model' },
+      tools: [fakeTool()],
+      fetchImpl,
+    })
+
+    const diagnosis = await assistant.diagnose({ question: '消息没反应' })
+    expect(diagnosis.source).toBe('llm')
+    expect(diagnosis.summary).toBe('结论')
   })
 })

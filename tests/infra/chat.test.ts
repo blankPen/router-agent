@@ -55,9 +55,10 @@ describe('createChatClient', () => {
   it('OpenAI 兼容：带 Bearer 密钥发消息并取回文本', async () => {
     const { fetchImpl, calls } = fakeFetch(() => jsonResponse({ choices: [{ message: { content: '结论' } }] }))
     const client = createChatClient(model, { fetchImpl })
-    const text = await client.complete([{ role: 'user', content: '问题' }])
+    const turn = await client.complete([{ role: 'user', content: '问题' }])
 
-    expect(text).toBe('结论')
+    expect(turn.content).toBe('结论')
+    expect(turn.toolCalls).toEqual([])
     expect(calls[0]?.url).toBe('https://api.example.com/v1/chat/completions')
     const init = calls[0]?.init
     expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer sk-test')
@@ -72,12 +73,12 @@ describe('createChatClient', () => {
       { ...model, baseUrl: 'https://gw.example.com', api: 'anthropic-messages' },
       { fetchImpl },
     )
-    const text = await client.complete([
+    const turn = await client.complete([
       { role: 'system', content: '你是助手' },
       { role: 'user', content: '问题' },
     ])
 
-    expect(text).toBe('结论')
+    expect(turn.content).toBe('结论')
     expect(calls[0]?.url).toBe('https://gw.example.com/v1/messages')
     const headers = calls[0]?.init.headers as Record<string, string>
     expect(headers['x-api-key']).toBe('sk-test')

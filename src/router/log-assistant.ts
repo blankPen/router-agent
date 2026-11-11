@@ -13,9 +13,10 @@
  */
 import { preview } from '../core/events.js'
 import { noopLogger, errorMessage, type Logger } from '../infra/logger.js'
-import { createChatClient, type ChatClient, type ChatModelConfig } from '../infra/chat.js'
+import { createChatClient, type ChatClient, type ChatMessage, type ChatModelConfig } from '../infra/chat.js'
 import { extractJsonObject } from './model-config.js'
 import { readLogs, type LogEntry } from './log-tail.js'
+import { toolSpecs, type DiagnosisTool } from './diagnosis-tools.js'
 
 /** 一次排查最多带多少条证据给模型。 */
 export const MAX_ASSISTANT_EVIDENCE = 40
@@ -51,6 +52,8 @@ export interface LogCause {
   detail: string
   /** 支撑这个结论的日志事件名。 */
   events: string[]
+  /** 模型给出的处置分类：config = 用户自己能改；defect = 应上报。 */
+  category?: 'config' | 'defect'
 }
 
 export interface LogDiagnosis {
@@ -66,6 +69,22 @@ export interface LogDiagnosis {
   source: 'llm' | 'rules'
   /** 降级原因；正常总结时为空。 */
   degraded?: string
+  /** 助手用到的工具，让用户知道结论是基于什么得出的。 */
+  toolsUsed?: string[]
+  /** 处置建议：配置类引导去改配置，缺陷类引导一键上报 issue。 */
+  next?: LogNextStep[]
+}
+
+/** 处置建议。 */
+export interface LogNextStep {
+  /** config = 引导去改配置；issue = 一键上报 GitHub issue。 */
+  kind: 'config' | 'issue'
+  /** 按钮文案。 */
+  label: string
+  /** kind=config 时：配置页的 section id（sec-<id>），留空表示只跳到配置页。 */
+  section?: string
+  /** kind=issue 时：建议的 issue 标题。 */
+  issueTitle?: string
 }
 
 /** 面板上的常见问题入口。 */
@@ -89,6 +108,8 @@ export interface LogAssistantOptions {
   logPath: string
   /** 研判模型配置；缺省时只走规则式降级。 */
   model?: ChatModelConfig | null
+  /** 助手的只读工具（读配置 / 读本地代码）；缺省时模型只能看日志。 */
+  tools?: DiagnosisTool[]
   logger?: Logger
   /** 测试注入点。 */
   fetchImpl?: typeof fetch
@@ -107,6 +128,14 @@ const SYMPTOMS: Array<{
   title: string
   /** 面板快捷入口里预填的示例问题。 */
   example: string
+  /**
+   * 处置方向：config = 引导去改配置；defect = 缺陷 / 体验问题，适合一键上报 issue。
+   */
+  kind: 'config' | 'defect'
+  /** kind=config 时的引导目标：配置页的 section id（留空表示只跳到配置页）。 */
+  section?: string
+  /** kind=config 时给用户的按钮文案。 */
+  fixLabel?: string
   events: string[]
   keywords: string[]
   advice: string[]
@@ -115,6 +144,9 @@ const SYMPTOMS: Array<{
     id: 'message-ignored',
     title: '消息进来了但被过滤 / 机器人没反应',
     example: '飞书里发消息机器人完全没反应，日志里能看到消息吗？',
+    kind: 'config',
+    section: 'feishu',
+    fixLabel: '去修改「飞书消息 · 允许名单」',
     events: [
       'trigger:dropped', 'trigger:duplicate', 'feishu:bot-identity-failed',
       'feishu:allowlist-empty', 'feishu:chat-allowlist-empty', 'identity:resolve-failed',
@@ -133,6 +165,8 @@ const SYMPTOMS: Array<{
     id: 'config-not-effective',
     title: '配置改了不生效',
     example: '我在面板上改了配置，保存成功了但行为没变，为什么？',
+    kind: 'config',
+    fixLabel: '去「配置」页逐项核对',
     events: [
       'api:config', 'config:parse-failed', 'config:patch-rejected', 'config:write-failed',
       'config:created', 'config:legacy-backend', 'config:invalid-security-override',
@@ -150,6 +184,9 @@ const SYMPTOMS: Array<{
     id: 'ticket-not-created',
     title: '消息没有变成工单 / 没派工',
     example: '消息被收到了但没有建工单，也没有派工出去，排查一下。',
+    kind: 'config',
+    section: 'policy',
+    fixLabel: '去检查「准入策略 · 接单模式」',
     events: [
       'router:decision', 'decision:engine-failed', 'loop:trigger-failed',
       'thread:created', 'thread:resolved', 'chat:reply-failed', 'trigger:ingested',
@@ -166,6 +203,7 @@ const SYMPTOMS: Array<{
     id: 'worker-stuck',
     title: 'Worker 卡住 / 执行失败',
     example: '工单里的 worker 好像卡住了，一直没有进展，帮我看看。',
+    kind: 'defect',
     events: [
       'worker:status-failed', 'codex:turn-failed', 'codex:process-exit', 'codex:resume-failed',
       'codex:launch-failed', 'launch', 'effect:failed', 'worker:event-log-failed',
@@ -183,6 +221,7 @@ const SYMPTOMS: Array<{
     id: 'service-error',
     title: '服务自身报错 / 面板打不开',
     example: '面板打不开或者服务在报错，帮我定位一下。',
+    kind: 'defect',
     events: [
       'api:request-failed', 'config:parse-failed', 'session:migration-required',
       'session:migration-incomplete', 'feishu:consumer-start-failed', 'update:upgrade-failed',
@@ -200,6 +239,7 @@ const SYMPTOMS: Array<{
     id: 'reply-not-sent',
     title: '回复 / 通知没发出去',
     example: '工单处理完了，但飞书那边没有收到回复，消息发出去了吗？',
+    kind: 'defect',
     events: [
       'outbox:failed', 'channel:not-registered', 'feishu:card-fallback',
       'chat:reply-failed', 'progress:dedup', 'channel:ack-failed',
@@ -216,6 +256,7 @@ const SYMPTOMS: Array<{
     id: 'pr-tracking',
     title: 'PR / MR 状态查不到',
     example: '工单关联的 PR 状态一直查不到，帮我看看为什么。',
+    kind: 'defect',
     events: [
       'pr:track-failed', 'pr:inspect-failed', 'pr:repo-slug-failed',
       'report:evidence-missing', 'report:evidence-unverified', 'report:ingest-failed',
@@ -284,11 +325,12 @@ export function createLogAssistant(opts: LogAssistantOptions): LogAssistant {
 
         if (client) {
           try {
-            const answer = await askModel(client, text, withEvidence)
+            const answer = await askModel(client, text, withEvidence, opts.tools ?? [])
             logger.info('logs:assistant-answered', {
               question: preview(text, 120),
               evidence: withEvidence.length,
               source: 'llm',
+              ...(answer.toolsUsed?.length ? { tools: answer.toolsUsed.join(',') } : {}),
             })
             return answer
           } catch (error) {
@@ -506,7 +548,50 @@ export function ruleDiagnosis(question: string, evidence: LogEvidence[], hits: S
         + (ranked.length > 1 ? `另外还命中 ${ranked.length - 1} 类已知问题模式，见下方。` : '')
       : `命中 ${causes.length} 类已知问题模式：${causes.map(cause => cause.title).join('；')}。`
 
-  return { summary, causes, actions: actions.slice(0, 8), evidence, source: 'rules' }
+  return {
+    summary,
+    causes,
+    actions: actions.slice(0, 8),
+    evidence,
+    source: 'rules',
+    next: nextStepsFor(ranked, question),
+  }
+}
+
+/**
+ * 由命中的问题模式推导处置建议。
+ *
+ * 只按**最可能的那一类**给动作：用户要的是一个判断——配置类去改配置，
+ * 缺陷 / 体验类去上报 issue；日志里同时有其它现象时，建议仍列在「建议的下一步」里，
+ * 但不在按钮上分叉，免得把人引到不相干的配置项。
+ */
+export function nextStepsFor(hits: SymptomHit[], question: string): LogNextStep[] {
+  const primary = hits[0]
+  if (primary) {
+    if (primary.symptom.kind === 'config') {
+      return [{
+        kind: 'config',
+        label: primary.symptom.fixLabel ?? `去「配置」页检查与「${primary.symptom.title}」相关的设置`,
+        ...(primary.symptom.section ? { section: primary.symptom.section } : {}),
+      }]
+    }
+    return [{
+      kind: 'issue',
+      label: '一键上报 GitHub issue',
+      issueTitle: `[排查助手] ${primary.symptom.title}`,
+    }]
+  }
+  // 日志里没有命中事件，但问题描述点名了配置类现象：给一条配置引导。
+  for (const symptom of SYMPTOMS) {
+    if (symptom.kind !== 'config') continue
+    if (!symptom.keywords.some(keyword => question.includes(keyword))) continue
+    return [{
+      kind: 'config',
+      label: symptom.fixLabel ?? `去「配置」页检查与「${symptom.title}」相关的设置`,
+      ...(symptom.section ? { section: symptom.section } : {}),
+    }]
+  }
+  return []
 }
 
 /** 问题里是否点名了这一类症状。 */
@@ -514,9 +599,15 @@ function matchesQuestion(question: string, symptom: (typeof SYMPTOMS)[number]): 
   return symptom.keywords.some(keyword => question.includes(keyword))
 }
 
-/** 命中的排序分：问题点名的那一类排最前，其次看命中的事件数量。 */
+/**
+ * 命中的排序分：问题点名的关键词越多越靠前，其次看命中的事件数量。
+ *
+ * 按命中的关键词个数而不是「有没有命中」计分：用户问「工单里的 worker 卡住了」
+ * 同时点了两类症状，worker 类命中「worker」「卡住」两个词才不会被工单类抢走。
+ */
 function hitScore(question: string, hit: SymptomHit): number {
-  return (matchesQuestion(question, hit.symptom) ? 10 : 0) + hit.events.length
+  const keywords = hit.symptom.keywords.filter(keyword => question.includes(keyword)).length
+  return keywords * 10 + hit.events.length
 }
 
 /** 命中的问题模式。 */
@@ -565,13 +656,28 @@ const SYSTEM_PROMPT = [
   '你是 router-agent（飞书消息 → 研判 → 派工到 worker 的双层 Agent 系统）的运维排查助手。',
   '用户会给出遇到的问题和相关的服务日志（每行一条 JSON 事件，事件名形如 域:动作）。',
   '请只依据给出的日志判断，不要编造日志里没有的事实；信息不足时明确说「日志里看不到」。',
+  '可以调用工具查看本机的 router-agent 配置与安装目录下的代码来核实判断；工具是只读的，只能读不能改。',
   '输出严格的 JSON，不要加解释性文字或代码块围栏：',
-  '{"summary":"一句话结论","causes":[{"title":"可能原因","detail":"为什么","events":["支撑的事件名"]}],"actions":["建议的下一步操作"]}',
+  '{"summary":"一句话结论","causes":[{"title":"可能原因","detail":"为什么","events":["支撑的事件名"],"category":"config|defect"}],"actions":["建议的下一步操作"]}',
   'causes 最多 3 条，actions 最多 5 条；没有证据支撑的原因不要写。',
+  'category 填 config 表示这是配置问题、用户自己能改，填 defect 表示这是缺陷或体验问题、应该上报。',
 ].join('\n')
 
-/** 让模型基于证据总结结论；解析失败会抛错，由调用方降级到规则式判断。 */
-export async function askModel(client: ChatClient, question: string, evidence: LogEvidence[]): Promise<LogDiagnosis> {
+/** 模型最多能连着调几轮工具。 */
+const MAX_TOOL_ROUNDS = 6
+
+/**
+ * 让模型基于证据总结结论；解析失败会抛错，由调用方降级到规则式判断。
+ *
+ * 模型可以要求调用只读工具（读配置 / 读本地代码），工具结果回灌给它继续判断，
+ * 最多 MAX_TOOL_ROUNDS 轮，避免无限循环。
+ */
+export async function askModel(
+  client: ChatClient,
+  question: string,
+  evidence: LogEvidence[],
+  tools: DiagnosisTool[] = [],
+): Promise<LogDiagnosis> {
   const lines = evidence.map(item => {
     const fields = item.data ? redactFields(item.data) : (item.detail ?? '')
     return `${item.at || '-'} ${item.level.toUpperCase()} ${item.message}${fields ? ` ${fields}` : ''}`
@@ -586,10 +692,31 @@ export async function askModel(client: ChatClient, question: string, evidence: L
     ...SYMPTOMS.map(symptom => `- ${symptom.id}：${symptom.title}（相关事件：${symptom.events.slice(0, 6).join('、')}）`),
   ].join('\n')
 
-  const raw = await client.complete([
+  const messages: ChatMessage[] = [
     { role: 'system', content: SYSTEM_PROMPT },
     { role: 'user', content: user },
-  ])
+  ]
+  const specs = toolSpecs(tools)
+  const toolsUsed = new Set<string>()
+
+  let raw = ''
+  for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
+    const turn = await client.complete(messages, specs.length > 0 ? { tools: specs } : {})
+    raw = turn.content
+    if (turn.toolCalls.length === 0 || tools.length === 0) break
+
+    messages.push({ role: 'assistant', content: turn.content, toolCalls: turn.toolCalls })
+    for (const call of turn.toolCalls) {
+      const tool = tools.find(item => item.spec.name === call.name)
+      const output = tool
+        ? safeRunTool(tool, call.arguments)
+        : `没有这个工具：${call.name}。可用工具：${tools.map(item => item.spec.name).join('、')}。`
+      toolsUsed.add(call.name)
+      messages.push({ role: 'tool', content: output, toolCallId: call.id })
+    }
+    if (round === MAX_TOOL_ROUNDS) break
+  }
+
   const parsed = extractJsonObject(raw)
   if (!parsed) throw new Error('assistant:model-invalid-json')
 
@@ -597,17 +724,54 @@ export async function askModel(client: ChatClient, question: string, evidence: L
     ? parsed.summary.trim()
     : '模型没有给出结论摘要。'
   const causes = Array.isArray(parsed.causes)
-    ? parsed.causes.slice(0, 3).map(item => ({
-      title: String((item as Record<string, unknown>)?.title ?? '可能原因'),
-      detail: String((item as Record<string, unknown>)?.detail ?? ''),
-      events: Array.isArray((item as Record<string, unknown>)?.events)
-        ? ((item as Record<string, unknown>).events as unknown[]).map(event => String(event))
-        : [],
-    }))
+    ? parsed.causes.slice(0, 3).map(item => {
+      const record = (item ?? {}) as Record<string, unknown>
+      const category: 'config' | 'defect' | undefined =
+        record.category === 'config' || record.category === 'defect' ? record.category : undefined
+      return {
+        title: String(record.title ?? '可能原因'),
+        detail: String(record.detail ?? ''),
+        events: Array.isArray(record.events) ? (record.events as unknown[]).map(event => String(event)) : [],
+        ...(category ? { category } : {}),
+      }
+    })
     : []
   const actions = Array.isArray(parsed.actions)
     ? parsed.actions.slice(0, 5).map(item => String(item))
     : []
 
-  return { summary, causes, actions, evidence, source: 'llm' }
+  const next = nextStepsFromCauses(causes)
+
+  return {
+    summary,
+    causes,
+    actions,
+    evidence,
+    source: 'llm',
+    ...(toolsUsed.size > 0 ? { toolsUsed: [...toolsUsed] } : {}),
+    ...(next.length > 0 ? { next } : {}),
+  }
+}
+
+/**
+ * 由模型给出的处置分类推导按钮。
+ *
+ * 模型给 causes 标了 config / defect 时，页面才有「去改配置」或「上报 issue」的入口；
+ * 没标就不硬塞按钮，避免给错方向。
+ */
+export function nextStepsFromCauses(causes: LogCause[]): LogNextStep[] {
+  // 与规则式排查一致：只按最可能的那条原因给动作。
+  const primary = causes.find(cause => cause.category)
+  if (!primary?.category) return []
+  if (primary.category === 'config') return [{ kind: 'config', label: '去「配置」页按建议修改' }]
+  return [{ kind: 'issue', label: '一键上报 GitHub issue' }]
+}
+
+/** 工具执行出错不该拖垮整次排查：把错误当工具结果回给模型。 */
+function safeRunTool(tool: DiagnosisTool, args: Record<string, unknown>): string {
+  try {
+    return tool.run(args)
+  } catch (error) {
+    return `工具执行失败：${error instanceof Error ? error.message : String(error)}`
+  }
 }

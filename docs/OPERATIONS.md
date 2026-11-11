@@ -121,9 +121,13 @@ Router 不做对话，只在必要时说话：
 | `config:patch-rejected` / `config:write-failed` | HTTP API | `errors` / `detail` | 面板保存的配置校验失败或落盘失败 |
 | `api:config` | HTTP API | `changed` `policyChanged` `restartRequired` `identityEffective` | 配置保存成功、是否需要重启、允许名单是否已即时生效 |
 | `api:request-failed` | HTTP API | `method` `path` `detail` | 请求级未预期异常（客户端会收到 500） |
-| `logs:assistant-answered` | Log Assistant | `question` `evidence` `source` | 日志页排查助手给出结论；`source` 为 `llm`（模型总结）或 `rules`（规则降级） |
+| `logs:assistant-answered` | Log Assistant | `question` `evidence` `source` `tools` | 日志页排查助手给出结论；`source` 为 `llm`（模型总结）或 `rules`（规则降级），`tools` 是这次用到的工具名 |
 | `logs:assistant-model-failed` | Log Assistant | `question` `detail` | 模型总结失败，已退回规则式排查，结论里会写明降级原因 |
 | `api:log-assistant-failed` | HTTP API | `question` `detail` | 排查请求本身失败（客户端会收到 500） |
+| `issue:created` | Issue Reporter | `repo` `number` `title` | 排查结论已上报成 GitHub issue |
+| `issue:create-failed` | Issue Reporter | `repo` `code` `detail` | issue 创建失败（`gh` 未登录、仓库不存在等），面板上会提示失败原因 |
+| `api:issue` | HTTP API | `number` `url` | 面板触发的一键上报成功 |
+| `api:issue-create-failed` | HTTP API | `detail` | 一键上报失败（客户端会收到 500） |
 | `ticket:resume-failed` | HTTP API | `ticketId` `detail` | 工单详情里的恢复命令生成失败，详情页仍可打开 |
 | `effect:done` / `effect:failed` | Effects | `kind` `key` / `error` | 派工、停止、清理等内部动作的执行结果 |
 | `worker:stop-queued` | Service | `ticketId` `source` | 自动关单（`idle` / `pr:merged` / `pr:closed`）后排队停 worker，workspace 保留给定时任务回收；同 key 已存在时不重复记录 |
@@ -176,13 +180,34 @@ grep '"message":"trigger:' ~/.router-agent/logs/router-agent.log
 
 ### 智能问题排查助手
 
-面板「日志」页顶部有一块**智能问题排查助手**：描述遇到的问题（也可以直接点常见问题快捷入口），助手会结合当前日志页的级别 / 关键字筛选范围给出结论、可能原因、建议的下一步，以及作为依据的证据日志。
+面板右下角常驻一个**智能排查助手悬浮按钮**，不用切到「日志」页也能用：
+
+1. 服务日志里出现 `error` 时，按钮变成红色并带上错误条数，同时弹一条「检测到 N 条新的错误日志」的提示；没有错误时是普通状态。
+2. 鼠标移到按钮上会展开快捷菜单：**智能分析异常**（直接分析最近的错误）、**上报 GitHub issue**、**打开排查面板**。
+3. 点开后是弹窗：描述问题（也可以点常见问题快捷入口）→ 给出结论、可能原因、建议的下一步、证据日志；结论属于配置类时给「去配置页修改」的入口，属于缺陷 / 体验类时给「一键上报 GitHub issue」的按钮。
 
 - 有配置模型时由模型总结，结论里会标注「模型总结」；没配模型或模型调用失败时自动退回**规则式排查**（内置「事件名 → 症状」知识库），结论标注「规则排查」，降级原因写在结论下方。
 - 助手与日志页共用同一套筛选：用户看到的日志范围就是排查范围，结论里引用的事件一定能在证据列表里看到。
 - 证据按分诊顺序排列：错误 → 警告 → 普通信息，同级里越新越靠前。
 - 助手只读日志，不改配置、不动工单；所有动作仍要走面板或 CLI。
 - 发给模型前，日志里的正文类字段（`text` / `reply` / `summary` / `content` 等）会被替换成「（内容已省略）」：排查用不到用户消息正文，没必要把它送到外部模型。面板上看到的证据仍是完整内容。
+
+#### 模型能看本机代码与配置
+
+配了模型时，助手是一个带工具的 Agent，可以调用四个**只读**工具核实判断：
+
+| 工具 | 作用 |
+|-|-|
+| `read_config` | 读取当前生效的配置（密钥已脱敏）与配置文件路径 |
+| `list_code` | 列出 router-agent 安装目录下的文件与子目录 |
+| `read_code` | 读取安装目录内的文本文件（可指定行号区间） |
+| `search_code` | 在安装目录里搜关键字，返回 `文件:行号:内容` |
+
+安全边界（硬约束，不要为了方便放宽）：**只读**（没有写、删、执行命令的能力）、**路径封闭**（所有路径必须在安装目录内，`..` 越界一律拒绝）、**限量**（单次读文件 400 行 / 20000 字符，搜索最多 30 条命中）。结论里会列出这次用到的工具，用户知道判断依据是什么。
+
+#### 一键上报 GitHub issue
+
+判定为缺陷 / 体验问题时，点「一键上报 GitHub issue」会把**问题描述 + 排查结论 + 可能原因 + 建议 + 证据日志**拼成一条 issue 发到 `blankPen/router-agent`（仓库可用环境变量 `RA_ISSUE_REPO` 覆盖）。走 `gh` CLI，与 PR 跟踪共用同一套登录态，用户不用额外配置。issue 正文里的日志就是面板上看到的那批证据。
 
 > **同一机器人只能有一个事件总线在跑。** 如果 `ra logs` 出现 `another event bus is already connected`，先停掉其它占用该应用的消费者；建议给 router-agent 使用独立的自建应用，避免与其它 agent 抢同一个机器人。
 
