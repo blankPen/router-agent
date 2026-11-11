@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
-import { DEFAULT_ADMISSION, type AcceptMode, type AdmissionTable, type Policy } from './core/policy.js'
+import { DEFAULT_ADMISSION, type AcceptMode, type AdmissionTable, type InterruptedRecoveryMode, type Policy } from './core/policy.js'
 import type { ToolPolicy } from './worker/port.js'
 import { UI_EVIDENCE_MODES, type UiEvidenceMode } from './worker/evidence-gate.js'
 import { ORCA_RUNTIME_ID, isWorkerRuntimeId, normalizeRuntimeId } from './worker/runtimes/catalog.js'
@@ -71,6 +71,16 @@ export interface PolicySettings {
   acceptMode: AcceptMode
   maxWorkers: number
   admission: AdmissionTable
+  /**
+   * worker 被服务重启打断后的恢复策略。
+   *
+   * auto：自动补一条输入让 worker 从中断处接着做（默认）。
+   * notify：只发飞书提醒，等用户回复才恢复。
+   * off：完全不处理。
+   */
+  interruptedRecovery: InterruptedRecoveryMode
+  /** 同一工单最多自动恢复几次；超出后降级为飞书提醒。 */
+  maxAutoRecover: number
 }
 
 /** 会话复用：一个飞书会话（按人隔离）对应一个落盘的 Pi session。 */
@@ -256,6 +266,8 @@ export function defaultConfig(): AppConfig {
       acceptMode: 'auto',
       maxWorkers: 4,
       admission: { ...DEFAULT_ADMISSION },
+      interruptedRecovery: 'auto',
+      maxAutoRecover: 1,
     },
     router: {
       timeoutMs: 60_000,
@@ -326,6 +338,12 @@ feishu:
 policy:
   acceptMode: auto     # off / observe / auto
   maxWorkers: 4
+  # worker 被服务重启打断后的恢复策略：
+  #   auto   = 自动补一条输入，让 worker 从中断处接着做
+  #   notify = 只发飞书提醒，等用户回复才恢复
+  #   off    = 不处理
+  interruptedRecovery: auto
+  maxAutoRecover: 1    # 同一工单最多自动恢复几次，超出后降级为飞书提醒
 
 # 研判层：Pi 单引擎；超时、token 预算与独立配置目录
 router:
@@ -382,6 +400,9 @@ runtime:
   #     command: /Users/me/.router-agent/runtimes/codex/node_modules/.bin/codex-acp
   #     args: ["--message-streaming"]
   #     env: {}
+  #   codex-app:           # Codex App 运行时；CODEX_HOME 缺省为 ~/.codex，与桌面端一致
+  #     env:
+  #       CODEX_HOME: /Users/me/.codex
   # 非 orca runtime 用独立项目清单，和顶层 projects 互不影响
   # projects:
   #   claude-code:
@@ -504,6 +525,8 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
       acceptMode,
       maxWorkers: Number.isFinite(Number(doc.policy?.maxWorkers)) && Number(doc.policy?.maxWorkers) > 0 ? Number(doc.policy.maxWorkers) : base.policy.maxWorkers,
       admission,
+      interruptedRecovery: pickInterruptedRecovery(doc.policy?.interruptedRecovery, base.policy.interruptedRecovery),
+      maxAutoRecover: positiveIntOr(doc.policy?.maxAutoRecover, base.policy.maxAutoRecover, 0, 100),
     },
     router: parseRouter(doc.router, base.router),
     progress: {
@@ -597,6 +620,10 @@ function pickAcceptMode(value: unknown, fallback: AcceptMode): AcceptMode {
 
 function pickUiEvidenceMode(value: unknown, fallback: UiEvidenceMode): UiEvidenceMode {
   return value === 'off' || value === 'warn' || value === 'enforce' ? value : fallback
+}
+
+function pickInterruptedRecovery(value: unknown, fallback: InterruptedRecoveryMode): InterruptedRecoveryMode {
+  return value === 'auto' || value === 'notify' || value === 'off' ? value : fallback
 }
 
 function parseRouter(value: unknown, base: RouterSettings): RouterSettings {
@@ -821,6 +848,8 @@ export function writeConfig(home: string, config: AppConfig): void {
       acceptMode: config.policy.acceptMode,
       maxWorkers: config.policy.maxWorkers,
       admission: config.policy.admission,
+      interruptedRecovery: config.policy.interruptedRecovery,
+      maxAutoRecover: config.policy.maxAutoRecover,
     },
     router: {
       timeoutMs: config.router.timeoutMs,
@@ -1023,6 +1052,7 @@ function stringListValue(): Validator {
 }
 
 const ACCEPT_MODES = ['off', 'observe', 'auto']
+const INTERRUPTED_RECOVERY_MODES = ['auto', 'notify', 'off']
 const ADMISSION_LISTED = ['inferred', 'ignore']
 const ADMISSION_UNLISTED_ADDRESSED = ['explicit', 'inferred', 'ignore']
 
@@ -1044,6 +1074,8 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
 
   'policy.acceptMode': enumValue(ACCEPT_MODES),
   'policy.maxWorkers': intValue(1, 64),
+  'policy.interruptedRecovery': enumValue(INTERRUPTED_RECOVERY_MODES),
+  'policy.maxAutoRecover': intValue(0, 100),
   'policy.admission.listedNotAddressed': enumValue(ADMISSION_LISTED),
   'policy.admission.unlistedAddressed': enumValue(ADMISSION_UNLISTED_ADDRESSED),
   'policy.admission.unlistedNotAddressed': enumValue(ADMISSION_LISTED),
@@ -1354,6 +1386,17 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
       const v = int(1, 64)
       if (v === null) return false
       config.policy.maxWorkers = v
+      return true
+    }
+    case 'policy.interruptedRecovery': {
+      if (!INTERRUPTED_RECOVERY_MODES.includes(value)) return false
+      config.policy.interruptedRecovery = value as InterruptedRecoveryMode
+      return true
+    }
+    case 'policy.maxAutoRecover': {
+      const v = int(0, 100)
+      if (v === null) return false
+      config.policy.maxAutoRecover = v
       return true
     }
     case 'progress.syncMs': {

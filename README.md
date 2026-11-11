@@ -74,7 +74,7 @@ ra start                      # 启动，就绪后自动打开 http://127.0.0.1:
 | 依赖 | 说明 |
 |-|-|
 | Node.js | `>= 22.19.0`（自带 npm；使用内置 `node:sqlite`；项目根目录 `.nvmrc` 已固定 22.19.0） |
-| 编码 Agent | 任选其一：Orca（`orca` 运行时，提供 worktree 与终端）、Claude Code（`claude-code` / `acp-claude` 运行时）或其它 ACP Agent（Codex / Gemini / OpenCode 等） |
+| 编码 Agent | 任选其一：Orca（`orca` 运行时，提供 worktree 与终端）、Claude Code（`claude-code` / `acp-claude` 运行时）、Codex（`codex-app` 运行时，优先使用 Codex App 内置 CLI）或其它 ACP Agent（Codex / Gemini / OpenCode 等） |
 | lark-cli | 飞书事件消费、发消息；需提前安装并确保在 `PATH` 中，`ra doctor` 会检查是否可用；需要一个飞书自建应用 |
 | gh / glab（可选） | PR / MR 状态跟踪：GitHub 用 `gh`，GitLab 用 `glab`；对应平台需已登录。不需要跟踪 PR / MR 时可不装 |
 | pnpm | 仅从源码运行或参与开发时需要（见本节末尾） |
@@ -137,7 +137,7 @@ ra tickets                                             # 模拟产生的工单�
 2. `ra tickets` 出现工单，`ra ticket <id>` 能看到授权范围与强度；
 3. `orca worktree list --json`（`orca` 运行时；其它运行时用 `git worktree list`）出现 `ra-tk-<编号>-<语义slug>`，分支名为 `ra/tk-<编号>-<语义slug>`（目录名与分支名一一对应，只把 `/` 换成 `-`），对应运行时里出现 Agent 会话（Orca 为 Claude Code 终端）；
 4. Worker 执行 `ra report` 后，`ra ticket <id>` 的阶段在 `running → review/blocked` 之间变化；
-5. 合并或关闭 PR / MR 后，工单变 `done`，飞书收到一次闭环通知。
+5. 合并或关闭 PR / MR 后，工单变 `done`，飞书收到一次闭环通知，对应 workspace 自动回收；闲置超时关单、面板停止也同样会回收 workspace。
 
 </details>
 
@@ -164,6 +164,7 @@ Worker 不在 Router 进程里跑。Router 按 `runtime.default` 选择适配器
 |-|-|-|
 | `orca`（默认） | Orca 创建 worktree + Claude Code 终端 | 本机已用 Orca 管仓库，想同时看到终端 |
 | `claude-code` | `git worktree` + `claude --bg` 后台会话 | 不用 Orca，直接跑 Claude Code |
+| `codex-app` | `git worktree` + `codex app-server`，优先用 Codex App 内置 CLI | 用 Codex，且希望 Router 创建的 thread 在 Codex 桌面端可见 |
 | `acp` / `acp-*` | ACP 子进程（Claude / Codex / Gemini / OpenCode / Copilot / Cursor / Goose） | 想接其它 ACP Agent |
 
 换运行时只加一个 adapter，内核与 Router 一行不改。项目清单按运行时分开维护：Orca 用仓库选择器，其它运行时用本地仓库绝对路径；切换默认运行时只影响新工单。完整的运行时对比、ACP Agent 目录、工具策略与规范注入见 [docs/RUNTIME.md](docs/RUNTIME.md)。
@@ -279,7 +280,8 @@ ra config edit                                   # 用 $EDITOR 编辑全文
 | `ra runtime install <id>` | 按需安装 ACP 适配器到 `~/.router-agent/runtimes/<agent>` |
 | `ra runtime uninstall <id>` | 卸载 ra 托管的 ACP 适配器 |
 | `ra runtime check <id>` | 完整 ACP 握手（`initialize` + `session/new`） |
-| `ra runtime login <id>` | 交互式登录（由 Agent 自己提供：`acp-claude` 走 `claude`，`acp-codex` 走 `codex-acp login`） |
+| `ra runtime login <id>` | 交互式登录（由 Agent 自己提供：`acp-claude` 走 `claude`，`acp-codex` 走 `codex-acp login`，`codex-app` 走 `codex login`） |
+| `ra runtime check codex-app` | 探测 Codex App / CLI，并做一次 app-server `initialize` 握手 |
 | `ra config` | 查看配置；`config set <key> <value>` 改单项（含 `project.<名>` / `chatBinding.<群>` / `chatMode.<群>` / `chatAllow.<群>` / `progress.syncMs` / `progress.probeMs`）；`config edit` 编辑全文 |
 | `ra report` | Worker 侧上报：状态、摘要、`--reply`（字面量 / `@文件` / `-`）、PR 链接与 `--ack` |
 | `ra doc` | Worker 侧创建飞书文档并输出链接，长结论写进 `--reply` |

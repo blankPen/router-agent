@@ -66,6 +66,8 @@ export function runtimeStatusLabel(status?: string): string {
 export function runtimeSourceLabel(source?: string): string {
   if (source === 'managed') return 'ra 安装'
   if (source === 'config') return '配置指定'
+  if (source === 'app') return 'App 内置'
+  if (source === 'env') return '环境变量'
   if (source === 'path') return 'PATH'
   return ''
 }

@@ -381,7 +381,7 @@ export class FeishuConsumer {
 }
 
 export function feishuReplyCommand(messageId: string, text: string, idempotencyKey: string): string[] {
-  return ['im', '+messages-reply', '--message-id', messageId, '--text', text, '--reply-in-thread', '--idempotency-key', idempotencyKey, '--as', 'bot', '--json']
+  return ['im', '+messages-reply', '--message-id', messageId, `--text=${text}`, '--reply-in-thread', '--idempotency-key', idempotencyKey, '--as', 'bot', '--json']
 }
 
 /** 给一条消息加确认表情（飞书 emoji_type，如 OK / THUMBSUP / OnIt）。 */
@@ -411,7 +411,7 @@ export function parseReactionId(stdout: string): string {
 }
 
 export function feishuSendCommand(chatId: string, text: string, idempotencyKey: string): string[] {
-  return ['im', '+messages-send', '--chat-id', chatId, '--text', text, '--idempotency-key', idempotencyKey, '--as', 'bot', '--json']
+  return ['im', '+messages-send', '--chat-id', chatId, `--text=${text}`, '--idempotency-key', idempotencyKey, '--as', 'bot', '--json']
 }
 
 /** 单行且没有 Markdown 语法的短回复，直接用纯文本发送，不必为了几个字开卡片。 */
@@ -539,26 +539,31 @@ export function feishuCard(markdown: string): string {
   })
 }
 
-export function feishuCardSendCommand(chatId: string, idempotencyKey: string): string[] {
-  return ['im', '+messages-send', '--chat-id', chatId, '--msg-type', 'interactive', '--content', '-', '--idempotency-key', idempotencyKey, '--as', 'bot', '--json']
+/**
+ * lark-cli 的 `im +messages-send` / `+messages-reply` 不支持从 stdin 读正文：
+ * `--content` 只接受 JSON 字符串，`--markdown` 只接受 markdown 文本。
+ * 正文必须直接落在参数值上，且用 `--flag=value` 形式，避免以 `-` 开头的正文被当成 flag。
+ */
+export function feishuCardSendCommand(chatId: string, cardJson: string, idempotencyKey: string): string[] {
+  return ['im', '+messages-send', '--chat-id', chatId, '--msg-type', 'interactive', `--content=${cardJson}`, '--idempotency-key', idempotencyKey, '--as', 'bot', '--json']
 }
 
-export function feishuCardReplyCommand(messageId: string, idempotencyKey: string): string[] {
-  return ['im', '+messages-reply', '--message-id', messageId, '--msg-type', 'interactive', '--content', '-', '--reply-in-thread', '--idempotency-key', idempotencyKey, '--as', 'bot', '--json']
+export function feishuCardReplyCommand(messageId: string, cardJson: string, idempotencyKey: string): string[] {
+  return ['im', '+messages-reply', '--message-id', messageId, '--msg-type', 'interactive', `--content=${cardJson}`, '--reply-in-thread', '--idempotency-key', idempotencyKey, '--as', 'bot', '--json']
 }
 
 /** 卡片不可用时的降级：飞书 post 富文本，仍比纯文本更接近 Markdown 观感。 */
-export function feishuMarkdownSendCommand(chatId: string, idempotencyKey: string): string[] {
-  return ['im', '+messages-send', '--chat-id', chatId, '--markdown', '-', '--idempotency-key', idempotencyKey, '--as', 'bot', '--json']
+export function feishuMarkdownSendCommand(chatId: string, markdown: string, idempotencyKey: string): string[] {
+  return ['im', '+messages-send', '--chat-id', chatId, `--markdown=${markdown}`, '--idempotency-key', idempotencyKey, '--as', 'bot', '--json']
 }
 
-export function feishuMarkdownReplyCommand(messageId: string, idempotencyKey: string): string[] {
-  return ['im', '+messages-reply', '--message-id', messageId, '--markdown', '-', '--reply-in-thread', '--idempotency-key', idempotencyKey, '--as', 'bot', '--json']
+export function feishuMarkdownReplyCommand(messageId: string, markdown: string, idempotencyKey: string): string[] {
+  return ['im', '+messages-reply', '--message-id', messageId, `--markdown=${markdown}`, '--reply-in-thread', '--idempotency-key', idempotencyKey, '--as', 'bot', '--json']
 }
 
 /** 用 Markdown 创建一篇飞书文档；正文走 stdin，避免超长参数与转义问题。 */
 export function feishuCreateDocCommand(title: string): string[] {
-  return ['docs', '+create', '--title', title, '--content', '-', '--doc-format', 'markdown', '--as', 'bot']
+  return ['docs', '+create', `--title=${title}`, '--content', '-', '--doc-format', 'markdown', '--as', 'bot']
 }
 
 /** 从 `docs +create` 的 JSON 返回里取文档链接。 */
@@ -601,7 +606,7 @@ export class FeishuSender {
   /** 以互动卡片发送 Markdown；卡片失败时自动降级为 post 富文本。 */
   async sendCard(chatId: string, markdown: string, idempotencyKey: string): Promise<void> {
     const key = fitIdempotencyKey(idempotencyKey)
-    const res = await this.runner.run(feishuCardSendCommand(chatId, key), { input: feishuCard(markdown) })
+    const res = await this.runner.run(feishuCardSendCommand(chatId, feishuCard(markdown), key))
     if (res.code === 0) return
     this.logger.warn('feishu:card-fallback', {
       target: chatId,
@@ -609,13 +614,13 @@ export class FeishuSender {
       code: res.code,
       message: res.stderr.slice(0, 200),
     })
-    const fallback = await this.runner.run(feishuMarkdownSendCommand(chatId, key), { input: markdown })
+    const fallback = await this.runner.run(feishuMarkdownSendCommand(chatId, markdown, key))
     if (fallback.code !== 0) throw new Error(`feishu:card-send-failed: ${fallback.stderr.slice(0, 300)}`)
   }
 
   async replyCard(messageId: string, markdown: string, idempotencyKey: string): Promise<void> {
     const key = fitIdempotencyKey(idempotencyKey)
-    const res = await this.runner.run(feishuCardReplyCommand(messageId, key), { input: feishuCard(markdown) })
+    const res = await this.runner.run(feishuCardReplyCommand(messageId, feishuCard(markdown), key))
     if (res.code === 0) return
     this.logger.warn('feishu:card-fallback', {
       target: messageId,
@@ -623,7 +628,7 @@ export class FeishuSender {
       code: res.code,
       message: res.stderr.slice(0, 200),
     })
-    const fallback = await this.runner.run(feishuMarkdownReplyCommand(messageId, key), { input: markdown })
+    const fallback = await this.runner.run(feishuMarkdownReplyCommand(messageId, markdown, key))
     if (fallback.code !== 0) throw new Error(`feishu:card-reply-failed: ${fallback.stderr.slice(0, 300)}`)
   }
 

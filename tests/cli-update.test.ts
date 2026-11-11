@@ -123,14 +123,19 @@ describe('ra update', () => {
   it('npm 安装失败时返回非 0 并带上错误摘要', async () => {
     const reg = await registry('9.9.9')
     try {
+      const dir = home()
       const output = io()
       output.npm = npmRunner({ code: 1, stdout: '', stderr: 'npm ERR! code EACCES permission denied' })
 
-      const code = await runCli(['update', '--force', '--no-restart', '--registry', reg.url, '--home', home()], output)
+      const code = await runCli(['update', '--force', '--no-restart', '--registry', reg.url, '--home', dir], output)
 
       expect(code).toBe(1)
       expect(output.err.join('\n')).toContain('安装失败')
       expect(output.err.join('\n')).toContain('permission denied')
+      // 事件名留在 message，错误详情落到 detail，两者都不丢。
+      const log = readFileSync(join(dir, 'logs', 'router-agent.log'), 'utf8')
+      expect(log).toContain('"message":"update:upgrade-failed"')
+      expect(log).toContain('"detail":"npm ERR! code EACCES permission denied"')
     } finally {
       await reg.close()
     }

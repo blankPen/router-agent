@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process'
 import { loadConfig } from '../config.js'
 import { acpAgentOf } from '../worker/runtimes/acp/agents.js'
-import { normalizeRuntimeId } from '../worker/runtimes/catalog.js'
+import { CODEX_APP_RUNTIME_ID, normalizeRuntimeId } from '../worker/runtimes/catalog.js'
+import { detectCodexBinary } from '../worker/runtimes/codex/detect.js'
 import { AcpRuntimeAdmin } from '../worker/runtimes/acp/admin.js'
 import { resolveAgentCommand, resolveExecutable } from '../worker/runtimes/acp/detect.js'
 import { installAcpAgent, uninstallAcpAgent } from '../worker/runtimes/acp/install.js'
@@ -75,6 +76,13 @@ export async function cmdRuntimeInstall(
   opts: { version?: string },
   io: RuntimeCliIo,
 ): Promise<number> {
+  if (normalizeRuntimeId(id) === CODEX_APP_RUNTIME_ID) {
+    const detection = await detectCodexBinary({ home, env: envOf(io), config: loadConfig(home) })
+    io.stderr(detection.installHint)
+    if (detection.installUrl) io.stderr(`下载 / 安装：${detection.installUrl}`)
+    io.stderr('安装后重启 ra；也可以用 runtime.options.codex-app.command 指定可执行文件。')
+    return 1
+  }
   const result = await installAcpAgent({
     home,
     agentId: id,
@@ -91,6 +99,10 @@ export async function cmdRuntimeInstall(
 }
 
 export async function cmdRuntimeUninstall(home: string, id: string, io: RuntimeCliIo): Promise<number> {
+  if (normalizeRuntimeId(id) === CODEX_APP_RUNTIME_ID) {
+    io.stderr('codex-app 使用 Codex App / 全局 Codex CLI，不归 ra 管理；请用官方安装器卸载。')
+    return 1
+  }
   const agent = acpAgentOf(id)
   const config = loadConfig(home)
   if (agent && normalizeRuntimeId(config.runtime.default) === agent.runtimeId) {
@@ -108,6 +120,18 @@ export async function cmdRuntimeUninstall(home: string, id: string, io: RuntimeC
 
 export async function cmdRuntimeLogin(home: string, id: string, io: RuntimeCliIo): Promise<number> {
   const config = loadConfig(home)
+  if (normalizeRuntimeId(id) === CODEX_APP_RUNTIME_ID) {
+    const detection = await detectCodexBinary({ home, env: envOf(io), config })
+    if (!detection.command || !detection.compatible) {
+      io.stderr(detection.reason ?? 'Codex 不可用；先安装 Codex App 或 Codex CLI')
+      return 1
+    }
+    return new Promise<number>(resolve => {
+      const child = spawn(detection.command!, ['login'], { stdio: 'inherit', env: envOf(io) })
+      child.on('error', error => { io.stderr(error.message); resolve(1) })
+      child.on('close', code => resolve(code ?? 1))
+    })
+  }
   const agent = acpAgentOf(id)
   if (!agent) {
     io.stderr(`未知 ACP Agent: ${id}`)

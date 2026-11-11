@@ -183,6 +183,29 @@ describe('HTTP 管理 API', () => {
     expect(res.status).toBe(200)
     expect(store.getTicket(ticketId)?.stage).toBe('done')
     expect(events.find(event => event.event === 'api:stop')).toMatchObject({ ticketId })
+    // Web-only 模式没有服务层：退回只排 stop-worker。
+    expect(store.claimEffects('2026-11-06T10:00:10.000Z', 10).some(item => item.kind === 'stop-worker')).toBe(true)
+  })
+
+  it('POST /api/tickets/:id/stop 有服务层时由服务层关单并回收 workspace', async () => {
+    const calls: string[] = []
+    const extra = await createApiServer({
+      engine, store, config,
+      onEvent: event => events.push(event),
+      onStopTicket: (id, reason) => {
+        calls.push(`${id}:${reason}`)
+        return engine.stopTicket(id, reason)
+      },
+    })
+    try {
+      const res = await call(extra, 'POST', `/api/tickets/${ticketId}/stop`, { reason: '人工停止' })
+      expect(res.status).toBe(200)
+      expect(calls).toEqual([`${ticketId}:人工停止`])
+      // 服务层会排 cleanup-workspace（先停进程再删目录），不再重复排 stop-worker。
+      expect(store.claimEffects('2026-11-06T10:00:10.000Z', 10)).toHaveLength(0)
+    } finally {
+      await extra.close()
+    }
   })
 
   it('GET / PUT /api/policy 读写策略', async () => {

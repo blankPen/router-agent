@@ -117,7 +117,7 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
     })
 
   withHome(program.command('runtime [action] [id]')
-    .description('ACP 运行时：list / check / install / uninstall / login'))
+    .description('Worker 运行时：list / check / install / uninstall / login（含 ACP 与 codex-app）'))
     .option('--json', 'list / check 以 JSON 输出')
     .option('--version <version>', 'install 指定版本（默认用目录里 pinned 的版本）')
     .action(async (action: string | undefined, id: string | undefined, opts: { home?: string; json?: boolean; version?: string }) => {
@@ -312,6 +312,7 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
       orca: output.orca ?? realRunner('orca'),
       claude: output.claude ?? realRunner('claude'),
       git: output.git ?? realRunner('git'),
+      logger: createLogger(home, output, false),
     }).default()
   } catch (error) {
     // 未注册/拼错的 runtime 由配置检查单独报错，不让 doctor 直接崩溃。
@@ -663,7 +664,7 @@ async function cmdTicketStop(home: string, ticketId: string, output: CliIo): Pro
       body: JSON.stringify({ reason: 'ra ticket --stop' }),
     })
     if (res.ok) {
-      output.stdout(`已停止 ${ticketId}（服务已关闭 worker 终端）`)
+      output.stdout(`已停止 ${ticketId}（worker 终端与 workspace 正在回收）`)
       return 0
     }
     output.stderr(`服务返回 ${res.status}，改为直接写库停止`)
@@ -683,8 +684,18 @@ async function cmdTicketStop(home: string, ticketId: string, output: CliIo): Pro
       return 0
     }
     const engine = new Engine({ store, policy: policyOf(config) })
-    engine.stopTicket(ticketId, 'ra ticket --stop')
-    output.stdout(`已停止 ${ticketId}`)
+    const stopped = engine.stopTicket(ticketId, 'ra ticket --stop')
+    // 服务未运行时先把回收任务落到 effects 队列，下次启动会按同一套逻辑删 worktree。
+    const now = new Date().toISOString()
+    const suffix = (stopped.closedAt ?? now).replace(/[^0-9a-zA-Z]/g, '')
+    store.enqueueEffect({
+      id: `ef_cleanup_${ticketId}_${suffix}`,
+      key: `cleanup-workspace:${ticketId}:${stopped.closedAt ?? now}`,
+      kind: 'cleanup-workspace',
+      payload: { ticketId },
+      now,
+    })
+    output.stdout(`已停止 ${ticketId}；workspace 回收已排队，服务启动后执行`)
     return 0
   } finally {
     store.close()
@@ -1127,6 +1138,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     orca: orcaRunner,
     claude: claudeRunner,
     git: gitRunner,
+    logger,
   })
   const runtime = runtimes.default()
   const prTracker = new ForgeTracker({
@@ -1275,6 +1287,8 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
             list: async () => service.listWorkspaces(),
             cleanup: (request: Parameters<RouterService['cleanupWorkspaces']>[0]) => service.cleanupWorkspaces(request),
           },
+          // 面板「停止」由服务层关单并排 workspace 回收，避免只停进程、目录留在磁盘上。
+          onStopTicket: (ticketId: string, reason: string) => service.stopTicket(ticketId, reason),
         }
       : {}),
     port: config.server.port,
@@ -1396,7 +1410,15 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
 function createLogger(home: string, output: CliIo, echo = true): Logger {
   const path = join(home, 'logs', 'router-agent.log')
   const write = (level: string, message: string, extra?: Record<string, unknown>): void => {
-    const line = JSON.stringify({ at: new Date().toISOString(), level, message, ...(extra ?? {}) })
+    // message 永远是事件名；业务字段里的 message 改写成 detail，避免把事件名冲掉。
+    const { message: detail, ...rest } = extra ?? {}
+    const line = JSON.stringify({
+      at: new Date().toISOString(),
+      level,
+      message,
+      ...(detail === undefined ? {} : { detail }),
+      ...rest,
+    })
     try {
       writeFileSync(path, `${line}\n`, { flag: 'a' })
     } catch {

@@ -47,7 +47,7 @@ It is a **clean rewrite** of dsh-superagent, with no dependency on the prototype
 | Dependency | Notes |
 |-|-|
 | Node.js | `>= 22.19.0` (bundles npm; uses the built-in `node:sqlite`; pinned to 22.19.0 via `.nvmrc`) |
-| Coding agent | Pick one: Orca (the `orca` runtime, provides worktrees and terminals), Claude Code (the `claude-code` / `acp-claude` runtimes), or another ACP agent (Codex / Gemini / OpenCode and friends) |
+| Coding agent | Pick one: Orca (the `orca` runtime, provides worktrees and terminals), Claude Code (the `claude-code` / `acp-claude` runtimes), Codex (the `codex-app` runtime, preferring the CLI bundled with the Codex app), or another ACP agent (Codex / Gemini / OpenCode and friends) |
 | lark-cli | Feishu event consumption and messaging; install it and make sure it is on `PATH` (`ra doctor` checks it); needs a Feishu custom app |
 | gh / glab (optional) | PR / MR state tracking: `gh` for GitHub, `glab` for GitLab; log in to the matching platform first. Not needed if you don't track PRs / MRs |
 | pnpm | Only needed to run from source or contribute (see the end of this section) |
@@ -180,6 +180,7 @@ Workers don't run inside the Router process. The Router picks an adapter from `r
 |-|-|-|
 | `orca` (default) | Orca creates the worktree + Claude Code terminal | You already manage repos with Orca and want to watch the terminal |
 | `claude-code` | `git worktree` + background `claude --bg` session | You don't use Orca and just want Claude Code |
+| `codex-app` | `git worktree` + `codex app-server`, preferring the CLI bundled with the Codex app | Use Codex and want Router-created threads visible in the Codex desktop app |
 | `acp` / `acp-*` | ACP child process (Claude / Codex / Gemini / OpenCode and friends) | You want to plug in another ACP agent |
 
 Project lists are kept per runtime: Orca uses repository selectors, other runtimes need absolute local paths. Switching the default only affects new tickets. The full comparison, ACP agent catalog, tool policy and spec injection are in [docs/RUNTIME.md](docs/RUNTIME.md) (Chinese).

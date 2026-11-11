@@ -34,6 +34,8 @@ describe('全局状态目录与配置', () => {
     const cfg = loadConfig(home())
     expect(cfg.policy.acceptMode).toBe('auto')
     expect(cfg.policy.maxWorkers).toBe(4)
+    expect(cfg.policy.interruptedRecovery).toBe('auto')
+    expect(cfg.policy.maxAutoRecover).toBe(1)
     expect(cfg.feishu.reaction).toBe('Typing')
     expect(cfg.worker.evidence.ui).toBe('warn')
     expect(cfg.runtime.default).toBe('orca')
@@ -97,6 +99,28 @@ describe('全局状态目录与配置', () => {
     const cfg = loadConfig(dir)
     expect(cfg.policy.acceptMode).toBe('auto')
     expect(cfg.server.port).toBe(defaultConfig().server.port)
+  })
+
+  it('interruptedRecovery 可配置，非法值回退到 auto', () => {
+    const dir = home()
+    ensureHome(dir)
+    writeFileSync(
+      join(dir, 'config.yaml'),
+      ['policy:', '  interruptedRecovery: notify', '  maxAutoRecover: 3'].join('\n'),
+    )
+    const cfg = loadConfig(dir)
+    expect(cfg.policy.interruptedRecovery).toBe('notify')
+    expect(cfg.policy.maxAutoRecover).toBe(3)
+
+    const bad = home()
+    ensureHome(bad)
+    writeFileSync(
+      join(bad, 'config.yaml'),
+      ['policy:', '  interruptedRecovery: whatever', '  maxAutoRecover: -5'].join('\n'),
+    )
+    const fallback = loadConfig(bad)
+    expect(fallback.policy.interruptedRecovery).toBe('auto')
+    expect(fallback.policy.maxAutoRecover).toBe(1)
   })
 
   it('配置映射成 Policy：版本号随关键字段变化', () => {

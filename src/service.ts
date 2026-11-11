@@ -33,7 +33,7 @@ import { preview } from './core/events.js'
 import { DEFAULT_CHANNEL_ID } from './channels/port.js'
 import type { CommandRunner } from './infra/process.js'
 import { realRunner } from './infra/process.js'
-import { noopLogger, type Logger } from './infra/logger.js'
+import { errorMessage, noopLogger, type Logger } from './infra/logger.js'
 import type { PrInfo } from './sources/github.js'
 import {
   ReportRejectedError,
@@ -97,6 +97,14 @@ function launchFailureCursorKey(ticketId: string): string {
   return `launch-failure:${ticketId}`
 }
 
+/**
+ * 中断恢复水位：记录已处理过的「被中断轮次」与自动恢复次数。
+ * 持久化到 cursors，保证同一个被中断的轮次不会被反复恢复 / 反复提醒。
+ */
+function interruptedCursorKey(ticketId: string): string {
+  return `interrupted:${ticketId}`
+}
+
 /** 关单提醒水位：记录提醒时间与自动关闭时间，重启后仍能继续倒计时。 */
 function reminderCursorKey(ticketId: string): string {
   return `retention:reminder:${ticketId}`
@@ -145,6 +153,14 @@ interface LaunchFailureRecord {
   /** 上次失败时工单上已存在的最大输入序号；序号不大于它的输入不再触发重试。 */
   lastSeq: number
   lastReason: string
+}
+
+/** 中断恢复水位：同一个被中断的轮次只处理一次，自动恢复次数也有上限。 */
+interface InterruptedRecord {
+  /** 已处理过的被中断轮次 id；避免重启后反复恢复同一轮。 */
+  turnIds: string[]
+  /** 已自动恢复的次数。 */
+  autoRecovered: number
 }
 
 /** 同一条进展（summary + reply）只保留一次，避免 worker 重复上报刷屏。 */
@@ -1036,7 +1052,7 @@ export class RouterService {
         ? String(error.detail.workdir)
         : assignment.workdir
       this.store.updateAssignment({ ...assignment, workdir: failedWorkdir, status: 'ended', endedAt: this.clock.now() })
-      if (failedWorkdir) this.enqueueWorkspaceCleanup(ticket)
+      if (failedWorkdir) this.enqueueWorkspaceCleanup(ticket, 'launch-failed')
       this.reportLaunchFailure(ticket, error)
       throw error
     }
@@ -1515,7 +1531,7 @@ export class RouterService {
       throw error
     }
     this.store.deleteCursor(reminderCursorKey(ticket.id))
-    this.enqueueWorkspaceCleanup(closed)
+    this.enqueueWorkspaceCleanup(closed, 'idle')
     this.notify(
       closed,
       `工单「${closed.title}」已 ${this.retention.idleHours} 小时无进展且 ${this.retention.closeGraceHours} 小时未回复，已自动关闭，正在回收对应的 workspace。`,
@@ -1524,15 +1540,21 @@ export class RouterService {
     this.log('retention:closed', closed.id, { reason: 'idle' })
   }
 
-  private enqueueWorkspaceCleanup(ticket: Ticket): void {
+  /**
+   * 投递 workspace 回收任务。所有自动关单来源（闲置超时、PR 合并 / 关闭、派工半成功、人工停止）
+   * 都必须走这里，否则工单会关掉、worktree 却留在磁盘上。
+   */
+  private enqueueWorkspaceCleanup(ticket: Ticket, source: string): void {
     const suffix = ticket.closedAt ?? this.clock.now()
-    this.store.enqueueEffect({
+    const queued = this.store.enqueueEffect({
       id: `ef_cleanup_${ticket.id}_${suffix.replace(/[^0-9a-zA-Z]/g, '')}`,
       key: `cleanup-workspace:${ticket.id}:${suffix}`,
       kind: 'cleanup-workspace',
       payload: { ticketId: ticket.id },
       now: this.clock.now(),
     })
+    // 队列去重时不重复打日志，避免 PR 轮询反复命中同一张单。
+    if (queued) this.log('cleanup:queued', ticket.id, { source })
   }
 
   /**
@@ -1937,7 +1959,9 @@ export class RouterService {
 
   stopTicket(ticketId: string, reason: string): Ticket {
     const ticket = this.engine.stopTicket(ticketId, reason)
-    this.store.enqueueEffect({ id: `ef_stop_${ticketId}_${Date.now()}`, key: `stop:${ticketId}`, kind: 'stop-worker', payload: { ticketId }, now: this.clock.now() })
+    // 人工停止同样要回收 workspace：cleanup-workspace 会先停终端再删 worktree，
+    // 比单独排 stop-worker 更完整（旧实现只停进程，目录会一直留在磁盘上）。
+    this.enqueueWorkspaceCleanup(ticket, 'stop')
     return ticket
   }
 
@@ -2024,8 +2048,10 @@ let repo = ticket.repo
       if ((info.state === 'merged' || info.state === 'closed') && updated.stage !== 'done') {
         const closed = this.engine.closeTicket(ticket.id, `pr:${info.state}`)
         appendEvent(join(this.config.home, 'workers', ticket.id, 'events.log'), { kind: 'pr', state: info.state, at: this.clock.now() })
+        // PR 闭环也是自动关单：和闲置超时关单一样回收 workspace，否则目录会一直留在磁盘上。
+        this.enqueueWorkspaceCleanup(closed, `pr:${info.state}`)
         const label = info.state === 'merged' ? '已合并' : '已关闭'
-        this.notify(closed, `工单「${closed.title}」的 PR ${info.url} ${label}，工单闭环。`, `pr:${ticket.id}:${info.state}`)
+        this.notify(closed, `工单「${closed.title}」的 PR ${info.url} ${label}，工单闭环，正在回收对应的 workspace。`, `pr:${ticket.id}:${info.state}`)
       }
     }
   }
@@ -2069,6 +2095,8 @@ let repo = ticket.repo
           // 连接已恢复，重启前留下的 stale 提示不再成立；真闲置会在下一个巡检周期重新判。
           if (attached) this.engine.clearAttention(ticket.id)
           this.log('recover:reattach', ticket.id, { attached })
+          // 接回来了不代表任务做完：worker 进程随服务一起死的那一轮可能停在半路。
+          if (attached) await this.recoverInterruptedTurn(ticket, assignment, runtime)
         }
         this.log('recover:reuse', ticket.id, { handle: assignment.handle, phase: status?.phase })
         continue
@@ -2088,6 +2116,125 @@ let repo = ticket.repo
   }
 
   // ---------- 内部 ----------
+
+  /**
+   * 处理「worker 上一轮被服务重启打断」的情况。
+   *
+   * 只有 worker 进程随 Router 一起死的运行时（capabilities.agent.processExit=true）
+   * 才需要：这类运行时重启后上一轮可能停在半路，任务并没有做完。
+   * orca / claude-code 的 worker 活在自己的常驻服务里，重启期间照常干活，不该打扰。
+   *
+   * 两种处置（policy.interruptedRecovery 控制）：
+   *   auto   —— 自动补一条输入，让 worker 自己检查现场后接着做；
+   *   notify —— 发飞书提醒，等用户回复才恢复。
+   */
+  private async recoverInterruptedTurn(
+    ticket: Ticket,
+    assignment: Assignment,
+    runtime: WorkerRuntime,
+  ): Promise<void> {
+    const mode = this.config.policy.interruptedRecovery
+    if (mode === 'off') return
+    // 进程不随 Router 死的运行时：任务没被打断，worker 还在跑，不需要恢复。
+    if (!runtime.capabilities.agent.processExit) return
+    if (!runtime.interruptedTurn) return
+
+    const interrupted = await runtime.interruptedTurn(this.refOf(assignment)).catch(() => null)
+    if (!interrupted) return
+
+    const record = this.loadInterruptedRecord(ticket.id)
+    // 同一个被中断的轮次只处理一次：反复重启不应反复恢复同一轮。
+    if (record.turnIds.includes(interrupted.turnId)) return
+    record.turnIds.push(interrupted.turnId)
+    if (record.turnIds.length > 20) record.turnIds = record.turnIds.slice(-20)
+
+    const summary = interrupted.summary
+    this.logger.warn('recover:interrupted', {
+      ticketId: ticket.id,
+      turnId: interrupted.turnId,
+      mode,
+      autoRecovered: record.autoRecovered,
+    })
+
+    // 先告诉用户「任务被打断了」，无论后面是自动恢复还是等用户触发。
+    this.notify(
+      ticket,
+      [
+        `工单「${ticket.title}」的 worker 因服务重启被中断，上一轮没有跑完。`,
+        ...(summary ? ['', `中断前已完成到：${summary}`] : []),
+        '',
+        '工作区未提交的改动都还在，回复「继续」即可从中断处接着做。',
+      ].join('\n'),
+      `recover:interrupted:${ticket.id}:${interrupted.turnId}`,
+    )
+
+    const canAutoRecover = mode === 'auto' && record.autoRecovered < this.config.policy.maxAutoRecover
+    if (!canAutoRecover) {
+      if (mode === 'auto') {
+        // 自动恢复次数用完，降级为「等用户触发」，但要说明原因。
+        this.notify(
+          ticket,
+          `工单「${ticket.title}」自动恢复次数已达上限（${this.config.policy.maxAutoRecover} 次），已改为等你回复「继续」再接着做。`,
+          `recover:interrupted-cap:${ticket.id}:${interrupted.turnId}`,
+        )
+      }
+      this.saveInterruptedRecord(ticket.id, record)
+      return
+    }
+
+    // 自动恢复：补一条 retry 输入。走 deliverInput 才会落库，
+    // 这样恢复动作可审计，且 worker 没 ack 时重启后还能再投一次。
+    try {
+      this.engine.deliverInput(ticket.id, {
+        kind: 'retry',
+        text: [
+          '上一轮因服务重启被中断。',
+          ...(summary ? [`中断前已完成到：${summary}。`] : []),
+          '请先检查当前现场（文件可能只写了一半），判断哪些步骤需要重做，然后继续完成剩余部分。',
+        ].join('\n'),
+      })
+      record.autoRecovered += 1
+      this.saveInterruptedRecord(ticket.id, record)
+      this.log('recover:auto-resume', ticket.id, { turnId: interrupted.turnId })
+      // 恢复动作已经排上，提示用户一声。
+      this.notify(
+        ticket,
+        `工单「${ticket.title}」已自动从中断处恢复，正在继续执行。`,
+        `recover:auto-resumed:${ticket.id}:${interrupted.turnId}`,
+      )
+    } catch (error) {
+      this.saveInterruptedRecord(ticket.id, record)
+      this.logger.warn('recover:auto-resume-failed', {
+        ticketId: ticket.id,
+        turnId: interrupted.turnId,
+        message: errorMessage(error),
+      })
+      this.notify(
+        ticket,
+        `工单「${ticket.title}」自动恢复失败，请回复「继续」手动接着做。`,
+        `recover:auto-resume-failed:${ticket.id}:${interrupted.turnId}`,
+      )
+    }
+  }
+
+  /** 读取中断恢复水位；读不出来当作全新记录。 */
+  private loadInterruptedRecord(ticketId: string): InterruptedRecord {
+    const raw = this.store.getCursor(interruptedCursorKey(ticketId))
+    if (!raw) return { turnIds: [], autoRecovered: 0 }
+    try {
+      const parsed = JSON.parse(raw) as Partial<InterruptedRecord>
+      return {
+        turnIds: Array.isArray(parsed.turnIds) ? parsed.turnIds.filter(id => typeof id === 'string') : [],
+        autoRecovered: typeof parsed.autoRecovered === 'number' && parsed.autoRecovered >= 0 ? parsed.autoRecovered : 0,
+      }
+    } catch {
+      return { turnIds: [], autoRecovered: 0 }
+    }
+  }
+
+  private saveInterruptedRecord(ticketId: string, record: InterruptedRecord): void {
+    this.store.setCursor(interruptedCursorKey(ticketId), JSON.stringify(record), this.clock.now())
+  }
 
   /** 只把「确认丢失/不可恢复」判为 gone；查询失败不误杀。 */
   private async workerGone(assignment: Assignment): Promise<boolean> {

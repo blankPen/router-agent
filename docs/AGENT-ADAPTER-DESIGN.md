@@ -1135,6 +1135,8 @@ export function createRuntimes(config: AppConfig, deps: RuntimeDeps): RuntimeReg
 
 ### P4 · Codex CLI 运行时（二期）
 
+> 2026-11-10 更新：已先交付 `codex-app`（Codex App Server 直连）运行时，支持 thread/resume、turn/steer、原生审批与桌面端 `codex://threads/<id>` 深链；详见 [RUNTIME.md](RUNTIME.md)。本节的 `codex-cli` 方案保留为 App Server 不可用时的兜底。
+
 - `CodexCliRuntime`（`codex exec --json` + `codex exec resume`，stdin 传 prompt，沙箱/网络默认保守）；
 - `CodexSessionActivity`（sessionId + cwd 双条件，候选文件有界）；
 - 版本容错与事件解析测试。
