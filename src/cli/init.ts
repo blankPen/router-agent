@@ -42,7 +42,7 @@ export async function runInitWizard(deps: InitDeps): Promise<AppConfig> {
     writeConfig(deps.home, config)
     out(`已写入默认配置：${join(deps.home, 'config.yaml')}`)
     out('必填项可用 `ra config set` 补齐：project.<名称> / feishu.chats / feishu.allowed / feishu.botOpenIds')
-    out('其余参数（acceptMode、maxWorkers、workerSpec.mode、port 等）同样用 `ra config set` 调整。')
+    out('其余参数（acceptMode、maxWorkers、port 等）同样用 `ra config set` 调整。')
     return config
   }
 

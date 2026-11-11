@@ -53,7 +53,6 @@ describe('规范 markdown 内置存储', () => {
       'router.admission',
       'router.conversation',
       'worker.prompt-mode',
-      'worker.agent-mode',
       'worker.contract',
     ])
     expect(specs.every(spec => spec.isCustom === false)).toBe(true)
@@ -90,7 +89,6 @@ describe('规范 markdown 内置存储', () => {
     expect(buildSystemPrompt(policy, home)).toContain('自定义执行规范')
 
     const prompt = buildWorkerPrompt({
-      mode: 'prompt',
       ticket,
       mandateScope: '只改登录超时',
       statePath: '/tmp/s.json',

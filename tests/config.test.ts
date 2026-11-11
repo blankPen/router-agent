@@ -27,17 +27,17 @@ describe('全局状态目录与配置', () => {
     for (const sub of ['logs', 'workers']) expect(existsSync(join(dir, sub))).toBe(true)
     const text = readFileSync(join(dir, 'config.yaml'), 'utf8')
     expect(text).toContain('acceptMode')
-    expect(text).toContain('workerSpec')
+    expect(text).toContain('runtime')
   })
 
-  it('没有配置时使用默认值：auto + 并发 4 + prompt 模式 + orca 运行时', () => {
+  it('没有配置时使用默认值：auto + 并发 4 + orca 运行时', () => {
     const cfg = loadConfig(home())
     expect(cfg.policy.acceptMode).toBe('auto')
     expect(cfg.policy.maxWorkers).toBe(4)
     expect(cfg.policy.interruptedRecovery).toBe('auto')
     expect(cfg.policy.maxAutoRecover).toBe(1)
     expect(cfg.feishu.reaction).toBe('Typing')
-    expect(cfg.workerSpec.mode).toBe('prompt')
+    expect(cfg.worker.evidence.ui).toBe('warn')
     expect(cfg.runtime.default).toBe('orca')
   })
 
@@ -71,8 +71,9 @@ describe('全局状态目录与配置', () => {
       'policy:',
       '  acceptMode: observe',
       '  maxWorkers: 2',
-      'workerSpec:',
-      '  mode: agent',
+      'worker:',
+      '  evidence:',
+      '    ui: enforce',
       'feishu:',
       '  chats: [oc_a]',
       '  otherChats: [oc_b]',
@@ -84,19 +85,19 @@ describe('全局状态目录与配置', () => {
     ].join('\n'))
     const cfg = loadConfig(dir)
     expect(cfg.policy.acceptMode).toBe('observe')
-    expect(cfg.workerSpec.mode).toBe('agent')
     expect(cfg.server.port).toBe(3999)
+    expect(cfg.policy.maxWorkers).toBe(2)
+    expect(cfg.worker.evidence.ui).toBe('enforce')
     expect(cfg.feishu.chats).toEqual([chatEntry('oc_a'), chatEntry('oc_b', { mode: 'mention' })])
   })
 
-  it('非法 acceptMode / mode / port 回退到默认值而不是崩溃', () => {
+  it('非法 acceptMode / port 回退到默认值而不是崩溃', () => {
     const dir = home()
     ensureHome(dir)
     const { writeFileSync } = require('node:fs') as typeof import('node:fs')
-    writeFileSync(join(dir, 'config.yaml'), ['policy:', '  acceptMode: yolo', 'workerSpec:', '  mode: magic', 'server:', '  port: abc'].join('\n'))
+    writeFileSync(join(dir, 'config.yaml'), ['policy:', '  acceptMode: yolo', 'server:', '  port: abc'].join('\n'))
     const cfg = loadConfig(dir)
     expect(cfg.policy.acceptMode).toBe('auto')
-    expect(cfg.workerSpec.mode).toBe('prompt')
     expect(cfg.server.port).toBe(defaultConfig().server.port)
   })
 
@@ -238,9 +239,9 @@ describe('全局状态目录与配置', () => {
     expect(cfg.feishu.reaction).toBe('OnIt')
     expect(setConfigValue(cfg, 'feishu.reaction', '')).toBe(true)
     expect(cfg.feishu.reaction).toBe('')
-    expect(setConfigValue(cfg, 'workerSpec.mode', 'agent')).toBe(true)
-    expect(cfg.workerSpec.mode).toBe('agent')
-    expect(setConfigValue(cfg, 'workerSpec.mode', 'magic')).toBe(false)
+    expect(setConfigValue(cfg, 'worker.evidence.ui', 'enforce')).toBe(true)
+    expect(cfg.worker.evidence.ui).toBe('enforce')
+    expect(setConfigValue(cfg, 'worker.evidence.ui', 'magic')).toBe(false)
     expect(setConfigValue(cfg, 'llm.api', 'anthropic-messages')).toBe(true)
     expect(cfg.llm?.api).toBe('anthropic-messages')
     expect(setConfigValue(cfg, 'llm.api', 'bogus')).toBe(false)

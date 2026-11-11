@@ -76,7 +76,7 @@ pnpm link --global      # then use `ra` directly; without linking, use `node bin
 
 **2 · Initialize: two ways, pick either one**
 
-Initialization results in `~/.router-agent/config.yaml` (`ra init` also writes the global worker spec). Both paths write the same config, so you can mix them and run them repeatedly.
+Initialization results in `~/.router-agent/config.yaml`. Both paths write the same config, so you can mix them and run them repeatedly.
 
 | Path | Best for | Entry point |
 |-|-|-|

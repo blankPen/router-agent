@@ -25,17 +25,16 @@ function home(): string {
 }
 
 async function initHome(dir: string): Promise<void> {
-  await runCli(['init', '--home', dir, '--agents-dir', join(dir, '.claude/agents'), '--yes'], io())
+  await runCli(['init', '--home', dir, '--yes'], io())
 }
 
 describe('ra CLI', () => {
-  it('ra init 初始化目录、配置与 worker 全局规范', async () => {
+  it('ra init 初始化目录与配置', async () => {
     const dir = home()
     const output = io()
-    const code = await runCli(['init', '--home', dir, '--agents-dir', join(dir, '.claude/agents'), '--yes'], output)
+    const code = await runCli(['init', '--home', dir, '--yes'], output)
     expect(code).toBe(0)
     expect(existsSync(join(dir, 'config.yaml'))).toBe(true)
-    expect(existsSync(join(dir, '.claude/agents/router-agent-worker.md'))).toBe(true)
     expect(output.out.join('\n')).toContain(dir)
   })
 

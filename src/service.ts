@@ -32,8 +32,15 @@ import { EffectsProcessor } from './core/effects.js'
 import { preview } from './core/events.js'
 import { DEFAULT_CHANNEL_ID } from './channels/port.js'
 import type { CommandRunner } from './infra/process.js'
+import { realRunner } from './infra/process.js'
 import { errorMessage, noopLogger, type Logger } from './infra/logger.js'
 import type { PrInfo } from './sources/github.js'
+import {
+  ReportRejectedError,
+  decisionLogDetail,
+  evaluateUiEvidence,
+  evidenceRejectedMessage,
+} from './worker/evidence-gate.js'
 
 // Logger 的实现放在 infra/logger.ts；这里保留 re-export，兼容既有 import。
 export type { Logger } from './infra/logger.js'
@@ -61,6 +68,8 @@ export interface RouterServiceOptions {
   prTracker: PrTracker
   clock?: Clock
   logger?: Logger
+  /** git 命令；UI 证据门禁按改动文件推断是否属于 UI 工单。 */
+  git?: CommandRunner
   poller?: { scan(): number; reset?: () => void }
   effects?: EffectsProcessor
   sender?: OutboundSender
@@ -463,6 +472,7 @@ export class RouterService {
   private poller: { scan(): number; reset?: () => void }
   private effects: EffectsProcessor
   private prTracker: PrTracker
+  private git: CommandRunner
   private sender: OutboundSender
   private timers: NodeJS.Timeout[] = []
   private running = false
@@ -507,6 +517,7 @@ export class RouterService {
     this.clock = opts.clock ?? { now: () => new Date().toISOString() }
     this.logger = opts.logger ?? noopLogger
     this.prTracker = opts.prTracker
+    this.git = opts.git ?? realRunner('git')
     this.idleAfterMs = opts.idleAfterMs ?? 120_000
     this.staleAfterMs = opts.staleAfterMs ?? 300_000
     this.claudeProjectsDir = opts.claudeProjectsDir
@@ -542,7 +553,10 @@ export class RouterService {
     })
     this.poller = opts.poller ?? new ReportPoller({
       workersDir: join(opts.config.home, 'workers'),
-      onState: (state, meta) => this.onWorkerState(state, meta ?? undefined),
+      onState: (state, meta) => {
+        // 证据门禁需要查 git / PR，异步执行；失败不能丢掉这条上报，分类型落日志。
+        void this.ingestWorkerState(state, meta ?? undefined).catch(error => this.handleIngestError(state, error))
+      },
       onError: (ticketId, error) => this.logger.error('report:invalid', { ticketId, message: error.message }),
     })
     this.sender = opts.sender ?? { send: async () => {} }
@@ -986,7 +1000,6 @@ export class RouterService {
     const branchName = workBranch(ticket)
     const contract = runtime.id === 'orca'
       ? buildWorkerPrompt({
-          mode: this.config.workerSpec.mode,
           ticket,
           mandateScope: ticket.title,
           statePath,
@@ -1593,6 +1606,101 @@ export class RouterService {
   }
 
   // ---------- 上报 ----------
+
+  /**
+   * 带证据门禁的上报入口：HTTP 与 state.json 兜底通道都走这里。
+   * 门禁只拦 `ready`；`blocked` / `progress` 等原样放行。
+   */
+  async ingestWorkerState(state: WorkerStateFile, meta?: WorkerMeta): Promise<void> {
+    await this.enforceUiEvidence(state)
+    this.onWorkerState(state, meta)
+  }
+
+  /**
+   * UI 工单报 ready 前检查 PR / MR 描述里的 Before / After 证据。
+   * - mode=off / 非 ready / 非 UI 工单：直接放行；
+   * - 无法判断（workdir 丢失、git / PR 查询失败）：放行并记 evidence-unverified，避免误杀；
+   * - mode=warn：记 evidence-missing 但放行；
+   * - mode=enforce：抛 ReportRejectedError，由 API 映射成 422。
+   */
+  private async enforceUiEvidence(state: WorkerStateFile): Promise<void> {
+    const mode = this.config.worker.evidence.ui
+    if (mode === 'off' || state.state !== 'ready') return
+    const ticket = this.store.getTicket(state.ticketId)
+    if (!ticket) return
+    const assignment = (state.assignmentId ? this.store.getAssignment(state.assignmentId) : null)
+      ?? this.store.latestAssignment(ticket.id)
+    const decision = await evaluateUiEvidence(
+      {
+        state: state.state,
+        summary: state.summary,
+        prNumber: state.prNumber,
+        prUrl: state.prUrl,
+        ...(state.uiChange !== undefined ? { uiChange: state.uiChange } : {}),
+      },
+      {
+        ticketId: ticket.id,
+        repo: ticket.repo,
+        branch: ticket.branch,
+        ...(assignment?.workdir ? { workdir: assignment.workdir } : {}),
+        mode,
+      },
+      {
+        git: this.git,
+        prView: (repo, number, hint) => this.prTracker.view(repo, number, hint),
+      },
+    )
+
+    if (decision.unverified) {
+      this.logger.warn('report:evidence-unverified', {
+        ticketId: ticket.id,
+        mode,
+        unverified: decision.unverified,
+        ...(decision.source ? { source: decision.source } : {}),
+      })
+      return
+    }
+    if (!decision.checked || !decision.ui) return
+
+    if (decision.action === 'reject') {
+      this.logger.warn('report:evidence-missing', decisionLogDetail(decision, { ticketId: ticket.id, mode }))
+      throw new ReportRejectedError('evidence-missing', evidenceRejectedMessage(decision), {
+        ticketId: ticket.id,
+        missing: decision.missing,
+        ...(decision.source ? { source: decision.source } : {}),
+      })
+    }
+    if (decision.reason) {
+      this.logger.warn('report:evidence-missing', decisionLogDetail(decision, { ticketId: ticket.id, mode }))
+    }
+  }
+
+  /** 兜底通道没有 HTTP 响应可回：命中门禁时转人工，其他异常只记日志，不能丢上报。 */
+  private handleIngestError(state: WorkerStateFile, error: unknown): void {
+    if (error instanceof ReportRejectedError) {
+      this.logger.warn('report:evidence-missing', {
+        ticketId: state.ticketId,
+        mode: this.config.worker.evidence.ui,
+        action: 'reject',
+        channel: 'state-file',
+        message: error.message,
+      })
+      const ticket = this.store.getTicket(state.ticketId)
+      if (ticket && ticket.stage !== 'done') {
+        this.engine.setAttention(ticket.id, 'worker 上报 ready，但 UI 证据不足；请补齐 PR / MR 描述或确认接受')
+        this.notify(
+          ticket,
+          `工单「${ticket.title}」的 worker 上报完成，但缺少 UI 的 Before / After 证据：${error.message}\n请补齐 PR / MR 描述后让 worker 重新上报，或在本话题确认是否接受。`,
+          `evidence:${ticket.id}:${state.turn}`,
+        )
+      }
+      return
+    }
+    this.logger.warn('report:ingest-failed', {
+      ticketId: state.ticketId,
+      message: error instanceof Error ? error.message : String(error),
+    })
+  }
 
   /** Worker 通过 state.json 上报；poller 与测试都走这里。 */
   onWorkerState(state: WorkerStateFile, meta?: WorkerMeta): void {

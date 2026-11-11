@@ -142,7 +142,7 @@ Worker **不手写状态文件**，统一用 `ra report` 上报。CLI 会 POST �
 - 终端长时间无输出 → 主动发 `status?`；仍无响应 → 标记 stale 并通知人。
 - 审计事件追加到同目录 `events.log`。
 
-两种规范注入模式（`workerSpec.mode`）：`prompt` 把手册拼进启动 prompt；`agent` 只发工单，由全局 `~/.claude/agents/router-agent-worker.md` 提供规范（`ra init` 会生成）。两种模式都不改项目 `CLAUDE.md`。详见 [RUNTIME.md](RUNTIME.md#worker-规范注入)。
+Worker 手册会拼进启动 prompt；非 Orca 运行时使用运行时中立的契约文件。两者都不改项目 `CLAUDE.md`。详见 [RUNTIME.md](RUNTIME.md#worker-规范注入)。
 
 ### 上报协议
 
@@ -153,6 +153,7 @@ ra report \
   --summary "一句话摘要" \
   --reply @answer.md \
   --pr-number 12 --pr-url "https://github.com/o/r/pull/12" \
+  --ui-change [true|false] \
   --human-action "blocked 时要人做的事" \
   --ack in_xxx
 ```
@@ -162,6 +163,7 @@ ra report \
 | `--summary` | 一句话摘要，只给日志和列表用 |
 | `--reply` | 用户真正看到的完整内容（Markdown），支持字面量、`@文件`、`-`（stdin） |
 | `--pr-number` / `--pr-url` | 代码类交付时附 PR 编号与链接 |
+| `--ui-change` | 显式声明是否改了 UI；不声明时 Router 按改动文件推断。`worker.evidence.ui: enforce` 下，UI 工单缺 Before / After 证据的 `ready` 会返回 422 |
 | `--human-action` | `blocked` 时需要人做的事 |
 | `--ack` | 确认已读某条追问（`in_xxx`），否则会被反复重投 |
 
