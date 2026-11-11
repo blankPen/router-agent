@@ -20,7 +20,7 @@ import type {
 } from '../port.js'
 import { buildWorkerPrompt } from '../spec/index.js'
 import { workBranch, worktreeName } from '../naming.js'
-import { readClaudeSession } from './session.js'
+import { resolveSession } from '../agents/registry.js'
 import {
   agentLaunch,
   terminalClose,
@@ -40,6 +40,8 @@ export interface OrcaRuntimeOptions {
   workersDir: string
   /** 状态目录；传入后 Worker 规范优先读 `<home>/specs/worker/` 下的覆盖文件。 */
   home?: string
+  /** 派工时启动哪个 Agent；留空 = 由 Orca 自己的配置决定。 */
+  agent?: string
   /** Claude Code 会话记录目录；默认 ~/.claude/projects，测试可注入临时目录。 */
   claudeProjectsDir?: string
 }
@@ -207,12 +209,14 @@ export class OrcaRuntime implements WorkerRuntime {
   private runner: CommandRunner
   private workersDir: string
   private home?: string
+  private agent: string
   private claudeProjectsDir?: string
 
   constructor(opts: OrcaRuntimeOptions) {
     this.runner = opts.runner
     this.workersDir = opts.workersDir
     this.home = opts.home
+    this.agent = String(opts.agent ?? '').trim()
     this.claudeProjectsDir = opts.claudeProjectsDir
   }
 
@@ -238,11 +242,27 @@ export class OrcaRuntime implements WorkerRuntime {
       workdir: ctx.workdir,
       ...(this.home ? { home: this.home } : {}),
     })
-    const res = await this.run(worktreeCreate({ repo, name, prompt, branch, ...(baseBranch ? { baseBranch } : {}) }))
+    const res = await this.run(worktreeCreate({
+      repo,
+      name,
+      prompt,
+      branch,
+      ...(baseBranch ? { baseBranch } : {}),
+      ...(this.agent ? { agent: this.agent } : {}),
+    }))
     const parsed = parseCreateResult(res.stdout)
     const workdir = parsed.workdir ?? ctx.workdir
     if (!workdir) throw new Error('orca:workdir-missing: worktree create 没有返回路径')
-    this.writeMeta(ctx, { handle: parsed.handle, workdir, statePath, eventsPath, repo, branch: baseBranch, workBranch: parsed.branch ?? branch })
+    this.writeMeta(ctx, {
+      handle: parsed.handle,
+      workdir,
+      statePath,
+      eventsPath,
+      repo,
+      branch: baseBranch,
+      workBranch: parsed.branch ?? branch,
+      ...(this.agent ? { agent: this.agent } : {}),
+    })
     return {
       handle: parsed.handle,
       workdir,
@@ -312,7 +332,7 @@ export class OrcaRuntime implements WorkerRuntime {
     return this.read(this.handleOf(ref), opts)
   }
 
-  /** 结构化活动：优先读 Claude Code 的会话记录；没有 workdir 时返回 null。 */
+  /** 结构化活动：优先读 Agent 自己的会话记录；没有 workdir 时返回 null。 */
   async activity(query: ActivityQuery): Promise<SessionSnapshot | null> {
     const workdir = query.ref.workdir
     if (!workdir) return null
@@ -381,14 +401,15 @@ export class OrcaRuntime implements WorkerRuntime {
   }
 
   /**
-   * 优先读 Agent 自己的结构化会话记录（Claude Code JSONL），
+   * 优先读 Agent 自己的结构化会话记录（按配置的 Agent 选读取器），
    * 比终端屏幕干净得多；找不到时返回 null，由调用方退回 read()。
    */
   async session(workdir: string, opts: { maxBytes?: number; maxEvents?: number } = {}): Promise<SessionSnapshot | null> {
-    return readClaudeSession(workdir, {
-      ...(this.claudeProjectsDir ? { projectsDir: this.claudeProjectsDir } : {}),
-      ...opts,
+    const resolved = resolveSession(workdir, this.agent, {
+      ...(this.claudeProjectsDir ? { roots: { claude: this.claudeProjectsDir } } : {}),
     })
+    if (!resolved) return null
+    return resolved.reader.read(workdir, opts)
   }
 
   async inspectWorktree(selector: string): Promise<Record<string, unknown> | null> {
@@ -403,7 +424,7 @@ export class OrcaRuntime implements WorkerRuntime {
   }
 
   async relaunchAgent(worktree: string, prompt: string): Promise<void> {
-    await this.run(agentLaunch({ worktree, prompt }))
+    await this.run(agentLaunch({ worktree, prompt, ...(this.agent ? { agent: this.agent } : {}) }))
   }
 
   private handleOf(ref: WorkerRef | string): string {
@@ -418,7 +439,7 @@ export class OrcaRuntime implements WorkerRuntime {
     return res
   }
 
-  private writeMeta(ctx: WorkerContext, extra: { handle: string; workdir: string; statePath: string; eventsPath: string; repo: string; branch: string; workBranch: string }): void {
+  private writeMeta(ctx: WorkerContext, extra: { handle: string; workdir: string; statePath: string; eventsPath: string; repo: string; branch: string; workBranch: string; agent?: string }): void {
     const dir = join(this.workersDir, ctx.ticket.id)
     mkdirSync(dir, { recursive: true })
     const metaPath = join(dir, 'meta.json')
@@ -435,6 +456,8 @@ export class OrcaRuntime implements WorkerRuntime {
       branch: extra.branch,
       /** worktree 自己实际使用的工作分支。 */
       workBranch: extra.workBranch,
+      /** 派工时用的 Agent；没配时留空，表示跟随 Orca 自己的默认。 */
+      ...(extra.agent ? { agent: extra.agent } : {}),
       runtime: this.id,
       status: 'running',
       startedAt: new Date().toISOString(),

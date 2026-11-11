@@ -27,7 +27,7 @@ export const WORKER_RUNTIMES: readonly WorkerRuntimeMeta[] = [
     id: ORCA_RUNTIME_ID,
     name: 'Orca',
     label: 'orca · Orca worktree + 终端',
-    hint: '通过 Orca 创建 worktree 并启动 Claude Code 终端，交互与状态读取走 Orca',
+    hint: '通过 Orca 创建 worktree 并启动 Agent 终端（默认跟随 Orca 配置），交互与状态读取走 Orca',
     installHint: '从 Orca 官方发布页下载安装，并确保 orca CLI 在 PATH 中',
     installUrl: 'https://github.com/stablyai/orca/releases',
   },

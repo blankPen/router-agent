@@ -81,7 +81,7 @@ function attachmentsSection(attachments: Attachment[]): string {
   return [
     '## 附件图片（原图）',
     '',
-    '发起人随消息发来了原始图片，Router 已落盘到本机。请直接用 Read 工具查看原图，',
+    '发起人随消息发来了原始图片，Router 已落盘到本机。请直接用你的读图工具查看原图，',
     '不要只依赖 Router 的文字转写；图片里的细节以原图为准。',
     '',
     ...lines,

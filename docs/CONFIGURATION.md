@@ -155,6 +155,7 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 | `workspace.enabled` / `keepHours` / `sweepMinutes` | 见「关单后的工作区回收」 |
 | `worker.evidence.ui` | `off` / `warn` / `enforce`；UI 证据门禁档位（保存后需重启） |
 | `runtime.default` | `orca` / `claude-code` / `acp` / `acp-*` |
+| `runtime.options.<运行时>.<键>` | 运行时自己的选项；键由该运行时声明，见「运行时选项」 |
 | `server.port` | 1–65535 |
 | `feishu.appId` / `reaction` / `directMessages` / `allowed` / `bots` / `botOpenIds` / `botNames` | 字符串、布尔或逗号分隔列表 |
 | `feishu.chats` | 逗号分隔 chat_id；已有条目的 mode / 绑定 / sync 保留，新条目默认 `all` |
@@ -169,8 +170,21 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 | `chatMode.<chatId>` | `ra config set chatMode.oc_xxx mention` | `all` / `mention` |
 | `chatSync.<chatId>` | `ra config set chatSync.oc_xxx true` | 启动时补拉该群历史 |
 | `chatAllow.<chatId>` | `ra config set chatAllow.oc_xxx ou_a,ou_b` | 空值 = 沿用全局 `feishu.allowed` |
+| `runtime.options.<运行时>.<键>` | `ra config set runtime.options.orca.agent codex` | 运行时专属选项；按该运行时的声明校验 |
 
-`router.session.*`、`router.persona.*`、`feishu.images.*` 不在 `config set` 的白名单里，用 `ra config edit` 或 Web 面板改；`worker.tools.*` 与 `runtime.options.*` 面板不提供，只能 `ra config edit` 直接改文件。
+`router.session.*`、`router.persona.*`、`feishu.images.*` 不在 `config set` 的白名单里，用 `ra config edit` 或 Web 面板改；`worker.tools.*` 面板不提供，只能 `ra config edit` 直接改文件。
+
+## 运行时选项
+
+每个运行时可以声明自己的可配置项，落在通用的 `runtime.options.<运行时 id>.<键>` 下：
+
+- **面板**：声明过的选项会自动出现在「选择运行时」卡片下方，随运行时切换；
+- **命令行**：`ra config set runtime.options.orca.agent codex`；
+- **校验**：后端按该运行时的声明校验取值，声明之外的键一律拒绝。
+
+目前只有 Orca 声明了一个选项：`agent` —— 决定 Orca 在工单 worktree 里启动哪个 Agent。留空表示**跟随 Orca 自己的默认**（不传 `--agent`）；填 `codex` / `claude` / `opencode` 等则显式指定。改了要重启服务才生效，只影响新工单。
+
+新增运行时只要声明自己的选项即可，内核与面板都不用改；选项声明见 `src/worker/runtimes/options.ts` 与各运行时的 `options.ts`。
 
 ## 环境变量
 

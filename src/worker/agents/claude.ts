@@ -1,7 +1,14 @@
+/**
+ * Claude Code 的会话记录读取。
+ *
+ * Claude 把每个项目的会话写在 `~/.claude/projects/<cwd 转义>/<sessionId>.jsonl`，
+ * 文件名本身就是 `claude --resume` 接受的 session id。
+ */
 import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import type { SessionEvent, SessionSnapshot } from '../port.js'
+import type { AgentSessionReader } from './profile.js'
 
 /** Claude Code 默认把会话记录写在这里。 */
 export function defaultClaudeProjectsDir(): string {
@@ -18,7 +25,6 @@ export function claudeProjectSlug(workdir: string): string {
  *
  * Claude Code 的会话文件名就是 `claude --resume` 接受的 session id，
  * 所以这里只按 mtime 取最新的 .jsonl，不解析文件内容。
- * Orca 的 meta 只记录终端句柄，恢复按钮需要靠它补出真实 session id。
  */
 export function latestClaudeSessionId(workdir: string, opts: { projectsDir?: string } = {}): string | null {
   if (!workdir) return null
@@ -219,4 +225,19 @@ export function describeToolUse(name: unknown, input: unknown): string {
 function oneLine(value: unknown): string {
   const text = String(value ?? '').replace(/\s+/g, ' ').trim()
   return text.length <= 160 ? text : `${text.slice(0, 160)}…`
+}
+
+/** Claude Code 的会话记录读取器。 */
+export const claudeSessionReader: AgentSessionReader = {
+  latestSessionId(workdir, opts) {
+    return latestClaudeSessionId(workdir, opts?.root ? { projectsDir: opts.root } : {})
+  },
+  read(workdir, opts) {
+    return readClaudeSession(workdir, {
+      ...(opts?.root ? { projectsDir: opts.root } : {}),
+      ...(opts?.maxBytes !== undefined ? { maxBytes: opts.maxBytes } : {}),
+      ...(opts?.maxEvents !== undefined ? { maxEvents: opts.maxEvents } : {}),
+      ...(opts?.sessionId ? { sessionId: opts.sessionId } : {}),
+    })
+  },
 }

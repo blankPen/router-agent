@@ -6,6 +6,7 @@
  */
 import { WORKER_RUNTIMES } from '../../worker/runtimes/catalog.js'
 import { ACP_AGENTS } from '../../worker/runtimes/acp/agents.js'
+import { optionSpecOf, runtimeOptionPath } from '../../worker/runtimes/options.js'
 import { isDeprecatedRuntime, runtimeOptionLabel, runtimeStatusLabel, type RuntimeChoiceView } from './runtime-model.js'
 
 export type { RuntimeChoiceView } from './runtime-model.js'
@@ -270,6 +271,34 @@ export const SECTIONS: SectionDef[] = [
 /** 所有标量字段的点路径，用于计算「哪些配置被改过」。 */
 export const FIELD_PATHS: string[] = SECTIONS.flatMap(section => section.fields.map(field => field.path))
 
+/**
+ * 运行时自己声明的选项 → 面板字段。
+ *
+ * 面板不关心具体是哪个运行时：新增运行时只要声明了自己的选项，这里就会自动渲染。
+ */
+export function runtimeOptionFields(runtimeId: string): FieldDef[] {
+  const spec = optionSpecOf(runtimeId)
+  if (!spec) return []
+  return spec.fields.map(field => ({
+    path: runtimeOptionPath(runtimeId, field.key),
+    label: field.label,
+    kind: field.kind === 'select' ? 'select' : field.kind === 'switch' ? 'switch' : field.kind === 'number' ? 'number' : 'text',
+    ...(field.options
+      ? {
+          options: field.options.map(option => ({
+            value: option.value,
+            label: option.label,
+            ...(option.hint ? { hint: option.hint } : {}),
+          })),
+        }
+      : {}),
+    ...(field.placeholder ? { placeholder: field.placeholder } : {}),
+    ...(field.hint ? { hint: field.hint } : {}),
+    ...(field.min !== undefined ? { min: field.min } : {}),
+    ...(field.max !== undefined ? { max: field.max } : {}),
+  }))
+}
+
 /** 探测结果 → runtime.default 的下拉选项；无探测结果时回退静态清单。 */
 export function runtimeOptions(choices?: RuntimeChoiceView[], selectedId?: string): FieldOption[] {
   // 内置运行时永远保留；探测结果按 id 覆盖，避免旧缓存里缺 orca / claude-code。
@@ -315,12 +344,20 @@ export function runtimeOptions(choices?: RuntimeChoiceView[], selectedId?: strin
   })
 }
 
-/** 用动态 choices 替换 runtime.default 的 options；其余字段原样保留。 */
+/**
+ * 用动态 choices 替换 runtime.default 的 options；其余字段原样保留。
+ *
+ * 选中的运行时如果声明了自己的选项，把这些选项挂到「派工与服务」分区末尾。
+ */
 export function sectionsFor(choices?: RuntimeChoiceView[], selectedId?: string): SectionDef[] {
   const options = runtimeOptions(choices, selectedId)
+  const optionFields = selectedId ? runtimeOptionFields(selectedId) : []
   return SECTIONS.map(section => ({
     ...section,
-    fields: section.fields.map(field => field.path === 'runtime.default' ? { ...field, options } : field),
+    fields: [
+      ...section.fields.map(field => field.path === 'runtime.default' ? { ...field, options } : field),
+      ...(section.id === 'delivery' ? optionFields : []),
+    ],
   }))
 }
 
@@ -329,6 +366,18 @@ export function getByPath(doc: unknown, path: string): unknown {
     if (!node || typeof node !== 'object') return undefined
     return (node as Record<string, unknown>)[part]
   }, doc)
+}
+
+/**
+ * 取字段当前值。
+ *
+ * 运行时选项没配置过时按空串算：与「留空 = 不覆盖」是同一件事，
+ * 否则面板会误报「有未保存的修改」。
+ */
+export function fieldValue(doc: unknown, path: string): unknown {
+  const value = getByPath(doc, path)
+  if (value === undefined && path.startsWith('runtime.options.')) return ''
+  return value
 }
 
 /** 不可变地写入点路径，供 React draft 使用。 */
@@ -367,6 +416,8 @@ export function fieldError(field: FieldDef, value: unknown): string | null {
     if (field.max !== undefined && value > field.max) return `不能大于 ${field.max}`
   }
   if (field.kind === 'select' && field.options) {
+    // 没有配置过（值为空）时，只要声明里留了空选项，就视为「不覆盖」。
+    if ((value === undefined || value === '') && field.options.some(item => item.value === '')) return null
     const option = field.options.find(item => item.value === value)
     if (!option) return '请选择一个有效值'
     // 当前选中项不可用（未安装/不兼容）时只置灰，不阻止用户保存其它字段。

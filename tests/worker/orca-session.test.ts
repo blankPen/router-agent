@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { claudeProjectSlug, latestClaudeSessionId } from '../../src/worker/orca/session.js'
+import { claudeProjectSlug, latestClaudeSessionId } from '../../src/worker/agents/claude.js'
 
 describe('latestClaudeSessionId', () => {
   it('按 workdir 的 slug 目录取最新会话文件名作为 session id', () => {

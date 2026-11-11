@@ -7,6 +7,7 @@ import { DEFAULT_ADMISSION, type AcceptMode, type AdmissionTable, type Interrupt
 import type { ToolPolicy } from './worker/port.js'
 import { UI_EVIDENCE_MODES, type UiEvidenceMode } from './worker/evidence-gate.js'
 import { ORCA_RUNTIME_ID, isWorkerRuntimeId, normalizeRuntimeId } from './worker/runtimes/catalog.js'
+import { optionFieldOf, parseRuntimeOptionPath, validateRuntimeOption } from './worker/runtimes/options.js'
 import { noopLogger, errorMessage, type Logger } from './infra/logger.js'
 
 export type ChatMode = 'all' | 'mention'
@@ -245,6 +246,23 @@ export function setProjectsForRuntime(config: AppConfig, runtimeId: string, proj
     return
   }
   config.runtime.projects = { ...(config.runtime.projects ?? {}), [id]: projects }
+}
+
+/**
+ * 写入（或删除）一个运行时选项。
+ *
+ * 运行时选项走通用的 `runtime.options.<runtimeId>.<key>`：每个运行时自己声明能配什么，
+ * 这里只负责按声明落盘。空串表示「不覆盖」，直接删掉这个键。
+ */
+export function setRuntimeOption(config: AppConfig, runtimeId: string, key: string, value: unknown): void {
+  const options = { ...(config.runtime.options ?? {}) }
+  const entry = { ...((options[runtimeId] as Record<string, unknown> | undefined) ?? {}) }
+  if (value === '' || value === undefined || value === null) delete entry[key]
+  else entry[key] = value
+  if (Object.keys(entry).length === 0) delete options[runtimeId]
+  else options[runtimeId] = entry
+  // 全删光时连 options 段一起去掉，配置文件不留空壳。
+  config.runtime.options = Object.keys(options).length > 0 ? options : undefined
 }
 
 /**
@@ -1271,6 +1289,23 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
       }
       continue
     }
+    // 运行时自己的选项：runtime.options.<runtimeId>.<key>，按运行时声明校验。
+    const runtimeOption = parseRuntimeOptionPath(path)
+    if (runtimeOption) {
+      const id = normalizeRuntimeId(runtimeOption.runtimeId)
+      if (!isWorkerRuntimeId(id)) {
+        errors.push({ path, message: `未知 runtime: ${runtimeOption.runtimeId}` })
+      } else {
+        const field = optionFieldOf(id, runtimeOption.key)
+        if (!field) errors.push({ path, message: `未知选项: ${runtimeOption.key}` })
+        else {
+          const message = validateRuntimeOption(field, value)
+          if (message) errors.push({ path, message })
+          else accepted.push({ path, value })
+        }
+      }
+      continue
+    }
     if ((LIST_PATHS as readonly string[]).includes(path)) {
       if (path === 'projects') {
         const result = validateProjects(value, ORCA_RUNTIME_ID)
@@ -1312,6 +1347,9 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
     else if (path === 'feishu.chats') config.feishu.chats = value as ChatSettings[]
     else if (path.startsWith('runtime.projects.')) {
       setProjectsForRuntime(config, path.slice('runtime.projects.'.length), value as ProjectConfig[])
+    } else if (path.startsWith('runtime.options.')) {
+      const parsed = parseRuntimeOptionPath(path)!
+      setRuntimeOption(config, normalizeRuntimeId(parsed.runtimeId), parsed.key, value)
     } else setPath(config as unknown as Record<string, unknown>, path, value)
     changed.push(path)
   }
@@ -1411,6 +1449,20 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
     const chat = path.slice('chatMode.'.length).trim()
     if (!chat || (value !== 'all' && value !== 'mention')) return false
     ensureChat(config, chat).mode = value
+    return true
+  }
+
+  // 运行时选项：`ra config set runtime.options.orca.agent codex`
+  // 走通用声明：每个运行时自己声明能配哪些键，这里按声明校验后落盘。
+  if (path.startsWith('runtime.options.')) {
+    const parsed = parseRuntimeOptionPath(path)
+    if (!parsed) return false
+    const id = normalizeRuntimeId(parsed.runtimeId)
+    if (!isWorkerRuntimeId(id)) return false
+    const field = optionFieldOf(id, parsed.key)
+    if (!field) return false
+    if (validateRuntimeOption(field, value)) return false
+    setRuntimeOption(config, id, parsed.key, field.kind === 'switch' ? value === 'true' : value)
     return true
   }
 

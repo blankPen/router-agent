@@ -17,6 +17,7 @@ import {
   ORCA_RUNTIME_ID,
   normalizeRuntimeId,
 } from './runtimes/catalog.js'
+import { runtimeOptionString } from './runtimes/options.js'
 
 export interface RuntimeDeps {
   home: string
@@ -69,10 +70,13 @@ export class RuntimeRegistry {
 /** 生产环境装配：只注册已实现的运行时；配置了未注册运行时会在启动期失败。 */
 export function createRuntimes(config: AppConfig, deps: RuntimeDeps): RuntimeRegistry {
   const runtimes = new Map<string, WorkerRuntime>()
+  // 运行时选项走通用的 `runtime.options.<runtimeId>.<key>`；没配就是「跟随工具自己的默认」。
+  const orcaAgent = runtimeOptionString(config.runtime.options, ORCA_RUNTIME_ID, 'agent')
   runtimes.set(ORCA_RUNTIME_ID, new OrcaRuntime({
     runner: deps.orca,
     workersDir: deps.workersDir,
     home: deps.home,
+    ...(orcaAgent ? { agent: orcaAgent } : {}),
   }))
 
   // 旧配置可能把选项写在 claude-cli 下，两个键都认。

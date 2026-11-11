@@ -87,7 +87,7 @@ ra start                      # 启动，就绪后自动打开 http://127.0.0.1:
 页面只放「服务跑起来必需的五件事」，顶部是完成度清单：
 
 1. **LLM Provider**：Base URL / 模型 / API Key，三项必填；OpenAI 兼容与 Anthropic 兼容协议都支持。密钥只写入 `config.yaml`，保存后不回显；环境变量 `RA_LLM_*` 可覆盖。右上角「从本地配置导入」会打开选择弹窗，从 Claude Code、CCSwitch、Pi、OpenCode、Magpie 的已有 Provider 里选一份导入（只读原配置，密钥不回显）。
-2. **选择运行时**：Orca / Claude Code / ACP Agent 卡片平铺，自动检测 CLI、版本、ACP 依赖与登录状态，支持安装引导和真实握手试启动。
+2. **选择运行时**：Orca / Claude Code / ACP Agent 卡片平铺，自动检测 CLI、版本、ACP 依赖与登录状态，支持安装引导和真实握手试启动。卡片下方是该运行时自己的选项（例如 Orca 的「执行 Agent」：留空跟随 Orca 默认，也可指定 codex 等）。
 3. **登记项目**：添加本地项目（系统目录选择 + 自动识别 Git）或 Git 项目（自动 clone 到 `~/.router-agent/repos`，可用 `RA_HOME` 改根目录）。
 4. **飞书机器人**：填 App ID / App Secret（Secret 只写入 lark-cli 加密存储），固定使用 `~/.router-agent-lark` profile；保存后可检查授权状态并完成 Device Flow 授权。
 5. **群与绑定**：至少添加一个监控群；可把群固定到某个项目，之后开工不再追问。
@@ -135,7 +135,7 @@ ra tickets                                             # 模拟产生的工单�
 
 1. `ra logs | grep trigger:ingested` 能看到消息进入；
 2. `ra tickets` 出现工单，`ra ticket <id>` 能看到授权范围与强度；
-3. `orca worktree list --json`（`orca` 运行时；其它运行时用 `git worktree list`）出现 `ra-tk-<编号>-<语义slug>`，分支名为 `ra/tk-<编号>-<语义slug>`（目录名与分支名一一对应，只把 `/` 换成 `-`），对应运行时里出现 Agent 会话（Orca 为 Claude Code 终端）；
+3. `orca worktree list --json`（`orca` 运行时；其它运行时用 `git worktree list`）出现 `ra-tk-<编号>-<语义slug>`，分支名为 `ra/tk-<编号>-<语义slug>`（目录名与分支名一一对应，只把 `/` 换成 `-`），对应运行时里出现 Agent 会话（Orca 为 Agent 终端）；
 4. Worker 执行 `ra report` 后，`ra ticket <id>` 的阶段在 `running → review/blocked` 之间变化；
 5. 合并或关闭 PR / MR 后，工单变 `done`，飞书收到一次闭环通知；对应 workspace 保留 24 小时后由定时任务回收（人工停止工单会立即回收）。
 
@@ -162,7 +162,7 @@ Worker 不在 Router 进程里跑。Router 按 `runtime.default` 选择适配器
 
 | runtime id | 拉起方式 | 适用场景 |
 |-|-|-|
-| `orca`（默认） | Orca 创建 worktree + Claude Code 终端 | 本机已用 Orca 管仓库，想同时看到终端 |
+| `orca`（默认） | Orca 创建 worktree + Agent 终端（默认跟随 Orca 配置） | 本机已用 Orca 管仓库，想同时看到终端 |
 | `claude-code` | `git worktree` + `claude --bg` 后台会话 | 不用 Orca，直接跑 Claude Code |
 | `codex-app` | `git worktree` + `codex app-server`，优先用 Codex App 内置 CLI | 用 Codex，且希望 Router 创建的 thread 在 Codex 桌面端可见 |
 | `acp` / `acp-*` | ACP 子进程（Claude / Codex / Gemini / OpenCode / Copilot / Cursor / Goose） | 想接其它 ACP Agent |
@@ -258,10 +258,11 @@ ra config set policy.acceptMode observe          # 先观察，不开工
 ra config set project.router-agent "name:dsh/router-agent@main"
 ra config set chatBinding.oc_xxx "router-agent@main"
 ra config set runtime.default claude-code
+ra config set runtime.options.orca.agent codex   # Orca 派工时用 Codex；留空 = 跟随 Orca 默认
 ra config edit                                   # 用 $EDITOR 编辑全文
 ```
 
-完整字段、`ra config set` 白名单、环境变量、模型 / 飞书机器人 / 项目清单、准入矩阵与闲置治理见 [docs/CONFIGURATION.md](docs/CONFIGURATION.md)。
+完整字段、`ra config set` 白名单、运行时选项、环境变量、模型 / 飞书机器人 / 项目清单、准入矩阵与闲置治理见 [docs/CONFIGURATION.md](docs/CONFIGURATION.md)。
 
 ## 命令
 
@@ -284,7 +285,7 @@ ra config edit                                   # 用 $EDITOR 编辑全文
 | `ra runtime check <id>` | 完整 ACP 握手（`initialize` + `session/new`） |
 | `ra runtime login <id>` | 交互式登录（由 Agent 自己提供：`acp-claude` 走 `claude`，`acp-codex` 走 `codex-acp login`，`codex-app` 走 `codex login`） |
 | `ra runtime check codex-app` | 探测 Codex App / CLI，并做一次 app-server `initialize` 握手 |
-| `ra config` | 查看配置；`config set <key> <value>` 改单项（含 `project.<名>` / `chatBinding.<群>` / `chatMode.<群>` / `chatAllow.<群>` / `progress.syncMs` / `progress.probeMs`）；`config edit` 编辑全文 |
+| `ra config` | 查看配置；`config set <key> <value>` 改单项（含 `project.<名>` / `chatBinding.<群>` / `chatMode.<群>` / `chatAllow.<群>` / `runtime.options.<运行时>.<键>` / `progress.syncMs` / `progress.probeMs`）；`config edit` 编辑全文 |
 | `ra report` | Worker 侧上报：状态、摘要、`--reply`（字面量 / `@文件` / `-`）、PR 链接与 `--ack` |
 | `ra doc` | Worker 侧创建飞书文档并输出链接，长结论写进 `--reply` |
 
