@@ -484,6 +484,42 @@ describe('解析日志', () => {
   })
 })
 
+describe('通讯录错误分类', () => {
+  it('lark-cli 非零退出且错误码是跨应用时，按「查无此人」丢弃条目', async () => {
+    const { events, logger } = captureLogger()
+    const runner = makeRunner(() => ({
+      code: 1,
+      stdout: '',
+      stderr: JSON.stringify({ ok: false, identity: 'bot', error: { type: 'api', code: 99992361, message: 'open_id cross app' } }),
+    }))
+    const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a', logger })
+
+    const resolution = await resolver.resolveEntries(['ou_82fb106b096ac2a7563f9a2a6077a44d'])
+
+    expect(resolution.invalid).toHaveLength(1)
+    expect(resolution.pending).toHaveLength(0)
+    expect(resolution.openIds).toEqual([])
+    const failed = events.find(event => event.message === 'identity:resolve-failed')
+    expect(String(failed?.extra?.detail)).toContain('跨应用')
+  })
+
+  it('非零退出但没有确定错误码时保留条目待重试', async () => {
+    const { events, logger } = captureLogger()
+    const runner = makeRunner(() => ({
+      code: 1,
+      stdout: '',
+      stderr: JSON.stringify({ ok: false, error: { code: 99991663, message: 'permission denied' } }),
+    }))
+    const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a', logger })
+
+    const resolution = await resolver.resolveEntries(['ou_self'])
+
+    expect(resolution.pending).toHaveLength(1)
+    expect(resolution.openIds).toEqual(['ou_self'])
+    expect(events.find(event => event.message === 'identity:resolve-deferred')).toBeTruthy()
+  })
+})
+
 /** 群成员列表的返回：机器人条目带 app_id。 */
 const MEMBERS = (bots: Record<string, unknown>[] = [], users: Record<string, unknown>[] = []): Reply => ({
   code: 0,

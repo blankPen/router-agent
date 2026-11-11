@@ -285,6 +285,10 @@ export class IdentityResolver {
     try {
       const result = await this.lark.run(argv, { timeoutMs: CONTACT_TIMEOUT_MS })
       if (result.code !== 0) {
+        // lark-cli 会把飞书的错误信封写在 stderr 并以非零退出：其中「跨应用 open_id」「查无此人」
+        // 是确定结论，重试也不会成功，必须丢弃；其余（权限、网络、超时）保留待重试。
+        const definitive = classifyContactError(result.stderr) ?? classifyContactError(result.stdout)
+        if (definitive) return { status: 'invalid', user: null, detail: definitive }
         return { status: 'unknown', user: null, detail: `contact +get-user 调用失败（code=${result.code}）：${detailText(result.stderr)}` }
       }
       return parseContactPayload(result.stdout)
@@ -659,6 +663,27 @@ function parseContactPayload(stdout: string): ContactPayload {
       email: String(user.email ?? ''),
     },
     detail: '',
+  }
+}
+
+/**
+ * 从非零退出码的错误输出里识别「确定查不到这个人」的结论。
+ *
+ * lark-cli 把飞书错误信封写在 stderr（也可能写 stdout）并以非零码退出。其中
+ * 「跨应用 open_id」「查无此人」重试也不会成功，必须丢弃条目；其余失败（权限、
+ * 网络、超时）返回 null，由调用方按「暂时查不了」保留，避免一次接口故障清空名单。
+ */
+function classifyContactError(text: string): string | null {
+  if (!text.trim()) return null
+  try {
+    const doc = JSON.parse(text) as Record<string, any>
+    const code = String(doc?.error?.code ?? doc?.code ?? '')
+    if (code === CODE_CROSS_APP) return `open_id 跨应用，当前应用查不到这个 id（code=${code}），请改用邮箱或确认 feishu.appId`
+    if (code === CODE_NOT_FOUND) return `查无此人：open_id 无效或不存在（code=${code}）`
+    return null
+  } catch {
+    // 输出不是 JSON（例如普通 stderr 文本）：按「暂时查不了」处理，交调用方保留条目。
+    return null
   }
 }
 
