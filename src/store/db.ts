@@ -362,6 +362,19 @@ CREATE TABLE IF NOT EXISTS effects (
   last_error TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_effects_due ON effects (status, next_at);
+
+-- 身份别名缓存：邮箱 / open_id 解析成 open_id 的结果。
+-- 键里必须带 app_id：open_id 是「应用 × 用户」维度的，换个应用同一个人的 open_id 就变了，
+-- 旧应用的缓存不能被新应用复用。
+CREATE TABLE IF NOT EXISTS identity_aliases (
+  app_id     TEXT NOT NULL,
+  kind       TEXT NOT NULL,
+  value      TEXT NOT NULL,
+  open_id    TEXT NOT NULL,
+  name       TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (app_id, kind, value)
+);
 `
 
 type Row = Record<string, unknown>
@@ -1063,6 +1076,26 @@ export class Store {
     const row = this.db.prepare('SELECT attempts FROM effects WHERE id = ?').get(id) as Row | undefined
     const nextAt = new Date(new Date(now).getTime() + backoffMs(Number(row?.attempts ?? 1))).toISOString()
     this.db.prepare("UPDATE effects SET status = 'pending', next_at = ?, last_error = ? WHERE id = ?").run(nextAt, error, id)
+  }
+
+  // ---------- 身份别名缓存 ----------
+
+  /**
+   * 读一条身份解析缓存。
+   * 键里带 app_id：open_id 跨应用不通用，旧应用的缓存不能被新应用命中。
+   */
+  getIdentityAlias(appId: string, kind: 'email' | 'open_id', value: string): { openId: string; name: string } | null {
+    const row = this.db.prepare('SELECT open_id, name FROM identity_aliases WHERE app_id = ? AND kind = ? AND value = ?')
+      .get(appId, kind, value) as Row | undefined
+    if (!row) return null
+    return { openId: String(row.open_id), name: String(row.name ?? '') }
+  }
+
+  /** 写一条身份解析缓存；同一个键重复写入以最后一次为准。 */
+  setIdentityAlias(appId: string, kind: 'email' | 'open_id', value: string, openId: string, name: string): void {
+    this.db.prepare(`INSERT OR REPLACE INTO identity_aliases (app_id, kind, value, open_id, name, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(appId, kind, value, openId, name, new Date().toISOString())
   }
 }
 
