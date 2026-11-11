@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -208,6 +208,86 @@ describe('CodexAppRuntime', () => {
       await snapshotWith(rt, home, started.handle, '恢复后继续')
     } finally {
       await rt.stop({ handle: '', ticketId: 'tk-1', workdir: join(home, 'worktrees', 'ra-tk-1-demo') }, 'cleanup')
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('interruptedTurn：正常完成的轮次不算被打断', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-codex-interrupted-ok-'))
+    const previousTurns = process.env.FAKE_CODEX_TURNS
+    process.env.FAKE_CODEX_TURNS = join(home, 'turns.json')
+    const rt = runtimeFor(home)
+    try {
+      const started = await rt.start(context(home))
+      await waitIdle(rt, home, started.handle)
+      expect(await rt.interruptedTurn(ref(home, started.handle))).toBeNull()
+    } finally {
+      await rt.stop(ref(home, ''), 'cleanup')
+      restoreEnv('FAKE_CODEX_TURNS', previousTurns)
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('interruptedTurn：重启后从 thread/turns/list 读出被中断的轮次', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-codex-interrupted-'))
+    const turnsPath = join(home, 'turns.json')
+    const previousTurns = process.env.FAKE_CODEX_TURNS
+    process.env.FAKE_CODEX_TURNS = turnsPath
+    const rt = runtimeFor(home)
+    try {
+      const started = await rt.start(context(home))
+      await waitIdle(rt, home, started.handle)
+
+      // 模拟「重启打断了正在跑的那一轮」：把最后一轮标成 interrupted。
+      // 轮次历史落在磁盘上，新起的 app-server 进程能读到——对应真实的 rollout 语义。
+      const turns = JSON.parse(readFileSync(turnsPath, 'utf8')) as Array<{ id: string; status: string }>
+      expect(turns.length).toBeGreaterThan(0)
+      turns[0]!.status = 'interrupted'
+      writeFileSync(turnsPath, JSON.stringify(turns), 'utf8')
+
+      // 重启：新 runtime 实例（只有磁盘上的 meta.json）。
+      const rt2 = runtimeFor(home)
+      const attached = await rt2.reattach(ref(home, started.handle))
+      expect(attached).toBe(true)
+
+      const interrupted = await rt2.interruptedTurn(ref(home, started.handle))
+      expect(interrupted).not.toBeNull()
+      expect(interrupted!.turnId).toBe(turns[0]!.id)
+      // 摘要里应能看到被中断那一轮的用户要求，便于生成恢复提示。
+      expect(interrupted!.summary).toContain('请执行')
+    } finally {
+      await rt.stop(ref(home, ''), 'cleanup')
+      restoreEnv('FAKE_CODEX_TURNS', previousTurns)
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('interruptedTurn：查不到轮次状态时记 warn 并返回 null，不误判成被打断', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-codex-interrupted-fail-'))
+    const previousTurns = process.env.FAKE_CODEX_TURNS
+    const previousError = process.env.FAKE_CODEX_TURNS_ERROR
+    process.env.FAKE_CODEX_TURNS = join(home, 'turns.json')
+    process.env.FAKE_CODEX_TURNS_ERROR = '1'
+    const warns: Array<{ message: string; extra?: Record<string, unknown> }> = []
+    const rt = runtimeFor(home, 'never', {
+      logger: {
+        info: () => {},
+        warn: (message, extra) => { warns.push({ message, ...(extra ? { extra } : {}) }) },
+        error: () => {},
+      },
+    })
+    try {
+      const started = await rt.start(context(home))
+      await waitIdle(rt, home, started.handle)
+      expect(await rt.interruptedTurn(ref(home, started.handle))).toBeNull()
+      const event = warns.find(item => item.message === 'codex:interrupted-turn-check-failed')
+      expect(event).toBeDefined()
+      expect(event!.extra?.ticketId).toBe('tk-1')
+      expect(typeof event!.extra?.reason).toBe('string')
+    } finally {
+      await rt.stop(ref(home, ''), 'cleanup')
+      restoreEnv('FAKE_CODEX_TURNS', previousTurns)
+      restoreEnv('FAKE_CODEX_TURNS_ERROR', previousError)
       rmSync(home, { recursive: true, force: true })
     }
   })

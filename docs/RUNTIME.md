@@ -76,6 +76,28 @@ runtime:
 - 原生处理 `item/commandExecution/requestApproval`、`item/fileChange/requestApproval`、`item/permissions/requestApproval` 等审批请求；
 - threadId 同时写入 `meta.handle` / `meta.sessionId`，Web 面板会显示「Codex 打开」按钮，用 `codex://threads/<threadId>` 在 Codex 桌面端打开同一 thread。
 
+### 重启后被中断的任务怎么恢复
+
+`codex-app` 的 app-server 是 Router 的子进程，**Router 重启会把正在跑的那一轮一起带走**。
+会话上下文不会丢（Codex 从磁盘 rollout 重建），但**任务本身停住了**，需要恢复动作接着做。
+
+Router 用 `thread/turns/list` 读回最后一轮的状态：被打断的那轮状态是 `interrupted`，
+这是一个精确信号，不需要靠时间窗口猜。恢复策略由 `policy.interruptedRecovery` 控制：
+
+| 值 | 行为 |
+| --- | --- |
+| `auto`（默认） | 发中断提示后，自动补一条 `kind=retry` 的输入，让 worker 检查现场并接着做完；同时发恢复提示 |
+| `notify` | 只发中断提示，等用户回复「继续」才恢复 |
+| `off` | 不处理 |
+
+`policy.maxAutoRecover` 限制同一工单的自动恢复次数，超出后自动降级为 `notify`。
+中断提示里会带上被中断那一轮的执行摘要（`thread/turns/list` 的 `itemsView=full`），
+worker 能据此判断哪些步骤需要重做，避免重复写入只写了一半的文件。
+
+> 只有 worker 进程随 Router 一起死的运行时需要这套机制
+> （`capabilities.agent.processExit=true`，即 `codex-app` / `acp-*`）。
+> `orca` / `claude-code` 的 worker 活在自己的常驻服务里，Router 重启期间照常干活，不受影响。
+
 ### 二进制发现（优先 Codex App 内置）
 
 按以下顺序探测，取第一个既能跑 `codex --version`、又支持 `codex app-server` 的版本：
