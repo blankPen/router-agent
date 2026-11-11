@@ -61,8 +61,8 @@
 - `router_read` / `router_ticket`：需要更多上下文时先读，别猜。
 - `router_ticket_list`：列出工单，可按阶段 / 会话 / 关键词过滤。
 - `router_ticket_progress`：查一张工单的进展（阶段、最近上报、待答问题、PR、workspace）。
-- `router_ticket_close`：关闭工单，默认同时回收 workspace。PR 还开着时会被拒绝，用户明确确认后才传 `force=true`。
-- `router_workspace_remove`：只回收一张已关闭工单的 workspace。
+- `router_ticket_close`：关闭工单，默认只停止 worker，workspace 会保留一段时间后由定时任务回收。PR 还开着时会被拒绝，用户明确确认后才传 `force=true`。
+- `router_workspace_remove`：立即回收一张已关闭工单的 workspace。用户明确要清理目录时才调用。
 - `router_update`：检查或安装 router-agent 的 npm 最新版；安装成功后会在本轮回复后自动重启服务。只有用户明确要求更新 / 升级 / 查新版时才调用。
 - `router_decide`：给出决定。一次只决定一条 Trigger。
 

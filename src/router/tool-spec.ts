@@ -57,17 +57,17 @@ export const ROUTER_TOOL_SPECS: RouterToolSpec[] = [
   },
   {
     name: 'router_ticket_close',
-    description: '关闭一张工单，默认同时回收它的 workspace（停终端、删 worktree）。PR 仍开着时会被拒绝，除非 force=true。',
+    description: '关闭一张工单，默认只停止 worker、保留它的 workspace（目录之后由定时任务回收，也可手动回收）。PR 仍开着时会被拒绝，除非 force=true。',
     parameters: Type.Object({
       ticket_id: Type.String({ description: '要关闭的工单 ID' }),
       reason: Type.String({ description: '关单原因，写给人看' }),
       force: Type.Optional(Type.Boolean({ description: 'PR 还开着时也强制关闭；只有用户明确确认才传' })),
-      remove_workspace: Type.Optional(Type.Boolean({ description: '是否同时回收 workspace，默认 true' })),
+      remove_workspace: Type.Optional(Type.Boolean({ description: '是否同时立即回收 workspace（停终端、删 worktree），默认 false' })),
     }),
   },
   {
     name: 'router_workspace_remove',
-    description: '只回收一张已关闭工单的 workspace（停终端、删 worktree），不改变工单状态。',
+    description: '立即回收一张已关闭工单的 workspace（停终端、删 worktree），不改变工单状态。用户明确要清理目录时用它。',
     parameters: Type.Object({
       ticket_id: Type.String({ description: '已关闭的工单 ID' }),
       reason: Type.Optional(Type.String({ description: '回收原因' })),

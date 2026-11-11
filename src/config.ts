@@ -166,7 +166,7 @@ export interface ProgressSettings {
 }
 
 /**
- * 闲置工单治理：长时间没有新进展的工单先提醒，再自动关闭并回收 workspace。
+ * 闲置工单治理：长时间没有新进展的工单先提醒，再自动关闭。
  * 阈值按小时配置，更贴近日常表述；服务内部换算成毫秒。
  */
 export interface RetentionSettings {
@@ -178,6 +178,19 @@ export interface RetentionSettings {
   closeGraceHours: number
   /** 显示在执行、但多久没有上报/终端输出算僵尸进程。 */
   zombieHours: number
+  /** 扫描间隔（分钟）。 */
+  sweepMinutes: number
+}
+
+/**
+ * 关单后的工作区回收：关单只停 worker、保留目录，目录由定时任务在保留期后回收，
+ * 或者由用户在面板 / `router_workspace_remove` 手动回收。
+ */
+export interface WorkspaceSettings {
+  /** 总开关；关闭后定时任务不再回收任何目录（只能手动回收）。 */
+  enabled: boolean
+  /** 关单后目录保留多久；0 表示下一个扫描周期就回收。 */
+  keepHours: number
   /** 扫描间隔（分钟）。 */
   sweepMinutes: number
 }
@@ -210,6 +223,7 @@ export interface AppConfig {
   router: RouterSettings
   progress: ProgressSettings
   retention: RetentionSettings
+  workspace: WorkspaceSettings
   worker: { tools: ToolPolicy; evidence: { ui: UiEvidenceMode } }
 runtime: { default: string; options?: Record<string, unknown>; projects?: RuntimeProjects }
   server: { port: number }
@@ -306,6 +320,12 @@ export function defaultConfig(): AppConfig {
       zombieHours: 6,
       sweepMinutes: 5,
     },
+    workspace: {
+      enabled: true,
+      // 用户口径：关单只停 worker，目录保留 1 天后由定时任务回收。
+      keepHours: 24,
+      sweepMinutes: 30,
+    },
     worker: { tools: { ...DEFAULT_WORKER_TOOLS }, evidence: { ui: 'warn' } },
     runtime: { default: 'orca' },
     server: { port: 3083 },
@@ -379,13 +399,19 @@ progress:
   silenceMs: 600000    # 多久没有新上报/新输入才算静默（毫秒）
   repeatMs: 900000     # 同一静默期内重复提醒的最小间隔（毫秒）
 
-# 闲置工单治理：先提醒，宽限期后自动关闭并回收 workspace
+# 闲置工单治理：先提醒，宽限期后自动关闭（workspace 不在关单时回收）
 retention:
   enabled: true
   idleHours: 24        # 多久没有新进展就发关单提醒
   closeGraceHours: 6   # 提醒后多久没回复就自动关闭
   zombieHours: 6       # 执行中但多久没上报/输出算僵尸
   sweepMinutes: 5      # 扫描间隔（分钟）
+
+# 关单后的工作区回收：关单只停 worker，目录保留一段时间后由定时任务回收
+workspace:
+  enabled: true
+  keepHours: 24        # 关单后保留多久；0 = 下个扫描周期就回收
+  sweepMinutes: 30     # 扫描间隔（分钟）
 
 runtime:
   default: orca         # 新工单默认 runtime：orca | claude-code | acp | acp-claude | acp-codex ...
@@ -481,6 +507,7 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
   const progressSilenceMs = Number(progressDoc.silenceMs)
   const progressRepeatMs = Number(progressDoc.repeatMs)
   const retentionDoc = doc.retention ?? {}
+  const workspaceDoc = doc.workspace ?? {}
   const projectLists = parseProjectLists(doc.runtime?.projects)
 
   const admissionDoc = doc.policy?.admission ?? {}
@@ -541,6 +568,11 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
       closeGraceHours: positiveNumberOr(retentionDoc.closeGraceHours, base.retention.closeGraceHours, 1, 24 * 365),
       zombieHours: positiveNumberOr(retentionDoc.zombieHours, base.retention.zombieHours, 1, 24 * 365),
       sweepMinutes: positiveNumberOr(retentionDoc.sweepMinutes, base.retention.sweepMinutes, 1, 24 * 60),
+    },
+    workspace: {
+      enabled: booleanOr(workspaceDoc.enabled, base.workspace.enabled),
+      keepHours: positiveNumberOr(workspaceDoc.keepHours, base.workspace.keepHours, 0, 24 * 365),
+      sweepMinutes: positiveNumberOr(workspaceDoc.sweepMinutes, base.workspace.sweepMinutes, 1, 24 * 60),
     },
     worker: {
       tools: {
@@ -876,6 +908,11 @@ export function writeConfig(home: string, config: AppConfig): void {
       zombieHours: config.retention.zombieHours,
       sweepMinutes: config.retention.sweepMinutes,
     },
+    workspace: {
+      enabled: config.workspace.enabled,
+      keepHours: config.workspace.keepHours,
+      sweepMinutes: config.workspace.sweepMinutes,
+    },
     worker: { tools: config.worker.tools, evidence: config.worker.evidence },
 runtime: {
       default: config.runtime.default,
@@ -973,6 +1010,7 @@ export function publicDefaults(): Record<string, unknown> {
     router: base.router,
     progress: base.progress,
     retention: base.retention,
+    workspace: base.workspace,
     worker: base.worker,
     runtime: base.runtime,
     server: base.server,
@@ -1109,6 +1147,10 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
   'retention.closeGraceHours': intValue(1, 8_760, ' 小时'),
   'retention.zombieHours': intValue(1, 8_760, ' 小时'),
   'retention.sweepMinutes': intValue(1, 1_440, ' 分钟'),
+
+  'workspace.enabled': boolValue(),
+  'workspace.keepHours': intValue(0, 8_760, ' 小时'),
+  'workspace.sweepMinutes': intValue(1, 1_440, ' 分钟'),
 
   'worker.evidence.ui': enumValue(UI_EVIDENCE_MODES),
   'runtime.default': runtimeIdValue,
@@ -1453,6 +1495,24 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
       const v = int(1, 24 * 60)
       if (v === null) return false
       config.retention.sweepMinutes = v
+      return true
+    }
+    case 'workspace.enabled': {
+      const v = bool()
+      if (v === null) return false
+      config.workspace.enabled = v
+      return true
+    }
+    case 'workspace.keepHours': {
+      const v = int(0, 24 * 365)
+      if (v === null) return false
+      config.workspace.keepHours = v
+      return true
+    }
+    case 'workspace.sweepMinutes': {
+      const v = int(1, 24 * 60)
+      if (v === null) return false
+      config.workspace.sweepMinutes = v
       return true
     }
     case 'policy.admission.listedNotAddressed':

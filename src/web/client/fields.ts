@@ -203,13 +203,23 @@ export const SECTIONS: SectionDef[] = [
   {
     id: 'retention',
     title: '闲置治理',
-    description: '长时间没有进展的工单，先提醒、再自动关单并回收 workspace。',
+    description: '长时间没有进展的工单，先提醒、再自动关单。',
     fields: [
       { path: 'retention.enabled', label: '启用闲置治理', kind: 'switch' },
       { path: 'retention.idleHours', label: '多久没进展发提醒', kind: 'number', min: 1, max: 8_760, unit: '小时' },
       { path: 'retention.closeGraceHours', label: '提醒后多久自动关单', kind: 'number', min: 1, max: 8_760, unit: '小时' },
       { path: 'retention.zombieHours', label: '僵尸进程判定', kind: 'number', min: 1, max: 8_760, unit: '小时' },
       { path: 'retention.sweepMinutes', label: '扫描间隔', kind: 'number', min: 1, max: 1_440, unit: '分钟' },
+    ],
+  },
+  {
+    id: 'workspace',
+    title: '工作区回收',
+    description: '工单关闭后只停 worker，workspace 先保留一段时间，再由定时任务回收；也可以随时在「清理工作区」里手动回收。',
+    fields: [
+      { path: 'workspace.enabled', label: '启用定时回收', kind: 'switch' },
+      { path: 'workspace.keepHours', label: '关单后保留多久', kind: 'number', min: 0, max: 8_760, unit: '小时', hint: '0 = 下个扫描周期就回收' },
+      { path: 'workspace.sweepMinutes', label: '扫描间隔', kind: 'number', min: 1, max: 1_440, unit: '分钟' },
     ],
   },
   {

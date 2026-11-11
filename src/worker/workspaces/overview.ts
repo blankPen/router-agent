@@ -17,6 +17,8 @@ export interface WorkspaceEntryView {
   runtimeId: string
   workdir: string
   startedAt: string
+  /** 工单关闭时间（ISO）；未关闭为空串。定时任务用它算保留期。 */
+  closedAt: string
   /** 仅「工单已关闭 + 目录仍存在 + 当前运行时可回收」时为 true。 */
   cleanable: boolean
   /** 不可清理的原因；cleanable=true 时为空。 */

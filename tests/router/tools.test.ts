@@ -128,7 +128,7 @@ describe('RouterToolbox 清理工具', () => {
     expect(effectKinds(store)).toEqual([])
   })
 
-  it('关单默认同时回收 workspace，并写成一条 Effects', () => {
+  it('关单默认只停 worker，保留 workspace', () => {
     const { toolbox, store, ticket } = setup()
     const result = toolbox.close({ ticket_id: ticket.id, reason: '用户要求关闭' }, { canMutate: true }) as {
       ticket: { stage: string }
@@ -138,15 +138,15 @@ describe('RouterToolbox 清理工具', () => {
 
     expect(result.ticket.stage).toBe('done')
     expect(result.alreadyClosed).toBe(false)
-    expect(result.queued).toEqual(['cleanup-workspace'])
+    expect(result.queued).toEqual(['stop-worker'])
     expect(store.getTicket(ticket.id)?.stage).toBe('done')
-    expect(effectKinds(store)).toEqual(['cleanup-workspace'])
+    expect(effectKinds(store)).toEqual(['stop-worker'])
   })
 
-  it('remove_workspace=false 时只停 worker，不删 worktree', () => {
+  it('remove_workspace=true 时才立即回收 workspace', () => {
     const { toolbox, store, ticket } = setup()
-    toolbox.close({ ticket_id: ticket.id, reason: '先停一下', remove_workspace: false }, { canMutate: true })
-    expect(effectKinds(store)).toEqual(['stop-worker'])
+    toolbox.close({ ticket_id: ticket.id, reason: '顺手清掉目录', remove_workspace: true }, { canMutate: true })
+    expect(effectKinds(store)).toEqual(['cleanup-workspace'])
   })
 
   it('PR 还开着时默认拒绝关闭，force 才强制关闭', () => {
@@ -170,7 +170,7 @@ describe('RouterToolbox 清理工具', () => {
     toolbox.close({ ticket_id: ticket.id, reason: '关闭' }, { canMutate: true })
     const again = toolbox.close({ ticket_id: ticket.id, reason: '再关一次' }, { canMutate: true }) as { alreadyClosed: boolean }
     expect(again.alreadyClosed).toBe(true)
-    expect(store.claimEffects(NOW, 20).filter(item => item.kind === 'cleanup-workspace')).toHaveLength(1)
+    expect(store.claimEffects(NOW, 20).filter(item => item.kind === 'stop-worker')).toHaveLength(1)
   })
 
   it('router_workspace_remove 只允许已关闭工单，并排队回收', () => {

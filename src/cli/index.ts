@@ -721,6 +721,11 @@ function cmdStatus(home: string, output: CliIo): number {
         ? `闲置治理: 开启（${config.retention.idleHours}h 无进展提醒，${config.retention.closeGraceHours}h 未回复自动关闭）`
         : '闲置治理: 关闭',
     )
+    output.stdout(
+      config.workspace.enabled
+        ? `工作区回收: 开启（关单后保留 ${config.workspace.keepHours}h，由定时任务回收）`
+        : '工作区回收: 关闭（只能手动回收）',
+    )
     return 0
   } finally {
     store.close()
