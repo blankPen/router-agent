@@ -11,6 +11,7 @@ import type {
   Stage,
   Subscription,
   Ticket,
+  Thread,
   Trigger,
   TriggerDisposition,
 } from '../core/model.js'
@@ -164,6 +165,17 @@ CREATE TABLE IF NOT EXISTS threads (
   chat_id TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+
+-- 线程的外部标识别名：话题 ID（omt_）、根消息 ID（om_）、消息自身 ID 都指向同一个 Thread。
+-- 飞书不同客户端入口给不全字段，靠这张表把同一话题的消息收敛到同一条线程。
+CREATE TABLE IF NOT EXISTS thread_aliases (
+  source TEXT NOT NULL,
+  alias TEXT NOT NULL,
+  thread_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (source, alias)
+);
+CREATE INDEX IF NOT EXISTS idx_thread_aliases_thread ON thread_aliases (thread_id);
 
 CREATE TABLE IF NOT EXISTS decisions (
   id TEXT PRIMARY KEY,
@@ -537,6 +549,76 @@ export class Store {
   upsertThread(thread: { id: string; source: SourceKind; rootId: string; chatId: string; createdAt: string }): void {
     this.db.prepare('INSERT OR IGNORE INTO threads (id, source, root_id, chat_id, created_at) VALUES (?, ?, ?, ?, ?)')
       .run(thread.id, thread.source, thread.rootId, thread.chatId, thread.createdAt)
+  }
+
+  // ---------- Thread alias ----------
+
+  /** 登记一个外部标识到规范 Thread 的映射。先登记的优先，不覆盖已有映射。 */
+  registerThreadAlias(input: { source: SourceKind; alias: string; threadId: string; createdAt: string }): void {
+    const alias = input.alias.trim()
+    if (!alias) return
+    this.db.prepare('INSERT OR IGNORE INTO thread_aliases (source, alias, thread_id, created_at) VALUES (?, ?, ?, ?)')
+      .run(input.source, alias, input.threadId, input.createdAt)
+  }
+
+  listThreadAliases(source: SourceKind, threadId: string): string[] {
+    const rows = this.db
+      .prepare('SELECT alias FROM thread_aliases WHERE source = ? AND thread_id = ? ORDER BY created_at, rowid')
+      .all(source, threadId) as Row[]
+    return rows.map(row => String(row.alias))
+  }
+
+  listThreads(source: SourceKind): Thread[] {
+    const rows = this.db.prepare('SELECT * FROM threads WHERE source = ? ORDER BY created_at, rowid').all(source) as Row[]
+    return rows.map(row => ({
+      id: String(row.id),
+      source: row.source as SourceKind,
+      rootId: String(row.root_id),
+      chatId: String(row.chat_id),
+      createdAt: String(row.created_at),
+    }))
+  }
+
+  /**
+   * 别名回填清单：线程根还是消息 ID（om_）、并且还没登记话题 ID（omt_）别名的线程。
+   * 这些线程需要回查一次话题 ID，否则「话题内直接回复」的消息依然匹配不上。
+   */
+  threadAliasBacklog(source: SourceKind): Thread[] {
+    return this.listThreads(source).filter(thread => {
+      if (thread.rootId.startsWith('omt_')) return false
+      const aliases = this.listThreadAliases(source, thread.id)
+      return !aliases.some(alias => alias.startsWith('omt_'))
+    })
+  }
+
+  /**
+   * 把一条消息携带的线程标识解析成规范 Thread ID。
+   *
+   * 命中已有别名就复用那条线程；否则以 canonicalId 建新线程，并把全部标识登记为别名。
+   * 这样「话题 ID / 根消息 ID / 消息自身 ID」任意一个到场，都能落回同一个 Thread。
+   */
+  resolveThread(input: { source: SourceKind; chatId: string; keys: string[]; canonicalId: string; createdAt: string }): { threadId: string; created: boolean } {
+    const keys = [...new Set(input.keys.map(key => key.trim()).filter(Boolean))]
+    // 按传入顺序逐个查：keys 的先后就是权威性顺序（话题 ID > 根消息 ID > 消息自身 ID）。
+    // 不能用 ORDER BY created_at——历史误拆的线程会用自己的 message_id 当根，登记得更早，
+    // 那样「话题内直发」的消息会被拉回那条孤立的旧线程。
+    for (const key of keys) {
+      const row = this.db
+        .prepare('SELECT thread_id FROM thread_aliases WHERE source = ? AND alias = ?')
+        .get(input.source, key) as Row | undefined
+      if (row) return { threadId: String(row.thread_id), created: false }
+    }
+    this.upsertThread({
+      id: input.canonicalId,
+      source: input.source,
+      rootId: keys[0] ?? input.canonicalId.split(':').at(-1) ?? input.canonicalId,
+      chatId: input.chatId,
+      createdAt: input.createdAt,
+    })
+    for (const alias of keys) {
+      this.registerThreadAlias({ source: input.source, alias, threadId: input.canonicalId, createdAt: input.createdAt })
+    }
+    return { threadId: input.canonicalId, created: true }
   }
 
   // ---------- Decision ----------

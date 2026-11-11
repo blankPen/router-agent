@@ -103,14 +103,28 @@ export class Engine {
 
   /** 幂等写入一条 Trigger；重复的 Source 事件不会入库。 */
   ingest(trigger: Trigger): boolean {
-    this.store.upsertThread({
-      id: trigger.threadId,
+    // 线程归属统一走别名解析：话题 ID / 根消息 ID / 消息自身 ID 任一到场都能落回同一个 Thread。
+    const resolved = this.store.resolveThread({
       source: trigger.source,
-      rootId: trigger.threadId.split(':').at(-1) ?? trigger.threadId,
       chatId: trigger.chatId,
+      keys: threadKeysOf(trigger),
+      canonicalId: trigger.threadId,
       createdAt: trigger.receivedAt,
     })
-    return this.store.insertTrigger(trigger)
+    if (resolved.created) {
+      this.onEvent({ event: 'thread:created', threadId: resolved.threadId, source: trigger.source, chat: trigger.chatId })
+    } else if (resolved.threadId !== trigger.threadId) {
+      // 关键排查点：消息自带的线程标识没对上，靠别名收敛到了已有线程。
+      this.onEvent({
+        event: 'thread:resolved',
+        threadId: resolved.threadId,
+        rawThreadId: trigger.threadId,
+        triggerId: trigger.id,
+        source: trigger.source,
+      })
+    }
+    const stored = resolved.threadId === trigger.threadId ? trigger : { ...trigger, threadId: resolved.threadId }
+    return this.store.insertTrigger(stored)
   }
 
   /** 记录一个 Decision；accept 时同时创建 Mandate 与 Ticket。 */
@@ -395,6 +409,18 @@ export function deriveTitle(text: string): string {
   const line = text.trim().split('\n')[0]?.trim() ?? ''
   if (!line) return '未命名工单'
   return line.length > 40 ? `${line.slice(0, 40)}…` : line
+}
+
+/**
+ * 提取一条 Trigger 携带的全部线程标识。
+ *
+ * 新 Source 会显式给出 threadKeys；历史数据与其它 Source 没有这个字段，
+ * 按「线程 ID 尾段 + 事件 ID」兜底，至少保证同一 ID 反复出现时能稳定归到一条线程。
+ */
+function threadKeysOf(trigger: Trigger): string[] {
+  const declared = trigger.threadKeys?.filter(Boolean) ?? []
+  const tail = trigger.threadId.split(':').at(-1)
+  return [...new Set([...declared, tail, trigger.externalId].filter((key): key is string => Boolean(key)))]
 }
 
 /**

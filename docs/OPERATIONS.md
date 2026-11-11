@@ -51,8 +51,11 @@ Router 不做对话，只在必要时说话：
 | 事件 | 来源 | 关键字段 | 说明 |
 |-|-|-|-|
 | `feishu:ready` | 事件消费者 | — | 事件流已连上 |
-| `trigger:ingested` | Source | `id` `chat` `addressed` | 用户消息进入系统 |
+| `trigger:ingested` | Source | `id` `chat` `addressed` `threadKeys` `topic` | 用户消息进入系统；`topic=true` 表示事件带了话题 ID（omt_） |
 | `trigger:dropped` | Source | `reason` `chat` `actor` | 收到但被过滤 |
+| `thread:created` | Engine | `threadId` `source` `chat` | 首次见到某条线程，登记规范 ID |
+| `thread:resolved` | Engine | `threadId` `rawThreadId` `triggerId` `source` | 消息自带线程标识没对上，靠别名收敛到了已有线程（排查「消息没进工单」先看这条） |
+| `thread:backfilled` / `thread:backfill-failed` | CLI | `filled` `failed` / `batch` `code` `detail` | `ra migrate threads --apply` 的回填结果 |
 | `router:decision` | Engine | `triggerId` `decision` `strength` `reason` `ticketId` `title` `scope` | Router 的研判结论 |
 | `launch` | Service | `ticketId` `handle` `workdir` | 派工到 Orca worktree |
 | `input:queued` | Engine | `ticketId` `seq` `text` | Router 准备发给 worker 的内容 |
@@ -178,6 +181,25 @@ ra start
 - 非交互环境执行 `--apply` 必须显式加 `--yes`；不提供 `--force`。
 - 迁移失败时事务整体回滚；回滚版本请恢复上一步的备份文件。
 - 手工 SQL 兜底：`scripts/migrations/2026-11-session-key-channel.sql`（同样由人确认后执行）。
+
+## 线程别名回填（话题 ID）
+
+飞书在老线程上只给根消息 ID（`om_`），但「在话题面板里直接发言」时事件只带话题 ID（`omt_`）。
+Router 靠 `thread_aliases` 把两者收敛到同一条线程，见 `Store.resolveThread`。
+
+存量线程需要一次性补上话题 ID，否则这类消息仍然匹配不上已有工单：
+
+```bash
+ra stop
+ra migrate threads --dry-run    # 只读：线程总数 / 待回填数 / 样例
+ra migrate threads --apply      # 回查话题 ID 并登记别名，幂等
+ra migrate threads --verify     # 仍缺少话题 ID 的线程数
+ra start
+```
+
+- 规范线程 ID 的尾段始终是可回复的消息 ID（`om_`）——`+messages-reply --message-id` 只接受 `om_`。
+- 同一消息带多个标识时，按「话题 ID > 根消息 ID > 消息自身 ID」的顺序解析，与登记时间无关。
+- 查询失败的线程（消息已删除 / 无权限）如实报告，仍需按根消息 ID 归并；`--apply` 退出码为 1。
 
 ## 已知限制
 
