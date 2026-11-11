@@ -54,6 +54,16 @@ const CODE_NOT_FOUND = '99992351'
 /** 通讯录调用超时；超时按「暂时查不了」处理，条目保留待重试。 */
 const CONTACT_TIMEOUT_MS = 20_000
 
+/**
+ * `batch_get_id` 单次请求的邮箱数量上限。
+ *
+ * 飞书 `contact/v3/users/batch_get_id` 对 `emails` 数组有数量上限（本项目未实测，
+ * 这里按 50 取保守值）。超限时接口会直接报错，整批条目都会变成「待重试」，
+ * 下游按 open_ids 重建名单时等于被清空——和这次要消灭的故障是同一种表现，
+ * 所以必须分片请求，单片失败只影响该片。
+ */
+const BATCH_GET_ID_EMAIL_LIMIT = 50
+
 /** 错误详情最多保留这么多个字符，避免日志被长文本撑爆。 */
 const DETAIL_MAX = 200
 
@@ -180,7 +190,7 @@ export class IdentityResolver {
     }
   }
 
-  /** 邮箱条目：查缓存 → 批量 batch_get_id → 补通讯录显示名。 */
+  /** 邮箱条目：查缓存 → 分批 batch_get_id → 补通讯录显示名。 */
   private async resolveEmails(result: IdentityEntry[], kinds: IdentityKind[]): Promise<void> {
     const needBatch: number[] = []
     for (let index = 0; index < result.length; index += 1) {
@@ -199,51 +209,72 @@ export class IdentityResolver {
     }
     if (needBatch.length === 0) return
 
-    const emails = needBatch.map(index => result[index]!.entry.trim())
-    const batch = await this.fetchBatch(emails)
-    if (!batch.ok) {
-      // 整批查不了：全部保留待重试，不能当成查无此人。
-      for (const index of needBatch) {
-        const entry = result[index]!
-        entry.status = 'pending'
-        entry.detail = batch.detail
-        this.logger.warn('identity:resolve-deferred', { entry: maskEntry(entry.entry), detail: entry.detail })
-      }
-      return
+    // 同一个邮箱只查一次；分片时单片失败只影响该片的条目。
+    const wanted = new Map<string, { original: string; indexes: number[] }>()
+    for (const index of needBatch) {
+      const original = result[index]!.entry.trim()
+      const key = original.toLowerCase()
+      const found = wanted.get(key)
+      if (found) found.indexes.push(index)
+      else wanted.set(key, { original, indexes: [index] })
     }
 
-    for (const index of needBatch) {
-      const entry = result[index]!
-      const email = entry.entry.trim()
-      const openId = batch.map.get(email.toLowerCase())
-      if (!openId) {
-        // 邮箱查无此人时接口仍然 ok:true，只是这一条没有 user_id 字段。
-        entry.status = 'invalid'
-        entry.detail = `查无此人：通讯录里没有 ${maskEmail(email)}`
-        this.logger.warn('identity:resolve-failed', { entry: maskEmail(email), detail: entry.detail })
+    for (const shard of chunk([...wanted.values()], BATCH_GET_ID_EMAIL_LIMIT)) {
+      const batch = await this.fetchBatch(shard.map(item => item.original), shard.length)
+      if (!batch.ok) {
+        // 这一片查不了：片内条目全部保留待重试，不能当成查无此人。
+        for (const item of shard) {
+          for (const index of item.indexes) {
+            const entry = result[index]!
+            entry.status = 'pending'
+            entry.detail = batch.detail
+            this.logger.warn('identity:resolve-deferred', { entry: maskEntry(entry.entry), detail: entry.detail })
+          }
+        }
         continue
       }
-      entry.status = 'resolved'
-      entry.openId = openId
-      const nameHit = this.readCache('open_id', openId)
-      if (nameHit) {
-        entry.name = nameHit.name
-      } else {
-        const contact = await this.fetchContactUser(openId)
-        if (contact.status === 'ok' && contact.user) {
-          entry.name = contact.user.name
-          if (entry.name) this.writeCache('open_id', openId, openId, entry.name)
-        } else {
-          // 身份已经确定，只是名字暂时没取到：不影响进名单，记录下来等下次补。
-          entry.name = ''
-          entry.detail = `名字暂未取到：${contact.detail}`
-          this.logger.warn('identity:resolve-deferred', { entry: maskEmail(email), actor: openId, detail: entry.detail })
+      for (const item of shard) {
+        const key = item.original.toLowerCase()
+        const openId = batch.map.get(key)
+        if (!openId) {
+          // 响应结构完好（条数对得上、每条都有邮箱），却查不到 user_id：
+          // 这才是「确认查无此人」，条目丢弃。
+          for (const index of item.indexes) {
+            const entry = result[index]!
+            entry.status = 'invalid'
+            entry.detail = `查无此人：通讯录里没有 ${maskEmail(item.original)}`
+            this.logger.warn('identity:resolve-failed', { entry: maskEmail(item.original), detail: entry.detail })
+          }
+          continue
         }
+        for (const index of item.indexes) await this.resolveEmailEntry(result[index]!, openId)
       }
-      // 名字没取到时不写缓存，下次解析会重试，把名字补上。
-      if (entry.name) this.writeCache('email', email, openId, entry.name)
-      this.logResolved(entry)
     }
+  }
+
+  /** 邮箱已经换成 open_id，再补上通讯录显示名。 */
+  private async resolveEmailEntry(entry: IdentityEntry, openId: string): Promise<void> {
+    const email = entry.entry.trim()
+    entry.status = 'resolved'
+    entry.openId = openId
+    const nameHit = this.readCache('open_id', openId)
+    if (nameHit) {
+      entry.name = nameHit.name
+    } else {
+      const contact = await this.fetchContactUser(openId)
+      if (contact.status === 'ok' && contact.user) {
+        entry.name = contact.user.name
+        if (entry.name) this.writeCache('open_id', openId, openId, entry.name)
+      } else {
+        // 身份已经确定，只是名字暂时没取到：不影响进名单，记录下来等下次补。
+        entry.name = ''
+        entry.detail = `名字暂未取到：${contact.detail}`
+        this.logger.warn('identity:resolve-deferred', { entry: maskEmail(email), actor: openId, detail: entry.detail })
+      }
+    }
+    // 名字没取到时不写缓存，下次解析会重试，把名字补上。
+    if (entry.name) this.writeCache('email', email, openId, entry.name)
+    this.logResolved(entry)
   }
 
   /** 调 `contact +get-user` 查单个用户。 */
@@ -256,12 +287,12 @@ export class IdentityResolver {
       }
       return parseContactPayload(result.stdout)
     } catch (error) {
-      return { status: 'unknown', user: null, detail: `contact +get-user 调用异常：${errorMessage(error)}` }
+      return { status: 'unknown', user: null, detail: `contact +get-user 调用异常：${detailText(errorMessage(error))}` }
     }
   }
 
-  /** 调 `batch_get_id` 批量把邮箱换成 open_id。 */
-  private async fetchBatch(emails: string[]): Promise<{ ok: boolean; map: Map<string, string>; detail: string }> {
+  /** 调 `batch_get_id` 批量把邮箱换成 open_id；一批的邮箱数量不能超过接口上限。 */
+  private async fetchBatch(emails: string[], expectedCount: number): Promise<BatchPayload> {
     const argv = [
       'api', 'POST', '/open-apis/contact/v3/users/batch_get_id',
       '--params', JSON.stringify({ user_id_type: 'open_id' }),
@@ -273,11 +304,9 @@ export class IdentityResolver {
       if (result.code !== 0) {
         return { ok: false, map: new Map(), detail: `batch_get_id 调用失败（code=${result.code}）：${detailText(result.stderr)}` }
       }
-      const payload = parseBatchPayload(result.stdout)
-      if (!payload.ok) return { ok: false, map: new Map(), detail: payload.detail }
-      return { ok: true, map: payload.map, detail: '' }
+      return parseBatchPayload(result.stdout, expectedCount)
     } catch (error) {
-      return { ok: false, map: new Map(), detail: `batch_get_id 调用异常：${errorMessage(error)}` }
+      return { ok: false, map: new Map(), detail: `batch_get_id 调用异常：${detailText(errorMessage(error))}` }
     }
   }
 
@@ -287,7 +316,7 @@ export class IdentityResolver {
     try {
       return this.cache.get(this.appId, kind, kind === 'email' ? value.toLowerCase() : value)
     } catch (error) {
-      this.logger.warn('identity:cache-failed', { kind, detail: `缓存读取失败：${errorMessage(error)}` })
+      this.logger.warn('identity:cache-failed', { kind, detail: `缓存读取失败：${detailText(errorMessage(error))}` })
       return null
     }
   }
@@ -297,7 +326,7 @@ export class IdentityResolver {
     try {
       this.cache.set(this.appId, kind, kind === 'email' ? value.toLowerCase() : value, openId, name)
     } catch (error) {
-      this.logger.warn('identity:cache-failed', { kind, detail: `缓存写入失败：${errorMessage(error)}` })
+      this.logger.warn('identity:cache-failed', { kind, detail: `缓存写入失败：${detailText(errorMessage(error))}` })
     }
   }
 
@@ -312,8 +341,22 @@ interface ContactPayload {
   detail: string
 }
 
-/** 解析 `batch_get_id` 的返回；`ok:false` 或结构认不出来时按「暂时查不了」处理。 */
-function parseBatchPayload(stdout: string): { ok: boolean; map: Map<string, string>; detail: string } {
+interface BatchPayload {
+  /** 响应结构是否完好到可以据此判断「查无此人」。结构对不上时为 false，条目按待重试处理。 */
+  ok: boolean
+  /** email（小写）→ open_id。 */
+  map: Map<string, string>
+  detail: string
+}
+
+/**
+ * 解析 `batch_get_id` 的返回。
+ *
+ * 只有响应结构完好（条数与请求一致、每条都能认出 email）时，缺 `user_id` 的邮箱才算是
+ * 「确认查无此人」；结构对不上（字段改名、条数对不上）一律按「暂时查不了」处理，
+ * 避免接口形状一变就把允许名单静默清空。
+ */
+function parseBatchPayload(stdout: string, expectedCount?: number): BatchPayload {
   let doc: Record<string, any> | null = null
   try {
     doc = JSON.parse(stdout) as Record<string, any>
@@ -327,12 +370,20 @@ function parseBatchPayload(stdout: string): { ok: boolean; map: Map<string, stri
   if (!Array.isArray(list)) {
     return { ok: false, map: new Map(), detail: 'batch_get_id 返回里没有 user_list' }
   }
+  const items = list as Record<string, any>[]
   const map = new Map<string, string>()
-  for (const item of list as Record<string, any>[]) {
-    const email = String(item?.email ?? '')
-    const openId = String(item?.user_id ?? '')
-    // 缺 user_id 表示这个邮箱查无此人，不进映射。
-    if (email && openId) map.set(email.toLowerCase(), openId)
+  for (const item of items) {
+    const email = typeof item?.email === 'string' ? item.email.trim() : ''
+    // 条目认不出邮箱：响应结构与预期不符，不能据此判断谁查无此人。
+    if (!email.includes('@')) {
+      return { ok: false, map: new Map(), detail: 'batch_get_id 返回的条目里没有可识别的 email' }
+    }
+    const userId = typeof item?.user_id === 'string' ? item.user_id.trim() : ''
+    // 缺 user_id 表示这个邮箱查无此人，不进映射（调用方据此判定 invalid）。
+    if (userId) map.set(email.toLowerCase(), userId)
+  }
+  if (expectedCount !== undefined && items.length !== expectedCount) {
+    return { ok: false, map: new Map(), detail: `batch_get_id 返回的条数与请求不一致（请求 ${expectedCount} 条，返回 ${items.length} 条）` }
   }
   return { ok: true, map, detail: '' }
 }
@@ -386,4 +437,11 @@ function detailText(text: string): string {
 /** 入日志 / 进 detail 的条目：邮箱要掩码，open_id 与非法条目原样保留。 */
 function maskEntry(entry: string): string {
   return entry.includes('@') ? maskEmail(entry.trim()) : entry
+}
+
+/** 按固定大小切片。 */
+function chunk<T>(list: T[], size: number): T[][] {
+  const out: T[][] = []
+  for (let index = 0; index < list.length; index += size) out.push(list.slice(index, index + size))
+  return out
 }

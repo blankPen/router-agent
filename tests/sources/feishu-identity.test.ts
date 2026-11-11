@@ -34,6 +34,14 @@ function requestedUserId(argv: string[]): string {
   return index >= 0 ? (argv[index + 1] ?? '') : ''
 }
 
+/** 从 batch_get_id 的 argv 里取出实际发出去的邮箱。 */
+function sentEmails(argv: string[]): string[] {
+  const index = argv.indexOf('--data')
+  if (index < 0) return []
+  const data = JSON.parse(argv[index + 1] ?? '{}') as { emails?: string[] }
+  return data.emails ?? []
+}
+
 /** 采集日志调用，便于断言事件名与字段。 */
 function captureLogger() {
   const events: { level: string; message: string; extra?: Record<string, unknown> }[] = []
@@ -306,6 +314,131 @@ describe('身份条目解析', () => {
 
     expect(resolution.openIds).toEqual([openId])
     expect(resolution.entries).toHaveLength(2)
+  })
+})
+
+describe('失败信息里的邮箱必须掩码', () => {
+  it('lark-cli 抛异常时异常信息里的邮箱掩码后才进 detail', async () => {
+    const runner = makeRunner(() => {
+      throw new Error('spawn failed: --data {"emails":["pengzhen02@dewu.com"]}')
+    })
+    const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a' })
+
+    const resolution = await resolver.resolveEntries(['pengzhen02@dewu.com'])
+
+    expect(resolution.entries[0]?.status).toBe('pending')
+    expect(resolution.entries[0]?.detail).not.toContain('pengzhen02@dewu.com')
+    expect(resolution.entries[0]?.detail).toContain('p***@dewu.com')
+  })
+
+  it('缓存读写异常里的邮箱掩码后才进日志', async () => {
+    const { events, logger } = captureLogger()
+    const cache: IdentityCache = {
+      get: () => { throw new Error(`cache lookup failed for pengzhen02@dewu.com`) },
+      set: () => { throw new Error(`cache write failed for pengzhen02@dewu.com`) },
+    }
+    const runner = makeRunner(argv => {
+      if (isBatch(argv)) return OK_BATCH('pengzhen02@dewu.com', 'ou_1')
+      return OK_USER('ou_1', '阿振(Pz)')
+    })
+    const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a', cache, logger })
+
+    await resolver.resolveEntries(['pengzhen02@dewu.com'])
+
+    const cacheFailed = events.filter(event => event.message === 'identity:cache-failed')
+    expect(cacheFailed.length).toBeGreaterThan(0)
+    for (const event of cacheFailed) {
+      expect(String(event.extra?.detail)).not.toContain('pengzhen02@dewu.com')
+      expect(String(event.extra?.detail)).toContain('p***@dewu.com')
+    }
+    expect(JSON.stringify(events)).not.toContain('pengzhen02@dewu.com')
+  })
+})
+
+describe('响应结构对不上时保留条目', () => {
+  it('条目没有 email 字段时按 pending 处理，不当成查无此人', async () => {
+    const runner = makeRunner(() => ({
+      code: 0,
+      stdout: JSON.stringify({ ok: true, data: { user_list: [{ user_id: 'ou_1' }] } }),
+      stderr: '',
+    }))
+    const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a' })
+
+    const resolution = await resolver.resolveEntries(['pengzhen02@dewu.com'])
+
+    expect(resolution.entries[0]?.status).toBe('pending')
+    expect(resolution.invalid).toHaveLength(0)
+    expect(resolution.pending).toHaveLength(1)
+  })
+
+  it('返回条数与请求不一致时按 pending 处理，不当成查无此人', async () => {
+    const runner = makeRunner(() => ({
+      code: 0,
+      stdout: JSON.stringify({
+        ok: true,
+        data: { user_list: [{ email: 'pengzhen02@dewu.com', user_id: 'ou_1' }, { email: 'other@dewu.com', user_id: 'ou_2' }] },
+      }),
+      stderr: '',
+    }))
+    const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a' })
+
+    const resolution = await resolver.resolveEntries(['pengzhen02@dewu.com'])
+
+    expect(resolution.entries[0]?.status).toBe('pending')
+    expect(resolution.invalid).toHaveLength(0)
+    expect(resolution.pending).toHaveLength(1)
+  })
+
+  it('返回空 user_list 时按 pending 处理，不当成查无此人', async () => {
+    const runner = makeRunner(() => ({
+      code: 0,
+      stdout: JSON.stringify({ ok: true, data: { user_list: [] } }),
+      stderr: '',
+    }))
+    const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a' })
+
+    const resolution = await resolver.resolveEntries(['pengzhen02@dewu.com'])
+
+    expect(resolution.entries[0]?.status).toBe('pending')
+    expect(resolution.invalid).toHaveLength(0)
+    expect(resolution.pending).toHaveLength(1)
+  })
+})
+
+describe('邮箱分片', () => {
+  it('邮箱数量超过单次上限时按片请求，单片失败不影响其他片', async () => {
+    const emails = Array.from({ length: 51 }, (_, index) => `user${index}@dewu.com`)
+    const failed = 'user50@dewu.com'
+    const runner = makeRunner(argv => {
+      if (isBatch(argv)) {
+        const sent = sentEmails(argv)
+        if (sent.includes(failed)) return { code: 1, stdout: '', stderr: 'too many emails' }
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            ok: true,
+            data: { user_list: sent.map(email => ({ email, user_id: `ou_${email.split('@')[0]}` })) },
+          }),
+          stderr: '',
+        }
+      }
+      return OK_USER(requestedUserId(argv), '阿振(Pz)')
+    })
+    const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a' })
+
+    const resolution = await resolver.resolveEntries(emails)
+
+    const batchCalls = runner.calls.filter(isBatch)
+    expect(batchCalls).toHaveLength(2)
+    expect(sentEmails(batchCalls[0]!)).toHaveLength(50)
+    expect(sentEmails(batchCalls[1]!)).toEqual([failed])
+
+    // 第一片的 50 条都解析成功
+    expect(resolution.openIds).toHaveLength(50)
+    // 失败那一片的条目保留待重试，不能被当成查无此人丢弃
+    expect(resolution.pending).toHaveLength(1)
+    expect(resolution.pending[0]?.entry).toBe(failed)
+    expect(resolution.invalid).toHaveLength(0)
   })
 })
 
