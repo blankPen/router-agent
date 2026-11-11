@@ -6,7 +6,7 @@
  */
 import { WORKER_RUNTIMES } from '../../worker/runtimes/catalog.js'
 import { ACP_AGENTS } from '../../worker/runtimes/acp/agents.js'
-import { optionSpecOf, runtimeOptionPath } from '../../worker/runtimes/options.js'
+import { RUNTIME_OPTION_SPECS, optionSpecOf, runtimeOptionPath } from '../../worker/runtimes/options.js'
 import { isDeprecatedRuntime, runtimeOptionLabel, runtimeStatusLabel, type RuntimeChoiceView } from './runtime-model.js'
 
 export type { RuntimeChoiceView } from './runtime-model.js'
@@ -299,6 +299,11 @@ export function runtimeOptionFields(runtimeId: string): FieldDef[] {
   }))
 }
 
+/** 所有已声明运行时的选项字段；保存前统一校验，避免某个运行时的脏值溜过去。 */
+export function allRuntimeOptionFields(): FieldDef[] {
+  return RUNTIME_OPTION_SPECS.flatMap(spec => runtimeOptionFields(spec.runtimeId))
+}
+
 /** 探测结果 → runtime.default 的下拉选项；无探测结果时回退静态清单。 */
 export function runtimeOptions(choices?: RuntimeChoiceView[], selectedId?: string): FieldOption[] {
   // 内置运行时永远保留；探测结果按 id 覆盖，避免旧缓存里缺 orca / claude-code。
@@ -347,17 +352,14 @@ export function runtimeOptions(choices?: RuntimeChoiceView[], selectedId?: strin
 /**
  * 用动态 choices 替换 runtime.default 的 options；其余字段原样保留。
  *
- * 选中的运行时如果声明了自己的选项，把这些选项挂到「派工与服务」分区末尾。
+ * 运行时自己的选项不在页面上平铺：它们通过卡片上的「设置」弹窗编辑，
+ * 见 runtime-settings.tsx。
  */
 export function sectionsFor(choices?: RuntimeChoiceView[], selectedId?: string): SectionDef[] {
   const options = runtimeOptions(choices, selectedId)
-  const optionFields = selectedId ? runtimeOptionFields(selectedId) : []
   return SECTIONS.map(section => ({
     ...section,
-    fields: [
-      ...section.fields.map(field => field.path === 'runtime.default' ? { ...field, options } : field),
-      ...(section.id === 'delivery' ? optionFields : []),
-    ],
+    fields: section.fields.map(field => field.path === 'runtime.default' ? { ...field, options } : field),
   }))
 }
 
