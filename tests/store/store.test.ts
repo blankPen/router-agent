@@ -418,3 +418,45 @@ describe('会话复用存储', () => {
     expect(db.getDispatchDraft('oc_chat', 'ou_bob')?.task).toBe('改支付回调')
   })
 })
+
+describe('身份别名缓存', () => {
+  it('写入后能按 (app_id, kind, value) 读回', () => {
+    const db = store()
+    expect(db.getIdentityAlias('cli_a', 'email', 'a@b.com')).toBeNull()
+
+    db.setIdentityAlias('cli_a', 'email', 'a@b.com', 'ou_x', '阿振')
+    expect(db.getIdentityAlias('cli_a', 'email', 'a@b.com')).toEqual({ openId: 'ou_x', name: '阿振' })
+    db.close()
+  })
+
+  it('换个 appId 缓存不通用：open_id 是应用内唯一的', () => {
+    const db = store()
+    db.setIdentityAlias('cli_a', 'email', 'a@b.com', 'ou_x', '阿振')
+
+    // 另一个应用里同一个人的 open_id 完全不同，旧应用的缓存不能被复用。
+    expect(db.getIdentityAlias('cli_b', 'email', 'a@b.com')).toBeNull()
+    db.close()
+  })
+
+  it('同一 appId 下不同 kind 互不串', () => {
+    const db = store()
+    db.setIdentityAlias('cli_a', 'email', 'a@b.com', 'ou_x', '阿振')
+
+    expect(db.getIdentityAlias('cli_a', 'open_id', 'a@b.com')).toBeNull()
+    db.close()
+  })
+
+  it('缓存落盘，重开数据库后仍能读到', () => {
+    const path = join(tmpdir(), `ra-identity-${Date.now()}-${Math.random().toString(16).slice(2)}.db`)
+    const db = new Store(path)
+    db.setIdentityAlias('cli_a', 'email', 'a@b.com', 'ou_x', '阿振')
+    db.close()
+
+    const reopened = new Store(path)
+    expect(reopened.getIdentityAlias('cli_a', 'email', 'a@b.com')).toEqual({ openId: 'ou_x', name: '阿振' })
+    reopened.close()
+    rmSync(path, { force: true })
+    rmSync(`${path}-wal`, { force: true })
+    rmSync(`${path}-shm`, { force: true })
+  })
+})

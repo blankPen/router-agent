@@ -60,6 +60,27 @@ function deps(over: Partial<DoctorDeps> & { config?: AppConfig } = {}): DoctorDe
   }
 }
 
+/** 自动识别场景的配置：不手填机器人身份，只给 appId 与一个 mode=mention 的群。 */
+function autoBotConfig(appId = 'cli_bot'): AppConfig {
+  const config = healthyConfig()
+  config.feishu.appId = appId
+  config.feishu.botOpenIds = []
+  config.feishu.botNames = []
+  config.feishu.chats = [chatEntry('oc_dsh', { mode: 'mention' })]
+  return config
+}
+
+/** 群成员查询抛错的 runner：模拟 lark-cli 不可用。 */
+function throwingMembersLark(message = 'lark-cli 调用超时'): CommandRunner {
+  const base = lark()
+  return {
+    async run(argv, opts) {
+      if (argv[1] === '+chat-members-list') throw new Error(message)
+      return base.run(argv, opts)
+    },
+  }
+}
+
 describe('ra doctor', () => {
   it('配置齐全且依赖可用时全部 ok/warn，没有 fail', async () => {
     const checks = await runDoctor(deps())
@@ -113,6 +134,46 @@ describe('ra doctor', () => {
     const checks = await runDoctor(deps({ lark: lark({ chats: ['oc_other'], members: false }) }))
     expect(checks.find(item => item.name === '监控群可见性')?.status).toBe('fail')
     expect(checks.find(item => item.name === '机器人在群内')?.status).toBe('fail')
+  })
+
+  it('不手填机器人身份时按 appId 自动识别，必填项不再要求 botOpenIds', async () => {
+    const checks = await runDoctor(deps({ config: autoBotConfig() }))
+    expect(checks.find(item => item.name === '配置必填项')?.status).toBe('ok')
+    const identity = checks.find(item => item.name === '机器人身份自动识别')!
+    expect(identity.status).toBe('ok')
+    expect(identity.detail).toContain('识别到机器人')
+    expect(checks.find(item => item.name === '机器人在群内')?.status).toBe('ok')
+  })
+
+  it('自动识别失败时判 fail，并说明是没找到而不是接口异常', async () => {
+    const checks = await runDoctor(deps({ config: autoBotConfig('cli_other'), lark: lark({ members: false }) }))
+    const identity = checks.find(item => item.name === '机器人身份自动识别')!
+    expect(identity.status).toBe('fail')
+    expect(identity.detail).toContain('没找到')
+    expect(identity.detail).not.toContain('接口异常')
+  })
+
+  it('自动识别时 lark-cli 抛错判 fail，且带出调用失败原因', async () => {
+    const checks = await runDoctor(deps({ config: autoBotConfig(), lark: throwingMembersLark('lark-cli 调用超时') }))
+    const identity = checks.find(item => item.name === '机器人身份自动识别')!
+    expect(identity.status).toBe('fail')
+    expect(identity.detail).toContain('超时')
+  })
+
+  it('手填机器人身份时不再自动识别，只由「机器人在群内」扫一次成员', async () => {
+    const config = healthyConfig()
+    config.feishu.chats = [chatEntry('oc_dsh', { mode: 'mention' })]
+    let memberCalls = 0
+    const base = lark()
+    const runner: CommandRunner = {
+      async run(argv, opts) {
+        if (argv[1] === '+chat-members-list') memberCalls += 1
+        return base.run(argv, opts)
+      },
+    }
+    const checks = await runDoctor(deps({ config, lark: runner }))
+    expect(checks.find(item => item.name === '机器人身份自动识别')?.detail).toContain('手动填写')
+    expect(memberCalls).toBe(1)
   })
 
   it('格式化输出带图标与修复建议', async () => {

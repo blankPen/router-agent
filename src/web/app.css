@@ -1143,6 +1143,15 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 .editor-hint { margin: 0 0 12px; font-size: 13px; color: var(--muted); }
 .editor-hint strong { color: var(--text); font-weight: 600; }
 .editor-foot { padding: 0 var(--card-pad-x) 20px; font-size: 12px; color: var(--muted); }
+/* 允许名单解析状态：解析有问题的条目逐条列出。 */
+.identity-entries {
+  margin: 4px var(--card-pad-x) 0;
+  padding-left: 30px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.identity-entries li { margin: 2px 0; }
+.identity-hint { margin: 4px var(--card-pad-x) 0; font-size: 12px; }
 .editor-head {
   display: grid;
   grid-template-columns: 1.2fr 1.6fr 0.8fr 30px;

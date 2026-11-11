@@ -30,6 +30,13 @@ import {
   type LocalProviderView,
 } from './api.js'
 import { Icon, LogoMark } from './icons.js'
+import {
+  describeEntry,
+  problemEntries,
+  summarizeBot,
+  summarizeIdentity,
+  type IdentityStatusView,
+} from './identity-status.js'
 import { RuntimeCards, type RuntimeNotice } from './runtime-cards.js'
 import { FeishuBotPanel } from './feishu-panel.js'
 import { SpecsEditor } from './specs-editor.js'
@@ -1201,6 +1208,7 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
   const [configPath, setConfigPath] = useState('')
   const [runtimeChoices, setRuntimeChoices] = useState<RuntimeChoiceView[]>([])
   const [detecting, setDetecting] = useState(false)
+  const [identity, setIdentity] = useState<IdentityStatusView | undefined>(undefined)
   const [active, setActive] = useState<string>('policy')
   const [filter, setFilter] = useState('')
   const [saving, setSaving] = useState(false)
@@ -1222,6 +1230,7 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
         setConfigPath(data.configPath)
         setRuntimeChoices(data.runtimeChoices ?? [])
         setDetecting(Boolean(data.detecting))
+        setIdentity(data.identity)
         setLoadError(null)
       })
       .catch(error => setLoadError(error instanceof Error ? error.message : String(error)))
@@ -1298,13 +1307,21 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
       setConfigPath(result.configPath)
       if (result.runtimeChoices) setRuntimeChoices(result.runtimeChoices)
       if (typeof result.detecting === 'boolean') setDetecting(result.detecting)
+      // 保存后服务端会重解析名单，这里同步最新状态（解析失败也不影响保存结果）。
+      if (result.identity) setIdentity(result.identity)
       setPendingRestart(result.restartRequired)
-      const message = secretDropNotice(patch, result) ?? {
-        kind: result.restartRequired ? 'warn' as const : 'ok' as const,
-        text: result.restartRequired
-          ? `已保存 ${result.changed.length} 项，其中部分配置需要重启服务才生效；点右上角「重启服务」即可（页面不会刷新）。`
-          : `已保存 ${result.changed.length} 项，已立即生效。`,
-      }
+      const message = secretDropNotice(patch, result) ?? (result.identityEffective === false
+        ? {
+            // 名单重解析失败时保存仍然成功（配置已落盘），但新名单还没生效，必须说清楚。
+            kind: 'warn' as const,
+            text: '已保存，但允许名单重新解析失败，新名单暂未生效（会按上一次的名单继续运行）；稍后可再保存一次或在日志里查看 identity:refresh-failed 的原因。',
+          }
+        : {
+            kind: result.restartRequired ? 'warn' as const : 'ok' as const,
+            text: result.restartRequired
+              ? `已保存 ${result.changed.length} 项，其中部分配置需要重启服务才生效；点右上角「重启服务」即可（页面不会刷新）。`
+              : `已保存 ${result.changed.length} 项，已立即生效。`,
+          })
       setNotice(message)
       window.setTimeout(() => setNotice(current => (current === message ? null : current)), 6_000)
       return true
@@ -1454,7 +1471,7 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
                     </div>
                     <div className="editor-block">
                       <h3 className="editor-subtitle">群与绑定</h3>
-                      <p className="editor-hint">配置监控哪些群、收全部消息还是只收 @；绑定项目只能从当前后端的项目清单里选，分支自动跟随项目的默认分支。</p>
+                      <p className="editor-hint">配置监控哪些群、收全部消息还是只收 @；绑定项目只能从当前后端的项目清单里选，分支自动跟随项目的默认分支。群级名单推荐填邮箱（兼容 ou_xxx）：配了却解析不到人时，该群会拒绝所有人，不会退回全局名单。</p>
                       <ChatsEditor
                         chats={draft.feishu?.chats ?? []}
                         projects={activeProjects}
@@ -1466,14 +1483,20 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
                 )}
 
                 {section.id === 'feishu' && (
-                  <FeishuBotPanel
-                    appId={String(draft.feishu?.appId ?? '')}
-                    onConfigSaved={config => {
-                      const nextAppId = String(config.feishu?.appId ?? '')
-                      setOriginal(current => (current ? setByPath(current, 'feishu.appId', nextAppId) : current))
-                      setDraft(current => (current ? setByPath(current, 'feishu.appId', nextAppId) : current))
-                    }}
-                  />
+                  <>
+                    <IdentityNotices
+                      identity={identity}
+                      stale={changed.includes('feishu.allowed') || changed.includes('feishu.chats')}
+                    />
+                    <FeishuBotPanel
+                      appId={String(draft.feishu?.appId ?? '')}
+                      onConfigSaved={config => {
+                        const nextAppId = String(config.feishu?.appId ?? '')
+                        setOriginal(current => (current ? setByPath(current, 'feishu.appId', nextAppId) : current))
+                        setDraft(current => (current ? setByPath(current, 'feishu.appId', nextAppId) : current))
+                      }}
+                    />
+                  </>
                 )}
 
                 {section.id === 'delivery' && (
@@ -1522,6 +1545,57 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
         onSave={() => void save()}
         onSaveAndRestart={() => void saveAndRestart()}
       />
+    </>
+  )
+}
+
+/**
+ * 允许名单与机器人身份的解析状态提示。
+ *
+ * 解析失败**不阻断保存**，所以这里只说明「这些人的消息收不到」，
+ * 不能写成「保存失败」的口气。
+ */
+function IdentityNotices({ identity, stale }: {
+  identity?: IdentityStatusView
+  stale?: boolean
+}): JSX.Element | null {
+  if (!identity) return null
+  const summary = summarizeIdentity(identity)
+  const bot = summarizeBot(identity)
+  const problems = problemEntries(identity)
+  return (
+    <>
+      {stale && (
+        <div className="banner warn compact">
+          <Icon name="alert" size={13} />
+          <span>允许名单有未保存的修改，下面的解析状态还是上一次保存后的结果。</span>
+        </div>
+      )}
+      {/* 正常状态不占一条横幅：只在确实有问题（解析失败 / 待重试）时提示。 */}
+      {summary.kind !== 'ok' && (
+        <div className={`banner ${summary.kind === 'error' ? 'danger' : 'warn'} compact`}>
+          <Icon name="alert" size={13} />
+          <span>{summary.text}</span>
+        </div>
+      )}
+      {bot.kind !== 'ok' && (
+        <div className={`banner ${bot.kind === 'error' ? 'danger' : 'warn'} compact`}>
+          <Icon name="alert" size={13} />
+          <span>{bot.text}</span>
+        </div>
+      )}
+      {problems.length > 0 && (
+        <ul className="identity-entries">
+          {problems.map((entry, index) => (
+            <li key={`${entry.entry}-${index}`}>{describeEntry(entry)}</li>
+          ))}
+        </ul>
+      )}
+      {summary.kind === 'error' && (
+        <p className="editor-hint identity-hint">
+          名单条目没解析到就等于没有这个人：他们的消息收不到；如果某个群的名单配了却解析不到，该群会直接拒绝所有人（不会退回全局名单）。
+        </p>
+      )}
     </>
   )
 }
@@ -2582,7 +2656,7 @@ function ChatsEditor({ chats, projects, error, onChange }: {
           <span>chat_id</span>
           <span>接收</span>
           <span>绑定项目</span>
-          <span>本群名单</span>
+          <span>本群名单（推荐邮箱）</span>
           <span />
         </div>
       )}
@@ -2612,7 +2686,7 @@ function ChatsEditor({ chats, projects, error, onChange }: {
           </span>
           <input
             value={chat.allowed.join(', ')}
-            placeholder="可空，沿用全局"
+            placeholder="可空，沿用全局；推荐填邮箱"
             onChange={event => update(index, { allowed: event.target.value.split(',').map(item => item.trim()).filter(Boolean) })}
           />
           <button className="icon-btn danger" title="删除群" onClick={() => onChange(chats.filter((_, i) => i !== index))}>

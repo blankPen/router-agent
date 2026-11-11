@@ -13,6 +13,8 @@ export interface FeishuConfig {
   /** 机器人自己的 open_id，用于丢弃自发消息与识别 @。 */
   botOpenIds: string[]
   botNames: string[]
+  /** 发送人 open_id → 显示名；由装配阶段用解析结果填好，入站只读，不发任何请求。 */
+  actorNames?: Map<string, string>
 }
 
 export interface FeishuEvent {
@@ -116,7 +118,7 @@ export function normalizeFeishuEventDetailed(raw: Record<string, unknown>, cfg: 
     chatId,
     chatName,
     actorId: senderId,
-    actorName: '',
+    actorName: cfg.actorNames?.get(senderId) ?? '',
     isBot: senderIsBot,
     text: text || '[附件]',
     addressed: isP2p ? 'direct' : mentionedBot ? 'mention' : 'none',

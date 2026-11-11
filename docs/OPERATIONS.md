@@ -94,6 +94,21 @@ Router 不做对话，只在必要时说话：
 | `feishu:card-fallback` | Sender | `target` `key` `code` `detail` | 互动卡片发送失败，已自动降级为富文本 |
 | `feishu:quote-fetch-failed` / `feishu:quote-parse-failed` | Source | `messageId` `detail` | 引用消息回查失败，按原消息继续 |
 | `chats:refresh-failed` / `chats:parse-failed` / `chats:cache-invalid` | Source | `code` / `detail` / `path` | 群名目录刷新失败或缓存损坏，旧值继续可用 |
+| `identity:resolved` | Identity | `entry`(掩码) `actor` `name` | 允许名单条目（邮箱 / open_id）解析成 open_id 与显示名 |
+| `identity:resolve-failed` | Identity | `entry`(掩码) `detail` | 条目确认解析不出来（格式不对 / 查无此人 / open_id 跨应用），该条目被丢弃 |
+| `identity:resolve-deferred` | Identity | `entry`(掩码) `detail` | 暂时查不了（权限缺失 / lark-cli 不可用 / 超时），条目**保留**待重试，不清空名单 |
+| `identity:cache-failed` | Identity | `kind` `detail` | 身份解析缓存读写失败，本次降级为直接查通讯录 |
+| `identity:refresh-failed` | HTTP API | `detail` | 面板保存后重新解析允许名单失败；保存照样成功，名单先按上一次的结果继续用 |
+| `identity:retry-resolved` | CLI | `round` `pending` | 启动时的后台重试解析成功，名单已恢复并重建策略 |
+| `identity:retry-deferred` | CLI | `round` `pending` `bot` | 后台重试后仍有待重试条目或机器人未识别，继续退避 |
+| `identity:retry-failed` | CLI | `round` `detail` | 后台重试本身失败（接口 / 网络），下一轮再试 |
+| `identity:retry-exhausted` | CLI | `attempts` | 后台重试次数用完仍没解析全，需要重启或重新保存来触发 |
+| `config:identity-invalid` | Identity | `count` `detail` | 允许名单里有条目解析不到人（或暂时查不了待重试），名单已生效但可见性问题已告警 |
+| `feishu:allowlist-empty` | Identity | `count` `detail` | 全局允许名单一个都没解析出来（`detail` 区分「待重试」与「查无此人」），等于暂时谁都不许 |
+| `config:identity-resolve-failed` | CLI | `detail` | 启动时的身份装配整体失败，已降级为按原始配置启动 |
+| `feishu:bot-identity-resolved` | Identity | `bot` `name` | 机器人身份自动识别成功（按 `app_id` 匹配群成员），或使用了手动填写的身份 |
+| `feishu:bot-identity-failed` | Identity | `detail` | 机器人身份识别失败，`mode: mention` 的群会丢消息，需人工确认 |
+| `feishu:chat-allowlist-empty` | Identity | `chat` `name` `count` | 群级允许名单配了却一个都解析不出来，该群按「拒绝所有人」处理 |
 | `loop:trigger-failed` | Agent Loop | `triggerId` `chat` `detail` | 单条消息处理异常，同批其它消息不受影响 |
 | `decision:engine-failed` | Agent Loop | `triggerId` `detail` | 研判引擎调用失败，按 unavailable 处理并留下原因 |
 | `chat:reply-failed` | Agent Loop | `triggerId` `chat` `reason` `detail` | 回复模型失败，已退回固定话术 |
@@ -103,7 +118,7 @@ Router 不做对话，只在必要时说话：
 | `config:legacy-backend` | Config | `path` | 旧版 `backend` 段已兼容映射到 `runtime` |
 | `config:invalid-security-override` | Config | `runtime` `keys` | `runtime.options` 试图覆盖安全参数，启动被拒绝 |
 | `config:patch-rejected` / `config:write-failed` | HTTP API | `errors` / `detail` | 面板保存的配置校验失败或落盘失败 |
-| `api:config` | HTTP API | `changed` `policyChanged` `restartRequired` | 配置保存成功及是否需要重启 |
+| `api:config` | HTTP API | `changed` `policyChanged` `restartRequired` `identityEffective` | 配置保存成功、是否需要重启、允许名单是否已即时生效 |
 | `api:request-failed` | HTTP API | `method` `path` `detail` | 请求级未预期异常（客户端会收到 500） |
 | `ticket:resume-failed` | HTTP API | `ticketId` `detail` | 工单详情里的恢复命令生成失败，详情页仍可打开 |
 | `effect:done` / `effect:failed` | Effects | `kind` `key` / `error` | 派工、停止、清理等内部动作的执行结果 |
