@@ -9,6 +9,7 @@ import {
   fieldError,
   fieldValue,
   getByPath,
+  runtimeOptionPatchValue,
   runtimeOptionFields,
   type RuntimeChoiceView,
 } from './fields.js'
@@ -60,13 +61,13 @@ export function RuntimeSettingsDialog({ choice, draft, defaults, onChange, onClo
               error={touched[field.path] ? errors.find(item => item.path === field.path)?.message : undefined}
               onChange={value => {
                 setTouched(current => ({ ...current, [field.path]: true }))
-                onChange(field.path, value)
+                onChange(field.path, runtimeOptionPatchValue(field, value))
               }}
             />
           ))}
           <p className="modal-hint">
             <Icon name="alert" size={13} />
-            这些选项属于 <code>runtime.options.{choice.id}</code>；留空表示不覆盖，跟随运行时自己的默认。
+            这些选项属于 <code>runtime.options.{choice.id}</code>；未配置时使用该运行时的声明默认值。
           </p>
         </div>
         <footer className="modal-foot">

@@ -687,7 +687,7 @@ export class RouterService {
     )
   }
 
-  /** Orca 派工时用的 Agent；没配置 = 跟随 Orca 自己的默认。 */
+  /** Orca 派工时用的 Agent；没配置时取选项声明的默认值。 */
   private orcaAgentId(): string {
     return runtimeOptionString(this.config.runtime.options, ORCA_RUNTIME_ID, 'agent')
   }

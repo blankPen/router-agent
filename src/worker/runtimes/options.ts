@@ -19,12 +19,18 @@ export interface RuntimeOptionField {
   key: string
   label: string
   kind: RuntimeOptionKind
+  /**
+   * 未配置时的声明式默认值。
+   *
+   * 运行时与面板都从这里取值，避免「默认值」散落在 adapter、面板、文档三处。
+   * 有些工具的选项没有可省略的形态（例如 Orca 的 `--prompt` 必须配 `--agent`），
+   * 这种情况就靠这里给出一个真实默认值，而不是让调用方猜。
+   */
+  default?: string | number | boolean
   /** kind=select 时的候选取值。 */
   options?: RuntimeOptionValue[]
   placeholder?: string
   hint?: string
-  /** 值留空时的语义说明，例如「留空 = 跟随运行时自己的默认」。 */
-  emptyHint?: string
   /** kind=number 时的取值范围。 */
   min?: number
   max?: number
@@ -44,6 +50,11 @@ export function optionSpecOf(runtimeId: string): RuntimeOptionSpec | null {
 
 export function optionFieldOf(runtimeId: string, key: string): RuntimeOptionField | null {
   return optionSpecOf(runtimeId)?.fields.find(field => field.key === key) ?? null
+}
+
+/** 某个选项未配置时的声明式默认值；没有声明返回 undefined。 */
+export function runtimeOptionDefault(runtimeId: string, key: string): unknown {
+  return optionFieldOf(runtimeId, key)?.default
 }
 
 /** 配置里的点路径：runtime.options.<runtimeId>.<key>。 */
@@ -68,6 +79,7 @@ export function runtimeOptionPaths(): string[] {
  从配置里取某个运行时的字符串选项。
  *
  * 运行时之间没有特例：调用方只需要知道「我要哪个运行时的哪个选项」。
+ * 没配置（或显式留空）时回落到声明里的默认值。
  */
 export function runtimeOptionString(
   options: Record<string, unknown> | undefined,
@@ -75,9 +87,12 @@ export function runtimeOptionString(
   key: string,
 ): string {
   const entry = options?.[runtimeId]
-  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return ''
-  const value = (entry as Record<string, unknown>)[key]
-  return typeof value === 'string' ? value.trim() : ''
+  if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+    const value = (entry as Record<string, unknown>)[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  const fallback = runtimeOptionDefault(runtimeId, key)
+  return typeof fallback === 'string' ? fallback.trim() : ''
 }
 
 /**
@@ -90,7 +105,10 @@ export function validateRuntimeOption(field: RuntimeOptionField, value: unknown)
     case 'select': {
       const text = String(value ?? '').trim()
       const allowed = field.options?.map(option => option.value) ?? []
-      return allowed.includes(text) ? null : `取值必须是：${allowed.map(item => item || '(空)').join(' / ')}`
+      if (allowed.includes(text)) return null
+      // 留空表示回到声明里的默认值；没声明默认值的选项仍然必须显式选择。
+      if (text === '' && field.default !== undefined) return null
+      return `取值必须是：${allowed.map(item => item || '(空)').join(' / ')}`
     }
     case 'switch': {
       if (typeof value === 'boolean') return null
@@ -109,7 +127,3 @@ export function validateRuntimeOption(field: RuntimeOptionField, value: unknown)
   }
 }
 
-/** 该字段是否把空串当成「不覆盖」。 */
-export function isEmptyOptionValue(field: RuntimeOptionField, value: unknown): boolean {
-  return String(value ?? '').trim() === ''
-}

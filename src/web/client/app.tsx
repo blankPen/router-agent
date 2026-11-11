@@ -1926,7 +1926,8 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       if (message) map.set(field.path, message)
     }
     for (const field of optionFields) {
-      const message = fieldError(field, getByPath(draft, field.path))
+      // 没配置过的运行时选项取声明默认值，否则会被误判成「请选择一个有效值」。
+      const message = fieldError(field, fieldValue(draft, field.path))
       if (message) map.set(field.path, message)
     }
     if (changedSet.has('feishu.chats')) {

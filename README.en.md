@@ -178,7 +178,7 @@ Workers don't run inside the Router process. The Router picks an adapter from `r
 
 | runtime id | How it launches | Best for |
 |-|-|-|
-| `orca` (default) | Orca creates the worktree + agent terminal (follows Orca's own default) | You already manage repos with Orca and want to watch the terminal |
+| `orca` (default) | Orca creates the worktree + agent terminal (Claude Code by default; configurable) | You already manage repos with Orca and want to watch the terminal |
 | `claude-code` | `git worktree` + background `claude --bg` session | You don't use Orca and just want Claude Code |
 | `codex-app` | `git worktree` + `codex app-server`, preferring the CLI bundled with the Codex app | Use Codex and want Router-created threads visible in the Codex desktop app |
 | `acp` / `acp-*` | ACP child process (Claude / Codex / Gemini / OpenCode and friends) | You want to plug in another ACP agent |
@@ -221,7 +221,7 @@ ra config set policy.acceptMode observe          # observe first, no dispatch
 ra config set project.router-agent "name:dsh/router-agent@main"
 ra config set chatBinding.oc_xxx "router-agent@main"
 ra config set runtime.default claude-code
-ra config set runtime.options.orca.agent codex   # Orca dispatches with Codex; empty = follow Orca's default
+ra config set runtime.options.orca.agent codex   # Orca dispatches with Codex; default is Claude Code
 ra config edit                                   # edit the whole file in $EDITOR
 ```
 

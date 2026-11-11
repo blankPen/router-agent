@@ -87,7 +87,7 @@ ra start                      # 启动，就绪后自动打开 http://127.0.0.1:
 页面只放「服务跑起来必需的五件事」，顶部是完成度清单：
 
 1. **LLM Provider**：Base URL / 模型 / API Key，三项必填；OpenAI 兼容与 Anthropic 兼容协议都支持。密钥只写入 `config.yaml`，保存后不回显；环境变量 `RA_LLM_*` 可覆盖。右上角「从本地配置导入」会打开选择弹窗，从 Claude Code、CCSwitch、Pi、OpenCode、Magpie 的已有 Provider 里选一份导入（只读原配置，密钥不回显）。
-2. **选择运行时**：Orca / Claude Code / ACP Agent 卡片平铺，自动检测 CLI、版本、ACP 依赖与登录状态，支持安装引导和真实握手试启动。卡片下方是该运行时自己的选项（例如 Orca 的「执行 Agent」：留空跟随 Orca 默认，也可指定 codex 等）。
+2. **选择运行时**：Orca / Claude Code / ACP Agent 卡片平铺，自动检测 CLI、版本、ACP 依赖与登录状态，支持安装引导和真实握手试启动。运行时自己的选项在卡片的「设置」弹窗里改（例如 Orca 的「执行 Agent」：默认 Claude Code，也可指定 codex 等）。
 3. **登记项目**：添加本地项目（系统目录选择 + 自动识别 Git）或 Git 项目（自动 clone 到 `~/.router-agent/repos`，可用 `RA_HOME` 改根目录）。
 4. **飞书机器人**：填 App ID / App Secret（Secret 只写入 lark-cli 加密存储），固定使用 `~/.router-agent-lark` profile；保存后可检查授权状态并完成 Device Flow 授权。
 5. **群与绑定**：至少添加一个监控群；可把群固定到某个项目，之后开工不再追问。
@@ -162,7 +162,7 @@ Worker 不在 Router 进程里跑。Router 按 `runtime.default` 选择适配器
 
 | runtime id | 拉起方式 | 适用场景 |
 |-|-|-|
-| `orca`（默认） | Orca 创建 worktree + Agent 终端（默认跟随 Orca 配置） | 本机已用 Orca 管仓库，想同时看到终端 |
+| `orca`（默认） | Orca 创建 worktree + Agent 终端（默认 Claude Code，可用选项改成 codex 等） | 本机已用 Orca 管仓库，想同时看到终端 |
 | `claude-code` | `git worktree` + `claude --bg` 后台会话 | 不用 Orca，直接跑 Claude Code |
 | `codex-app` | `git worktree` + `codex app-server`，优先用 Codex App 内置 CLI | 用 Codex，且希望 Router 创建的 thread 在 Codex 桌面端可见 |
 | `acp` / `acp-*` | ACP 子进程（Claude / Codex / Gemini / OpenCode / Copilot / Cursor / Goose） | 想接其它 ACP Agent |
@@ -258,7 +258,7 @@ ra config set policy.acceptMode observe          # 先观察，不开工
 ra config set project.router-agent "name:dsh/router-agent@main"
 ra config set chatBinding.oc_xxx "router-agent@main"
 ra config set runtime.default claude-code
-ra config set runtime.options.orca.agent codex   # Orca 派工时用 Codex；留空 = 跟随 Orca 默认
+ra config set runtime.options.orca.agent codex   # Orca 派工时用 Codex；不配 = 默认 Claude Code
 ra config edit                                   # 用 $EDITOR 编辑全文
 ```
 

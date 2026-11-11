@@ -6,7 +6,13 @@
  */
 import { WORKER_RUNTIMES } from '../../worker/runtimes/catalog.js'
 import { ACP_AGENTS } from '../../worker/runtimes/acp/agents.js'
-import { RUNTIME_OPTION_SPECS, optionSpecOf, runtimeOptionPath } from '../../worker/runtimes/options.js'
+import {
+  RUNTIME_OPTION_SPECS,
+  optionSpecOf,
+  parseRuntimeOptionPath,
+  runtimeOptionDefault,
+  runtimeOptionPath,
+} from '../../worker/runtimes/options.js'
 import { isDeprecatedRuntime, runtimeOptionLabel, runtimeStatusLabel, type RuntimeChoiceView } from './runtime-model.js'
 
 export type { RuntimeChoiceView } from './runtime-model.js'
@@ -36,6 +42,8 @@ export interface FieldDef {
   /** 毫秒字段：额外展示「≈ 1 分钟」这类可读换算。 */
   ms?: boolean
   placeholder?: string
+  /** 字段自带默认值（运行时选项用它，页面「默认值快照」里没有这些动态路径）。 */
+  defaultValue?: unknown
 }
 
 export interface SectionDef {
@@ -294,6 +302,7 @@ export function runtimeOptionFields(runtimeId: string): FieldDef[] {
       : {}),
     ...(field.placeholder ? { placeholder: field.placeholder } : {}),
     ...(field.hint ? { hint: field.hint } : {}),
+    ...(field.default !== undefined ? { defaultValue: field.default } : {}),
     ...(field.min !== undefined ? { min: field.min } : {}),
     ...(field.max !== undefined ? { max: field.max } : {}),
   }))
@@ -302,6 +311,20 @@ export function runtimeOptionFields(runtimeId: string): FieldDef[] {
 /** 所有已声明运行时的选项字段；保存前统一校验，避免某个运行时的脏值溜过去。 */
 export function allRuntimeOptionFields(): FieldDef[] {
   return RUNTIME_OPTION_SPECS.flatMap(spec => runtimeOptionFields(spec.runtimeId))
+}
+
+/**
+ * 运行时选项回写值：选回声明默认值时写成空串，让后端把键删掉。
+ *
+ * 这样 config.yaml 里不会留下一个「和默认值相同」的多余配置，
+ * 后续调整声明默认值也能直接生效。
+ */
+export function runtimeOptionPatchValue(field: FieldDef, value: unknown): unknown {
+  const parsed = parseRuntimeOptionPath(field.path)
+  if (!parsed) return value
+  const fallback = runtimeOptionDefault(parsed.runtimeId, parsed.key)
+  if (fallback === undefined) return value
+  return JSON.stringify(value) === JSON.stringify(fallback) ? '' : value
 }
 
 /** 探测结果 → runtime.default 的下拉选项；无探测结果时回退静态清单。 */
@@ -373,12 +396,17 @@ export function getByPath(doc: unknown, path: string): unknown {
 /**
  * 取字段当前值。
  *
- * 运行时选项没配置过时按空串算：与「留空 = 不覆盖」是同一件事，
- * 否则面板会误报「有未保存的修改」。
+ * 运行时选项没配置过时回落到声明里的默认值（没声明默认值则按空串算），
+ * 这样面板显示的就是实际会生效的取值，也不会误报「有未保存的修改」。
  */
 export function fieldValue(doc: unknown, path: string): unknown {
   const value = getByPath(doc, path)
-  if (value === undefined && path.startsWith('runtime.options.')) return ''
+  if (value !== undefined && value !== '') return value
+  if (path.startsWith('runtime.options.')) {
+    const parsed = parseRuntimeOptionPath(path)
+    const fallback = parsed ? runtimeOptionDefault(parsed.runtimeId, parsed.key) : undefined
+    return fallback ?? ''
+  }
   return value
 }
 

@@ -178,11 +178,13 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 
 每个运行时可以声明自己的可配置项，落在通用的 `runtime.options.<运行时 id>.<键>` 下：
 
-- **面板**：声明过的选项会自动出现在「选择运行时」卡片下方，随运行时切换；
+- **面板**：声明过的选项出现在对应运行时卡片的「设置」弹窗里，不写死任何运行时；
 - **命令行**：`ra config set runtime.options.orca.agent codex`；
 - **校验**：后端按该运行时的声明校验取值，声明之外的键一律拒绝。
 
-目前只有 Orca 声明了一个选项：`agent` —— 决定 Orca 在工单 worktree 里启动哪个 Agent。留空表示**跟随 Orca 自己的默认**（不传 `--agent`）；填 `codex` / `claude` / `opencode` 等则显式指定。改了要重启服务才生效，只影响新工单。
+目前只有 Orca 声明了一个选项：`agent` —— 决定 Orca 在工单 worktree 里启动哪个 Agent。默认 `claude`；填 `codex` / `claude` / `opencode` 等则显式指定。改了要重启服务才生效，只影响新工单。
+
+默认值写在选项声明里（`RuntimeOptionField.default`），后端、面板、文档都从同一处取值。如果某个运行时的选项没有「可省略」的形态（例如 Orca 的 `--prompt` 必须配 `--agent`），就用声明默认值兜底，而不是让调用方猜。
 
 新增运行时只要声明自己的选项即可，内核与面板都不用改；选项声明见 `src/worker/runtimes/options.ts` 与各运行时的 `options.ts`。
 

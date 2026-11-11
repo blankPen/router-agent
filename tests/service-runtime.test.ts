@@ -741,15 +741,16 @@ describe('运行时机制', () => {
       note: expect.stringContaining('不再由 Orca 托管'),
     })
 
-    // meta 里没记 Agent（跟随 Orca 默认）又找不到会话记录：退回切回 Orca 终端。
+    // meta 里没记 Agent：按选项声明的默认值（claude）解释 sessionId。
     now += 1_000
     engine.startAssignment(ticketId, { runtimeId: 'orca', handle: 'term-3', workdir })
     writeFileSync(metaPath, JSON.stringify({
       ticketId, runtime: 'orca', handle: 'term-3', workdir, sessionId: 'sess_1',
     }))
     expect(await service.resumeHint(ticketId)).toEqual({
-      command: `orca 'terminal' 'switch' '--terminal' 'term-3'`,
-      note: expect.stringContaining('Orca'),
+      command: `cd '${workdir}' && claude '--resume' 'sess_1'`,
+      sessionId: 'sess_1',
+      note: expect.stringContaining('不再由 Orca 托管'),
     })
     expect(await service.resumeHint('tk_missing')).toBeNull()
   })

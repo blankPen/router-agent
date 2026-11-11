@@ -89,7 +89,7 @@ describe('RuntimeRegistry', () => {
     } as never)).rejects.toMatchObject({ code: 'runtime:unavailable' })
   })
 
-  it('Orca 的 Agent 走通用运行时选项：配了就用，没配就跟随 Orca 默认', async () => {
+  it('Orca 的 Agent 走通用运行时选项：配了就用，没配就用声明默认', async () => {
     const config = defaultConfig()
     config.runtime.options = { orca: { agent: 'codex' } }
     const calls: string[][] = []
@@ -120,10 +120,10 @@ describe('RuntimeRegistry', () => {
     const argv = calls[0]!
     expect(argv[argv.indexOf('--agent') + 1]).toBe('codex')
 
-    // 没配置时不传 --agent：由 Orca 自己的配置决定用哪个 Agent。
+    // 没配置时用选项声明里的默认值：Orca 的 --prompt 必须配 --agent。
     calls.length = 0
     const plain = defaultConfig()
     await createRuntimes(plain, deps).get('orca').start({ ticket, assignment, workdir: '/tmp/wt' } as never)
-    expect(calls[0]).not.toContain('--agent')
+    expect(calls[0]![calls[0]!.indexOf('--agent') + 1]).toBe('claude')
   })
 })

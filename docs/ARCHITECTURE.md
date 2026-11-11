@@ -23,7 +23,7 @@ WorkerRuntime 端口 ── OrcaRuntime（默认）/ ClaudeCodeRuntime / AcpRunt
 
 1. **听**：常驻消费飞书群 / 私聊消息，按名单与 `@` 规则做确定性准入。
 2. **判**：未被直接指派的候选交给 Pi 研判（可批量），输出 `accept / stop / ignore / unavailable` 四类决定。
-3. **派**：接单后创建工单与授权（Mandate），先确认「项目 + 起始分支」，再按 `runtime.default` 选择运行时：Orca 用 `orca worktree create --repo ... --base-branch ...` 开 worktree + Agent 终端（默认跟随 Orca 配置，可用 `runtime.options.orca.agent` 指定）；Claude Code 用 `git worktree` + `claude --bg` 后台会话；ACP 用 `AcpRuntime` 拉起对应的 ACP Agent。缺项目或分支时不开单，先在会话里追问（群配置里可固定项目和分支，免问答）。
+3. **派**：接单后创建工单与授权（Mandate），先确认「项目 + 起始分支」，再按 `runtime.default` 选择运行时：Orca 用 `orca worktree create --repo ... --base-branch ...` 开 worktree + Agent 终端（默认 Claude Code，可用 `runtime.options.orca.agent` 指定）；Claude Code 用 `git worktree` + `claude --bg` 后台会话；ACP 用 `AcpRuntime` 拉起对应的 ACP Agent。缺项目或分支时不开单，先在会话里追问（群配置里可固定项目和分支，免问答）。
 4. **跟**：Worker 用 `ra report` 上报（失败自动落盘 `state.json`），Router 刷新工单阶段；PR 合并 / 关闭后闭环并通知发起人。
 
 ## 关键约束

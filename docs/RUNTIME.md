@@ -8,7 +8,7 @@ Worker 不在 Router 进程里跑。每张工单开工时，Router 按 `runtime.
 
 | runtime id | 拉起方式 | workspace | 状态读取 | 追问 / 恢复 | 适用场景 |
 |-|-|-|-|-|-|
-| `orca`（默认） | Orca 创建 worktree + Agent 终端（默认跟随 Orca 配置，也可指定 codex 等） | `orca worktree create --repo … --base-branch …` | Orca `AgentStatus`（`connected` / `orphaned` / `lastOutputAt`） | 终端常驻，追问直接投递；巡检优先读 Agent 自己的会话记录 | 本机已用 Orca 管仓库，想同时看到终端 |
+| `orca`（默认） | Orca 创建 worktree + Agent 终端（默认 Claude Code，也可指定 codex 等） | `orca worktree create --repo … --base-branch …` | Orca `AgentStatus`（`connected` / `orphaned` / `lastOutputAt`） | 终端常驻，追问直接投递；巡检优先读 Agent 自己的会话记录 | 本机已用 Orca 管仓库，想同时看到终端 |
 | `claude-code` | `git worktree` + `claude --bg` 后台会话 | 本地 git 仓库绝对路径 | `claude agents --json --all` | 会话结束后用 `claude --bg --resume <sessionId>` 追问；进程退出不自动 resume | 不用 Orca，直接跑 Claude Code |
 | `codex-app` | `git worktree` + `codex app-server --stdio` | 本地 git 仓库绝对路径 | Codex `thread/status/changed`、`turn/*`、`item/*` 事件 | `thread/resume` 接回；执行中 `turn/steer`；停止用 `turn/interrupt` | 想用 Codex，且希望 Router 创建的 thread 能在 Codex 桌面端看到 |
 | `acp` / `acp-*` | ACP 子进程：`initialize` → `session/new` → `session/prompt` | `git worktree`（本地绝对路径） | ACP `session/update` | Agent 声明 `loadSession` 时用 `session/load` 恢复 | 想接 Codex / Gemini / OpenCode 等 |
@@ -33,7 +33,7 @@ Worker 不在 Router 进程里跑。每张工单开工时，Router 按 `runtime.
 
 ```bash
 ra config set runtime.default claude-code
-ra config set runtime.options.orca.agent codex   # Orca 派工时用 Codex；留空 = 跟随 Orca 默认
+ra config set runtime.options.orca.agent codex   # Orca 派工时用 Codex；不配 = 默认 Claude Code
 ra runtime list                    # 本机 ACP Agent 状态、版本、来源
 ra runtime install acp-claude      # 装到 ~/.router-agent/runtimes/claude
 ra runtime check acp-claude        # 完整 initialize + session/new 握手
@@ -49,7 +49,7 @@ runtime:
   # 运行时专属的非安全参数
   options:
     orca:
-      agent: codex          # 留空 = 跟随 Orca 自己的默认 Agent
+      agent: codex          # 不配 = 默认 Claude Code
     claude-code:
       model: claude-sonnet-5-5
     codex-app:
@@ -76,9 +76,9 @@ runtime:
 
 ## 运行时选项：各运行时自己声明
 
-`runtime.options.<运行时 id>.<键>` 是通用的扩展点。每个运行时在自己的 `options.ts` 里声明「能配什么、取值有哪些、留空是什么意思」，于是：
+`runtime.options.<运行时 id>.<键>` 是通用的扩展点。每个运行时在自己的 `options.ts` 里声明「能配什么、取值有哪些、默认是什么」，于是：
 
-- **面板**按声明自动渲染字段（运行时卡片下方），不写死任何运行时；
+- **面板**按声明自动渲染字段（运行时卡片上的「设置」弹窗），不写死任何运行时；
 - **后端**按声明校验取值，声明之外的键直接拒绝；
 - **命令行**统一用 `ra config set runtime.options.<运行时 id>.<键> <值>` 改。
 
@@ -86,12 +86,12 @@ runtime:
 
 ```bash
 ra config set runtime.options.orca.agent codex   # Orca 派工时启动 Codex
-ra config set runtime.options.orca.agent ""       # 回到「跟随 Orca 默认」
+ra config set runtime.options.orca.agent claude  # 回到默认的 Claude Code
 ```
 
-留空时 ra **不传** `--agent`，由 Orca 自己的配置决定用哪个 Agent；填了才显式指定。选定的 Agent 会记进工单 meta，人工恢复会话时用它的 CLI 语法（`claude --resume` / `codex resume`）。
+默认值是 `claude`。Orca 的 `worktree create --prompt` 必须同时给 `--agent`，没有「不传」这种形态，所以 ra 总是显式传一个 Agent；没配置时用选项声明里的默认值。选定的 Agent 会记进工单 meta，人工恢复会话时用它的 CLI 语法（`claude --resume` / `codex resume`）。
 
-进展巡检读的是 Agent 自己的结构化会话记录：Claude 读 `~/.claude/projects/<cwd>/`，Codex 读 `~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl`。没指定 Agent 时，ra 按注册表顺序自动探测是哪一个留下了会话记录，读不到就退回终端屏幕渲染。
+进展巡检读的是 Agent 自己的结构化会话记录：Claude 读 `~/.claude/projects/<cwd>/`，Codex 读 `~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl`。没指定 Agent 时按默认值 `claude` 读，读不到就退回终端屏幕渲染。
 
 ## Codex App Server 运行时（`codex-app`）
 

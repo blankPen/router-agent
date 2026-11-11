@@ -46,7 +46,7 @@ const assignment: Assignment = {
 }
 
 describe('Orca 命令构造', () => {
-  it('worktree create 不写死 Agent：不配置时用 Orca 自己的默认', () => {
+  it('worktree create 不写死 Agent：不传 agent 时不拼 --agent', () => {
     expect(worktreeCreate({ repo: 'dsh/router-agent', name: 'ra-tk_1', prompt: '做这个' })).toEqual([
       'worktree', 'create',
       '--repo', 'name:dsh/router-agent',
@@ -59,7 +59,7 @@ describe('Orca 命令构造', () => {
     ])
   })
 
-  it('worktree create 配了 Agent 时才传 --agent', () => {
+  it('worktree create 配了 Agent 时传 --agent', () => {
     const argv = worktreeCreate({ repo: 'dsh/router-agent', name: 'ra-tk_1', prompt: '做这个', agent: 'codex' })
     expect(argv).toContain('--agent')
     expect(argv[argv.indexOf('--agent') + 1]).toBe('codex')
@@ -86,7 +86,7 @@ describe('Orca 命令构造', () => {
     // 默认不 --force：脏工作区交给 Orca 拒绝，避免误删未提交改动。
     expect(worktreeRemove('path:/tmp/wt')).toEqual(['worktree', 'rm', '--worktree', 'path:/tmp/wt', '--json'])
     expect(worktreeRemove('path:/tmp/wt', { force: true })).toEqual(['worktree', 'rm', '--worktree', 'path:/tmp/wt', '--force', '--json'])
-    // 不配置 Agent 时不传 --agent，由 Orca 自己的配置决定。
+    // 命令构造层不猜默认值；默认值由 Orca 选项声明提供。
     expect(agentLaunch({ worktree: 'path:/tmp/wt', prompt: '继续' })).toEqual(['agent', 'launch', '--worktree', 'path:/tmp/wt', '--prompt', '继续'])
     expect(agentLaunch({ worktree: 'path:/tmp/wt', prompt: '继续', agent: 'codex' }))
       .toEqual(['agent', 'launch', '--agent', 'codex', '--worktree', 'path:/tmp/wt', '--prompt', '继续'])
@@ -183,12 +183,14 @@ describe('OrcaRuntime', () => {
     expect(meta.assignmentId).toBe('as_1')
   })
 
-  it('不配置 Agent 时不传 --agent；配置后按配置传', async () => {
+  it('未配置时用声明默认 claude；配置后按配置传', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'ra-workers-'))
     const stdout = JSON.stringify({ ok: true, result: { launch: { outcome: { handle: 'term-9' } } } })
     const runner = new FakeRunner([{ code: 0, stdout, stderr: '' }])
     await new OrcaRuntime({ runner, workersDir: dir }).start({ ticket, assignment, workdir: '/tmp/wt-9' })
-    expect(runner.calls[0]!.argv).not.toContain('--agent')
+    const defaultArgv = runner.calls[0]!.argv
+    // Orca 的 --prompt 必须配 --agent，所以缺省也要传声明里的默认值。
+    expect(defaultArgv[defaultArgv.indexOf('--agent') + 1]).toBe('claude')
 
     const runner2 = new FakeRunner([{ code: 0, stdout, stderr: '' }])
     const adapter = new OrcaRuntime({ runner: runner2, workersDir: dir, agent: 'codex' })
