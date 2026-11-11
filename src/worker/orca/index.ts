@@ -21,6 +21,8 @@ import type {
 import { buildWorkerPrompt } from '../spec/index.js'
 import { workBranch, worktreeName } from '../naming.js'
 import { resolveSession } from '../agents/registry.js'
+import { runtimeOptionDefault } from '../runtimes/options.js'
+import { ORCA_RUNTIME_ID } from '../runtimes/catalog.js'
 import {
   agentLaunch,
   terminalClose,
@@ -40,7 +42,7 @@ export interface OrcaRuntimeOptions {
   workersDir: string
   /** 状态目录；传入后 Worker 规范优先读 `<home>/specs/worker/` 下的覆盖文件。 */
   home?: string
-  /** 派工时启动哪个 Agent；留空 = 由 Orca 自己的配置决定。 */
+  /** 派工时启动哪个 Agent；缺省用 Orca 选项声明里的默认值。 */
   agent?: string
   /** Claude Code 会话记录目录；默认 ~/.claude/projects，测试可注入临时目录。 */
   claudeProjectsDir?: string
@@ -216,7 +218,8 @@ export class OrcaRuntime implements WorkerRuntime {
     this.runner = opts.runner
     this.workersDir = opts.workersDir
     this.home = opts.home
-    this.agent = String(opts.agent ?? '').trim()
+    // Orca 的 --prompt 必须配 --agent，没有「不传」这种形态，因此这里必须落到一个具体值。
+    this.agent = String(opts.agent || runtimeOptionDefault(ORCA_RUNTIME_ID, 'agent') || '').trim()
     this.claudeProjectsDir = opts.claudeProjectsDir
   }
 

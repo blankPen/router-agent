@@ -13,7 +13,13 @@ import {
   runtimeOptionString,
   validateRuntimeOption,
 } from '../../src/worker/runtimes/options.js'
-import { allRuntimeOptionFields, runtimeOptionFields, sectionsFor } from '../../src/web/client/fields.js'
+import {
+  allRuntimeOptionFields,
+  fieldValue,
+  runtimeOptionFields,
+  runtimeOptionPatchValue,
+  sectionsFor,
+} from '../../src/web/client/fields.js'
 
 describe('运行时选项：通用声明与路径', () => {
   it('路径形状可解析，配置落点是 runtime.options.<runtimeId>.<key>', () => {
@@ -38,10 +44,11 @@ describe('运行时选项：通用声明与路径', () => {
     expect(validateRuntimeOption(field, 'nope')).toContain('取值必须是')
   })
 
-  it('从配置里读选项字符串', () => {
+  it('从配置里读选项字符串；没配置时回落到声明默认值', () => {
     expect(runtimeOptionString({ orca: { agent: ' codex ' } }, 'orca', 'agent')).toBe('codex')
     expect(runtimeOptionString({ orca: { agent: 'codex' } }, 'claude-code', 'agent')).toBe('')
-    expect(runtimeOptionString(undefined, 'orca', 'agent')).toBe('')
+    expect(runtimeOptionString(undefined, 'orca', 'agent')).toBe('claude')
+    expect(runtimeOptionString({ orca: {} }, 'orca', 'agent')).toBe('claude')
   })
 })
 
@@ -61,7 +68,7 @@ describe('运行时选项：配置读写', () => {
     expect(applyConfigPatch(config, { 'runtime.options.orca.agent': 'nope' }).errors[0]?.message).toContain('取值必须是')
   })
 
-  it('留空表示不覆盖：把键删掉而不是写空串', () => {
+  it('留空表示回到声明默认：把键删掉而不是写空串', () => {
     const config = defaultConfig()
     applyConfigPatch(config, { 'runtime.options.orca.agent': 'codex' })
     applyConfigPatch(config, { 'runtime.options.orca.agent': '' })
@@ -83,8 +90,18 @@ describe('运行时选项：面板渲染', () => {
     expect(fields).toHaveLength(1)
     expect(fields[0]?.path).toBe('runtime.options.orca.agent')
     expect(fields[0]?.kind).toBe('select')
-    expect(fields[0]?.options?.map(option => option.value)).toContain('')
+    expect(fields[0]?.options?.map(option => option.value)).toContain('claude')
+    expect(fields[0]?.defaultValue).toBe('claude')
     expect(runtimeOptionFields('claude-code')).toEqual([])
+  })
+
+  it('面板显示未配置选项的声明默认值，并把它当作「和默认一致」', () => {
+    expect(fieldValue({}, 'runtime.options.orca.agent')).toBe('claude')
+    expect(fieldValue({ runtime: { options: { orca: { agent: 'codex' } } } }, 'runtime.options.orca.agent')).toBe('codex')
+    expect(fieldValue({ runtime: { options: { orca: { agent: '' } } } }, 'runtime.options.orca.agent')).toBe('claude')
+    const field = runtimeOptionFields('orca')[0]!
+    expect(runtimeOptionPatchValue(field, 'claude')).toBe('')
+    expect(runtimeOptionPatchValue(field, 'codex')).toBe('codex')
   })
 
   it('选项不在页面上平铺：走卡片上的「设置」弹窗', () => {

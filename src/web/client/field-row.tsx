@@ -18,7 +18,8 @@ export function FieldRow({ field, value, defaultValue, error, onChange }: {
   error?: string
   onChange: (value: unknown) => void
 }): JSX.Element {
-  const changedFromDefault = defaultValue !== undefined && JSON.stringify(value) !== JSON.stringify(defaultValue)
+  const baseline = defaultValue ?? field.defaultValue
+  const changedFromDefault = baseline !== undefined && JSON.stringify(value) !== JSON.stringify(baseline)
   const hint = error
     ? <span className="field-error">{error}</span>
     : <>
@@ -34,8 +35,8 @@ export function FieldRow({ field, value, defaultValue, error, onChange }: {
           {changedFromDefault && (
             <button
               className="reset-link"
-              title={`恢复默认值：${JSON.stringify(defaultValue)}`}
-              onClick={() => onChange(defaultValue)}
+              title={`恢复默认值：${JSON.stringify(baseline)}`}
+              onClick={() => onChange(baseline)}
             >
               恢复默认
             </button>
