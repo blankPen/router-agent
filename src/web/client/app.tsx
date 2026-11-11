@@ -42,6 +42,7 @@ import { FeishuBotPanel } from './feishu-panel.js'
 import { SpecsEditor } from './specs-editor.js'
 import {
   mergeRuntimeChoices,
+  runtimeDisplayName,
   runtimeStatusLabel,
 } from './runtime-model.js'
 import { hashForTab, tabFromHash, type Tab } from './tabs.js'
@@ -1239,7 +1240,15 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
   // 探测轮询由 RuntimeCards 负责；这里只保留静态目录兜底 + 服务端快照合并。
   const runtimeCatalog = useMemo(() => mergeRuntimeChoices(runtimeChoices), [runtimeChoices])
 
-  const sections = useMemo(() => [...sectionsFor(runtimeChoices), ...CUSTOM_SECTIONS], [runtimeChoices])
+  // 当前选中的运行时：deprecated 的 ACP 运行时仍要留在下拉里，老配置才对得上。
+  const selectedRuntimeId = normalizeRuntimeId(
+    draft && typeof draft.runtime?.default === 'string' ? draft.runtime.default : ORCA_RUNTIME_ID,
+  )
+
+  const sections = useMemo(
+    () => [...sectionsFor(runtimeChoices, selectedRuntimeId), ...CUSTOM_SECTIONS],
+    [runtimeChoices, selectedRuntimeId],
+  )
 
   const changed = useMemo(() => {
     if (!draft || !original) return []
@@ -1270,7 +1279,7 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
     if (chatMessage) map.set('feishu.chats', chatMessage)
     for (const runtime of runtimeCatalog) {
       const issue = projectIssue(runtime.id, projectsOf(draft, runtime.id))
-      if (issue) map.set(projectPatchPath(runtime.id), `${runtime.label}：${issue}`)
+      if (issue) map.set(projectPatchPath(runtime.id), `${runtimeDisplayName(runtime)}：${issue}`)
     }
     return map
   }, [draft, sections, runtimeCatalog])
@@ -1343,8 +1352,9 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
   if (!draft || !original) return <div className="empty-state tall"><p>正在读取配置…</p></div>
 
   const query = filter.trim().toLowerCase()
-  const runtimeId = normalizeRuntimeId(typeof draft.runtime?.default === 'string' ? draft.runtime.default : ORCA_RUNTIME_ID)
-  const runtimeLabel = runtimeCatalog.find(runtime => runtime.id === runtimeId)?.label ?? runtimeId
+  const runtimeId = selectedRuntimeId
+  const selectedRuntime = runtimeCatalog.find(runtime => runtime.id === runtimeId)
+  const runtimeLabel = selectedRuntime ? runtimeDisplayName(selectedRuntime) : runtimeId
   const activeProjectsPath = projectPatchPath(runtimeId)
   const activeProjects = projectsOf(draft, runtimeId)
   const projectErrors = runtimeCatalog
@@ -1834,7 +1844,8 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
   )
   const activeProjectsPath = projectPatchPath(runtimeId)
   const activeProjects = draft ? projectsOf(draft, runtimeId) : []
-  const runtimeLabel = runtimeCatalog.find(runtime => runtime.id === runtimeId)?.label ?? runtimeId
+  const selectedRuntime = runtimeCatalog.find(runtime => runtime.id === runtimeId)
+  const runtimeLabel = selectedRuntime ? runtimeDisplayName(selectedRuntime) : runtimeId
 
   const changed = useMemo(() => {
     if (!draft || !original) return []
@@ -1868,7 +1879,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       // 只校验当前运行时的清单 + 本次确实要提交的其它清单，避免历史脏数据挡住保存。
       if (runtime.id !== runtimeId && !changedSet.has(path)) continue
       const issue = projectIssue(runtime.id, projectsOf(draft, runtime.id))
-      if (issue) map.set(path, `${runtime.label}：${issue}`)
+      if (issue) map.set(path, `${runtimeDisplayName(runtime)}：${issue}`)
     }
     // 自定义 acp 没有 command 时重启会直接启动失败，保存前就挡住。
     const selected = runtimeCatalog.find(runtime => runtime.id === runtimeId)

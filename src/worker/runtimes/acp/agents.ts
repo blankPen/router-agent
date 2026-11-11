@@ -21,6 +21,8 @@ export interface AcpAgentMeta {
   id: string
   /** 运行时 id，写入 runtime.default / runtime.projects / runtime.options。 */
   runtimeId: string
+  /** 产品名（自然大小写）；Web 面板按首字母大写展示，CLI 与文档保持原样。 */
+  name: string
   label: string
   hint: string
   /** PATH 上的命令名；managed 安装时也是 node_modules/.bin 下的文件名。 */
@@ -58,12 +60,18 @@ export interface AcpAgentMeta {
   loadSession?: boolean
   /** L0 版本探测不足以确认 ACP 模式，需要 `ra runtime check` 完整握手。 */
   verifyRequired?: boolean
+  /**
+   * 已有原生运行时替代品：Web 面板不再把它作为可选运行时展示，
+   * 但运行时 id、配置与已装扩展全部保留，老配置继续可用。
+   */
+  deprecated?: boolean
 }
 
 export const ACP_AGENTS: readonly AcpAgentMeta[] = [
   {
     id: 'claude',
     runtimeId: 'acp-claude',
+    name: 'Claude Code',
     label: 'Claude Code (ACP)',
     hint: '通过 claude-agent-acp 接入，支持断线后 session/load 恢复',
     command: 'claude-agent-acp',
@@ -79,10 +87,13 @@ export const ACP_AGENTS: readonly AcpAgentMeta[] = [
     env: { CLAUDE_AGENT_ACP_PROTOCOL: 'v1' },
     login: { command: 'claude', args: [], hint: '先完成 Claude Code 登录（claude 能正常对话）' },
     loadSession: true,
+    // 已有 claude-code 内置运行时，Web 面板不再把它作为可选项展示。
+    deprecated: true,
   },
   {
     id: 'codex',
     runtimeId: 'acp-codex',
+    name: 'Codex',
     label: 'Codex (ACP)',
     hint: 'baldaworks codex-acp；依赖本机 codex CLI，不支持断线恢复',
     command: 'codex-acp',
@@ -110,10 +121,13 @@ export const ACP_AGENTS: readonly AcpAgentMeta[] = [
       check: { command: 'codex', args: ['login', 'status'] },
     },
     loadSession: false,
+    // 已有 codex-app 内置运行时，Web 面板不再把它作为可选项展示。
+    deprecated: true,
   },
   {
     id: 'opencode',
     runtimeId: 'acp-opencode',
+    name: 'OpenCode',
     label: 'OpenCode',
     hint: 'opencode acp 原生 ACP 模式',
     command: 'opencode',
@@ -128,6 +142,7 @@ export const ACP_AGENTS: readonly AcpAgentMeta[] = [
   {
     id: 'gemini',
     runtimeId: 'acp-gemini',
+    name: 'Gemini CLI',
     label: 'Gemini CLI',
     hint: 'gemini --acp 实验性 ACP 模式',
     command: 'gemini',
@@ -141,6 +156,7 @@ export const ACP_AGENTS: readonly AcpAgentMeta[] = [
   {
     id: 'copilot',
     runtimeId: 'acp-copilot',
+    name: 'GitHub Copilot CLI',
     label: 'GitHub Copilot CLI',
     hint: 'copilot --acp --stdio',
     command: 'copilot',
@@ -158,6 +174,7 @@ export const ACP_AGENTS: readonly AcpAgentMeta[] = [
   {
     id: 'cursor',
     runtimeId: 'acp-cursor',
+    name: 'Cursor CLI',
     label: 'Cursor CLI',
     hint: 'cursor-agent acp；旧版本可能没有 acp 子命令',
     command: 'cursor-agent',
@@ -171,6 +188,7 @@ export const ACP_AGENTS: readonly AcpAgentMeta[] = [
   {
     id: 'goose',
     runtimeId: 'acp-goose',
+    name: 'Goose',
     label: 'Goose',
     hint: 'goose acp 原生 ACP 模式',
     command: 'goose',
@@ -197,6 +215,16 @@ export function acpAgentOf(idOrRuntimeId: string): AcpAgentMeta | undefined {
 export function isAcpRuntimeId(id: string): boolean {
   const value = id.trim()
   return ACP_AGENTS.some(agent => agent.runtimeId === value)
+}
+
+/**
+ * 是否是已有原生运行时替代品的 ACP 运行时（Claude Code / Codex）。
+ *
+ * 这类运行时 id 依旧合法、依旧能派工，只是 Web 面板不再把它们列为可选项。
+ */
+export function isDeprecatedAcpRuntimeId(id: string): boolean {
+  const value = id.trim()
+  return ACP_AGENTS.some(agent => agent.runtimeId === value && agent.deprecated === true)
 }
 
 /** agent id → runtime id；未知 id 返回 null。 */
