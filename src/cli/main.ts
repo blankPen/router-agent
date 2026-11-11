@@ -22,6 +22,7 @@ const io: CliIo = {
   orca: realRunner('orca'),
   claude: realRunner('claude'),
   git: realRunner('git'),
+  herdr: realRunner('herdr'),
   lark: createLarkRunner(),
   stream: (argv, env) => new Promise<number>(resolve => {
     const child = spawn('lark-cli', argv, { stdio: 'inherit', env })

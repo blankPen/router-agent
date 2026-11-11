@@ -55,6 +55,7 @@ describe('RuntimeRegistry', () => {
       orca: runner(),
       claude: runner(),
       git: runner(),
+      herdr: runner(),
     }
     expect(createRuntimes(config, deps).default().id).toBe('orca')
     const claude = { ...config, runtime: { default: 'claude-code' } }
@@ -75,6 +76,7 @@ describe('RuntimeRegistry', () => {
       orca: runner(),
       claude: runner(),
       git: runner(),
+      herdr: runner(),
       env: { PATH: '' },
     })
     expect(registry.ids()).toEqual(expect.arrayContaining(ACP_AGENTS.map(agent => agent.runtimeId)))
@@ -108,6 +110,7 @@ describe('RuntimeRegistry', () => {
       },
       claude: runner(),
       git: runner(),
+      herdr: runner(),
     }
     const ticket = {
       id: 'tk-1', title: 't', threadId: 't', source: 'feishu', chatId: 'c',

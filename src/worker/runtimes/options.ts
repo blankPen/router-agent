@@ -5,6 +5,7 @@
  * 配置落点是通用的 `runtime.options.<runtimeId>.<key>`，新增运行时不需要改内核或面板。
  */
 import { ORCA_OPTION_SPEC } from '../orca/options.js'
+import { HERDR_OPTION_SPEC } from './herdr/options.js'
 
 export type RuntimeOptionKind = 'text' | 'select' | 'switch' | 'number'
 
@@ -42,7 +43,7 @@ export interface RuntimeOptionSpec {
 }
 
 /** 所有运行时的选项声明；新增运行时在这里加一行即可。 */
-export const RUNTIME_OPTION_SPECS: readonly RuntimeOptionSpec[] = [ORCA_OPTION_SPEC]
+export const RUNTIME_OPTION_SPECS: readonly RuntimeOptionSpec[] = [ORCA_OPTION_SPEC, HERDR_OPTION_SPEC]
 
 export function optionSpecOf(runtimeId: string): RuntimeOptionSpec | null {
   return RUNTIME_OPTION_SPECS.find(spec => spec.runtimeId === runtimeId) ?? null

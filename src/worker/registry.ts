@@ -6,6 +6,7 @@ import { OrcaRuntime } from './orca/index.js'
 import { ClaudeCodeRuntime } from './runtimes/claude-code/index.js'
 import { CodexAppRuntime } from './runtimes/codex/index.js'
 import { codexAppOptionsOf } from './runtimes/codex/detect.js'
+import { HerdrRuntime } from './runtimes/herdr/index.js'
 import { AcpRuntime } from './runtimes/acp/index.js'
 import { ACP_AGENTS } from './runtimes/acp/agents.js'
 import { acpRuntimeConfig, installHintOf, resolveAgentCommand } from './runtimes/acp/detect.js'
@@ -13,6 +14,7 @@ import {
   ACP_RUNTIME_ID,
   CLAUDE_CODE_RUNTIME_ID,
   CODEX_APP_RUNTIME_ID,
+  HERDR_RUNTIME_ID,
   LEGACY_CLAUDE_CODE_RUNTIME_ID,
   ORCA_RUNTIME_ID,
   normalizeRuntimeId,
@@ -28,6 +30,8 @@ export interface RuntimeDeps {
   claude: CommandRunner
   /** 已绑定 git 的 runner。 */
   git: CommandRunner
+  /** 已绑定 herdr 的 runner。 */
+  herdr: CommandRunner
   claudeProjectsDir?: string
   env?: NodeJS.ProcessEnv
   logger?: Logger
@@ -133,6 +137,20 @@ export function createRuntimes(config: AppConfig, deps: RuntimeDeps): RuntimeReg
       ...(acpEnv ? { env: { ...(deps.env ?? {}), ...acpEnv } } : deps.env ? { env: deps.env } : {}),
     }))
   }
+
+  // Herdr：与 Orca 同构的「worktree + 终端」运行时，但控制面是 Herdr 自己的 CLI。
+  const herdrOptions = (config.runtime.options?.[HERDR_RUNTIME_ID] ?? {}) as Record<string, unknown>
+  const herdrAgent = runtimeOptionString(config.runtime.options, HERDR_RUNTIME_ID, 'agent')
+  const herdrModel = typeof herdrOptions.model === 'string' ? herdrOptions.model.trim() : ''
+  runtimes.set(HERDR_RUNTIME_ID, new HerdrRuntime({
+    herdr: deps.herdr,
+    git: deps.git,
+    workersDir: deps.workersDir,
+    home: deps.home,
+    ...(herdrAgent ? { agent: herdrAgent } : {}),
+    ...(herdrModel ? { model: herdrModel } : {}),
+    ...(deps.claudeProjectsDir ? { claudeProjectsDir: deps.claudeProjectsDir } : {}),
+  }))
 
   // 目录里的 ACP Agent 全部注册：是否安装只影响可用性，不影响 runtime id 是否存在。
   // 命令解析只做文件存在性检查，不 spawn 进程；真正探测由 detect.ts 负责。

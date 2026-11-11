@@ -112,6 +112,10 @@ describe('运行时选项：面板渲染', () => {
 
   it('保存前校验覆盖所有已声明运行时的选项', () => {
     const fields = allRuntimeOptionFields()
-    expect(fields.map(field => field.path)).toEqual(['runtime.options.orca.agent'])
+    expect(fields.map(field => field.path)).toEqual([
+      'runtime.options.orca.agent',
+      'runtime.options.herdr.agent',
+      'runtime.options.herdr.model',
+    ])
   })
 })

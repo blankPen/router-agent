@@ -9,6 +9,7 @@ export const ORCA_RUNTIME_ID = 'orca'
 export const CLAUDE_CODE_RUNTIME_ID = 'claude-code'
 export const ACP_RUNTIME_ID = 'acp'
 export const CODEX_APP_RUNTIME_ID = 'codex-app'
+export const HERDR_RUNTIME_ID = 'herdr'
 
 export interface WorkerRuntimeMeta {
   id: string
@@ -53,6 +54,14 @@ export const WORKER_RUNTIMES: readonly WorkerRuntimeMeta[] = [
     label: 'acp · 任意 ACP Agent',
     hint: '通过 ACP 协议接入其它 Agent；启用前需要在 runtime.options.acp 配置 command',
     installHint: '在 config.yaml 的 runtime.options.acp 下配置 command 与 args，然后重启服务',
+  },
+  {
+    id: HERDR_RUNTIME_ID,
+    name: 'Herdr',
+    label: 'herdr · Herdr worktree + 终端',
+    hint: '通过 Herdr 创建 worktree 并在终端 pane 里启动 Agent；状态来自 Herdr 的 Agent 检测',
+    installHint: '从 Herdr 官方发布页下载安装，并确保 herdr CLI 在 PATH 中',
+    installUrl: 'https://github.com/herdrdev/herdr/releases',
   },
 ]
 
