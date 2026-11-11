@@ -1310,12 +1310,18 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
       // 保存后服务端会重解析名单，这里同步最新状态（解析失败也不影响保存结果）。
       if (result.identity) setIdentity(result.identity)
       setPendingRestart(result.restartRequired)
-      const message = secretDropNotice(patch, result) ?? {
-        kind: result.restartRequired ? 'warn' as const : 'ok' as const,
-        text: result.restartRequired
-          ? `已保存 ${result.changed.length} 项，其中部分配置需要重启服务才生效；点右上角「重启服务」即可（页面不会刷新）。`
-          : `已保存 ${result.changed.length} 项，已立即生效。`,
-      }
+      const message = secretDropNotice(patch, result) ?? (result.identityEffective === false
+        ? {
+            // 名单重解析失败时保存仍然成功（配置已落盘），但新名单还没生效，必须说清楚。
+            kind: 'warn' as const,
+            text: '已保存，但允许名单重新解析失败，新名单暂未生效（会按上一次的名单继续运行）；稍后可再保存一次或在日志里查看 identity:refresh-failed 的原因。',
+          }
+        : {
+            kind: result.restartRequired ? 'warn' as const : 'ok' as const,
+            text: result.restartRequired
+              ? `已保存 ${result.changed.length} 项，其中部分配置需要重启服务才生效；点右上角「重启服务」即可（页面不会刷新）。`
+              : `已保存 ${result.changed.length} 项，已立即生效。`,
+          })
       setNotice(message)
       window.setTimeout(() => setNotice(current => (current === message ? null : current)), 6_000)
       return true

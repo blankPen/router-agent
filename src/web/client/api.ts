@@ -47,6 +47,8 @@ export interface ConfigSaveResult extends ConfigBundle {
   changed: string[]
   restartRequired: boolean
   policyChanged: boolean
+  /** 允许名单是否已即时生效；`false` 表示保存后重解析失败，新名单还没生效。 */
+  identityEffective?: boolean
 }
 
 /** 本机 LLM Provider 候选（服务端已剥掉明文密钥）。 */
