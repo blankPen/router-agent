@@ -42,6 +42,7 @@ import { RouterService, type Logger } from '../service.js'
 import { EffectsProcessor } from '../core/effects.js'
 import { createApiServer, emptyIdentityStatus, type IdentityPort } from '../router/api.js'
 import { ProjectSetup } from '../router/project-setup.js'
+import { createLogAssistant } from '../router/log-assistant.js'
 
 // 版本号以 package.json 为唯一来源（见 src/update/index.ts），`ra -v` 与更新检查共用同一个值。
 export const VERSION: string = PACKAGE_VERSION
@@ -1442,6 +1443,12 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     : null
 
   const webRoot = fileURLToPath(new URL('../web', import.meta.url))
+  // 日志页的智能排查助手：复用研判模型，没配模型时自动降级为规则式排查。
+  const logAssistant = createLogAssistant({
+    logPath: join(home, 'logs', 'router-agent.log'),
+    model,
+    logger,
+  })
   // onRestart 需要在 api 创建时注入，真正的重启函数在 service/consumer 就绪后再赋值。
   const api = await createApiServer({
     engine,
@@ -1451,6 +1458,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     update: updateService,
     feishuBot: feishuChannel.admin,
     identity: identityPort,
+    logAssistant,
     projectSetup: new ProjectSetup({ home, git: gitRunner, orca: orcaRunner }),
     // Web-only 模式没有 RouterService，工作区清理端点按「不支持」返回。
     ...(service

@@ -121,6 +121,9 @@ Router 不做对话，只在必要时说话：
 | `config:patch-rejected` / `config:write-failed` | HTTP API | `errors` / `detail` | 面板保存的配置校验失败或落盘失败 |
 | `api:config` | HTTP API | `changed` `policyChanged` `restartRequired` `identityEffective` | 配置保存成功、是否需要重启、允许名单是否已即时生效 |
 | `api:request-failed` | HTTP API | `method` `path` `detail` | 请求级未预期异常（客户端会收到 500） |
+| `logs:assistant-answered` | Log Assistant | `question` `evidence` `source` | 日志页排查助手给出结论；`source` 为 `llm`（模型总结）或 `rules`（规则降级） |
+| `logs:assistant-model-failed` | Log Assistant | `question` `detail` | 模型总结失败，已退回规则式排查，结论里会写明降级原因 |
+| `api:log-assistant-failed` | HTTP API | `question` `detail` | 排查请求本身失败（客户端会收到 500） |
 | `ticket:resume-failed` | HTTP API | `ticketId` `detail` | 工单详情里的恢复命令生成失败，详情页仍可打开 |
 | `effect:done` / `effect:failed` | Effects | `kind` `key` / `error` | 派工、停止、清理等内部动作的执行结果 |
 | `worker:stop-queued` | Service | `ticketId` `source` | 自动关单（`idle` / `pr:merged` / `pr:closed`）后排队停 worker，workspace 保留给定时任务回收；同 key 已存在时不重复记录 |
@@ -170,6 +173,15 @@ grep '"message":"trigger:' ~/.router-agent/logs/router-agent.log
 ```
 
 面板「日志」页支持按 INFO / WARN / ERROR 过滤与关键字搜索。
+
+### 智能问题排查助手
+
+面板「日志」页顶部有一块**智能问题排查助手**：描述遇到的问题（也可以直接点常见问题快捷入口），助手会结合当前日志页的级别 / 关键字筛选范围给出结论、可能原因、建议的下一步，以及作为依据的证据日志。
+
+- 有配置模型时由模型总结，结论里会标注「模型总结」；没配模型或模型调用失败时自动退回**规则式排查**（内置「事件名 → 症状」知识库），结论标注「规则排查」，降级原因写在结论下方。
+- 助手与日志页共用同一套筛选：用户看到的日志范围就是排查范围，结论里引用的事件一定能在证据列表里看到。
+- 证据按分诊顺序排列：错误 → 警告 → 普通信息，同级里越新越靠前。
+- 助手只读日志，不改配置、不动工单；所有动作仍要走面板或 CLI。
 
 > **同一机器人只能有一个事件总线在跑。** 如果 `ra logs` 出现 `another event bus is already connected`，先停掉其它占用该应用的消费者；建议给 router-agent 使用独立的自建应用，避免与其它 agent 抢同一个机器人。
 

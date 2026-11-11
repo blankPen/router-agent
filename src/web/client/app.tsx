@@ -39,6 +39,7 @@ import {
 } from './identity-status.js'
 import { RuntimeCards, type RuntimeNotice } from './runtime-cards.js'
 import { FeishuBotPanel } from './feishu-panel.js'
+import { LogAssistantPanel } from './log-assistant.js'
 import { SpecsEditor } from './specs-editor.js'
 import {
   mergeRuntimeChoices,
@@ -2982,6 +2983,8 @@ function LogsView(): JSX.Element {
           </>
         }
       />
+
+      <LogAssistantPanel level={level} keyword={keyword} />
 
       <section className="log-console" aria-busy={loading || undefined}>
         <div className="log-toolbar">

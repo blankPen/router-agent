@@ -19,6 +19,7 @@ import type { WorkerStateFile } from '../worker/report-poller.js'
 import type { ResumeHint } from '../worker/port.js'
 import type { WorkspaceAdminPort } from '../worker/workspaces/overview.js'
 import { readLogs } from './log-tail.js'
+import type { LogAssistantQuestion, LogDiagnosis, LogSuggestion } from './log-assistant.js'
 import { getSpec, listSpecs, resetSpec, saveSpec, SpecError } from '../specs/index.js'
 import { PACKAGE_VERSION, type UpdateSnapshot } from '../update/index.js'
 import {
@@ -69,6 +70,20 @@ export function emptyIdentityStatus(): IdentityStatusView {
   }
 }
 
+/**
+ * 日志页排查助手的端口。
+ *
+ * 缺省时面板不显示助手入口（端点返回 404），避免旧版本服务端让面板报错。
+ */
+export interface LogAssistantPort {
+  /** 模型是否配齐；面板据此提示「去配置模型」。 */
+  llmConfigured(): boolean
+  /** 常见问题快捷入口。 */
+  suggestions(): LogSuggestion[]
+  /** 基于最近日志给出排查结论。 */
+  diagnose(question: LogAssistantQuestion): Promise<LogDiagnosis>
+}
+
 export interface ApiServerOptions {
   engine: Engine
   store: Store
@@ -104,6 +119,8 @@ export interface ApiServerOptions {
   localProviders?: { discover(): Promise<LocalProviderScan> }
   /** 允许名单的解析能力；缺省时面板只拿到空状态，名单按原始条目生效。 */
   identity?: IdentityPort
+  /** 日志页的智能排查助手；缺省时相关端点返回 404。 */
+  logAssistant?: LogAssistantPort
   /** 请求级异常与配置写入失败的日志出口。 */
   logger?: Logger
 }
@@ -573,6 +590,38 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         ...(cursor !== undefined ? { cursor } : {}),
         limit: Number.isFinite(limit) ? limit : undefined,
       }))
+    }
+
+    // 日志页的智能排查助手：GET 看状态与常见问题，POST 拿排查结论。
+    if (path === '/api/logs/assistant') {
+      if (!opts.logAssistant) return respond(res, 404, { error: 'log-assistant-not-available' })
+      if (req.method === 'GET') {
+        return respond(res, 200, {
+          llmConfigured: opts.logAssistant.llmConfigured(),
+          suggestions: opts.logAssistant.suggestions(),
+        })
+      }
+      if (req.method === 'POST') {
+        const body = await readJson(req)
+        const question = typeof body.question === 'string' ? body.question.trim() : ''
+        const level = typeof body.level === 'string' ? body.level : undefined
+        const keyword = typeof body.keyword === 'string' ? body.keyword : undefined
+        try {
+          const diagnosis = await opts.logAssistant.diagnose({
+            question,
+            ...(level ? { level } : {}),
+            ...(keyword ? { keyword } : {}),
+          })
+          return respond(res, 200, { diagnosis })
+        } catch (error) {
+          logger.error('api:log-assistant-failed', {
+            detail: errorMessage(error),
+            question: preview(question, 120),
+          })
+          return respond(res, 500, { error: 'log-assistant-failed', message: errorMessage(error) })
+        }
+      }
+      return respond(res, 405, { error: 'method-not-allowed' })
     }
 
     // 规范 markdown：列表 / 读取 / 保存 / 恢复默认。内容落在 `<home>/specs/`，不再配置外部路径。
