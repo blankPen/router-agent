@@ -34,6 +34,8 @@ export interface RuntimeExtensionInfo {
 
 export interface RuntimeChoice {
   id: string
+  /** 产品名；Web 面板据此大写展示，缺省时退回 label。 */
+  name?: string
   label: string
   hint: string
   status: RuntimeStatus
@@ -47,6 +49,8 @@ export interface RuntimeChoice {
   loginHint?: string
   loadSession?: boolean
   verifyRequired?: boolean
+  /** 已有原生运行时替代品：Web 面板不再作为可选项展示。 */
+  deprecated?: boolean
   requires?: RuntimeRequirement[]
   cli?: RuntimeCliInfo
   extension?: RuntimeExtensionInfo
@@ -216,6 +220,7 @@ async function detectOne(agent: AcpAgentMeta, opts: DetectOptions): Promise<Runt
   const runner = opts.runner ?? realRunner
   const base: RuntimeChoice = {
     id: agent.runtimeId,
+    name: agent.name,
     label: agent.label,
     hint: agent.hint,
     status: 'not-installed',
@@ -225,6 +230,7 @@ async function detectOne(agent: AcpAgentMeta, opts: DetectOptions): Promise<Runt
     ...(agent.login ? { loginHint: agent.login.hint } : {}),
     ...(agent.loadSession !== undefined ? { loadSession: agent.loadSession } : {}),
     ...(agent.verifyRequired ? { verifyRequired: true } : {}),
+    ...(agent.deprecated ? { deprecated: true } : {}),
   }
   const resolved = resolveAgentCommand(agent, { home: opts.home, env: opts.env, config: opts.config })
 

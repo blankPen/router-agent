@@ -6,7 +6,7 @@
  */
 import { WORKER_RUNTIMES } from '../../worker/runtimes/catalog.js'
 import { ACP_AGENTS } from '../../worker/runtimes/acp/agents.js'
-import { runtimeStatusLabel, type RuntimeChoiceView } from './runtime-model.js'
+import { isDeprecatedRuntime, runtimeOptionLabel, runtimeStatusLabel, type RuntimeChoiceView } from './runtime-model.js'
 
 export type { RuntimeChoiceView } from './runtime-model.js'
 
@@ -271,37 +271,43 @@ export const SECTIONS: SectionDef[] = [
 export const FIELD_PATHS: string[] = SECTIONS.flatMap(section => section.fields.map(field => field.path))
 
 /** 探测结果 → runtime.default 的下拉选项；无探测结果时回退静态清单。 */
-export function runtimeOptions(choices?: RuntimeChoiceView[]): FieldOption[] {
+export function runtimeOptions(choices?: RuntimeChoiceView[], selectedId?: string): FieldOption[] {
   // 内置运行时永远保留；探测结果按 id 覆盖，避免旧缓存里缺 orca / claude-code。
   const merged = new Map<string, RuntimeChoiceView>()
   for (const runtime of WORKER_RUNTIMES) {
-    merged.set(runtime.id, { id: runtime.id, label: runtime.label, hint: runtime.hint, status: 'pending' })
+    merged.set(runtime.id, { id: runtime.id, name: runtime.name, label: runtime.label, hint: runtime.hint, status: 'pending' })
   }
-  for (const choice of choices ?? []) merged.set(choice.id, choice)
+  for (const choice of choices ?? []) merged.set(choice.id, { ...merged.get(choice.id), ...choice })
   // 探测结果还没回来时，把目录里的 ACP 运行时以「待检测」占位，避免已配置的
   // acp-* 默认值被前端误判成非法值、卡住保存。
   for (const agent of ACP_AGENTS) {
     if (!merged.has(agent.runtimeId)) {
       merged.set(agent.runtimeId, {
         id: agent.runtimeId,
+        name: agent.name,
         label: agent.label,
         hint: agent.hint,
         status: 'pending',
         installable: Boolean(agent.package),
+        ...(agent.deprecated ? { deprecated: true } : {}),
       })
     }
   }
   const source = [...merged.values()]
+    // 已有原生运行时替代品的（Claude Code / Codex 的 ACP 版本）不再列为可选项；
+    // 当前正选中的要留着，否则老配置在下拉里找不到自己。
+    .filter(choice => !isDeprecatedRuntime(choice) || choice.id === selectedId)
   return source.map(choice => {
     const available = choice.status === 'ready' || choice.status === 'unverified' || choice.status === 'pending'
     const statusLabel = runtimeStatusLabel(choice.status)
+    const name = runtimeOptionLabel(choice)
     return {
       value: choice.id,
       label: choice.status === 'pending'
-        ? `${choice.label} · 待检测`
+        ? `${name} · 待检测`
         : available
-          ? `${choice.label}${choice.version ? ` · ${choice.version}` : ''}`
-          : `${choice.label}（${statusLabel}）`,
+          ? `${name}${choice.version ? ` · ${choice.version}` : ''}`
+          : `${name}（${statusLabel}）`,
       hint: choice.reason ?? choice.hint,
       disabled: !available,
       ...(choice.reason ? { reason: choice.reason } : {}),
@@ -310,8 +316,8 @@ export function runtimeOptions(choices?: RuntimeChoiceView[]): FieldOption[] {
 }
 
 /** 用动态 choices 替换 runtime.default 的 options；其余字段原样保留。 */
-export function sectionsFor(choices?: RuntimeChoiceView[]): SectionDef[] {
-  const options = runtimeOptions(choices)
+export function sectionsFor(choices?: RuntimeChoiceView[], selectedId?: string): SectionDef[] {
+  const options = runtimeOptions(choices, selectedId)
   return SECTIONS.map(section => ({
     ...section,
     fields: section.fields.map(field => field.path === 'runtime.default' ? { ...field, options } : field),

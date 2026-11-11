@@ -10,6 +10,7 @@ import { Icon } from './icons.js'
 import {
   isAcpAgentRuntime,
   isBuiltinRuntime,
+  isDeprecatedRuntime,
   isRuntimeSelectable,
   mergeRuntimeChoices,
   runtimeDisplayName,
@@ -152,15 +153,16 @@ export function RuntimeCards({
       }
       const status = result.choice?.status ?? (result.ok ? 'ready' : 'incompatible')
       const verb = isAcpAgentRuntime(choice.id) ? '握手' : '检测'
+      const name = runtimeDisplayName(choice)
       if (status === 'needs-auth') {
-        onNotice({ kind: 'warn', text: `${choice.label} 握手通过，但仍需登录：${result.choice?.reason ?? result.detail}` })
+        onNotice({ kind: 'warn', text: `${name} 握手通过，但仍需登录：${result.choice?.reason ?? result.detail}` })
       } else if (result.ok) {
-        onNotice({ kind: 'ok', text: `${choice.label} ${verb}通过：${result.detail}` })
+        onNotice({ kind: 'ok', text: `${name} ${verb}通过：${result.detail}` })
       } else {
-        onNotice({ kind: 'error', text: `${choice.label} ${verb}失败：${result.detail}` })
+        onNotice({ kind: 'error', text: `${name} ${verb}失败：${result.detail}` })
       }
     } catch (error) {
-      if (mounted.current) onNotice({ kind: 'error', text: `${choice.label} 检测失败：${errorText(error)}` })
+      if (mounted.current) onNotice({ kind: 'error', text: `${runtimeDisplayName(choice)} 检测失败：${errorText(error)}` })
     } finally {
       if (mounted.current) setBusy(current => withoutKey(current, choice.id))
     }
@@ -177,7 +179,7 @@ export function RuntimeCards({
         if (job.status === 'running') continue
         setBusy(current => withoutKey(current, choice.id))
         if (job.status === 'ok') {
-          onNotice({ kind: 'ok', text: `${choice.label} 安装完成${job.version ? `（${job.version}）` : ''}，重启服务后用于派工` })
+          onNotice({ kind: 'ok', text: `${runtimeDisplayName(choice)} 安装完成${job.version ? `（${job.version}）` : ''}，重启服务后用于派工` })
           onPendingRestart?.()
           const snapshot = await getJson<{ choices?: RuntimeChoiceView[] }>('/api/runtimes')
           if (snapshot.choices && mounted.current) onChoices(snapshot.choices)
@@ -203,7 +205,7 @@ export function RuntimeCards({
   }
 
   const install = async (choice: RuntimeChoiceView): Promise<void> => {
-    const target = choice.extension?.packageName ?? choice.packageName ?? choice.label
+    const target = choice.extension?.packageName ?? choice.packageName ?? runtimeDisplayName(choice)
     if (!confirm(`安装 ACP 扩展 ${target} 到 ~/.router-agent/runtimes？需要联网下载 npm 包。`)) return
     setBusy(current => ({ ...current, [choice.id]: 'install' }))
     setJobs(current => withoutKey(current, choice.id))
@@ -218,6 +220,9 @@ export function RuntimeCards({
 
   const groups = useMemo(() => {
     const visible = cards.filter(choice => {
+      // 已有原生运行时替代品的（Claude Code / Codex 的 ACP 版本）不再展示，
+      // 但当前正选中的要留着，否则用户看不到自己在用的运行时。
+      if (isDeprecatedRuntime(choice) && choice.id !== selectedId) return false
       // 未配置的自定义 acp 只有当前选中时才展示，避免普通用户看到一张空卡。
       if (choice.id === ACP_RUNTIME_ID && choice.status === 'not-installed' && choice.id !== selectedId) return false
       return true

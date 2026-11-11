@@ -24,6 +24,8 @@ Worker 不在 Router 进程里跑。每张工单开工时，Router 按 `runtime.
 - **检测 / 试启动** 做一次真实 ACP 握手（`initialize` + `session/new`），避免只看版本号；
 - 点卡片即切换 `runtime.default`，只影响新工单；已开工的工单保留原运行时。
 
+卡片标题用大写的运行时名（`ORCA` / `CLAUDE CODE` / `CODEX APP`，ACP Agent 为 `OPENCODE` / `GEMINI CLI` 等），标题下方的小字是机器可读的 runtime id。已有原生运行时替代品的 ACP Agent（`acp-claude` / `acp-codex`）不在卡片里出现，但当前正选中的会保留，老配置不会「找不到自己」。
+
 ![Web 初始化页的运行时卡片：内置运行时与 ACP Agent 的可用性检测](assets/readme/setup-runtime-dark.png)
 
 ## 用 CLI 选
@@ -173,13 +175,15 @@ runtime:
 
 | runtime id | Agent | 启动方式 | 可在线安装 | 断线恢复 | 说明 |
 |-|-|-|-|-|-|
-| `acp-claude` | Claude Code | `claude-agent-acp` | ✅ | ✅ `session/load` | 需先登录 Claude Code |
-| `acp-codex` | Codex | `codex-acp` | ✅ | ❌ | 需本机 `codex` CLI；先 `codex-acp login`；默认带 `--message-streaming` |
+| `acp-claude` | Claude Code | `claude-agent-acp` | ✅ | ✅ `session/load` | 需先登录 Claude Code；已有 `claude-code` 运行时，面板不再列为可选项 |
+| `acp-codex` | Codex | `codex-acp` | ✅ | ❌ | 需本机 `codex` CLI；先 `codex-acp login`；默认带 `--message-streaming`；已有 `codex-app` 运行时，面板不再列为可选项 |
 | `acp-opencode` | OpenCode | `opencode acp` | ❌ | ✅ | 本机安装后自动识别，建议先 `ra runtime check` |
 | `acp-gemini` | Gemini CLI | `gemini --acp` | ❌ | — | 实验性 ACP 模式 |
 | `acp-copilot` | GitHub Copilot CLI | `copilot --acp --stdio` | ❌ | — | |
 | `acp-cursor` | Cursor CLI | `cursor-agent acp` | ❌ | — | 旧版本可能没有 `acp` 子命令 |
 | `acp-goose` | Goose | `goose acp` | ❌ | — | |
+
+> `acp-claude` / `acp-codex` 只在「面板不再作为可选项展示」这一层被隐藏：运行时 id、配置项与已安装的扩展都保留，老配置（`runtime.default: acp-claude`、`runtime.projects.acp-*`）继续可用，`ra runtime install / check / login` 也不受影响。默认运行时改成 `claude-code` / `codex-app` 即可用原生运行时替代。
 
 `AcpRuntime` 负责：spawn Agent 子进程 → `initialize` → `session/new` → `session/prompt`；从 `session/update` 读取助手文本与工具调用；把 Agent 的 `session/request_permission` 按 `worker.tools` 策略自动放行或拒绝；进程退出后，若 Agent 声明 `loadSession`，追问时会用 `session/load` 恢复会话。
 

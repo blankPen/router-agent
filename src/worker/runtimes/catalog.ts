@@ -12,6 +12,8 @@ export const CODEX_APP_RUNTIME_ID = 'codex-app'
 
 export interface WorkerRuntimeMeta {
   id: string
+  /** 产品名（自然大小写）；Web 面板统一大写展示，CLI 与文档保持原样。 */
+  name: string
   label: string
   hint: string
   /** 不能由 ra 自动安装时的界面引导文案。 */
@@ -23,6 +25,7 @@ export interface WorkerRuntimeMeta {
 export const WORKER_RUNTIMES: readonly WorkerRuntimeMeta[] = [
   {
     id: ORCA_RUNTIME_ID,
+    name: 'Orca',
     label: 'orca · Orca worktree + 终端',
     hint: '通过 Orca 创建 worktree 并启动 Claude Code 终端，交互与状态读取走 Orca',
     installHint: '从 Orca 官方发布页下载安装，并确保 orca CLI 在 PATH 中',
@@ -30,6 +33,7 @@ export const WORKER_RUNTIMES: readonly WorkerRuntimeMeta[] = [
   },
   {
     id: CLAUDE_CODE_RUNTIME_ID,
+    name: 'Claude Code',
     label: 'claude-code · git worktree + claude --bg',
     hint: '直接调用 Claude Code CLI 的后台会话；项目 repo 需要填本地仓库绝对路径',
     installHint: '参考 Claude Code 官方安装说明',
@@ -37,6 +41,7 @@ export const WORKER_RUNTIMES: readonly WorkerRuntimeMeta[] = [
   },
   {
     id: CODEX_APP_RUNTIME_ID,
+    name: 'Codex App',
     label: 'codex-app · Codex App Server',
     hint: '直连 Codex App Server；优先使用 Codex App 内置 CLI，桌面端可见同一 thread',
     installHint: '安装 Codex App（macOS/Windows）或 Codex CLI；ra 会优先使用 Codex App 内置的版本',
@@ -44,6 +49,7 @@ export const WORKER_RUNTIMES: readonly WorkerRuntimeMeta[] = [
   },
   {
     id: ACP_RUNTIME_ID,
+    name: 'ACP',
     label: 'acp · 任意 ACP Agent',
     hint: '通过 ACP 协议接入其它 Agent；启用前需要在 runtime.options.acp 配置 command',
     installHint: '在 config.yaml 的 runtime.options.acp 下配置 command 与 args，然后重启服务',
