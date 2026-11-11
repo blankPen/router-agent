@@ -4,7 +4,7 @@ import { homedir } from 'node:os'
 import { extname, join, normalize, resolve } from 'node:path'
 import type { Store } from '../store/db.js'
 import type { Engine } from '../core/engine.js'
-import { applyConfigPatch, policyOf, publicConfig, publicDefaults, requiresRestart, writeConfig, type AppConfig } from '../config.js'
+import { applyConfigPatch, policyOf, publicConfig, publicDefaults, requiresRestart, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
 import { InstallStartError, type AcpRuntimeAdmin } from '../worker/runtimes/acp/admin.js'
 import { isWorkerRuntimeId, normalizeRuntimeId } from '../worker/runtimes/catalog.js'
 import { ProjectSetupError, type ProjectSetupPort } from './project-setup.js'
@@ -13,6 +13,7 @@ import type { AcceptMode } from '../core/policy.js'
 import type { Ticket } from '../core/model.js'
 import { noopSink, preview, type EventSink } from '../core/events.js'
 import { noopLogger, errorMessage, type Logger } from '../infra/logger.js'
+import type { IdentityStatusView } from '../sources/feishu-identity.js'
 import type { WorkerStateFile } from '../worker/report-poller.js'
 import type { ResumeHint } from '../worker/port.js'
 import type { WorkspaceAdminPort } from '../worker/workspaces/overview.js'
@@ -30,6 +31,36 @@ export interface UpdatePort {
   snapshot(): UpdateSnapshot
   check(force?: boolean): Promise<UpdateSnapshot>
   upgrade(options?: { force?: boolean }): Promise<UpdateSnapshot>
+}
+
+/**
+ * 身份解析端口：面板保存允许名单后由它重新解析并刷新运行时快照。
+ *
+ * 允许名单支持邮箱后，名单不再是「写进配置就能用」：邮箱必须先解析成 open_id。
+ * 面板保存后如果不重解析，用户会看到「保存成功了但机器人不理我」。
+ */
+export interface IdentityPort {
+  /** 重新解析名单并刷新内存快照。 */
+  refresh(): Promise<IdentityStatusView>
+  /** 最近一次解析结果快照。 */
+  snapshot(): IdentityStatusView
+  /**
+   * 解析出的 open_id 集合，供重建 Policy 用；缺省时沿用配置里的原始条目。
+   *
+   * `allowedOpenIds` 省略表示「这次没解析出来」，不等于「确认名单为空」——
+   * 传空数组等于断言谁都不许，通讯录暂时查不通时不能这么干。
+   */
+  policyIds?(): PolicyResolution
+}
+
+/** 没注入身份端口时的空状态：面板拿到结构完整的空快照，而不是 undefined。 */
+export function emptyIdentityStatus(): IdentityStatusView {
+  return {
+    entries: [],
+    bot: { botOpenIds: [], botNames: [], resolved: false, detail: '未启用' },
+    invalidCount: 0,
+    pendingCount: 0,
+  }
 }
 
 export interface ApiServerOptions {
@@ -65,6 +96,8 @@ export interface ApiServerOptions {
   workspaceAdmin?: WorkspaceAdminPort
   /** 本机 LLM Provider 发现；缺省扫描当前用户主目录下的 Claude Code / CCSwitch / Pi 配置。 */
   localProviders?: { discover(): Promise<LocalProviderScan> }
+  /** 允许名单的解析能力；缺省时面板只拿到空状态，名单按原始条目生效。 */
+  identity?: IdentityPort
   /** 请求级异常与配置写入失败的日志出口。 */
   logger?: Logger
 }
@@ -289,7 +322,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
 
     if (path === '/api/config') {
       if (req.method === 'GET') {
-        return respond(res, 200, configPayload(config, opts.runtimeAdmin))
+        return respond(res, 200, configPayload(config, opts.runtimeAdmin, opts.identity))
       }
       if (req.method === 'PUT' || req.method === 'POST') {
         const body = await readJson(req)
@@ -317,19 +350,38 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         // 试写成功后，把同一批补丁作用到活配置对象上（服务里其他模块持有它的引用）。
         applyConfigPatch(config, patch)
 
+        // 允许名单改成邮箱后必须立刻重解析：否则新名单要等重启才生效。
+        // 解析失败不阻断保存——配置已经落盘，名单先按上一次的结果继续用。
+        const identityChanged = touchesIdentity(result.changed)
+        // 名单是否已即时生效：本次没改名单、重解析成功、或没有解析能力
+        // （原始条目直接进策略）都算生效；只有重解析失败才算没生效。
+        let identityEffective = true
+        if (identityChanged && opts.identity) {
+          try {
+            await opts.identity.refresh()
+          } catch (error) {
+            // 重解析失败：策略里仍是上一次的名单，新名单没生效，但保存照常成功。
+            logger.warn('identity:refresh-failed', { message: errorMessage(error) })
+            identityEffective = false
+          }
+        }
+
         const beforePolicy = opts.engine.policy()
-        const nextPolicy = opts.engine.updatePolicy(policyOf(config))
+        // 重建策略必须带上解析结果：否则名单会退回原始条目，邮箱永远匹配不上 open_id。
+        const nextPolicy = opts.engine.updatePolicy(policyOf(config, identityResolution(opts.identity)))
         const policyChanged = nextPolicy.version !== beforePolicy.version
         if (policyChanged) await opts.onPolicyChange?.(config)
         await opts.onConfigChange?.(config, result.changed)
         const restartRequired = requiresRestart(result.changed)
-        onEvent({ event: 'api:config', changed: result.changed, policyChanged, restartRequired })
+        onEvent({ event: 'api:config', changed: result.changed, policyChanged, restartRequired, identityEffective })
         return respond(res, 200, {
-          ...configPayload(config, opts.runtimeAdmin),
+          ...configPayload(config, opts.runtimeAdmin, opts.identity),
           ok: true,
           changed: result.changed,
           policyChanged,
           restartRequired,
+          // 名单已经即时生效（不用等重启）；restartRequired 说的是路径粒度的其它配置项。
+          identityEffective,
         })
       }
       return respond(res, 405, { error: 'method-not-allowed' })
@@ -399,11 +451,13 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       })
       onEvent({ event: 'api:llm-import', source: candidate.source, model: candidate.model, changed: result.changed })
       return respond(res, 200, {
-        ...configPayload(config, opts.runtimeAdmin),
+        ...configPayload(config, opts.runtimeAdmin, opts.identity),
         ok: true,
         changed: result.changed,
         restartRequired: requiresRestart(result.changed),
         policyChanged: false,
+        // 这次没动允许名单，名单仍然是即时生效的。
+        identityEffective: true,
         imported: {
           id: candidate.id,
           source: candidate.source,
@@ -452,7 +506,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       return respond(res, 200, {
         ok: true,
         message: result.message,
-        ...configPayload(config, opts.runtimeAdmin),
+        ...configPayload(config, opts.runtimeAdmin, opts.identity),
       })
     }
 
@@ -612,7 +666,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         if (body.admission && typeof body.admission === 'object') {
           config.policy.admission = { ...config.policy.admission, ...(body.admission as object) }
         }
-        const policy = opts.engine.updatePolicy(policyOf(config))
+        const policy = opts.engine.updatePolicy(policyOf(config, identityResolution(opts.identity)))
         // 面板保存要落盘，否则重启后策略又回到旧值；home 为空（单测）时跳过写文件。
         if (config.home) writeConfig(config.home, config)
         onEvent({ event: 'api:policy', acceptMode: policy.acceptMode, maxWorkers: policy.maxWorkers, version: policy.version })
@@ -741,7 +795,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** 配置面板的读/写都用同一份口径：安全快照 + 默认值 + 配置文件路径。 */
-function configPayload(config: AppConfig, runtimeAdmin?: AcpRuntimeAdmin): Record<string, unknown> {
+function configPayload(config: AppConfig, runtimeAdmin?: AcpRuntimeAdmin, identity?: IdentityPort): Record<string, unknown> {
   const snapshot = runtimeAdmin?.snapshot()
   return {
     config: publicConfig(config),
@@ -749,7 +803,32 @@ function configPayload(config: AppConfig, runtimeAdmin?: AcpRuntimeAdmin): Recor
     configPath: config.home ? join(config.home, 'config.yaml') : '',
     runtimeChoices: snapshot?.choices ?? [],
     detecting: runtimeAdmin?.isDetecting() ?? false,
+    identity: identity?.snapshot() ?? emptyIdentityStatus(),
   }
+}
+
+/**
+ * 端口给出的解析结果 → 策略层要注入的形态。
+ *
+ * `allowedOpenIds` 为空时不注入：空集合等于断言「谁都不许」，
+ * 而实际可能只是通讯录暂时查不通（原因见 `feishu:allowlist-empty` 事件）。
+ */
+function identityResolution(identity?: IdentityPort): PolicyResolution | undefined {
+  if (!identity?.policyIds) return undefined
+  const ids = identity.policyIds()
+  return {
+    ...(ids.allowedOpenIds && ids.allowedOpenIds.length > 0 ? { allowedOpenIds: ids.allowedOpenIds } : {}),
+    ...(ids.allowedByChatOpenIds ? { allowedByChatOpenIds: ids.allowedByChatOpenIds } : {}),
+    ...(ids.names ? { names: ids.names } : {}),
+  }
+}
+
+/** 改动后必须重新解析名单的配置路径（允许名单、群名单、机器人身份、应用 id）。 */
+const IDENTITY_PATHS = ['feishu.allowed', 'feishu.chats', 'feishu.appId', 'feishu.botOpenIds', 'feishu.botNames']
+
+/** 本次保存是否涉及允许名单：涉及才需要重新解析并重建策略。 */
+function touchesIdentity(changed: string[]): boolean {
+  return changed.some(path => IDENTITY_PATHS.includes(path))
 }
 
 function respond(res: ServerResponse, status: number, body: unknown, after?: () => void): void {

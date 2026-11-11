@@ -660,7 +660,7 @@ function describeError(doc: Record<string, any>): string {
 }
 
 /** 错误详情截断，并顺手把里面出现的邮箱掩码掉。 */
-function detailText(text: string): string {
+export function detailText(text: string): string {
   const masked = text.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, match => maskEmail(match))
   return masked.length > DETAIL_MAX ? `${masked.slice(0, DETAIL_MAX)}…` : masked
 }

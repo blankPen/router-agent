@@ -6,11 +6,12 @@ import { join } from 'node:path'
 import type { AddressInfo } from 'node:net'
 import { Store } from '../../src/store/db.js'
 import { Engine } from '../../src/core/engine.js'
-import { createApiServer, type ApiServer } from '../../src/router/api.js'
+import { createApiServer, type ApiServer, type IdentityPort } from '../../src/router/api.js'
 import { InstallStartError } from '../../src/worker/runtimes/acp/admin.js'
 import type { ResumeHint } from '../../src/worker/port.js'
-import { defaultConfig, loadConfig, policyOf, projectsForRuntime, type AppConfig, chatEntry } from '../../src/config.js'
+import { defaultConfig, loadConfig, policyOf, projectsForRuntime, type AppConfig, chatEntry, type PolicyResolution } from '../../src/config.js'
 import { FeishuBotAdmin } from '../../src/sources/feishu-bot-admin.js'
+import type { IdentityStatusView } from '../../src/sources/feishu-identity.js'
 
 function call(server: ApiServer, method: string, path: string, body?: unknown): Promise<{ status: number; json: any }> {
   return new Promise((resolve, reject) => {
@@ -646,6 +647,191 @@ describe('HTTP 管理 API', () => {
     const res = await call(server, 'GET', '/api/nope')
     expect(res.status).toBe(404)
     expect(res.json.error).toBe('not-found')
+  })
+})
+
+describe('允许名单保存后立即生效', () => {
+  let store: Store
+  let engine: Engine
+  let config: AppConfig
+  let logs: { level: string; message: string; extra?: Record<string, unknown> }[]
+  let refreshCalls: number
+  let status: IdentityStatusView
+  let ids: PolicyResolution
+
+  /** 假身份端口：记录刷新次数，返回预置的解析状态与解析结果。 */
+  function identityPort(overrides: Partial<IdentityPort> = {}): IdentityPort {
+    return {
+      refresh: async () => { refreshCalls += 1; return status },
+      snapshot: () => status,
+      policyIds: () => ids,
+      ...overrides,
+    }
+  }
+
+  beforeEach(() => {    store = new Store(':memory:')
+    config = { ...defaultConfig(), feishu: { ...defaultConfig().feishu, chats: [chatEntry('oc_dev')] } }
+    engine = new Engine({ store, policy: policyOf(config) })
+    logs = []
+    refreshCalls = 0
+    status = {
+      entries: [],
+      bot: { botOpenIds: [], botNames: [], resolved: false, detail: '未启用' },
+      invalidCount: 0,
+      pendingCount: 0,
+    }
+    ids = {}
+  })
+
+  afterEach(() => store.close())
+
+  it('GET /api/config 返回允许名单的解析状态', async () => {
+    status = {
+      entries: [
+        { entry: 'alice@example.com', kind: 'email', openId: 'ou_alice', name: 'Alice', status: 'resolved', detail: '' },
+        { entry: 'ou_bob', kind: 'open_id', openId: 'ou_bob', name: '', status: 'pending', detail: '通讯录查询失败' },
+      ],
+      bot: { botOpenIds: ['ou_bot'], botNames: ['机器人'], resolved: true, detail: '已识别' },
+      invalidCount: 0,
+      pendingCount: 1,
+    }
+    const server = await createApiServer({ engine, store, config, identity: identityPort() })
+    try {
+      const res = await call(server, 'GET', '/api/config')
+      expect(res.status).toBe(200)
+      expect(res.json.identity.entries).toHaveLength(2)
+      expect(res.json.identity.entries[0]).toMatchObject({
+        entry: 'alice@example.com',
+        kind: 'email',
+        status: 'resolved',
+        name: 'Alice',
+      })
+      expect(res.json.identity.entries[1].status).toBe('pending')
+      expect(res.json.identity.bot).toMatchObject({ resolved: true, botOpenIds: ['ou_bot'] })
+      expect(res.json.identity.pendingCount).toBe(1)
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('没注入身份端口时返回空状态，而不是 undefined', async () => {
+    const server = await createApiServer({ engine, store, config })
+    try {
+      const res = await call(server, 'GET', '/api/config')
+      expect(res.status).toBe(200)
+      expect(res.json.identity).toEqual({
+        entries: [],
+        bot: { botOpenIds: [], botNames: [], resolved: false, detail: '未启用' },
+        invalidCount: 0,
+        pendingCount: 0,
+      })
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('PUT /api/config 保存允许名单后立即重解析，新名单直接生效', async () => {
+    status = {
+      entries: [{ entry: 'alice@example.com', kind: 'email', openId: 'ou_alice', name: 'Alice', status: 'resolved', detail: '' }],
+      bot: { botOpenIds: ['ou_bot'], botNames: [], resolved: true, detail: '已识别' },
+      invalidCount: 0,
+      pendingCount: 0,
+    }
+    ids = { allowedOpenIds: ['ou_alice'], allowedByChatOpenIds: {}, names: { ou_alice: 'Alice' } }
+    const server = await createApiServer({ engine, store, config, identity: identityPort() })
+    try {
+      const res = await call(server, 'PUT', '/api/config', { patch: { 'feishu.allowed': ['alice@example.com'] } })
+      expect(res.status).toBe(200)
+      expect(refreshCalls).toBe(1)
+      expect(res.json.policyChanged).toBe(true)
+      expect(res.json.identityEffective).toBe(true)
+      // 策略里用的是解析出的 open_id，不是原始邮箱。
+      expect(engine.policy().allowedOpenIds).toEqual(['ou_alice'])
+      expect(res.json.identity.entries[0].status).toBe('resolved')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('解析失败的邮箱不阻断保存，状态里能看出失败条数', async () => {
+    status = {
+      entries: [{ entry: 'nobody@example.com', kind: 'email', openId: '', name: '', status: 'invalid', detail: '查无此人' }],
+      bot: { botOpenIds: [], botNames: [], resolved: false, detail: '未启用' },
+      invalidCount: 1,
+      pendingCount: 0,
+    }
+    ids = { allowedOpenIds: [], allowedByChatOpenIds: {} }
+    const server = await createApiServer({ engine, store, config, identity: identityPort() })
+    try {
+      const res = await call(server, 'PUT', '/api/config', { patch: { 'feishu.allowed': ['nobody@example.com'] } })
+      expect(res.status).toBe(200)
+      expect(res.json.identity.invalidCount).toBe(1)
+      expect(res.json.identityEffective).toBe(true)
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('重解析失败不阻断保存，但记录 identity:refresh-failed', async () => {
+    const server = await createApiServer({
+      engine, store, config,
+      identity: identityPort({ refresh: async () => { throw new Error('通讯录查不通') } }),
+      logger: {
+        info: () => {},
+        warn: (message, extra) => { logs.push({ level: 'warn', message, ...(extra ? { extra } : {}) }) },
+        error: (message, extra) => { logs.push({ level: 'error', message, ...(extra ? { extra } : {}) }) },
+      },
+    })
+    try {
+      const res = await call(server, 'PUT', '/api/config', { patch: { 'feishu.allowed': ['alice@example.com'] } })
+      expect(res.status).toBe(200)
+      expect(res.json.identityEffective).toBe(false)
+      const entry = logs.find(log => log.message === 'identity:refresh-failed')
+      expect(entry?.level).toBe('warn')
+      expect(entry?.extra?.message).toContain('通讯录查不通')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('没改允许名单时不触发重解析', async () => {
+    const server = await createApiServer({ engine, store, config, identity: identityPort() })
+    try {
+      const res = await call(server, 'PUT', '/api/config', { patch: { 'policy.acceptMode': 'observe' } })
+      expect(res.status).toBe(200)
+      expect(refreshCalls).toBe(0)
+      expect(res.json.identityEffective).toBe(true)
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('没有身份端口时名单按原始条目进策略，同样算即时生效', async () => {
+    const server = await createApiServer({ engine, store, config })
+    try {
+      const res = await call(server, 'PUT', '/api/config', { patch: { 'feishu.allowed': ['ou_alice'] } })
+      expect(res.status).toBe(200)
+      expect(res.json.identityEffective).toBe(true)
+      expect(engine.policy().allowed).toEqual(['ou_alice'])
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('PUT /api/policy 不丢掉解析出的名单', async () => {
+    ids = { allowedOpenIds: ['ou_alice'], allowedByChatOpenIds: { oc_dev: ['ou_alice'] }, names: { ou_alice: 'Alice' } }
+    engine.updatePolicy(policyOf(config, { allowedOpenIds: ['ou_alice'], allowedByChatOpenIds: { oc_dev: ['ou_alice'] } }))
+    const server = await createApiServer({ engine, store, config, identity: identityPort() })
+    try {
+      const res = await call(server, 'PUT', '/api/policy', { acceptMode: 'observe' })
+      expect(res.status).toBe(200)
+      expect(res.json.policy.acceptMode).toBe('observe')
+      // 策略重建时必须带上解析结果，否则名单会退回原始条目，邮箱永远匹配不上 open_id。
+      expect(engine.policy().allowedOpenIds).toEqual(['ou_alice'])
+      expect(engine.policy().allowedByChatOpenIds).toEqual({ oc_dev: ['ou_alice'] })
+    } finally {
+      await server.close()
+    }
   })
 })
 
