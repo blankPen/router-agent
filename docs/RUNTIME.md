@@ -24,7 +24,7 @@ Worker 不在 Router 进程里跑。每张工单开工时，Router 按 `runtime.
 - **检测 / 试启动** 做一次真实 ACP 握手（`initialize` + `session/new`），避免只看版本号；
 - 点卡片即切换 `runtime.default`，只影响新工单；已开工的工单保留原运行时。
 
-卡片标题用大写的运行时名（`ORCA` / `CLAUDE CODE` / `CODEX APP`，ACP Agent 为 `OPENCODE` / `GEMINI CLI` 等），标题下方的小字是机器可读的 runtime id。已有原生运行时替代品的 ACP Agent（`acp-claude` / `acp-codex`）不在卡片里出现，但当前正选中的会保留，老配置不会「找不到自己」。
+卡片标题用首字母大写的运行时名（`Orca` / `Claude Code` / `Codex App`，ACP Agent 为 `OpenCode` / `Gemini CLI` 等），标题下方的小字是机器可读的 runtime id。已有原生运行时替代品的 ACP Agent（`acp-claude` / `acp-codex`）不在卡片里出现，但当前正选中的会保留，老配置不会「找不到自己」。
 
 ![Web 初始化页的运行时卡片：内置运行时与 ACP Agent 的可用性检测](assets/readme/setup-runtime-dark.png)
 

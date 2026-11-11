@@ -50,17 +50,19 @@ describe('运行时卡片纯逻辑', () => {
     expect(runtimeSourceLabel(undefined)).toBe('')
   })
 
-  it('运行时名统一大写：内置用 name，ACP 用 label', () => {
-    expect(runtimeDisplayName({ id: 'orca', label: 'orca · Orca worktree + 终端', hint: 'h', status: 'ready' })).toBe('ORCA')
-    expect(runtimeDisplayName({ id: 'claude-code', name: 'Claude Code', label: 'claude-code · git worktree', hint: 'h', status: 'ready' })).toBe('CLAUDE CODE')
-    expect(runtimeDisplayName({ id: 'codex-app', name: 'Codex App', label: 'codex-app · Codex App Server', hint: 'h', status: 'ready' })).toBe('CODEX APP')
-    expect(runtimeDisplayName({ id: 'acp-opencode', label: 'OpenCode', hint: 'h', status: 'ready' })).toBe('OPENCODE')
-    expect(runtimeDisplayName({ id: 'acp-gemini', label: 'Gemini CLI', hint: 'h', status: 'ready' })).toBe('GEMINI CLI')
+  it('运行时名单词首字母大写：内置用 name，ACP 用 label；取不到 name 时把 id 转成可读形式', () => {
+    expect(runtimeDisplayName({ id: 'orca', label: 'orca · Orca worktree + 终端', hint: 'h', status: 'ready' })).toBe('Orca')
+    expect(runtimeDisplayName({ id: 'claude-code', name: 'Claude Code', label: 'claude-code · git worktree', hint: 'h', status: 'ready' })).toBe('Claude Code')
+    expect(runtimeDisplayName({ id: 'codex-app', name: 'Codex App', label: 'codex-app · Codex App Server', hint: 'h', status: 'ready' })).toBe('Codex App')
+    expect(runtimeDisplayName({ id: 'acp-opencode', label: 'OpenCode', hint: 'h', status: 'ready' })).toBe('OpenCode')
+    expect(runtimeDisplayName({ id: 'acp-gemini', label: 'Gemini CLI', hint: 'h', status: 'ready' })).toBe('Gemini CLI')
+    // 没有 name 时，id 里的连字符也要转成空格首字母大写。
+    expect(runtimeDisplayName({ id: 'claude-code', label: 'claude-code · x', hint: 'h', status: 'ready' })).toBe('Claude Code')
   })
 
   it('下拉文案带内置运行时的说明段', () => {
-    expect(runtimeOptionLabel({ id: 'orca', name: 'Orca', label: 'orca · Orca worktree + 终端', hint: 'h', status: 'ready' })).toBe('ORCA · Orca worktree + 终端')
-    expect(runtimeOptionLabel({ id: 'acp-opencode', label: 'OpenCode', hint: 'h', status: 'ready' })).toBe('OPENCODE')
+    expect(runtimeOptionLabel({ id: 'orca', name: 'Orca', label: 'orca · Orca worktree + 终端', hint: 'h', status: 'ready' })).toBe('Orca · Orca worktree + 终端')
+    expect(runtimeOptionLabel({ id: 'acp-opencode', label: 'OpenCode', hint: 'h', status: 'ready' })).toBe('OpenCode')
   })
 
   it('Claude Code / Codex 的 ACP 版本标记为 deprecated', () => {

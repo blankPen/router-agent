@@ -12,7 +12,7 @@ export const CODEX_APP_RUNTIME_ID = 'codex-app'
 
 export interface WorkerRuntimeMeta {
   id: string
-  /** 产品名（自然大小写）；Web 面板统一大写展示，CLI 与文档保持原样。 */
+  /** 产品名（自然大小写）；Web 面板按首字母大写展示，CLI 与文档保持原样。 */
   name: string
   label: string
   hint: string

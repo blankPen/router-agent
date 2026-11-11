@@ -82,15 +82,26 @@ function runtimeName(choice: RuntimeChoiceView): string {
 }
 
 /**
- * 卡片标题：运行时名统一大写展示。
+ * 卡片标题：运行时名按「单词首字母大写」展示。
  *
- * 例如 `orca · Orca worktree...` → `ORCA`，`Claude Code (ACP)` → `CLAUDE CODE`。
+ * 优先用目录里的 `name`（`Orca` / `Claude Code` / `Codex App`），
+ * 取不到时把 id 形式的第一段（`claude-code`）转成 `Claude Code`。
  */
 export function runtimeDisplayName(choice: RuntimeChoiceView): string {
-  return runtimeName(choice).toUpperCase()
+  return titleCase(runtimeName(choice))
 }
 
-/** 下拉选项文案：大写名称 + 内置运行时的说明段（`ORCA · Orca worktree + 终端`）。 */
+/** 把 `claude-code` / `codex app` 这类机器名转成 `Claude Code` 形式；已是正常大小写的不动。 */
+function titleCase(value: string): string {
+  return value
+    .split(/([\s-]+)/)
+    .map(part => (/^[\s-]+$/.test(part) ? ' ' : part.charAt(0).toUpperCase() + part.slice(1)))
+    .join('')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** 下拉选项文案：名称 + 内置运行时的说明段（`Orca · Orca worktree + 终端`）。 */
 export function runtimeOptionLabel(choice: RuntimeChoiceView): string {
   const name = runtimeDisplayName(choice)
   const desc = choice.label.split(' · ').slice(1).join(' · ').trim()

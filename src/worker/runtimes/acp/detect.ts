@@ -34,7 +34,7 @@ export interface RuntimeExtensionInfo {
 
 export interface RuntimeChoice {
   id: string
-  /** 产品名；Web 面板据此大写展示，缺省时退回 label。 */
+  /** 产品名；Web 面板据此首字母大写展示，缺省时退回 label。 */
   name?: string
   label: string
   hint: string

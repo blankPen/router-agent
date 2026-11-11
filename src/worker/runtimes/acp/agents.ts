@@ -21,7 +21,7 @@ export interface AcpAgentMeta {
   id: string
   /** 运行时 id，写入 runtime.default / runtime.projects / runtime.options。 */
   runtimeId: string
-  /** 产品名（自然大小写）；Web 面板统一大写展示，CLI 与文档保持原样。 */
+  /** 产品名（自然大小写）；Web 面板按首字母大写展示，CLI 与文档保持原样。 */
   name: string
   label: string
   hint: string
