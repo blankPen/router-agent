@@ -22,6 +22,7 @@ import { ChannelRegistry } from '../channels/registry.js'
 import { ChannelRouter } from '../channels/router.js'
 import { ChatDirectory } from '../sources/feishu-directory.js'
 import { createLarkRunner, larkEnv } from '../sources/lark.js'
+import { parseMessageThreadIds } from '../sources/feishu.js'
 import { createVisionTranscriber, type ImageTranscriber } from '../infra/vision.js'
 import { runInitWizard } from './init.js'
 import { formatChecks, runDoctor } from './doctor.js'
@@ -212,7 +213,7 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
     })
 
   withHome(program.command('migrate [action]')
-    .description('数据迁移：migrate sessions --dry-run | --apply | --verify（人工手动执行）')
+    .description('数据迁移：migrate sessions | threads --dry-run | --apply | --verify（人工手动执行）')
     .option('--dry-run', '只读检查，不写库（默认行为）')
     .option('--apply', '执行迁移；默认要求交互确认，非交互环境需 --yes')
     .option('--verify', '迁移后校验')
@@ -496,8 +497,9 @@ async function cmdMigrate(
   opts: { dryRun?: boolean; apply?: boolean; verify?: boolean; yes?: boolean },
   output: CliIo,
 ): Promise<number> {
+  if (action === 'threads') return cmdMigrateThreads(home, opts, output)
   if (action !== 'sessions') {
-    output.stderr('用法：ra migrate sessions [--dry-run | --apply | --verify]')
+    output.stderr('用法：ra migrate <sessions|threads> [--dry-run | --apply | --verify]')
     return 2
   }
   const store = openStore(home)
@@ -570,6 +572,102 @@ async function cmdMigrate(
     // 默认与 --dry-run 都是只读。
     printSessionMigrationState(store.sessionMigrationState(), output)
     output.stdout('未写入任何数据。确认后执行：ra migrate sessions --apply')
+    return 0
+  } finally {
+    store.close()
+  }
+}
+
+/** `+messages-mget` 单次最多查 50 条消息。 */
+const MGET_BATCH = 50
+
+/**
+ * 线程别名回填：给存量线程补上话题 ID（omt_）。
+ *
+ * 老线程用根消息 ID（om_）当线程 ID；飞书在话题面板里直接发言时事件只带话题 ID，
+ * 不回填的话这类消息仍然匹配不上已有工单。只由人手动执行，默认 dry-run 不写库。
+ */
+async function cmdMigrateThreads(
+  home: string,
+  opts: { dryRun?: boolean; apply?: boolean; verify?: boolean; yes?: boolean },
+  output: CliIo,
+): Promise<number> {
+  const store = openStore(home)
+  const logger = createLogger(home, output)
+  try {
+    const total = store.listThreads('feishu').length
+    const backlog = store.threadAliasBacklog('feishu')
+
+    if (opts.verify) {
+      output.stdout(`飞书线程总数：${total}`)
+      output.stdout(`待回填话题 ID：${backlog.length}`)
+      if (backlog.length === 0) {
+        output.stdout('校验通过：所有线程都已登记话题 ID 别名。')
+        return 0
+      }
+      logger.warn('thread:backfill-incomplete', { total, pending: backlog.length })
+      output.stderr('仍有线程缺少话题 ID 别名，请执行：ra migrate threads --apply')
+      return 1
+    }
+
+    output.stdout(`飞书线程总数：${total}`)
+    output.stdout(`待回填话题 ID：${backlog.length}`)
+    if (backlog.length === 0) {
+      output.stdout('没有需要回填的线程。')
+      return 0
+    }
+    for (const thread of backlog.slice(0, 5)) output.stdout(`  ${thread.id}（根 ${thread.rootId}）`)
+    if (backlog.length > 5) output.stdout(`  ... 另有 ${backlog.length - 5} 条`)
+
+    if (!opts.apply) {
+      output.stdout('未写入任何数据。确认后执行：ra migrate threads --apply')
+      return 0
+    }
+    if (!opts.yes) {
+      const confirmed = output.prompts
+        ? await output.prompts.confirm({ message: `确认回填 ${backlog.length} 条线程的话题 ID 别名？`, default: false })
+        : false
+      if (!confirmed) {
+        output.stderr('已取消，未写入任何数据。非交互环境请显式传 --yes。')
+        return 1
+      }
+    }
+
+    // 先把每个线程的根消息 ID 登记为自身别名，保证老消息按根 ID 也能命中；INSERT OR IGNORE 幂等。
+    for (const thread of store.listThreads('feishu')) {
+      store.registerThreadAlias({ source: 'feishu', alias: thread.rootId, threadId: thread.id, createdAt: thread.createdAt })
+    }
+
+    const lark = output.lark ?? createLarkRunner()
+    const roots = backlog.map(thread => thread.rootId)
+    let filled = 0
+    let failed = 0
+    for (let i = 0; i < roots.length; i += MGET_BATCH) {
+      const batch = roots.slice(i, i + MGET_BATCH)
+      const res = await lark.run(['im', '+messages-mget', '--message-ids', batch.join(','), '--as', 'bot', '--format', 'json'])
+      if (res.code !== 0) {
+        failed += batch.length
+        logger.warn('thread:backfill-failed', { batch: batch.length, code: res.code, message: res.stderr.slice(0, 200) })
+        continue
+      }
+      const topicIds = parseMessageThreadIds(res.stdout)
+      for (const thread of backlog.filter(item => batch.includes(item.rootId))) {
+        const topicId = topicIds.get(thread.rootId)
+        if (!topicId) {
+          failed += 1
+          continue
+        }
+        store.registerThreadAlias({ source: 'feishu', alias: topicId, threadId: thread.id, createdAt: thread.createdAt })
+        filled += 1
+      }
+    }
+
+    logger.info('thread:backfilled', { filled, failed })
+    output.stdout(`回填完成：${filled} 条，失败 ${failed} 条。`)
+    if (failed > 0) {
+      output.stderr('部分线程没有查到话题 ID（消息可能已删除或无权限），这些线程仍只能按根消息 ID 归并。')
+      return 1
+    }
     return 0
   } finally {
     store.close()

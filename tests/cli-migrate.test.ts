@@ -83,6 +83,77 @@ describe('ra migrate sessions', () => {
     const dir = home()
     const output = io(dir)
     expect(await runCli(['migrate', 'unknown', '--home', dir], output)).toBe(2)
-    expect(output.err.join('\n')).toContain('ra migrate sessions')
+    expect(output.err.join('\n')).toContain('ra migrate <sessions|threads>')
+  })
+})
+
+describe('ra migrate threads', () => {
+  const AT = '2026-11-06T10:00:00.000Z'
+
+  function seedThread(dir: string): void {
+    const store = new Store(join(dir, 'state.db'))
+    store.upsertThread({ id: 'feishu:oc_dev:om_root', source: 'feishu', rootId: 'om_root', chatId: 'oc_dev', createdAt: AT })
+    store.close()
+  }
+
+  it('dry-run 只读，报告待回填数量', async () => {
+    const dir = home()
+    seedThread(dir)
+    const output = io(dir)
+    expect(await runCli(['migrate', 'threads', '--dry-run', '--home', dir], output)).toBe(0)
+    expect(output.out.join('\n')).toContain('待回填话题 ID：1')
+    expect(output.out.join('\n')).toContain('未写入任何数据')
+
+    const store = new Store(join(dir, 'state.db'))
+    expect(store.listThreadAliases('feishu', 'feishu:oc_dev:om_root')).toEqual([])
+    store.close()
+  })
+
+  it('apply 回填话题 ID 后，话题内直发的消息能落回老线程', async () => {
+    const dir = home()
+    seedThread(dir)
+    const output = io(dir)
+    output.lark = {
+      async run(argv: string[]) {
+        expect(argv).toContain('om_root')
+        return {
+          code: 0,
+          stdout: JSON.stringify({ ok: true, data: { messages: [{ message_id: 'om_root', thread_id: 'omt_topic' }] } }),
+          stderr: '',
+        }
+      },
+    }
+    expect(await runCli(['migrate', 'threads', '--apply', '--yes', '--home', dir], output)).toBe(0)
+    expect(output.out.join('\n')).toContain('回填完成：1 条')
+
+    const store = new Store(join(dir, 'state.db'))
+    expect(store.listThreadAliases('feishu', 'feishu:oc_dev:om_root')).toEqual(['om_root', 'omt_topic'])
+    // 关键：只带话题 ID 的消息现在能解析到存量线程
+    const resolved = store.resolveThread({
+      source: 'feishu',
+      chatId: 'oc_dev',
+      keys: ['omt_topic', 'om_new'],
+      canonicalId: 'feishu:oc_dev:omt_topic',
+      createdAt: AT,
+    })
+    expect(resolved).toEqual({ threadId: 'feishu:oc_dev:om_root', created: false })
+    store.close()
+  })
+
+  it('查询失败的批次如实报告，不假装成功', async () => {
+    const dir = home()
+    seedThread(dir)
+    const output = io(dir)
+    output.lark = { async run() { return { code: 1, stdout: '', stderr: 'boom' } } }
+    expect(await runCli(['migrate', 'threads', '--apply', '--yes', '--home', dir], output)).toBe(1)
+    expect(output.err.join('\n')).toContain('部分线程没有查到话题 ID')
+  })
+
+  it('verify 在还有待回填线程时不通过', async () => {
+    const dir = home()
+    seedThread(dir)
+    const output = io(dir)
+    expect(await runCli(['migrate', 'threads', '--verify', '--home', dir], output)).toBe(1)
+    expect(output.err.join('\n')).toContain('ra migrate threads --apply')
   })
 })

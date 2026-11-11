@@ -44,6 +44,12 @@ export interface Trigger {
   /** Source 自己的事件 ID，用于幂等。 */
   externalId: string
   threadId: string
+  /**
+   * 这条消息携带的全部外部线程标识：话题 ID（omt_）、根消息 ID（om_）、消息自身 ID。
+   * 飞书在不同客户端入口给不全字段（话题面板直发只有 thread_id），
+   * Store 靠这组别名把同一话题的消息解析到同一个 Thread。见 Store.resolveThread。
+   */
+  threadKeys?: string[]
   /** 飞书 chat_id 或 GitHub owner/repo#number。 */
   chatId: string
   chatName: string
