@@ -4,6 +4,9 @@
  * 单独放一个文件，避免 runtime-cards.tsx 反向 import app.tsx 形成循环依赖。
  */
 import type { RuntimeChoiceView } from './runtime-model.js'
+import type { IdentityStatusView } from './identity-status.js'
+
+export type { IdentityEntryView, IdentityStatusView } from './identity-status.js'
 
 export type ConfigDoc = Record<string, any>
 
@@ -13,6 +16,8 @@ export interface ConfigBundle {
   configPath: string
   runtimeChoices?: RuntimeChoiceView[]
   detecting?: boolean
+  /** 允许名单与机器人身份的解析状态；旧版服务端可能没有这个字段。 */
+  identity?: IdentityStatusView
 }
 
 export async function getJson<T>(path: string): Promise<T> {
@@ -42,6 +47,8 @@ export interface ConfigSaveResult extends ConfigBundle {
   changed: string[]
   restartRequired: boolean
   policyChanged: boolean
+  /** 允许名单是否已即时生效；`false` 表示保存后重解析失败，新名单还没生效。 */
+  identityEffective?: boolean
 }
 
 /** 本机 LLM Provider 候选（服务端已剥掉明文密钥）。 */

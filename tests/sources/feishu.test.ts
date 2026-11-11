@@ -543,3 +543,16 @@ describe('未寻址消息放行（tk-59：已绑定工单话题内名单内成�
     expect(result.dropped).toBeUndefined()
   })
 })
+
+describe('发送人显示名', () => {
+  it('actorNames 里查到人时填上显示名', () => {
+    const named: FeishuConfig = { ...cfg, actorNames: new Map([['ou_alice', '阿振(Pz)']]) }
+    expect(normalizeFeishuEvent(evt(), named)!.actorName).toBe('阿振(Pz)')
+  })
+
+  it('actorNames 为空或查不到这个人时留空且不报错', () => {
+    expect(normalizeFeishuEvent(evt(), cfg)!.actorName).toBe('')
+    const named: FeishuConfig = { ...cfg, actorNames: new Map([['ou_bob', '别人']]) }
+    expect(normalizeFeishuEvent(evt(), named)!.actorName).toBe('')
+  })
+})

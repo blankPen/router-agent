@@ -1,7 +1,7 @@
 import { join } from 'node:path'
 import { Engine } from '../core/engine.js'
 import type { AddressMode, DecisionRecord, SourceKind, Ticket, Trigger } from '../core/model.js'
-import { policyOf, replyAlwaysChatsOf, type AppConfig } from '../config.js'
+import { policyOf, replyAlwaysChatsOf, type AppConfig, type PolicyResolution } from '../config.js'
 import { Store } from '../store/db.js'
 import { AgentLoop } from '../router/agent-loop.js'
 import { dispatchSettingsOf } from '../router/dispatch.js'
@@ -38,12 +38,18 @@ export async function simulate(
     config: AppConfig
     /** 引擎可以直接给，也可以按本次的内存库现建（Pi 的 toolbox 需要绑定同一个 Store / Engine）。 */
     decisionEngine: DecisionEngine | ((store: Store, engine: Engine) => DecisionEngine)
+    /**
+     * 允许名单的解析结果（邮箱 → open_id）。
+     *
+     * 不注入的话模拟会拿原始条目（邮箱）去和 open_id 比，准入判断与线上不一致。
+     */
+    identity?: PolicyResolution
   },
   opts: SimulateOptions,
 ): Promise<SimulateResult> {
   const store = new Store(opts.dryRun ? ':memory:' : join(deps.home, 'state.db'))
   try {
-    const engine = new Engine({ store, policy: policyOf(deps.config) })
+    const engine = new Engine({ store, policy: policyOf(deps.config, deps.identity) })
     const decisionEngine = typeof deps.decisionEngine === 'function' ? deps.decisionEngine(store, engine) : deps.decisionEngine
     const audits: DecisionAudit[] = []
     const loop = new AgentLoop({
@@ -63,7 +69,7 @@ export async function simulate(
       threadId: `feishu:${opts.chatId ?? deps.config.feishu.chats[0]?.chat ?? 'oc_sim'}:${now.getTime()}`,
       chatId: opts.chatId ?? deps.config.feishu.chats[0]?.chat ?? 'oc_sim',
       chatName: '',
-      actorId: opts.actorId ?? deps.config.feishu.allowed[0] ?? 'ou_sim',
+      actorId: opts.actorId ?? deps.identity?.allowedOpenIds?.[0] ?? deps.config.feishu.allowed[0] ?? 'ou_sim',
       actorName: '',
       isBot: false,
       text: opts.text,

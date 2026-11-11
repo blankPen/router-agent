@@ -5,10 +5,10 @@ import { join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { Command, CommanderError } from 'commander'
-import { ensureHome, loadConfig, policyOf, projectsForRuntime, replyAlwaysChatsOf, setConfigValue, writeConfig } from '../config.js'
+import { ensureHome, loadConfig, policyOf, projectsForRuntime, replyAlwaysChatsOf, setConfigValue, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
 import { Store, type SessionMigrationState } from '../store/db.js'
 import { Engine } from '../core/engine.js'
-import { shouldAcknowledge } from '../core/policy.js'
+import { effectiveAllowed, effectiveAllowedByChat, shouldAcknowledge } from '../core/policy.js'
 import { createRuntimes } from '../worker/registry.js'
 import { AcpRuntimeAdmin } from '../worker/runtimes/acp/admin.js'
 import { readDetectionSnapshot } from '../worker/runtimes/acp/detect.js'
@@ -21,6 +21,7 @@ import { ChannelIngress } from '../channels/ingress.js'
 import { ChannelRegistry } from '../channels/registry.js'
 import { ChannelRouter } from '../channels/router.js'
 import { ChatDirectory } from '../sources/feishu-directory.js'
+import { resolveRuntimeIdentity, detailText, type IdentityCache, type IdentityStatusView, type RuntimeIdentity } from '../sources/feishu-identity.js'
 import { createLarkRunner, larkEnv } from '../sources/lark.js'
 import { parseMessageThreadIds, type UnaddressedAdmission } from '../sources/feishu.js'
 import { createVisionTranscriber, type ImageTranscriber } from '../infra/vision.js'
@@ -39,7 +40,7 @@ import type { DecisionAudit } from '../router/decision-engine.js'
 import type { WorkerStateFile } from '../worker/report-poller.js'
 import { RouterService, type Logger } from '../service.js'
 import { EffectsProcessor } from '../core/effects.js'
-import { createApiServer } from '../router/api.js'
+import { createApiServer, emptyIdentityStatus, type IdentityPort } from '../router/api.js'
 import { ProjectSetup } from '../router/project-setup.js'
 
 // 版本号以 package.json 为唯一来源（见 src/update/index.ts），`ra -v` 与更新检查共用同一个值。
@@ -420,8 +421,11 @@ async function cmdSimulate(
   }
   const decisionEngine = (store: Store, engine: Engine) => createDecisionEngine({ config, store, model, engine })
 
+  // 名单是邮箱时必须先解析成 open_id，否则模拟出来的准入判断与线上不一致。
+  const identity = await resolveIdentityForCli(home, config, output.lark ?? createLarkRunner(), createLogger(home, output, false))
+
   const result = await simulate(
-    { home, config, decisionEngine },
+    { home, config, decisionEngine, ...(identity ? { identity: policyResolutionOf(identity) } : {}) },
     {
       text: opts.text,
       ...(opts.chat ? { chatId: opts.chat } : {}),
@@ -781,6 +785,8 @@ async function cmdTicketStop(home: string, ticketId: string, output: CliIo): Pro
       output.stdout(`工单已关闭: ${ticketId}`)
       return 0
     }
+    // 这里只用 Engine 关工单，stopTicket 不看允许名单：不解析身份，
+    // 免得「停工单」这种应急操作还要先连通讯录、卡在超时上。
     const engine = new Engine({ store, policy: policyOf(config) })
     const stopped = engine.stopTicket(ticketId, 'ra ticket --stop')
     // 服务未运行时先把回收任务落到 effects 队列，下次启动会按同一套逻辑删 worktree。
@@ -1228,13 +1234,54 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   const replyAlwaysChats = new Set(replyAlwaysChatsOf(config))
   const repaired = store.repairOutbox()
   if (repaired > 0) logger.warn('outbox:repaired', { count: repaired })
-  const engine = new Engine({ store, policy: policyOf(config), onEvent: sink })
   const orcaRunner = realRunner('orca')
   const claudeRunner = output.claude ?? realRunner('claude')
   const gitRunner = output.git ?? realRunner('git')
   const larkRunner = output.lark ?? createLarkRunner()
   const ghRunner = realRunner('gh')
   const glabRunner = realRunner('glab')
+  // 群名目录要先建好：身份装配失败时要在日志里写清是哪个群。
+  const directory = new ChatDirectory(join(home, 'chats.json'), logger)
+  // 身份装配：把允许名单里的邮箱解析成 open_id，并自动识别机器人自身身份。
+  // 解析只发生在这里，消息入站链路不再查通讯录。
+  const identity = await resolveRuntimeIdentitySafely({ config, lark: larkRunner, cache: identityCacheOf(store), logger, directory })
+  // 通道侧必须用装配后的配置：mention 判定读的就是 botOpenIds / botNames。
+  // 这里刻意持有同一份数组 / Map 引用：面板保存后重新解析，原地改一遍就生效，不用重建通道。
+  const botOpenIds = [...(identity?.bot.botOpenIds ?? config.feishu.botOpenIds)]
+  const botNames = [...(identity?.bot.botNames ?? config.feishu.botNames)]
+  const actorNames = new Map(identity?.names ?? [])
+  const feishuConfig = {
+    ...config.feishu,
+    botOpenIds,
+    botNames,
+    actorNames,
+  }
+  const engine = new Engine({
+    store,
+    // 装配失败时退回原始配置：宁可按用户填的原始条目跑，也不要凭空把名单清空。
+    policy: policyOf(config, identity ? policyResolutionOf(identity) : undefined),
+    onEvent: sink,
+  })
+  // 身份端口：面板保存允许名单后由 API 层调用，立即重解析并让新名单生效。
+  const identityPort = createIdentityPort({
+    config,
+    lark: larkRunner,
+    cache: identityCacheOf(store),
+    logger,
+    chatNames: (chatId: string) => directory.nameOf(chatId),
+    channel: { botOpenIds, botNames, actorNames },
+    initial: identity,
+  })
+  // 启动时还有「待重试」条目或机器人识别失败：后台退避重试，成功后同步策略。
+  // 否则通讯录权限恢复后没人会去重启或重新保存，群会一直静默全拒。
+  if (identity) {
+    scheduleIdentityRetry({
+      initial: identity.status,
+      logger,
+      refresh: () => identityPort.refresh(),
+      apply: () => { engine.updatePolicy(policyOf(config, identityPort.policyIds?.())) },
+    })
+  }
   const runtimes = createRuntimes(config, {
     home,
     workersDir: join(home, 'workers'),
@@ -1300,17 +1347,22 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       ...(audit.unavailableReason ? { unavailable: audit.unavailableReason } : {}),
     })
   }
-  const directory = new ChatDirectory(join(home, 'chats.json'), logger)
   /**
    * 未 @ 机器人的消息要不要放行：已绑定工单的话题内，名单内成员也触发回复（tk-59）。
    *
    * 两个条件同时成立才放行：话题上订阅着在办工单，且发送者在该群白名单（未配则用全局名单）内。
    * 放行后由 agent-loop 的订阅扇出把消息投给 worker，无需再走开单研判。
+   *
+   * 名单口径必须和 gate() 一致：群级名单优先、否则全局名单，且要按解析后的 open_id 匹配
+   * （allowedOpenIds / allowedByChatOpenIds）——名单改成邮箱后，原始条目里存的是邮箱，
+   * 直接拿 allowed 去比 open_id 会永远匹配不上。
    */
   const allowUnaddressed: UnaddressedAdmission = ({ chatId, actorId, threadKeys }) => {
     const policy = engine.policy()
-    const scoped = policy.allowedByChat?.[chatId]
-    const allowed = scoped && scoped.length > 0 ? scoped : policy.allowed
+    const scoped = effectiveAllowedByChat(policy, chatId)
+    // 配了群名单但一个都没解析出来：该群谁都不许进，不能退回全局名单（与 gate() 同口径）。
+    if (scoped && scoped.length === 0) return false
+    const allowed = scoped ?? effectiveAllowed(policy)
     if (!allowed.includes(actorId)) return false
     if (!store.hasLiveTicketForThreadKeys('feishu', threadKeys)) return false
     logger.info('trigger:admitted-unaddressed', { chat: chatId, actor: actorId, keys: threadKeys.length })
@@ -1318,7 +1370,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   }
   // 通道适配器：飞书的消费、归一化、富化、渲染、回执、文档与凭据全部收口到这里。
   const feishuChannel = createFeishuChannel({
-    config: config.feishu,
+    config: feishuConfig,
     reaction: config.feishu.reaction,
     runner: larkRunner,
     directory,
@@ -1398,6 +1450,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     runtimeAdmin,
     update: updateService,
     feishuBot: feishuChannel.admin,
+    identity: identityPort,
     projectSetup: new ProjectSetup({ home, git: gitRunner, orca: orcaRunner }),
     // Web-only 模式没有 RouterService，工作区清理端点按「不支持」返回。
     ...(service
@@ -1524,6 +1577,207 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   return new Promise<number>(() => {
     // 常驻直到收到信号
   })
+}
+
+/**
+ * 装配运行时身份（允许名单 + 机器人身份）。
+ *
+ * 装配失败不能挡住服务启动：这里降级成 null，调用方按原始配置继续跑，
+ * 并留下一条 error 说明原因——静默启动成功、但消息全被丢掉才是这次要消灭的故障形态。
+ */
+async function resolveRuntimeIdentitySafely(opts: {
+  config: AppConfig
+  lark: CommandRunner
+  cache: IdentityCache
+  logger: Logger
+  directory: ChatDirectory
+}): Promise<RuntimeIdentity | null> {
+  try {
+    return await resolveRuntimeIdentity({
+      config: opts.config,
+      lark: opts.lark,
+      cache: opts.cache,
+      logger: opts.logger,
+      chatNames: (chatId: string) => opts.directory.nameOf(chatId),
+    })
+  } catch (error) {
+    opts.logger.error('config:identity-resolve-failed', { detail: errorMessage(error) })
+    return null
+  }
+}
+
+/** 身份解析缓存：读写 state.db 的 identity_aliases（键带 app_id，换应用自然失效）。 */
+function identityCacheOf(store: Store): IdentityCache {
+  return {
+    get: (appId, kind, value) => {
+      const row = store.getIdentityAlias(appId, kind, value)
+      return row ? { openId: row.openId, name: row.name } : null
+    },
+    set: (appId, kind, value, openId, name) => store.setIdentityAlias(appId, kind, value, openId, name),
+  }
+}
+
+/** 没有缓存可用时用这个：既不读也不写。 */
+const NO_IDENTITY_CACHE: IdentityCache = { get: () => null, set: () => {} }
+
+/**
+ * 命令行场景的身份装配。
+ *
+ * 只读缓存、且不新建 state.db：模拟命令不该往库里写东西（dry run 的承诺），
+ * 也不该凭空多出一个库文件。库不存在时就没有缓存可用，直接查通讯录。
+ */
+async function resolveIdentityForCli(
+  home: string,
+  config: AppConfig,
+  lark: CommandRunner,
+  logger: Logger,
+): Promise<RuntimeIdentity | null> {
+  const directory = new ChatDirectory(join(home, 'chats.json'), logger)
+  const dbPath = join(home, 'state.db')
+  if (!existsSync(dbPath)) {
+    return resolveRuntimeIdentitySafely({ config, lark, cache: NO_IDENTITY_CACHE, logger, directory })
+  }
+  const store = openStore(home)
+  try {
+    return await resolveRuntimeIdentitySafely({
+      config,
+      lark,
+      cache: {
+        get: (appId, kind, value) => {
+          const row = store.getIdentityAlias(appId, kind, value)
+          return row ? { openId: row.openId, name: row.name } : null
+        },
+        set: () => { /* 只读缓存：模拟命令不往 state.db 里写 */ },
+      },
+      logger,
+      directory,
+    })
+  } finally {
+    store.close()
+  }
+}
+
+/**
+ * 把解析结果折算成策略层要注入的形态。
+ *
+ * 全局名单一个都没解析出来时不注入空集合：空集合等于断言「谁都不许」，
+ * 而实际可能只是通讯录暂时查不通（原因见 `feishu:allowlist-empty` 事件）。
+ */
+function policyResolutionOf(identity: RuntimeIdentity): PolicyResolution {
+  return {
+    ...(identity.allowedOpenIds.length > 0 ? { allowedOpenIds: identity.allowedOpenIds } : {}),
+    allowedByChatOpenIds: identity.allowedByChatOpenIds,
+    names: Object.fromEntries(identity.names),
+  }
+}
+
+/**
+ * 身份端口：面板保存允许名单后立即重解析。
+ *
+ * - `refresh()` 重新解析，并把结果原地同步到通道侧（机器人身份与显示名）；
+ * - `snapshot()` 返回最近一次解析状态，供面板只读展示；
+ * - `policyIds()` 返回解析出的 open_id，供 API 层重建策略。
+ *
+ * 策略重建由 API 层统一做（它手里才有 engine），这里只管解析结果与通道侧同步。
+ */
+export function createIdentityPort(opts: {
+  config: AppConfig
+  lark: CommandRunner
+  cache: IdentityCache
+  logger: Logger
+  /** 群 id → 群名；只用于日志里写清是哪个群。 */
+  chatNames?: (chatId: string) => string
+  /** 通道侧的运行时快照：机器人身份与显示名要原地同步过去。 */
+  channel: { botOpenIds: string[]; botNames: string[]; actorNames: Map<string, string> }
+  /** 启动时已经解析好的身份；缺省视为还没解析过。 */
+  initial?: RuntimeIdentity | null
+}): IdentityPort {
+  let current = opts.initial ?? null
+  return {
+    async refresh() {
+      let resolved: RuntimeIdentity
+      try {
+        resolved = await resolveRuntimeIdentity({
+          config: opts.config,
+          lark: opts.lark,
+          cache: opts.cache,
+          logger: opts.logger,
+          ...(opts.chatNames ? { chatNames: opts.chatNames } : {}),
+        })
+      } catch (error) {
+        // 失败交给调用方记日志：保存不能被解析失败挡住，名单先按上一次的结果继续用。
+        // 详情里的邮箱先掩码：这条错误会进日志。
+        throw new Error(`允许名单重解析失败：${detailText(errorMessage(error))}`)
+      }
+      current = resolved
+      syncIdentitySnapshot(opts.channel, resolved)
+      return resolved.status
+    },
+    snapshot: () => current?.status ?? emptyIdentityStatus(),
+    policyIds: () => (current ? policyResolutionOf(current) : {}),
+  }
+}
+
+/**
+ * 后台重试身份解析（启动时存在「待重试」条目或机器人识别失败才启动）。
+ *
+ * 只告警不重试的话，通讯录权限恢复后没人会去重启或重新保存，群就会一直静默全拒；
+ * 但也不能无限空转，所以按有限次数退避重试，成功后同步通道与策略。
+ */
+export function scheduleIdentityRetry(opts: {
+  /** 首次解析状态；有待重试项或机器人识别失败时才启动。 */
+  initial: IdentityStatusView
+  logger: Logger
+  /** 重新解析并同步通道，返回最近一次解析状态。 */
+  refresh: () => Promise<IdentityStatusView>
+  /** 重试成功后重建策略（名单已可用）。 */
+  apply: () => void
+  /** 重试间隔（毫秒），次数等于数组长度；测试里可以传 0。 */
+  delays?: readonly number[]
+}): void {
+  const initial = opts.initial
+  if (initial.pendingCount === 0 && initial.bot.resolved) return
+  const delays = opts.delays ?? [60_000, 300_000, 900_000]
+  if (delays.length === 0) return
+  let round = 0
+  const tick = async (): Promise<void> => {
+    try {
+      const status = await opts.refresh()
+      if (status.pendingCount === 0 && status.bot.resolved) {
+        opts.apply()
+        opts.logger.info('identity:retry-resolved', { round: round + 1, pending: status.pendingCount })
+        return
+      }
+      opts.logger.warn('identity:retry-deferred', { round: round + 1, pending: status.pendingCount, bot: status.bot.resolved })
+    } catch (error) {
+      // 重试失败不影响服务：下一轮再试，错误原因进日志。
+      opts.logger.warn('identity:retry-failed', { round: round + 1, detail: errorMessage(error) })
+    }
+    round += 1
+    if (round >= delays.length) {
+      opts.logger.warn('identity:retry-exhausted', { attempts: round })
+      return
+    }
+    const next = setTimeout(() => { void tick() }, delays[round])
+    next.unref?.()
+  }
+  const first = setTimeout(() => { void tick() }, delays[0])
+  first.unref?.()
+}
+
+/**
+ * 把最新的身份解析结果原地同步到通道侧的快照。
+ *
+ * 通道持有的是同一份数组 / Map 引用，改完立刻生效，不用重建通道。
+ */
+function syncIdentitySnapshot(
+  target: { botOpenIds: string[]; botNames: string[]; actorNames: Map<string, string> },
+  identity: RuntimeIdentity,
+): void {
+  target.botOpenIds.splice(0, target.botOpenIds.length, ...identity.bot.botOpenIds)
+  target.botNames.splice(0, target.botNames.length, ...identity.bot.botNames)
+  target.actorNames.clear()
+  for (const [openId, name] of identity.names) target.actorNames.set(openId, name)
 }
 
 function createLogger(home: string, output: CliIo, echo = true): Logger {

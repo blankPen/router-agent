@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs'
 import type { AppConfig } from '../config.js'
 import { projectsForRuntime } from '../config.js'
 import type { CommandRunner } from '../infra/process.js'
+import { checkMemberPayload, resolveBotIdentity } from '../sources/feishu-identity.js'
 import type { WorkerRuntime } from '../worker/port.js'
 import type { RuntimeChoice } from '../worker/runtimes/acp/detect.js'
 import {
@@ -41,6 +42,10 @@ export interface DoctorDeps {
 export async function runDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
   const { config } = deps
   const checks: DoctorCheck[] = []
+  /** 手填了机器人身份就按手填的匹配；留空则按 feishu.appId 自动识别（与启动装配同一规则）。 */
+  const manualBot = config.feishu.botOpenIds.length > 0 || config.feishu.botNames.length > 0
+  /** 只有 mode=mention 的群靠 @ 机器人判定收不收消息，也只有它们需要识别机器人身份。 */
+  const mentionChatIds = config.feishu.chats.filter(chat => chat.mode === 'mention').map(chat => chat.chat)
 
   const missing: string[] = []
   const projects = projectsForRuntime(config)
@@ -48,7 +53,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
   if (projectCount === 0) missing.push('projects')
   if (config.feishu.chats.length === 0) missing.push('feishu.chats')
   if (config.feishu.allowed.length === 0) missing.push('feishu.allowed')
-  if (config.feishu.botOpenIds.length === 0) missing.push('feishu.botOpenIds')
+  // 机器人身份不再要求手填：留空时启动会自动按 feishu.appId 识别（见「机器人身份自动识别」检查）。
   checks.push({
     name: '配置必填项',
     status: missing.length === 0 ? 'ok' : 'fail',
@@ -157,16 +162,60 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
       : { status: 'fail', detail: `不可见：${missingChats.join(', ')}`, hint: '把机器人拉进群，或检查 chat_id 是否正确' }
   }))
 
+  // 机器人身份：默认自动识别（按 appId 匹配群成员里的 bot），手填了才用手填的（逃生口）。
+  checks.push(await check('机器人身份自动识别', async () => {
+    if (manualBot) {
+      return { status: 'ok', detail: '手动填写了机器人身份，不自动识别', hint: '留空 feishu.botOpenIds / feishu.botNames 可改为自动识别' }
+    }
+    if (mentionChatIds.length === 0) {
+      // 没有 @ 模式的群就不需要识别；这与 resolveBotIdentity 的 resolved 语义一致（无需识别不是失败）。
+      return { status: 'ok', detail: '没有 mode=mention 的群，无需识别机器人身份' }
+    }
+    const identity = await resolveBotIdentity({ appId: config.feishu.appId, chatIds: mentionChatIds, lark: deps.lark })
+    return identity.resolved
+      ? { status: 'ok', detail: identity.detail }
+      : { status: 'fail', detail: identity.detail, hint: '确认机器人已在这些群里，且 feishu.appId 是机器人所属应用；也可手动填写 feishu.botOpenIds' }
+  }))
+
   checks.push(await check('机器人在群内', async () => {
-    const chatId = config.feishu.chats[0]?.chat
-    if (!chatId) return { status: 'warn', detail: '没有配置群' }
-    const res = await deps.lark.run(['im', '+chat-members-list', '--chat-id', chatId, '--as', 'bot', '--format', 'json'])
-    const members = res.code === 0 ? parseLarkMembers(res.stdout) : []
-    const bots = members.filter(member => member.type === 'bot')
-    const matched = bots.some(bot => config.feishu.botOpenIds.includes(bot.openId) || (bot.appId ? config.feishu.botOpenIds.includes(bot.appId) : false))
-    return matched
-      ? { status: 'ok', detail: `${bots.length} 个机器人成员，已匹配配置` }
-      : { status: 'fail', detail: `群 ${chatId} 里没找到配置的机器人身份`, hint: 'ra config set feishu.botOpenIds ou_xxx,cli_xxx' }
+    // @ 模式的群最要紧：识别不到机器人就会整群丢消息。没有 @ 群时退回检查配置里的第一个群。
+    const chatIds = mentionChatIds.length > 0 ? mentionChatIds : config.feishu.chats.slice(0, 1).map(chat => chat.chat)
+    if (chatIds.length === 0) return { status: 'warn', detail: '没有配置群' }
+    const missing: string[] = []
+    const failures: string[] = []
+    let botCount = 0
+    for (const chatId of chatIds) {
+      const res = await deps.lark.run(['im', '+chat-members-list', '--chat-id', chatId, '--as', 'bot', '--format', 'json'])
+      if (res.code !== 0) {
+        failures.push(`群 ${chatId} 读取成员失败（code=${res.code}）`)
+        continue
+      }
+      // 退出码 0 也可能是错误信封：接口异常不能当成「群里没有机器人」，否则排查方向会被带偏。
+      const payload = checkMemberPayload(res.stdout)
+      if (!payload.ok) {
+        failures.push(`群 ${chatId} ${payload.detail}`)
+        continue
+      }
+      const bots = parseLarkMembers(res.stdout).filter(member => member.type === 'bot')
+      botCount += bots.length
+      const matched = manualBot
+        ? bots.some(bot => config.feishu.botOpenIds.includes(bot.openId) || (bot.appId ? config.feishu.botOpenIds.includes(bot.appId) : false))
+        : bots.some(bot => Boolean(bot.appId) && bot.appId === config.feishu.appId)
+      if (!matched) missing.push(chatId)
+    }
+    if (failures.length > 0) {
+      return { status: 'fail', detail: `读取群成员接口异常：${failures.join('；')}`, hint: '检查 lark-cli 与机器人权限后重试；接口异常时无法判断机器人是否在群' }
+    }
+    if (missing.length > 0) {
+      return {
+        status: 'fail',
+        detail: manualBot
+          ? `群 ${missing.join('、')} 里没找到配置的机器人身份`
+          : `群 ${missing.join('、')} 里没找到 feishu.appId=${config.feishu.appId || '（未配置）'} 的机器人`,
+        hint: manualBot ? 'ra config set feishu.botOpenIds ou_xxx,cli_xxx' : '确认 feishu.appId 与机器人所属应用一致，并把机器人拉进群',
+      }
+    }
+    return { status: 'ok', detail: `${chatIds.length} 个群共 ${botCount} 个机器人成员，已匹配${manualBot ? '手动配置' : 'feishu.appId'}` }
   }))
 
   checks.push(await check('模型配置', async () => {

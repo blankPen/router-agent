@@ -147,6 +147,7 @@ export class AcpRuntimeAdmin {
       const probe = probes.get(meta.id)!
       return {
         id: meta.id,
+        name: meta.name,
         label: meta.label,
         hint: meta.hint,
         status: probe.status,
@@ -212,6 +213,7 @@ export class AcpRuntimeAdmin {
     const command = typeof options.command === 'string' ? options.command.trim() : ''
     const base: RuntimeChoice = {
       id: meta.id,
+      name: meta.name,
       label: meta.label,
       hint: meta.hint,
       status: 'not-installed',
@@ -321,11 +323,13 @@ export class AcpRuntimeAdmin {
     const existing = snapshot.choices.find(choice => choice.id === agent.runtimeId)
     const baseChoice = detected ?? existing ?? {
       id: agent.runtimeId,
+      name: agent.name,
       label: agent.label,
       hint: agent.hint,
       status: 'not-installed' as const,
       installable: Boolean(agent.package),
       ...(installHintOf(agent) ? { installHint: installHintOf(agent) } : {}),
+      ...(agent.deprecated ? { deprecated: true } : {}),
     }
     // 握手成功不代表已登录（codex-acp 的 session/new 不校验账号）；保留 needs-auth。
     const status = !result.ok
