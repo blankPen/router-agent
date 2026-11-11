@@ -232,8 +232,8 @@ llm:
 
 feishu:
   appId: cli_xxx
-  allowed: [ou_xxx]       # 允许发起工作的成员 open_id
-  botOpenIds: [ou_bot]    # 机器人自己的 open_id，用于识别 @；也可写 botNames
+  allowed: [alice@company.com]   # 允许发起工作的成员（推荐邮箱，兼容 ou_xxx）
+  botOpenIds: []          # 留空=按 appId 自动识别机器人；手填 ou_xxx 可覆盖（高级）
   chats:
     - chat: oc_xxx
       mode: mention
@@ -247,7 +247,7 @@ projects:
     defaultBranch: main
 ```
 
-`mode: mention` 的群必须配置 `botOpenIds`（或 `botNames`），否则识别不到「@机器人」，消息会被当作未 @ 丢弃；`allowed` 为空时 `ra doctor` 也会报必填缺失。
+`allowed` 推荐填邮箱（解析成 open_id 后匹配，换应用也不会失效），也兼容 `ou_xxx`。机器人身份默认按 `feishu.appId` 自动识别，`botOpenIds` 只作为高级手动覆盖；自动识别失败时 `ra doctor` 会报 fail 并给出原因。`allowed` 为空时 `ra doctor` 也会报必填缺失。
 
 常用调整不必编辑整份文件：
 

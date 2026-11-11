@@ -197,8 +197,8 @@ llm:
 
 feishu:
   appId: cli_xxx
-  allowed: [ou_xxx]       # members allowed to start work
-  botOpenIds: [ou_bot]    # the bot's own open_id, used to detect @mentions; botNames also works
+  allowed: [alice@company.com]   # members allowed to start work (email recommended, ou_xxx still accepted)
+  botOpenIds: []          # leave empty to auto-detect the bot by appId; set ou_xxx to override (advanced)
   chats:
     - chat: oc_xxx
       mode: mention
@@ -212,7 +212,7 @@ projects:
     defaultBranch: main
 ```
 
-A `mode: mention` chat must set `botOpenIds` (or `botNames`); otherwise the Router cannot tell that the bot was mentioned and drops the message. An empty `allowed` list also fails the `ra doctor` required-field check.
+Prefer emails in `allowed` (they are resolved to open_ids, so switching the app does not break the list); `ou_xxx` still works. The bot identity is auto-detected from `feishu.appId` by default, and `botOpenIds` is only an advanced manual override; `ra doctor` fails with the reason when auto-detection fails. An empty `allowed` list also fails the `ra doctor` required-field check.
 
 Common tweaks don't require editing the whole file:
 
