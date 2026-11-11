@@ -228,10 +228,10 @@ export const SECTIONS: SectionDef[] = [
       { path: 'feishu.images.enabled', label: '图片转文本', kind: 'switch', hint: '下载 image_key 后交给多模态模型识别' },
       { path: 'feishu.images.maxChars', label: '单张图片最多字符', kind: 'number', min: 100, max: 20_000, unit: '字' },
       { path: 'feishu.images.timeoutMs', label: '单张图片识别超时', kind: 'number', min: 1_000, max: 300_000, unit: '毫秒', ms: true },
-      { path: 'feishu.allowed', label: '全局允许名单', kind: 'list', placeholder: 'ou_xxx, ou_yyy', hint: '逗号分隔的 open_id' },
+      { path: 'feishu.allowed', label: '全局允许名单（推荐邮箱，兼容 ou_xxx）', kind: 'list', placeholder: 'alice@company.com, bob@company.com', hint: '推荐填邮箱；换应用后 open_id 会变，邮箱不会' },
       { path: 'feishu.bots', label: '可引用的机器人', kind: 'list', placeholder: 'ou_xxx' },
-      { path: 'feishu.botOpenIds', label: '机器人自身 open_id', kind: 'list', placeholder: 'ou_xxx' },
-      { path: 'feishu.botNames', label: '机器人显示名', kind: 'list', placeholder: '阿罗' },
+      { path: 'feishu.botOpenIds', label: '机器人自身 open_id（高级，默认自动识别）', kind: 'list', placeholder: 'ou_xxx', hint: '留空 = 按 App ID 自动识别机器人' },
+      { path: 'feishu.botNames', label: '机器人显示名（高级，默认自动识别）', kind: 'list', placeholder: '阿罗', hint: '留空 = 按 App ID 自动识别机器人' },
     ],
   },
   {
