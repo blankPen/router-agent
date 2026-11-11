@@ -710,7 +710,7 @@ function maskEntry(entry: string): string {
  * lark-cli 存在「退出码 0 + `{"ok":false,"error":{...}}`」的返回形态。接口已经失败时
  * 根本没有成员列表可查，必须归为接口异常；只有结构完好、确实没有匹配项才算「没找到机器人」。
  */
-function checkMemberPayload(stdout: string): { ok: true } | { ok: false; detail: string } {
+export function checkMemberPayload(stdout: string): { ok: true } | { ok: false; detail: string } {
   const parsed = JSON.parse(stdout) as unknown
   const root = parsed && typeof parsed === 'object' ? parsed as Record<string, any> : null
   // 顶层 ok === false，或存在 error 字段（即使 ok 没写 false），都是接口错误信封。

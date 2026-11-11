@@ -89,6 +89,10 @@ Router 不做对话，只在必要时说话：
 | `identity:resolve-deferred` | Identity | `entry`(掩码) `detail` | 暂时查不了（权限缺失 / lark-cli 不可用 / 超时），条目**保留**待重试，不清空名单 |
 | `identity:cache-failed` | Identity | `kind` `detail` | 身份解析缓存读写失败，本次降级为直接查通讯录 |
 | `identity:refresh-failed` | HTTP API | `detail` | 面板保存后重新解析允许名单失败；保存照样成功，名单先按上一次的结果继续用 |
+| `identity:retry-resolved` | CLI | `round` `pending` | 启动时的后台重试解析成功，名单已恢复并重建策略 |
+| `identity:retry-deferred` | CLI | `round` `pending` `bot` | 后台重试后仍有待重试条目或机器人未识别，继续退避 |
+| `identity:retry-failed` | CLI | `round` `detail` | 后台重试本身失败（接口 / 网络），下一轮再试 |
+| `identity:retry-exhausted` | CLI | `attempts` | 后台重试次数用完仍没解析全，需要重启或重新保存来触发 |
 | `config:identity-invalid` | Identity | `count` `detail` | 允许名单里有条目解析不到人（或暂时查不了待重试），名单已生效但可见性问题已告警 |
 | `feishu:allowlist-empty` | Identity | `count` `detail` | 全局允许名单一个都没解析出来（`detail` 区分「待重试」与「查无此人」），等于暂时谁都不许 |
 | `config:identity-resolve-failed` | CLI | `detail` | 启动时的身份装配整体失败，已降级为按原始配置启动 |

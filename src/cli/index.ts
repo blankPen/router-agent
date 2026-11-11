@@ -21,7 +21,7 @@ import { ChannelIngress } from '../channels/ingress.js'
 import { ChannelRegistry } from '../channels/registry.js'
 import { ChannelRouter } from '../channels/router.js'
 import { ChatDirectory } from '../sources/feishu-directory.js'
-import { resolveRuntimeIdentity, detailText, type IdentityCache, type RuntimeIdentity } from '../sources/feishu-identity.js'
+import { resolveRuntimeIdentity, detailText, type IdentityCache, type IdentityStatusView, type RuntimeIdentity } from '../sources/feishu-identity.js'
 import { createLarkRunner, larkEnv } from '../sources/lark.js'
 import { createVisionTranscriber, type ImageTranscriber } from '../infra/vision.js'
 import { runInitWizard } from './init.js'
@@ -1159,6 +1159,16 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     channel: { botOpenIds, botNames, actorNames },
     initial: identity,
   })
+  // 启动时还有「待重试」条目或机器人识别失败：后台退避重试，成功后同步策略。
+  // 否则通讯录权限恢复后没人会去重启或重新保存，群会一直静默全拒。
+  if (identity) {
+    scheduleIdentityRetry({
+      initial: identity.status,
+      logger,
+      refresh: () => identityPort.refresh(),
+      apply: () => { engine.updatePolicy(policyOf(config, identityPort.policyIds?.())) },
+    })
+  }
   const runtimes = createRuntimes(config, {
     home,
     workersDir: join(home, 'workers'),
@@ -1571,6 +1581,53 @@ export function createIdentityPort(opts: {
     snapshot: () => current?.status ?? emptyIdentityStatus(),
     policyIds: () => (current ? policyResolutionOf(current) : {}),
   }
+}
+
+/**
+ * 后台重试身份解析（启动时存在「待重试」条目或机器人识别失败才启动）。
+ *
+ * 只告警不重试的话，通讯录权限恢复后没人会去重启或重新保存，群就会一直静默全拒；
+ * 但也不能无限空转，所以按有限次数退避重试，成功后同步通道与策略。
+ */
+export function scheduleIdentityRetry(opts: {
+  /** 首次解析状态；有待重试项或机器人识别失败时才启动。 */
+  initial: IdentityStatusView
+  logger: Logger
+  /** 重新解析并同步通道，返回最近一次解析状态。 */
+  refresh: () => Promise<IdentityStatusView>
+  /** 重试成功后重建策略（名单已可用）。 */
+  apply: () => void
+  /** 重试间隔（毫秒），次数等于数组长度；测试里可以传 0。 */
+  delays?: readonly number[]
+}): void {
+  const initial = opts.initial
+  if (initial.pendingCount === 0 && initial.bot.resolved) return
+  const delays = opts.delays ?? [60_000, 300_000, 900_000]
+  if (delays.length === 0) return
+  let round = 0
+  const tick = async (): Promise<void> => {
+    try {
+      const status = await opts.refresh()
+      if (status.pendingCount === 0 && status.bot.resolved) {
+        opts.apply()
+        opts.logger.info('identity:retry-resolved', { round: round + 1, pending: status.pendingCount })
+        return
+      }
+      opts.logger.warn('identity:retry-deferred', { round: round + 1, pending: status.pendingCount, bot: status.bot.resolved })
+    } catch (error) {
+      // 重试失败不影响服务：下一轮再试，错误原因进日志。
+      opts.logger.warn('identity:retry-failed', { round: round + 1, detail: errorMessage(error) })
+    }
+    round += 1
+    if (round >= delays.length) {
+      opts.logger.warn('identity:retry-exhausted', { attempts: round })
+      return
+    }
+    const next = setTimeout(() => { void tick() }, delays[round])
+    next.unref?.()
+  }
+  const first = setTimeout(() => { void tick() }, delays[0])
+  first.unref?.()
 }
 
 /**

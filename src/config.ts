@@ -911,8 +911,14 @@ export interface ConfigPatchResult {
   changed: string[]
 }
 
-/** 立即生效的配置路径前缀；其余改动都需要重启 `ra start`。 */
-export const HOT_CONFIG_PREFIXES = ['policy.'] as const
+/**
+ * 立即生效的配置路径前缀；其余改动都需要重启 `ra start`。
+ *
+ * `feishu.allowed` 现在是热更新：面板保存后服务端会重解析名单并重建策略。
+ * 群级 `allowed` 仍挂在 `feishu.chats` 下（同一条目里还有 mode / repo 等必须重启的字段），
+ * 所以仍然按需要重启处理。
+ */
+export const HOT_CONFIG_PREFIXES = ['policy.', 'feishu.allowed'] as const
 
 function clone<T>(value: T): T {
   return structuredClone(value)

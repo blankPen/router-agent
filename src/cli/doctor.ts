@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import type { AppConfig } from '../config.js'
 import { projectsForRuntime } from '../config.js'
 import type { CommandRunner } from '../infra/process.js'
-import { resolveBotIdentity } from '../sources/feishu-identity.js'
+import { checkMemberPayload, resolveBotIdentity } from '../sources/feishu-identity.js'
 import type { WorkerRuntime } from '../worker/port.js'
 import type { RuntimeChoice } from '../worker/runtimes/acp/detect.js'
 import {
@@ -178,22 +178,44 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
   }))
 
   checks.push(await check('机器人在群内', async () => {
-    // 优先查 @ 模式的群：这些群识别不到机器人就会整群丢消息。
-    const chatId = mentionChatIds[0] ?? config.feishu.chats[0]?.chat
-    if (!chatId) return { status: 'warn', detail: '没有配置群' }
-    const res = await deps.lark.run(['im', '+chat-members-list', '--chat-id', chatId, '--as', 'bot', '--format', 'json'])
-    const members = res.code === 0 ? parseLarkMembers(res.stdout) : []
-    const bots = members.filter(member => member.type === 'bot')
-    const matched = manualBot
-      ? bots.some(bot => config.feishu.botOpenIds.includes(bot.openId) || (bot.appId ? config.feishu.botOpenIds.includes(bot.appId) : false))
-      : bots.some(bot => Boolean(bot.appId) && bot.appId === config.feishu.appId)
-    return matched
-      ? { status: 'ok', detail: `${bots.length} 个机器人成员，已匹配${manualBot ? '手动配置' : 'feishu.appId'}` }
-      : {
-          status: 'fail',
-          detail: manualBot ? `群 ${chatId} 里没找到配置的机器人身份` : `群 ${chatId} 里没找到 feishu.appId=${config.feishu.appId || '（未配置）'} 的机器人`,
-          hint: manualBot ? 'ra config set feishu.botOpenIds ou_xxx,cli_xxx' : '确认 feishu.appId 与机器人所属应用一致，并把机器人拉进群',
-        }
+    // @ 模式的群最要紧：识别不到机器人就会整群丢消息。没有 @ 群时退回检查配置里的第一个群。
+    const chatIds = mentionChatIds.length > 0 ? mentionChatIds : config.feishu.chats.slice(0, 1).map(chat => chat.chat)
+    if (chatIds.length === 0) return { status: 'warn', detail: '没有配置群' }
+    const missing: string[] = []
+    const failures: string[] = []
+    let botCount = 0
+    for (const chatId of chatIds) {
+      const res = await deps.lark.run(['im', '+chat-members-list', '--chat-id', chatId, '--as', 'bot', '--format', 'json'])
+      if (res.code !== 0) {
+        failures.push(`群 ${chatId} 读取成员失败（code=${res.code}）`)
+        continue
+      }
+      // 退出码 0 也可能是错误信封：接口异常不能当成「群里没有机器人」，否则排查方向会被带偏。
+      const payload = checkMemberPayload(res.stdout)
+      if (!payload.ok) {
+        failures.push(`群 ${chatId} ${payload.detail}`)
+        continue
+      }
+      const bots = parseLarkMembers(res.stdout).filter(member => member.type === 'bot')
+      botCount += bots.length
+      const matched = manualBot
+        ? bots.some(bot => config.feishu.botOpenIds.includes(bot.openId) || (bot.appId ? config.feishu.botOpenIds.includes(bot.appId) : false))
+        : bots.some(bot => Boolean(bot.appId) && bot.appId === config.feishu.appId)
+      if (!matched) missing.push(chatId)
+    }
+    if (failures.length > 0) {
+      return { status: 'fail', detail: `读取群成员接口异常：${failures.join('；')}`, hint: '检查 lark-cli 与机器人权限后重试；接口异常时无法判断机器人是否在群' }
+    }
+    if (missing.length > 0) {
+      return {
+        status: 'fail',
+        detail: manualBot
+          ? `群 ${missing.join('、')} 里没找到配置的机器人身份`
+          : `群 ${missing.join('、')} 里没找到 feishu.appId=${config.feishu.appId || '（未配置）'} 的机器人`,
+        hint: manualBot ? 'ra config set feishu.botOpenIds ou_xxx,cli_xxx' : '确认 feishu.appId 与机器人所属应用一致，并把机器人拉进群',
+      }
+    }
+    return { status: 'ok', detail: `${chatIds.length} 个群共 ${botCount} 个机器人成员，已匹配${manualBot ? '手动配置' : 'feishu.appId'}` }
   }))
 
   checks.push(await check('模型配置', async () => {
