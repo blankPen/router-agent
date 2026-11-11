@@ -84,6 +84,10 @@ Router 不做对话，只在必要时说话：
 | `feishu:card-fallback` | Sender | `target` `key` `code` `detail` | 互动卡片发送失败，已自动降级为富文本 |
 | `feishu:quote-fetch-failed` / `feishu:quote-parse-failed` | Source | `messageId` `detail` | 引用消息回查失败，按原消息继续 |
 | `chats:refresh-failed` / `chats:parse-failed` / `chats:cache-invalid` | Source | `code` / `detail` / `path` | 群名目录刷新失败或缓存损坏，旧值继续可用 |
+| `identity:resolved` | Identity | `entry`(掩码) `actor` `name` | 允许名单条目（邮箱 / open_id）解析成 open_id 与显示名 |
+| `identity:resolve-failed` | Identity | `entry`(掩码) `detail` | 条目确认解析不出来（格式不对 / 查无此人 / open_id 跨应用），该条目被丢弃 |
+| `identity:resolve-deferred` | Identity | `entry`(掩码) `detail` | 暂时查不了（权限缺失 / lark-cli 不可用 / 超时），条目**保留**待重试，不清空名单 |
+| `identity:cache-failed` | Identity | `kind` `detail` | 身份解析缓存读写失败，本次降级为直接查通讯录 |
 | `loop:trigger-failed` | Agent Loop | `triggerId` `chat` `detail` | 单条消息处理异常，同批其它消息不受影响 |
 | `decision:engine-failed` | Agent Loop | `triggerId` `detail` | 研判引擎调用失败，按 unavailable 处理并留下原因 |
 | `chat:reply-failed` | Agent Loop | `triggerId` `chat` `reason` `detail` | 回复模型失败，已退回固定话术 |
