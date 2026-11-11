@@ -407,8 +407,9 @@ export async function resolveBotIdentity(opts: {
   const missing: string[] = []
 
   // 没有 mention 群时不需要识别：不是故障，不写错误日志。
+  // resolved 的语义是「机器人身份可用或无需识别」，所以这里必须是 true，否则面板会误报成解析失败。
   if (opts.chatIds.length === 0) {
-    return { botOpenIds: [], botNames: [], resolved: false, detail: '没有配置 mode=mention 的群，无需识别机器人身份' }
+    return { botOpenIds: [], botNames: [], resolved: true, detail: '没有配置 mode=mention 的群，无需识别机器人身份' }
   }
   if (!opts.appId) {
     const detail = '没有配置 feishu.appId，无法识别机器人身份'
@@ -431,7 +432,14 @@ export async function resolveBotIdentity(opts: {
       continue
     }
     if (!isJson(stdout)) {
-      failures.push(`群 ${chatId} 成员列表输出无法解析`)
+      failures.push(`群 ${chatId} 读取成员接口异常：成员列表输出无法解析`)
+      continue
+    }
+    // 退出码 0 不代表成功：lark-cli 可能返回 `{"ok":false,"error":{...}}`。
+    // 这种情况是接口异常，不能当成「群里没找到机器人」，否则唯一的诊断日志会被带偏。
+    const check = checkMemberPayload(stdout)
+    if (!check.ok) {
+      failures.push(`群 ${chatId} 读取成员${check.detail}`)
       continue
     }
     const matched = parseLarkMembers(stdout).filter(member => member.type === 'bot' && member.appId === opts.appId)
@@ -452,22 +460,23 @@ export async function resolveBotIdentity(opts: {
     for (const openId of botOpenIds) {
       logger.info('feishu:bot-identity-resolved', { bot: openId, name: names.get(openId) ?? '' })
     }
+    // 部分成功时也要把失败的群带出来：否则面板显示「已识别」，排查的人看不到另一半群其实读不到。
+    const failureDetail = failures.length > 0 ? `；以下群读取成员失败：${failures.join('；')}` : ''
     return {
       botOpenIds,
       botNames,
       resolved: true,
-      detail: `已在群 ${opts.chatIds.join('、')} 里识别到机器人`,
+      detail: `已在群 ${opts.chatIds.join('、')} 里识别到机器人${failureDetail}`,
     }
   }
 
-  // 没有 mention 群时不需要识别：不是故障，不写错误日志。
-  if (opts.chatIds.length === 0) {
-    return { botOpenIds: [], botNames: [], resolved: false, detail: '没有配置 mode=mention 的群，无需识别机器人身份' }
-  }
-
-  const detail = failures.length > 0
-    ? failures.join('；')
-    : `群 ${missing.join('、')} 里没找到 appId=${opts.appId} 的机器人`
+  // 接口异常优先于「没找到」：一个是查不了，一个是确实不在群里，排查方向完全不同。
+  const failureText = failures.length > 0 ? failures.join('；') : ''
+  const missingText = missing.length > 0
+    ? `群 ${missing.join('、')} 里没找到 appId=${opts.appId} 的机器人`
+    : ''
+  const joined = [failureText, missingText].filter(Boolean).join('；')
+  const detail = joined || `未能在群 ${opts.chatIds.join('、')} 里识别到机器人`
   logger.error('feishu:bot-identity-failed', { detail })
   return { botOpenIds: [], botNames: [], resolved: false, detail }
 }
@@ -670,12 +679,38 @@ function maskEntry(entry: string): string {
   return entry.includes('@') ? maskEmail(entry.trim()) : entry
 }
 
+/**
+ * 校验群成员列表返回：先识别接口错误信封，再确认结构完好。
+ *
+ * lark-cli 存在「退出码 0 + `{"ok":false,"error":{...}}`」的返回形态。接口已经失败时
+ * 根本没有成员列表可查，必须归为接口异常；只有结构完好、确实没有匹配项才算「没找到机器人」。
+ */
+function checkMemberPayload(stdout: string): { ok: true } | { ok: false; detail: string } {
+  const parsed = JSON.parse(stdout) as unknown
+  const root = parsed && typeof parsed === 'object' ? parsed as Record<string, any> : null
+  // 顶层 ok === false，或存在 error 字段（即使 ok 没写 false），都是接口错误信封。
+  if (root && (root.ok === false || 'error' in root)) {
+    const code = String(root.error?.code ?? '')
+    return {
+      ok: false,
+      detail: `接口异常：接口返回错误${code ? `（code=${code}）` : ''}：${describeError(root)}`,
+    }
+  }
+  const data = root?.data
+  if (!data || typeof data !== 'object' || (!Array.isArray(data.users) && !Array.isArray(data.bots))) {
+    return { ok: false, detail: '接口异常：成员列表结构异常' }
+  }
+  return { ok: true }
+}
+
 /** 输出是不是 JSON：不是的话不能当「没找到机器人」，那会把接口异常说成业务结论。 */
 function isJson(text: string): boolean {
   try {
     JSON.parse(text)
     return true
   } catch {
+    // 输出不是 JSON 时按「接口异常」处理（由调用方写进 failures），不当作业务结论，
+    // 所以这里可以安全地忽略解析异常，不需要额外日志。
     return false
   }
 }

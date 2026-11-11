@@ -577,15 +577,85 @@ describe('机器人身份自动识别', () => {
     expect(events.find(event => event.message === 'feishu:bot-identity-failed')?.level).toBe('error')
   })
 
-  it('没有 mention 群时不扫描也不写错误事件', async () => {
+  it('没有 mention 群时不扫描也不写错误事件，且 resolved 为 true（无需识别不是失败）', async () => {
     const runner = makeRunner(() => { throw new Error('不该被调用') })
     const { events, logger } = captureLogger()
 
     const bot = await resolveBotIdentity({ appId: 'cli_a', chatIds: [], lark: runner, logger })
 
     expect(runner.calls).toHaveLength(0)
-    expect(bot.resolved).toBe(false)
+    expect(bot.resolved).toBe(true)
+    expect(bot.detail).toContain('无需识别')
     expect(events.find(event => event.message === 'feishu:bot-identity-failed')).toBeUndefined()
+  })
+
+  it('lark-cli 返回 ok:false 错误信封时按接口异常处理，不能当成没找到机器人', async () => {
+    const runner = makeRunner(() => ({
+      code: 0,
+      stdout: JSON.stringify({ ok: false, error: { code: 99991663, msg: 'permission denied for alice@example.com' } }),
+      stderr: '',
+    }))
+    const { events, logger } = captureLogger()
+
+    const bot = await resolveBotIdentity({ appId: 'cli_a', chatIds: ['oc_1'], lark: runner, logger })
+
+    expect(bot.resolved).toBe(false)
+    expect(bot.detail).toContain('接口异常')
+    expect(bot.detail).toContain('99991663')
+    // 接口异常不能被说成「机器人不在群里」，否则排查方向会被带偏。
+    expect(bot.detail).not.toContain('没找到')
+    // 错误信息里的邮箱必须掩码。
+    expect(bot.detail).not.toContain('alice@example.com')
+    const failed = events.find(event => event.message === 'feishu:bot-identity-failed')
+    expect(failed?.level).toBe('error')
+    expect(String(failed?.extra?.detail)).toContain('接口异常')
+    expect(String(failed?.extra?.detail)).not.toContain('没找到')
+    expect(String(failed?.extra?.detail)).not.toContain('alice@example.com')
+  })
+
+  it('顶层带 error 字段（即使 ok 不为 false）也按接口异常处理', async () => {
+    const runner = makeRunner(() => ({
+      code: 0,
+      stdout: JSON.stringify({ data: {}, error: { code: 12345, msg: 'rate limited' } }),
+      stderr: '',
+    }))
+
+    const bot = await resolveBotIdentity({ appId: 'cli_a', chatIds: ['oc_1'], lark: runner })
+
+    expect(bot.resolved).toBe(false)
+    expect(bot.detail).toContain('接口异常')
+    expect(bot.detail).toContain('12345')
+    expect(bot.detail).not.toContain('没找到')
+  })
+
+  it('成员列表结构异常时按接口异常处理，不当成没找到机器人', async () => {
+    const runner = makeRunner(() => ({
+      code: 0,
+      stdout: JSON.stringify({ ok: true, data: { items: [] } }),
+      stderr: '',
+    }))
+
+    const bot = await resolveBotIdentity({ appId: 'cli_a', chatIds: ['oc_1'], lark: runner })
+
+    expect(bot.resolved).toBe(false)
+    expect(bot.detail).toContain('接口异常')
+    expect(bot.detail).not.toContain('没找到')
+  })
+
+  it('部分群读取失败时，成功分支的 detail 仍然带出失败的群', async () => {
+    const runner = makeRunner(argv => {
+      const chatId = argv[argv.indexOf('--chat-id') + 1]
+      if (chatId === 'oc_1') return MEMBERS([{ member_id: 'ou_bot', name: '小助手', app_id: 'cli_a' }])
+      return { code: 0, stdout: JSON.stringify({ ok: false, error: { code: 99991663, msg: 'permission denied' } }), stderr: '' }
+    })
+    const { events, logger } = captureLogger()
+
+    const bot = await resolveBotIdentity({ appId: 'cli_a', chatIds: ['oc_1', 'oc_2'], lark: runner, logger })
+
+    expect(bot.resolved).toBe(true)
+    expect(bot.detail).toContain('oc_2')
+    expect(bot.detail).toContain('接口异常')
+    expect(events.find(event => event.message === 'feishu:bot-identity-resolved')?.level).toBe('info')
   })
 })
 
@@ -671,6 +741,20 @@ describe('运行时身份装配', () => {
     expect(identity.bot.botOpenIds).toEqual(['ou_manual_bot'])
     expect(identity.bot.botNames).toEqual(['手动机器人'])
     expect(identity.bot.resolved).toBe(true)
+  })
+
+  it('没有 mode=mention 群时机器人身份标记为可用（无需识别，不是失败）', async () => {
+    const runner = makeRunner(() => { throw new Error('不该被调用') })
+    const config = appConfig({
+      appId: 'cli_a',
+      chats: [chatEntry('oc_all', { mode: 'all' })],
+    })
+
+    const identity = await resolveRuntimeIdentity({ config, lark: runner })
+
+    expect(runner.calls).toHaveLength(0)
+    expect(identity.bot.resolved).toBe(true)
+    expect(identity.bot.detail).toContain('无需识别')
   })
 
   it('只扫描 mode=mention 的群来识别机器人身份', async () => {

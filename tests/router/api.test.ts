@@ -721,7 +721,8 @@ describe('允许名单保存后立即生效', () => {
       expect(res.status).toBe(200)
       expect(res.json.identity).toEqual({
         entries: [],
-        bot: { botOpenIds: [], botNames: [], resolved: false, detail: '未启用' },
+        // 未启用不是失败：缺省快照的机器人身份按「可用」表示，避免面板红色误报。
+        bot: { botOpenIds: [], botNames: [], resolved: true, detail: '未启用' },
         invalidCount: 0,
         pendingCount: 0,
       })

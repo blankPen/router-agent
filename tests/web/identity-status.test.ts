@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   describeEntry,
+  normalizeIdentityStatus,
   problemEntries,
   summarizeBot,
   summarizeIdentity,
@@ -93,13 +94,12 @@ describe('机器人身份', () => {
     expect(summary.text).toContain('@ 模式的消息不会被接收')
   })
 
-  it('没有 @ 模式的群时只提醒，不按错误算', () => {
+  it('后端把「无需识别」标成 resolved=true 时不再告警', () => {
     const summary = summarizeBot(view({
-      bot: { botOpenIds: [], botNames: [], resolved: false, detail: '没有配置 mode=mention 的群' },
-    }), false)
-    expect(summary.kind).toBe('warn')
-    expect(summary.text).toContain('机器人身份没识别出来')
-    expect(summary.text).not.toContain('@ 模式的消息不会被接收')
+      bot: { botOpenIds: [], botNames: [], resolved: true, detail: '没有配置 mode=mention 的群，无需识别机器人身份' },
+    }))
+    expect(summary.kind).toBe('ok')
+    expect(summary.text).not.toContain('机器人身份没识别出来')
   })
 
   it('识别出来时显示机器人名字', () => {
@@ -108,5 +108,33 @@ describe('机器人身份', () => {
     }))
     expect(summary.kind).toBe('ok')
     expect(summary.text).toContain('阿罗')
+  })
+})
+
+describe('残缺的服务端快照', () => {
+  it('缺 entries 与 bot 时按良性缺省归一，不抛错', () => {
+    const normalized = normalizeIdentityStatus({})
+    expect(normalized.entries).toEqual([])
+    expect(normalized.bot.resolved).toBe(true)
+    expect(normalized.bot.botOpenIds).toEqual([])
+    expect(normalized.invalidCount).toBe(0)
+    expect(normalized.pendingCount).toBe(0)
+
+    // 面板的汇总函数也必须能直接处理残缺快照，不能拖垮整个配置页。
+    expect(summarizeIdentity({} as IdentityStatusView).kind).toBe('ok')
+    expect(summarizeBot({} as IdentityStatusView).kind).toBe('ok')
+    expect(problemEntries({} as IdentityStatusView)).toEqual([])
+  })
+
+  it('只缺 bot 时仍保留可用的 entries 与计数', () => {
+    const normalized = normalizeIdentityStatus({
+      entries: [RESOLVED_EMAIL],
+      invalidCount: 1,
+      pendingCount: 2,
+    } as IdentityStatusView)
+    expect(normalized.entries).toEqual([RESOLVED_EMAIL])
+    expect(normalized.bot.resolved).toBe(true)
+    expect(normalized.invalidCount).toBe(1)
+    expect(normalized.pendingCount).toBe(2)
   })
 })

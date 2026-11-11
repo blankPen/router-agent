@@ -39,6 +39,31 @@ export interface IdentitySummary {
   text: string
 }
 
+/**
+ * 把服务端快照归一成结构完整的小对象。
+ *
+ * `identity` 字段本身是可选的（兼容旧服务端），但旧 / 异常服务端可能只返回 `{}` 或缺 `bot`。
+ * 面板不能因为缺字段在渲染期抛错、拖垮整个配置页，所以统一在这里兜底：
+ * - 缺 `entries` 当空数组；
+ * - 缺 `bot` 当一个良性缺省 bot（`resolved: true`，未启用/无需识别不是失败）；
+ * - 缺计数当 0。
+ */
+export function normalizeIdentityStatus(status: Partial<IdentityStatusView> | null | undefined): IdentityStatusView {
+  const source = status ?? {}
+  const bot = (source.bot ?? {}) as Partial<IdentityStatusView['bot']>
+  return {
+    entries: Array.isArray(source.entries) ? source.entries : [],
+    bot: {
+      botOpenIds: Array.isArray(bot.botOpenIds) ? bot.botOpenIds : [],
+      botNames: Array.isArray(bot.botNames) ? bot.botNames : [],
+      resolved: typeof bot.resolved === 'boolean' ? bot.resolved : true,
+      detail: typeof bot.detail === 'string' ? bot.detail : '',
+    },
+    invalidCount: typeof source.invalidCount === 'number' ? source.invalidCount : 0,
+    pendingCount: typeof source.pendingCount === 'number' ? source.pendingCount : 0,
+  }
+}
+
 /** 邮箱掩码：只留首字符，域名保留（`p***@dewu.com`），与后端保持一致。 */
 export function maskEmail(email: string): string {
   const at = email.indexOf('@')
@@ -65,41 +90,39 @@ export function describeEntry(entry: IdentityEntryView): string {
  */
 export function summarizeIdentity(status: IdentityStatusView | undefined): IdentitySummary {
   if (!status) return { kind: 'ok', text: '尚未获取到允许名单的解析状态。' }
-  if (status.invalidCount > 0) {
-    return { kind: 'error', text: `有 ${status.invalidCount} 个允许名单条目没能解析到，这些人的消息不会被接收。` }
+  const normalized = normalizeIdentityStatus(status)
+  if (normalized.invalidCount > 0) {
+    return { kind: 'error', text: `有 ${normalized.invalidCount} 个允许名单条目没能解析到，这些人的消息不会被接收。` }
   }
-  if (status.pendingCount > 0) {
-    return { kind: 'warn', text: `有 ${status.pendingCount} 个允许名单条目还在待重试，稍后会自动再解析。` }
+  if (normalized.pendingCount > 0) {
+    return { kind: 'warn', text: `有 ${normalized.pendingCount} 个允许名单条目还在待重试，稍后会自动再解析。` }
   }
-  if (status.entries.length === 0) return { kind: 'ok', text: '允许名单为空，没有配置任何成员。' }
-  return { kind: 'ok', text: `允许名单 ${status.entries.length} 项都已解析成功。` }
+  if (normalized.entries.length === 0) return { kind: 'ok', text: '允许名单为空，没有配置任何成员。' }
+  return { kind: 'ok', text: `允许名单 ${normalized.entries.length} 项都已解析成功。` }
 }
 
 /**
  * 机器人身份汇总。
  *
- * 机器人身份没识别出来时，@ 模式的消息收不到——这正是这次事故的形态，
- * 所以按错误级提示。
+ * 机器人身份没识别出来时，@ 模式的消息收不到——这正是这次事故的形态，所以按错误级提示。
  *
- * `mentionMode` 表示当前是否真的在用 @ 模式：没有 @ 模式的群时机器人身份用不上，
- * 这时只给提醒，不按错误算（否则会对每个不用 @ 的用户误报）。
+ * 不再从草稿里的群配置反推「有没有 @ 模式」：后端快照按**已保存配置**计算，
+ * 「无需识别」已经被表达成 `resolved: true`，前端只要看到 `resolved === false` 就是真失败。
  */
-export function summarizeBot(status: IdentityStatusView | undefined, mentionMode = true): IdentitySummary {
+export function summarizeBot(status: IdentityStatusView | undefined): IdentitySummary {
   if (!status) return { kind: 'ok', text: '尚未获取到机器人身份状态。' }
-  if (!status.bot.resolved) {
-    const detail = status.bot.detail ? `（${status.bot.detail}）` : ''
-    if (!mentionMode) {
-      return { kind: 'warn', text: `机器人身份没识别出来，但当前没有 @ 模式的群，暂时不影响收消息${detail}。` }
-    }
+  const normalized = normalizeIdentityStatus(status)
+  if (!normalized.bot.resolved) {
+    const detail = normalized.bot.detail ? `（${normalized.bot.detail}）` : ''
     return { kind: 'error', text: `机器人身份没识别出来，@ 模式的消息不会被接收${detail}。` }
   }
-  const names = status.bot.botNames.join('、')
-  const label = names || status.bot.botOpenIds.join('、')
+  const names = normalized.bot.botNames.join('、')
+  const label = names || normalized.bot.botOpenIds.join('、')
   return { kind: 'ok', text: label ? `机器人身份已识别：${label}` : '机器人身份已识别。' }
 }
 
 /** 有问题的条目（解析失败 / 待重试），供面板逐条列出。 */
 export function problemEntries(status: IdentityStatusView | undefined): IdentityEntryView[] {
   if (!status) return []
-  return status.entries.filter(entry => entry.status !== 'resolved')
+  return normalizeIdentityStatus(status).entries.filter(entry => entry.status !== 'resolved')
 }

@@ -53,11 +53,16 @@ export interface IdentityPort {
   policyIds?(): PolicyResolution
 }
 
-/** 没注入身份端口时的空状态：面板拿到结构完整的空快照，而不是 undefined。 */
+/**
+ * 没注入身份端口时的空状态：面板拿到结构完整的空快照，而不是 undefined。
+ *
+ * `bot.resolved` 的语义是「机器人身份可用或无需识别」；未启用属于后者，不是解析失败，
+ * 所以这里是 true，避免面板弹出红色误报。
+ */
 export function emptyIdentityStatus(): IdentityStatusView {
   return {
     entries: [],
-    bot: { botOpenIds: [], botNames: [], resolved: false, detail: '未启用' },
+    bot: { botOpenIds: [], botNames: [], resolved: true, detail: '未启用' },
     invalidCount: 0,
     pendingCount: 0,
   }

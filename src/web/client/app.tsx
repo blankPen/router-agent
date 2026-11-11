@@ -1481,7 +1481,6 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
                     <IdentityNotices
                       identity={identity}
                       stale={changed.includes('feishu.allowed') || changed.includes('feishu.chats')}
-                      mentionMode={(draft.feishu?.chats ?? []).some((chat: { mode?: string }) => chat.mode === 'mention')}
                     />
                     <FeishuBotPanel
                       appId={String(draft.feishu?.appId ?? '')}
@@ -1550,15 +1549,13 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
  * 解析失败**不阻断保存**，所以这里只说明「这些人的消息收不到」，
  * 不能写成「保存失败」的口气。
  */
-function IdentityNotices({ identity, stale, mentionMode }: {
+function IdentityNotices({ identity, stale }: {
   identity?: IdentityStatusView
   stale?: boolean
-  /** 当前是否有 @ 模式的群：没有的话机器人身份用不上，不用按错误提示。 */
-  mentionMode?: boolean
 }): JSX.Element | null {
   if (!identity) return null
   const summary = summarizeIdentity(identity)
-  const bot = summarizeBot(identity, mentionMode ?? true)
+  const bot = summarizeBot(identity)
   const problems = problemEntries(identity)
   return (
     <>
@@ -1568,10 +1565,13 @@ function IdentityNotices({ identity, stale, mentionMode }: {
           <span>允许名单有未保存的修改，下面的解析状态还是上一次保存后的结果。</span>
         </div>
       )}
-      <div className={`banner ${summary.kind === 'error' ? 'danger' : summary.kind === 'warn' ? 'warn' : ''} compact`}>
-        <Icon name={summary.kind === 'ok' ? 'check' : 'alert'} size={13} />
-        <span>{summary.text}</span>
-      </div>
+      {/* 正常状态不占一条横幅：只在确实有问题（解析失败 / 待重试）时提示。 */}
+      {summary.kind !== 'ok' && (
+        <div className={`banner ${summary.kind === 'error' ? 'danger' : 'warn'} compact`}>
+          <Icon name="alert" size={13} />
+          <span>{summary.text}</span>
+        </div>
+      )}
       {bot.kind !== 'ok' && (
         <div className={`banner ${bot.kind === 'error' ? 'danger' : 'warn'} compact`}>
           <Icon name="alert" size={13} />
