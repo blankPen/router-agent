@@ -78,6 +78,8 @@ export class ChannelIngress {
         id: trigger.id,
         chat: trigger.chatId,
         addressed: trigger.addressed,
+        // 没 @ 但被放行的消息（tk-59）：处理它是因为话题绑着在办工单，不是「漏了 @ 判断」。
+        admitted: Boolean(trigger.unaddressedAdmitted),
         quoted: Boolean(raw?.quote),
         images: Array.isArray(raw?.images) ? raw.images.length : 0,
         // 事件到底带了哪些线程标识：排查「消息没进工单」时先看 topic 是否为 true。

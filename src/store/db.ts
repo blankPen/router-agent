@@ -149,6 +149,7 @@ CREATE TABLE IF NOT EXISTS triggers (
   is_bot INTEGER NOT NULL,
   text TEXT NOT NULL,
   addressed TEXT NOT NULL,
+  unaddressed_admitted INTEGER NOT NULL DEFAULT 0,
   media_only INTEGER NOT NULL DEFAULT 0,
   received_at TEXT NOT NULL,
   disposition TEXT NOT NULL,
@@ -426,6 +427,9 @@ export class Store {
     if (!triggerColumns.some(column => column.name === 'media_only')) {
       this.db.exec('ALTER TABLE triggers ADD COLUMN media_only INTEGER NOT NULL DEFAULT 0')
     }
+    if (!triggerColumns.some(column => column.name === 'unaddressed_admitted')) {
+      this.db.exec('ALTER TABLE triggers ADD COLUMN unaddressed_admitted INTEGER NOT NULL DEFAULT 0')
+    }
     const ticketColumns = this.db.prepare('PRAGMA table_info(tickets)').all() as Row[]
     if (!ticketColumns.some(column => column.name === 'repo')) {
       this.db.exec("ALTER TABLE tickets ADD COLUMN repo TEXT NOT NULL DEFAULT ''")
@@ -511,10 +515,10 @@ export class Store {
 
   insertTrigger(t: Trigger): boolean {
     const result = this.db.prepare(`INSERT OR IGNORE INTO triggers
-      (id, source, external_id, thread_id, chat_id, chat_name, actor_id, actor_name, is_bot, text, addressed, media_only, received_at, disposition, decision_id, raw)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      (id, source, external_id, thread_id, chat_id, chat_name, actor_id, actor_name, is_bot, text, addressed, unaddressed_admitted, media_only, received_at, disposition, decision_id, raw)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(t.id, t.source, t.externalId, t.threadId, t.chatId, t.chatName, t.actorId, t.actorName, t.isBot ? 1 : 0,
-        t.text, t.addressed, t.mediaOnly ? 1 : 0, t.receivedAt, t.disposition, t.decisionId ?? null, t.raw === undefined ? null : JSON.stringify(t.raw))
+        t.text, t.addressed, t.unaddressedAdmitted ? 1 : 0, t.mediaOnly ? 1 : 0, t.receivedAt, t.disposition, t.decisionId ?? null, t.raw === undefined ? null : JSON.stringify(t.raw))
     return Number(result.changes) > 0
   }
 
@@ -1233,6 +1237,7 @@ function triggerFromRow(row: Row): Trigger {
     isBot: Number(row.is_bot) === 1,
     text: String(row.text),
     addressed: row.addressed as Trigger['addressed'],
+    ...(Number(row.unaddressed_admitted) === 1 ? { unaddressedAdmitted: true } : {}),
     mediaOnly: Number(row.media_only) === 1,
     receivedAt: String(row.received_at),
     disposition: row.disposition as TriggerDisposition,
