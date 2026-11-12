@@ -2,7 +2,7 @@
 export interface FeishuChannelSettings {
   appId: string
   allowed: string[]
-  chats: import('#core/config.js').ChatAdmissionSettings[]
+  chats: import('@router-agent/core/config.js').ChatAdmissionSettings[]
   directMessages: boolean
   botOpenIds: string[]
   botNames: string[]

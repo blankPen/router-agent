@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { LARK_PROFILE_HOME, larkEnv, withEnv, parseAuthStatus, parseDeviceLogin, parseLarkChats, parseLarkMembers, parseSelfOpenId, parseAppId, parseOrcaRepos, parseBotAvailable, parseEventPrecheck, parseOrcaStatus } from '#channel/sources/lark.js'
+import { LARK_PROFILE_HOME, larkEnv, withEnv, parseAuthStatus, parseDeviceLogin, parseLarkChats, parseLarkMembers, parseSelfOpenId, parseAppId, parseOrcaRepos, parseBotAvailable, parseEventPrecheck, parseOrcaStatus } from '@router-agent/channel-feishu'
 import type { CommandRunner } from '#infra/process.js'
 
 describe('lark-cli 配置隔离', () => {

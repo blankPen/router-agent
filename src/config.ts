@@ -7,8 +7,15 @@ import { DEFAULT_ADMISSION, type AcceptMode, type AdmissionTable, type Interrupt
 import type { ToolPolicy } from '#runtime/port.js'
 import { UI_EVIDENCE_MODES, type UiEvidenceMode } from '#runtime/evidence-gate.js'
 import { ORCA_RUNTIME_ID, isWorkerRuntimeId, normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
-import { optionFieldOf, parseRuntimeOptionPath, validateRuntimeOption } from '#runtime/runtimes/options.js'
+import { WORKER_RUNTIMES } from '#runtime/runtimes/catalog.js'
+import { optionFieldOf, parseRuntimeOptionPath, validateRuntimeOption, type RuntimeOptionSpec } from '#runtime/runtimes/options.js'
+import { DEFAULT_RUNTIME_PLUGINS } from '#runtime/plugins/loader.js'
+import { DEFAULT_CHANNEL_PLUGINS } from '#channel/plugins/loader.js'
 import { noopLogger, errorMessage, type Logger } from '#infra/logger.js'
+import type { PluginEntry } from '#infra/plugin-loader.js'
+
+const runtimePackage: Record<string, string> = { ...DEFAULT_RUNTIME_PLUGINS }
+const channelPackage = (id: string): string | undefined => DEFAULT_CHANNEL_PLUGINS[id]
 
 export type ChatMode = 'all' | 'mention'
 
@@ -261,7 +268,19 @@ export interface AppConfig {
   retention: RetentionSettings
   workspace: WorkspaceSettings
   worker: { tools: ToolPolicy; evidence: { ui: UiEvidenceMode } }
-runtime: { default: string; options?: Record<string, unknown>; projects?: RuntimeProjects }
+  runtime: {
+    default: string
+    options?: Record<string, unknown>
+    projects?: RuntimeProjects
+    /** 运行时插件入口；id 可覆盖内置包，也可以新增自定义 runtime。 */
+    plugins?: Record<string, PluginEntry>
+    /** 运行期发现的实例 id（createAll 多实例）；只用于校验，不写回配置文件。 */
+    loadedIds?: string[]
+    /** 插件声明的选项 schema；只用于面板渲染与校验，不写回配置文件。 */
+    optionSpecs?: RuntimeOptionSpec[]
+  }
+  /** 通道插件入口；id 可覆盖内置飞书包，也可以新增自定义 channel。 */
+  channels?: Record<string, PluginEntry>
   server: { port: number }
   llm?: LlmSettings
 }
@@ -298,6 +317,30 @@ export function setRuntimeOption(config: AppConfig, runtimeId: string, key: stri
   else options[runtimeId] = entry
   // 全删光时连 options 段一起去掉，配置文件不留空壳。
   config.runtime.options = Object.keys(options).length > 0 ? options : undefined
+}
+
+/** 写入或删除 runtime 插件入口；空串表示移除该条目。 */
+export function setRuntimePlugin(config: AppConfig, id: string, value: PluginEntry | ''): void {
+  const plugins = { ...(config.runtime.plugins ?? {}) }
+  if (value === '') delete plugins[id]
+  else plugins[id] = value
+  config.runtime.plugins = Object.keys(plugins).length > 0 ? plugins : undefined
+}
+
+/** 写入或删除 channel 插件入口；空串表示移除该条目。 */
+export function setChannelPlugin(config: AppConfig, id: string, value: PluginEntry | ''): void {
+  const channels = { ...(config.channels ?? {}) }
+  if (value === '') delete channels[id]
+  else channels[id] = value
+  config.channels = Object.keys(channels).length > 0 ? channels : undefined
+}
+
+/** 当前配置里可用的 runtime id：SDK 内置 + 用户声明的插件 id + 插件声明的多实例 id。 */
+export function isKnownRuntimeId(config: AppConfig, id: string): boolean {
+  const value = normalizeRuntimeId(id)
+  return isWorkerRuntimeId(value)
+    || Boolean(config.runtime.plugins?.[value])
+    || (config.runtime.loadedIds ?? []).includes(value)
 }
 
 /**
@@ -567,6 +610,8 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
   const retentionDoc = doc.retention ?? {}
   const workspaceDoc = doc.workspace ?? {}
   const projectLists = parseProjectLists(doc.runtime?.projects)
+  const runtimePlugins = parsePlugins(doc.runtime?.plugins)
+  const channelPlugins = parsePlugins(doc.channels)
 
   const admissionDoc = doc.policy?.admission ?? {}
   const admission: AdmissionTable = {
@@ -654,7 +699,9 @@ runtime: {
       default: normalizeRuntimeId(stringOr(doc.runtime?.default, base.runtime.default)),
       ...(doc.runtime?.options && typeof doc.runtime.options === 'object' ? { options: doc.runtime.options } : {}),
       ...(Object.keys(projectLists.others).length > 0 ? { projects: projectLists.others } : {}),
+      ...(Object.keys(runtimePlugins).length > 0 ? { plugins: runtimePlugins } : {}),
     },
+    ...(Object.keys(channelPlugins).length > 0 ? { channels: channelPlugins } : {}),
     server: { port: Number.isFinite(port) && port >= 0 && port < 65536 ? port : base.server.port },
     ...(isRecord(doc.llm) ? { llm: parseLlm(doc.llm) } : {}),
   }
@@ -831,6 +878,35 @@ function parseProjects(value: unknown): ProjectConfig[] {
     })
   }
   return projects
+}
+
+/**
+ * 解析插件入口表。
+ *
+ * 字符串与 `{ plugin | path | package, entry, enabled }` 都认；`enabled: false`
+ * 表示显式禁用内置插件。非法值跳过而不是让整份配置启动失败。
+ */
+function parsePlugins(value: unknown): Record<string, PluginEntry> {
+  if (!isRecord(value)) return {}
+  const plugins: Record<string, PluginEntry> = {}
+  for (const [rawId, item] of Object.entries(value)) {
+    const id = rawId.trim()
+    if (!id) continue
+    if (typeof item === 'string') {
+      if (item.trim()) plugins[id] = item.trim()
+      continue
+    }
+    if (!isRecord(item)) continue
+    const entry: Exclude<PluginEntry, string> = {
+      ...(typeof item.plugin === 'string' && item.plugin.trim() ? { plugin: item.plugin.trim() } : {}),
+      ...(typeof item.path === 'string' && item.path.trim() ? { path: item.path.trim() } : {}),
+      ...(typeof item.package === 'string' && item.package.trim() ? { package: item.package.trim() } : {}),
+      ...(typeof item.entry === 'string' && item.entry.trim() ? { entry: item.entry.trim() } : {}),
+      ...(typeof item.enabled === 'boolean' ? { enabled: item.enabled } : {}),
+    }
+    if (Object.keys(entry).length > 0) plugins[id] = entry
+  }
+  return plugins
 }
 
 /**
@@ -1072,13 +1148,17 @@ export function writeConfig(home: string, config: AppConfig): void {
       sweepMinutes: config.workspace.sweepMinutes,
     },
     worker: { tools: config.worker.tools, evidence: config.worker.evidence },
-runtime: {
+    runtime: {
       default: config.runtime.default,
       ...(config.runtime.options ? { options: config.runtime.options } : {}),
       ...(config.runtime.projects && Object.keys(config.runtime.projects).length > 0
         ? { projects: config.runtime.projects }
         : {}),
+      ...(config.runtime.plugins && Object.keys(config.runtime.plugins).length > 0
+        ? { plugins: config.runtime.plugins }
+        : {}),
     },
+    ...(config.channels && Object.keys(config.channels).length > 0 ? { channels: config.channels } : {}),
     projects: config.projects,
     server: { port: config.server.port },
   }
@@ -1127,6 +1207,11 @@ function clone<T>(value: T): T {
  */
 export function publicConfig(config: AppConfig): Record<string, unknown> {
   const doc = clone(config) as unknown as Record<string, unknown>
+  const runtimeDoc = doc.runtime as Record<string, unknown> | undefined
+  // 运行期发现的数据不写回配置文件；实例 id 由 plugins 字段下发。
+  if (runtimeDoc) delete runtimeDoc.loadedIds
+  if (runtimeDoc) delete runtimeDoc.optionSpecs
+  const runtime = runtimeDoc
   const llm = (doc.llm ?? {}) as Record<string, unknown>
   // 明文密钥不下发；apiKeySet 只用来告诉面板「已经配过」。
   doc.llm = {
@@ -1138,7 +1223,6 @@ export function publicConfig(config: AppConfig): Record<string, unknown> {
     apiKeySet: Boolean(llm.apiKey),
   }
   // ACP 适配器的 env 可能包含 API key：只下发 key 名，不下发明文。
-  const runtime = doc.runtime as Record<string, unknown> | undefined
   const options = runtime?.options
   if (runtime && options && typeof options === 'object' && !Array.isArray(options)) {
     const next: Record<string, unknown> = {}
@@ -1158,6 +1242,126 @@ export function publicConfig(config: AppConfig): Record<string, unknown> {
     runtime.options = next
   }
   return doc
+}
+
+/** 面板插件页需要的元数据；不包含任何密钥或实现细节。 */
+export interface PluginConfigView {
+  id: string
+  kind: 'runtime' | 'channel'
+  name?: string
+  label?: string
+  hint?: string
+  installHint?: string
+  installUrl?: string
+  packageName?: string
+  default?: boolean
+  /** 当前配置里的入口；内置插件未显式配置时为空。 */
+  entry?: PluginEntry
+  /** 已加载的 id（runtime 插件可能一次注册多个，如 ACP）。 */
+  loadedIds?: string[]
+  /** 运行时插件声明的可配置项；Web 面板据此渲染设置弹窗。 */
+  options?: RuntimeOptionSpec
+  status: 'builtin' | 'configured' | 'loaded' | 'failed'
+  error?: string
+  /** 失败时实际尝试加载的包名 / 路径。 */
+  specifier?: string
+}
+
+interface LoadedPluginMeta {
+  id: string
+  name: string
+  label: string
+  hint: string
+  installHint?: string
+  installUrl?: string
+  packageName?: string
+  deprecated?: boolean
+  loadedIds?: string[]
+}
+
+interface LoadedChannelMeta {
+  id: string
+  name: string
+  hint: string
+  default?: boolean
+  packageName?: string
+  loadedIds?: string[]
+}
+
+/** 插件在面板里的完整视图：插件自身元数据 + 宿主加载状态。 */
+export function publicPlugins(config: AppConfig, loaded?: {
+  runtimes?: LoadedPluginMeta[]
+  channels?: LoadedChannelMeta[]
+  failures?: Array<{ kind: 'runtime' | 'channel'; id: string; specifier: string; message: string }>
+}): PluginConfigView[] {
+  const failures = loaded?.failures ?? []
+  // createAll() 的实例 id（如 ACP 的 acp-claude）不是独立插件：面板只列插件本身，
+  // 实例挂在 loadedIds 下；运行时候选仍由 ACP 目录单独提供。
+  const ownerOf = (id: string): string | undefined => {
+    return loaded?.runtimes?.find(item => item.loadedIds?.includes(id) && item.id !== id)?.id
+  }
+  const hasExplicitEntry = (id: string): boolean => config.runtime.plugins?.[id] !== undefined
+  const runtimeIds = new Set([
+    ...WORKER_RUNTIMES.map(runtime => runtime.id),
+    ...Object.keys(config.runtime.plugins ?? {}),
+    ...(loaded?.runtimes ?? [])
+      .flatMap(runtime => runtime.loadedIds ?? [runtime.id])
+      .filter(id => ownerOf(id) === undefined || hasExplicitEntry(id)),
+  ])
+  const channelOwnerOf = (id: string): string | undefined =>
+    loaded?.channels?.find(item => item.loadedIds?.includes(id) && item.id !== id)?.id
+  const channelIds = new Set([
+    'feishu',
+    ...Object.keys(config.channels ?? {}),
+    ...(loaded?.channels ?? [])
+      .flatMap(channel => channel.loadedIds ?? [channel.id])
+      .filter(id => channelOwnerOf(id) === undefined || config.channels?.[id] !== undefined),
+  ])
+  const views: PluginConfigView[] = []
+  for (const id of runtimeIds) {
+    const meta = loaded?.runtimes?.find(item => item.id === id || item.loadedIds?.includes(id))
+    const builtin = WORKER_RUNTIMES.find(item => item.id === id)
+    const failure = failures.find(item => item.kind === 'runtime' && item.id === id)
+    const entry = config.runtime.plugins?.[id]
+    const packageName = meta?.packageName ?? runtimePackage[id]
+    const spec = config.runtime.optionSpecs?.find(item => item.runtimeId === id)
+    views.push({
+      id,
+      kind: 'runtime',
+      ...(meta?.name ?? builtin?.name ? { name: meta?.name ?? builtin?.name } : {}),
+      ...(meta?.label ?? builtin?.label ? { label: meta?.label ?? builtin?.label } : {}),
+      ...(meta?.hint ?? builtin?.hint ? { hint: meta?.hint ?? builtin?.hint } : {}),
+      ...(meta?.installHint ?? builtin?.installHint ? { installHint: meta?.installHint ?? builtin?.installHint } : {}),
+      ...(meta?.installUrl ?? builtin?.installUrl ? { installUrl: meta?.installUrl ?? builtin?.installUrl } : {}),
+      ...(packageName ? { packageName } : {}),
+      ...(meta?.loadedIds ? { loadedIds: meta.loadedIds } : {}),
+      ...(spec ? { options: spec } : {}),
+      ...(entry !== undefined ? { entry } : {}),
+      status: failure ? 'failed' : entry !== undefined ? 'configured' : meta ? 'loaded' : 'builtin',
+      ...(failure ? { error: failure.message } : {}),
+      ...(failure ? { specifier: failure.specifier } : {}),
+    })
+  }
+  for (const id of channelIds) {
+    const meta = loaded?.channels?.find(item => item.id === id || item.loadedIds?.includes(id))
+    const failure = failures.find(item => item.kind === 'channel' && item.id === id)
+    const entry = config.channels?.[id]
+    const packageName = meta?.packageName ?? channelPackage(id)
+    views.push({
+      id,
+      kind: 'channel',
+      ...(meta?.name ? { name: meta.name } : {}),
+      ...(meta?.hint ? { hint: meta.hint } : {}),
+      ...(packageName ? { packageName } : {}),
+      ...(meta?.loadedIds ? { loadedIds: meta.loadedIds } : {}),
+      ...(meta?.default ? { default: true } : {}),
+      ...(entry !== undefined ? { entry } : {}),
+      status: failure ? 'failed' : entry !== undefined ? 'configured' : meta ? 'loaded' : 'builtin',
+      ...(failure ? { error: failure.message } : {}),
+      ...(failure ? { specifier: failure.specifier } : {}),
+    })
+  }
+  return views
 }
 
 /** 面板「恢复默认值」用的基准：只保留可编辑口径，避免泄露模板之外的内容。 */
@@ -1222,11 +1426,22 @@ function enumValue(allowed: readonly string[]): Validator {
   return { check: value => (typeof value === 'string' && allowed.includes(value) ? null : `只能是 ${allowed.join(' / ')}`) }
 }
 
-/** 运行时 id 校验：内置运行时 + ACP 目录里的动态 id。 */
-const runtimeIdValue: Validator = {
-  check: value => (typeof value === 'string' && isWorkerRuntimeId(normalizeRuntimeId(value))
-    ? null
-    : '未知 runtime：只接受 orca / claude-code / acp / acp-<agent>'),
+/** 运行时 id 校验：内置运行时 + ACP 目录 + 当前配置声明的插件。 */
+function runtimeIdValueFor(config: AppConfig, declared?: ReadonlySet<string>): Validator {
+  return {
+    check: value => (typeof value === 'string' && (
+      isKnownRuntimeId(config, normalizeRuntimeId(value)) || declared?.has(normalizeRuntimeId(value))
+    )
+      ? null
+      : '未知 runtime：只接受内置运行时，或先在 runtime.plugins 里声明插件'),
+  }
+}
+
+/** 插件声明的选项；内置声明优先，未知运行时回退到加载器带来的 schema。 */
+function optionFieldFor(config: AppConfig, runtimeId: string, key: string) {
+  return optionFieldOf(runtimeId, key)
+    ?? config.runtime.optionSpecs?.find(spec => spec.runtimeId === runtimeId)?.fields.find(field => field.key === key)
+    ?? null
 }
 
 function intValue(min: number, max: number, unit = ''): Validator {
@@ -1238,6 +1453,28 @@ function intValue(min: number, max: number, unit = ''): Validator {
     },
   }
 }
+
+function parsePluginConfigPath(path: string): { kind: PluginKind; id: string } | null {
+  const runtime = /^runtime\.plugins\.([^.]+)$/.exec(path)
+  if (runtime) return { kind: 'runtime', id: runtime[1]! }
+  const channel = /^channels\.([^.]+)$/.exec(path)
+  return channel ? { kind: 'channel', id: channel[1]! } : null
+}
+
+function validatePluginEntry(value: unknown): PluginEntry | null {
+  if (typeof value === 'string') return value.trim() || ''
+  if (!isRecord(value)) return null
+  const entry: Exclude<PluginEntry, string> = {
+    ...(typeof value.plugin === 'string' && value.plugin.trim() ? { plugin: value.plugin.trim() } : {}),
+    ...(typeof value.path === 'string' && value.path.trim() ? { path: value.path.trim() } : {}),
+    ...(typeof value.package === 'string' && value.package.trim() ? { package: value.package.trim() } : {}),
+    ...(typeof value.entry === 'string' && value.entry.trim() ? { entry: value.entry.trim() } : {}),
+    ...(typeof value.enabled === 'boolean' ? { enabled: value.enabled } : {}),
+  }
+  return Object.keys(entry).length > 0 ? entry : null
+}
+
+type PluginKind = 'runtime' | 'channel'
 
 function boolValue(): Validator {
   return { check: value => (typeof value === 'boolean' ? null : '需要 true / false') }
@@ -1317,7 +1554,6 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
   'workspace.sweepMinutes': intValue(1, 1_440, ' 分钟'),
 
   'worker.evidence.ui': enumValue(UI_EVIDENCE_MODES),
-  'runtime.default': runtimeIdValue,
   'server.port': intValue(1, 65_535),
 
   'llm.baseUrl': stringValue,
@@ -1428,13 +1664,32 @@ function validateChatIntake(value: unknown): { error: string | null; value: Chat
 export function applyConfigPatch(config: AppConfig, patch: Record<string, unknown>): ConfigPatchResult {
   const errors: ConfigPatchError[] = []
   const accepted: { path: string; value: unknown }[] = []
+  // 同一次保存里可能先声明插件、再把它选为默认运行时：校验时把本批声明的 id 也算进来。
+  const declared = new Set<string>()
+  for (const [path, value] of Object.entries(patch)) {
+    if (value === '') continue
+    const pluginPath = parsePluginConfigPath(path)
+    if (pluginPath?.kind === 'runtime') declared.add(pluginPath.id)
+  }
 
   for (const [path, value] of Object.entries(patch)) {
+    // 插件入口：runtime.plugins.<id> / channels.<id>
+    const pluginPath = parsePluginConfigPath(path)
+    if (pluginPath) {
+      if (value === '') {
+        accepted.push({ path, value: '' })
+        continue
+      }
+      const entry = validatePluginEntry(value)
+      if (!entry) errors.push({ path, message: '插件入口需要 npm 包名、本地路径或 { plugin, entry } 对象' })
+      else accepted.push({ path, value: entry })
+      continue
+    }
     // 按运行时隔离的项目清单：runtime.projects.<runtimeId>
     const runtimeProjectPath = /^runtime\.projects\.([^.]+)$/.exec(path)
     if (runtimeProjectPath) {
       const id = normalizeRuntimeId(runtimeProjectPath[1]!)
-      if (!isWorkerRuntimeId(id)) {
+      if (!isKnownRuntimeId(config, id) && !declared.has(id)) {
         errors.push({ path, message: `未知 runtime: ${runtimeProjectPath[1]}` })
       } else {
         const result = validateProjects(value, id)
@@ -1447,10 +1702,10 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
     const runtimeOption = parseRuntimeOptionPath(path)
     if (runtimeOption) {
       const id = normalizeRuntimeId(runtimeOption.runtimeId)
-      if (!isWorkerRuntimeId(id)) {
+      if (!isKnownRuntimeId(config, id) && !declared.has(id)) {
         errors.push({ path, message: `未知 runtime: ${runtimeOption.runtimeId}` })
       } else {
-        const field = optionFieldOf(id, runtimeOption.key)
+        const field = optionFieldFor(config, id, runtimeOption.key)
         if (!field) errors.push({ path, message: `未知选项: ${runtimeOption.key}` })
         else {
           const message = validateRuntimeOption(field, value)
@@ -1472,7 +1727,7 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
       }
       continue
     }
-    const validator = CONFIG_VALIDATORS[path]
+    const validator = path === 'runtime.default' ? runtimeIdValueFor(config, declared) : CONFIG_VALIDATORS[path]
     if (!validator) {
       errors.push({ path, message: '不是可编辑的配置项' })
       continue
@@ -1504,6 +1759,10 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
     } else if (path.startsWith('runtime.options.')) {
       const parsed = parseRuntimeOptionPath(path)!
       setRuntimeOption(config, normalizeRuntimeId(parsed.runtimeId), parsed.key, value)
+    } else if (path.startsWith('runtime.plugins.')) {
+      setRuntimePlugin(config, path.slice('runtime.plugins.'.length), value as PluginEntry | '')
+    } else if (path.startsWith('channels.')) {
+      setChannelPlugin(config, path.slice('channels.'.length), value as PluginEntry | '')
     } else setPath(config as unknown as Record<string, unknown>, path, value)
     changed.push(path)
   }
@@ -1612,11 +1871,23 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
     const parsed = parseRuntimeOptionPath(path)
     if (!parsed) return false
     const id = normalizeRuntimeId(parsed.runtimeId)
-    if (!isWorkerRuntimeId(id)) return false
-    const field = optionFieldOf(id, parsed.key)
+    if (!isKnownRuntimeId(config, id)) return false
+    const field = optionFieldFor(config, id, parsed.key)
     if (!field) return false
     if (validateRuntimeOption(field, value)) return false
     setRuntimeOption(config, id, parsed.key, field.kind === 'switch' ? value === 'true' : value)
+    return true
+  }
+
+  // 插件入口：`ra config set runtime.plugins.my-runtime ./my-runtime`
+  // 空值删除条目；通道插件同理走 channels.<id>。
+  if (path.startsWith('runtime.plugins.') || path.startsWith('channels.')) {
+    const id = path.startsWith('runtime.plugins.')
+      ? path.slice('runtime.plugins.'.length).trim()
+      : path.slice('channels.'.length).trim()
+    if (!id || id.includes('.')) return false
+    if (path.startsWith('runtime.plugins.')) setRuntimePlugin(config, id, value)
+    else setChannelPlugin(config, id, value)
     return true
   }
 
@@ -1783,9 +2054,9 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
       config.server.port = v
       return true
     }
-case 'runtime.default': {
+    case 'runtime.default': {
       const id = normalizeRuntimeId(value)
-      if (!isWorkerRuntimeId(id)) return false
+      if (!isKnownRuntimeId(config, id)) return false
       config.runtime.default = id
       return true
     }

@@ -1,0 +1,25 @@
+{
+  "name": "@your-scope/runtime-example",
+  "version": "0.0.1",
+  "type": "module",
+  "description": "router-agent 运行时插件模板",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@router-agent/runtime": "^0.3.30"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "typescript": "^5.9.3"
+  }
+}

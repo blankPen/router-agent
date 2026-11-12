@@ -1,4 +1,4 @@
-import type { Ticket } from '#core/model.js'
+import type { Ticket } from '@router-agent/core/model.js'
 
 /** 分支名的语义部分最多保留多少字符，避免超出 git / 平台的显示长度。 */
 const MAX_SLUG_LENGTH = 36

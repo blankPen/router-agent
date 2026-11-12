@@ -4,9 +4,9 @@ import { homedir } from 'node:os'
 import { extname, join, normalize, resolve } from 'node:path'
 import type { Store } from '../store/db.js'
 import type { Engine } from '../core/engine.js'
-import { applyConfigPatch, policyOf, publicConfig, publicDefaults, requiresRestart, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
-import { InstallStartError, type AcpRuntimeAdmin } from '#runtime/runtimes/acp/admin.js'
-import { isWorkerRuntimeId, normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
+import { applyConfigPatch, isKnownRuntimeId, policyOf, publicConfig, publicDefaults, publicPlugins, requiresRestart, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
+import { InstallStartError, type AcpRuntimeAdmin } from '@router-agent/runtime-acp'
+import { normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
 import { ReportRejectedError } from '#runtime/evidence-gate.js'
 import { ProjectSetupError, type ProjectSetupPort } from './project-setup.js'
 import type { ChannelAdmin } from '#channel/port.js'
@@ -14,7 +14,7 @@ import type { AcceptMode } from '#core/policy.js'
 import type { Ticket } from '#core/model.js'
 import { noopSink, preview, type EventSink } from '#core/events.js'
 import { noopLogger, errorMessage, type Logger } from '#infra/logger.js'
-import type { IdentityStatusView } from '#channel/sources/feishu-identity.js'
+import type { IdentityStatusView } from '@router-agent/channel-feishu'
 import type { WorkerStateFile } from '#runtime/report-poller.js'
 import type { ResumeHint } from '#runtime/port.js'
 import type { WorkspaceAdminPort } from '#runtime/workspaces/overview.js'
@@ -126,6 +126,12 @@ export interface ApiServerOptions {
   issueReporter?: IssueReporter
   /** 请求级异常与配置写入失败的日志出口。 */
   logger?: Logger
+  /** 当前进程加载的插件元数据；启动时由 CLI 注入，面板据此展示自定义运行时/通道。 */
+  plugins?: {
+    runtimes?: Array<{ id: string; name: string; label: string; hint: string; installHint?: string; installUrl?: string; packageName?: string; deprecated?: boolean; loadedIds?: string[] }>
+    channels?: Array<{ id: string; name: string; hint: string; default?: boolean; packageName?: string; loadedIds?: string[] }>
+    failures?: Array<{ kind: 'runtime' | 'channel'; id: string; specifier: string; message: string }>
+  }
 }
 
 export interface ApiServer {
@@ -360,7 +366,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
 
     if (path === '/api/config') {
       if (req.method === 'GET') {
-        return respond(res, 200, configPayload(config, opts.runtimeAdmin, opts.identity))
+        return respond(res, 200, configPayload(config, opts.runtimeAdmin, opts.identity, opts.plugins))
       }
       if (req.method === 'PUT' || req.method === 'POST') {
         const body = await readJson(req)
@@ -413,7 +419,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         const restartRequired = requiresRestart(result.changed)
         onEvent({ event: 'api:config', changed: result.changed, policyChanged, restartRequired, identityEffective })
         return respond(res, 200, {
-          ...configPayload(config, opts.runtimeAdmin, opts.identity),
+          ...configPayload(config, opts.runtimeAdmin, opts.identity, opts.plugins),
           ok: true,
           changed: result.changed,
           policyChanged,
@@ -489,7 +495,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       })
       onEvent({ event: 'api:llm-import', source: candidate.source, model: candidate.model, changed: result.changed })
       return respond(res, 200, {
-        ...configPayload(config, opts.runtimeAdmin, opts.identity),
+        ...configPayload(config, opts.runtimeAdmin, opts.identity, opts.plugins),
         ok: true,
         changed: result.changed,
         restartRequired: requiresRestart(result.changed),
@@ -544,7 +550,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       return respond(res, 200, {
         ok: true,
         message: result.message,
-        ...configPayload(config, opts.runtimeAdmin, opts.identity),
+        ...configPayload(config, opts.runtimeAdmin, opts.identity, opts.plugins),
       })
     }
 
@@ -719,7 +725,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       const body = await readJson(req)
       const target = typeof body.path === 'string' ? body.path.trim() : ''
       if (!target) return respond(res, 400, { error: 'path-required', message: '请先选择或填写本地目录' })
-      const runtimeId = readRuntimeId(body, config.runtime.default)
+      const runtimeId = readRuntimeId(body, config.runtime.default, config)
       if (runtimeId === null) return respond(res, 400, { error: 'invalid-runtime', message: '未知的 Worker 运行时' })
       try {
         return respond(res, 200, await opts.projectSetup.prepareLocal(target, runtimeId))
@@ -733,7 +739,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       const body = await readJson(req)
       const url = typeof body.url === 'string' ? body.url.trim() : ''
       if (!url) return respond(res, 400, { error: 'url-required', message: '请填写 Git 地址' })
-      const runtimeId = readRuntimeId(body, config.runtime.default)
+      const runtimeId = readRuntimeId(body, config.runtime.default, config)
       if (runtimeId === null) return respond(res, 400, { error: 'invalid-runtime', message: '未知的 Worker 运行时' })
       try {
         return respond(res, 200, await opts.projectSetup.cloneRepository(url, runtimeId))
@@ -898,13 +904,19 @@ function optionalBoolean(value: unknown): boolean | undefined {
 }
 
 /** 配置面板的读/写都用同一份口径：安全快照 + 默认值 + 配置文件路径。 */
-function configPayload(config: AppConfig, runtimeAdmin?: AcpRuntimeAdmin, identity?: IdentityPort): Record<string, unknown> {
+function configPayload(
+  config: AppConfig,
+  runtimeAdmin?: AcpRuntimeAdmin,
+  identity?: IdentityPort,
+  plugins?: ApiServerOptions['plugins'],
+): Record<string, unknown> {
   const snapshot = runtimeAdmin?.snapshot()
   return {
     config: publicConfig(config),
     defaults: publicDefaults(),
     configPath: config.home ? join(config.home, 'config.yaml') : '',
     runtimeChoices: snapshot?.choices ?? [],
+    plugins: publicPlugins(config, plugins),
     detecting: runtimeAdmin?.isDetecting() ?? false,
     identity: identity?.snapshot() ?? emptyIdentityStatus(),
   }
@@ -962,10 +974,10 @@ function respondSpecError(res: ServerResponse, error: unknown): void {
  * 面板里切换运行时后未必已经保存，所以允许请求显式带 runtimeId；
  * 不传时沿用当前默认运行时，传了未知值则返回 null 让调用方报 400。
  */
-function readRuntimeId(body: Record<string, unknown>, fallback: string): string | null {
+function readRuntimeId(body: Record<string, unknown>, fallback: string, config: AppConfig): string | null {
   if (typeof body.runtimeId !== 'string' || !body.runtimeId.trim()) return fallback
   const id = normalizeRuntimeId(body.runtimeId)
-  return isWorkerRuntimeId(id) ? id : null
+  return isKnownRuntimeId(config, id) ? id : null
 }
 
 function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {

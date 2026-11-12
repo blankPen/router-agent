@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { ChatDirectory, parseChatList } from '#channel/sources/feishu-directory.js'
+import { ChatDirectory, parseChatList } from '@router-agent/channel-feishu'
 import type { CommandRunner } from '#infra/process.js'
 
 const sample = JSON.stringify({

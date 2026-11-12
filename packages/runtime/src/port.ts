@@ -1,4 +1,4 @@
-import type { Assignment, InputKind, Ticket } from '#core/model.js'
+import type { Assignment, InputKind, Ticket } from '@router-agent/core/model.js'
 
 /** 工单执行上下文：Router 负责拼装，运行时只消费。 */
 export interface WorkerContext {

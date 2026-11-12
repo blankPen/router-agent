@@ -12,9 +12,9 @@ import {
   renderInput,
   shortHash,
   withWorkdir,
-} from '#runtime/runtimes/herdr/index.js'
-import { ensureHerdrServer, probeHerdrServer } from '#runtime/runtimes/herdr/server.js'
-import { herdrAgentKindOf, HERDR_AGENT_KINDS } from '#runtime/runtimes/herdr/agents.js'
+} from '@router-agent/runtime-herdr'
+import { ensureHerdrServer, probeHerdrServer } from '@router-agent/runtime-herdr'
+import { herdrAgentKindOf, HERDR_AGENT_KINDS } from '@router-agent/runtime-herdr'
 import {
   agentGet,
   agentPrompt,
@@ -27,8 +27,8 @@ import {
   version,
   workspaceClose,
   workspaceCreate,
-} from '#runtime/runtimes/herdr/commands.js'
-import type { CommandRunner, CommandResult } from '#runtime/runtimes/herdr/commands.js'
+} from '@router-agent/runtime-herdr'
+import type { CommandRunner, CommandResult } from '@router-agent/runtime-herdr'
 import type { Assignment, Ticket } from '#core/model.js'
 
 /**

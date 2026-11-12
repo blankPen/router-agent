@@ -9,21 +9,22 @@ import { ensureHome, intakeEnabledChats, loadConfig, policyOf, projectsForRuntim
 import { Store, type SessionMigrationState } from '../store/db.js'
 import { Engine } from '../core/engine.js'
 import { effectiveAllowed, effectiveAllowedByChat, shouldAcknowledge } from '#core/policy.js'
-import { createRuntimes } from '#runtime/registry.js'
-import { AcpRuntimeAdmin } from '#runtime/runtimes/acp/admin.js'
-import { readDetectionSnapshot } from '#runtime/runtimes/acp/detect.js'
+import { loadRuntimePlugins, type LoadedRuntimePlugins } from '#runtime/plugins/loader.js'
+import { loadChannelPlugins, type LoadedChannelPlugins } from '#channel/plugins/loader.js'
+import { AcpRuntimeAdmin } from '@router-agent/runtime-acp'
+import { readDetectionSnapshot } from '@router-agent/runtime-acp'
 import { WORKER_RUNTIME_IDS, normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
 import { GitHubTracker } from '../sources/github.js'
 import { GitLabTracker } from '../sources/gitlab.js'
 import { ForgeTracker } from '../sources/forge-tracker.js'
-import { createFeishuChannel, createFeishuDocumenter } from '#channel/feishu/index.js'
+import { createFeishuChannel, createFeishuDocumenter } from '@router-agent/channel-feishu'
 import { ChannelIngress } from '#channel/ingress.js'
 import { ChannelRegistry } from '#channel/registry.js'
 import { ChannelRouter } from '#channel/router.js'
-import { ChatDirectory } from '#channel/sources/feishu-directory.js'
-import { resolveRuntimeIdentity, detailText, type IdentityCache, type IdentityStatusView, type RuntimeIdentity } from '#channel/sources/feishu-identity.js'
-import { createLarkRunner, larkEnv } from '#channel/sources/lark.js'
-import { parseMessageThreadIds, type UnaddressedAdmission } from '#channel/sources/feishu.js'
+import { ChatDirectory } from '@router-agent/channel-feishu'
+import { resolveRuntimeIdentity, detailText, type IdentityCache, type IdentityStatusView, type RuntimeIdentity } from '@router-agent/channel-feishu'
+import { createLarkRunner, larkEnv } from '@router-agent/channel-feishu'
+import { parseMessageThreadIds, type UnaddressedAdmission } from '@router-agent/channel-feishu'
 import { createVisionTranscriber, type ImageTranscriber } from '#infra/vision.js'
 import { runInitWizard } from './init.js'
 import { formatChecks, runDoctor } from './doctor.js'
@@ -326,16 +327,18 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
   let runtime: import('#runtime/port.js').WorkerRuntime | undefined
   let runtimeError: string | undefined
   try {
-    runtime = createRuntimes(config, {
+    runtime = (await loadRuntimePlugins(config, {
       home,
       workersDir: join(home, 'workers'),
-      orca: output.orca ?? realRunner('orca'),
-      claude: output.claude ?? realRunner('claude'),
+      runners: {
+        orca: output.orca ?? realRunner('orca'),
+        claude: output.claude ?? realRunner('claude'),
+        git: output.git ?? realRunner('git'),
+        herdr: output.herdr ?? realRunner('herdr'),
+      },
       claudeBin: output.claudeBin ?? 'claude',
-      git: output.git ?? realRunner('git'),
-      herdr: output.herdr ?? realRunner('herdr'),
       logger: createLogger(home, output, false),
-    }).default()
+    })).registry.default()
   } catch (error) {
     // 未注册/拼错的 runtime 由配置检查单独报错，不让 doctor 直接崩溃。
     runtimeError = error instanceof Error ? error.message : String(error)
@@ -1303,16 +1306,21 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       apply: () => { engine.updatePolicy(policyOf(config, identityPort.policyIds?.())) },
     })
   }
-  const runtimes = createRuntimes(config, {
+  const runtimePlugins = await loadRuntimePlugins(config, {
     home,
     workersDir: join(home, 'workers'),
-    orca: orcaRunner,
-    claude: claudeRunner,
+    runners: {
+      orca: orcaRunner,
+      claude: claudeRunner,
+      git: gitRunner,
+      herdr: herdrRunner,
+    },
     claudeBin: output.claudeBin ?? 'claude',
-    git: gitRunner,
-    herdr: herdrRunner,
     logger,
   })
+  config.runtime.loadedIds = runtimePlugins.ids
+  config.runtime.optionSpecs = runtimePlugins.specs
+  const runtimes = runtimePlugins.registry
   const runtime = runtimes.default()
   const prTracker = new ForgeTracker({
     github: new GitHubTracker(ghRunner),
@@ -1408,55 +1416,69 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     }
     return false
   }
-  // 通道适配器：飞书的消费、归一化、富化、渲染、回执、文档与凭据全部收口到这里。
-  const feishuChannel = createFeishuChannel({
-    config: feishuConfig,
-    reaction: config.feishu.reaction,
-    runner: larkRunner,
-    directory,
-    transcriber: imageTranscriber,
-    logger,
+  // 通道也走插件：飞书是默认内置包，用户可以在 channels.<id> 里覆盖或新增自己的通道。
+  const channelPlugins = await loadChannelPlugins(config, {
+    home,
     env: larkEnv(),
-    allowUnaddressed,
-    hooks: {
-      onReady: () => logger.info('feishu:ready', {}),
-      onReconnect: ({ attempt, delayMs }) => logger.warn('feishu:reconnecting', { attempt, delayMs }),
-      onError: error => {
-        if (/another event bus/i.test(error.message)) {
-          logger.warn('feishu:bus-conflict', {
-            message: '同一机器人只能有一个事件总线；请停止其它消费者，或改用专属机器人（ra init 选项 2/3）',
-          })
-          return
-        }
-        logger.warn('feishu:error', { message: error.message })
+    logger,
+    runner: bin => (bin === 'lark-cli' ? larkRunner : realRunner(bin)),
+    services: {
+      feishu: {
+        config: feishuConfig,
+        reaction: config.feishu.reaction,
+        directory,
+        transcriber: imageTranscriber,
+        allowUnaddressed,
+        hooks: {
+          onReady: () => logger.info('feishu:ready', {}),
+          onReconnect: ({ attempt, delayMs }: { attempt: number; delayMs: number }) => logger.warn('feishu:reconnecting', { attempt, delayMs }),
+          onError: (error: Error) => {
+            if (/another event bus/i.test(error.message)) {
+              logger.warn('feishu:bus-conflict', {
+                message: '同一机器人只能有一个事件总线；请停止其它消费者，或改用专属机器人（ra init 选项 2/3）',
+              })
+              return
+            }
+            logger.warn('feishu:error', { message: error.message })
+          },
+        },
       },
     },
   })
-  const channels = new ChannelRegistry(logger)
-  channels.register(feishuChannel)
+  const channels = channelPlugins.registry
+  const feishuChannel = channels.get('feishu') as ReturnType<typeof createFeishuChannel> | undefined
+  if (!feishuChannel) logger.warn('channel:feishu-missing', { detail: '飞书通道未加载；检查 channels.feishu 插件入口' })
+  const outbox = new ChannelRouter(channels, logger)
 
   const clearReaction = async (messageId: string): Promise<void> => {
     const saved = store.getReaction(messageId)
     if (!saved) return
+    const channelId = store.getReactionChannel(messageId) ?? 'feishu'
+    const adapter = channels.get(channelId)
+    if (!adapter?.clearAck) {
+      store.clearReaction(messageId)
+      return
+    }
     try {
-      await feishuChannel.clearAck(messageId, saved.reactionId)
+      await adapter.clearAck(messageId, saved.reactionId)
+    } catch (error) {
+      logger.warn('channel:unreact-failed', { channel: channelId, messageId, detail: errorMessage(error) })
     } finally {
       store.clearReaction(messageId)
     }
   }
 
-  const feishuOutbox = new ChannelRouter(channels, logger)
   const effects = new EffectsProcessor({
     store,
     sender: {
       async send(item) {
-        await feishuOutbox.send(item)
+        await outbox.send(item)
         // 回复已经发出，撤销「收到」表情。
         if (item.originMessageId) {
           try {
             await clearReaction(item.originMessageId)
           } catch (error) {
-            logger.warn('feishu:unreact-failed', { message: error instanceof Error ? error.message : String(error) })
+            logger.warn('channel:unreact-failed', { channel: item.channelKind, detail: errorMessage(error) })
           }
         }
       },
@@ -1475,7 +1497,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       git: gitRunner,
       logger,
       effects,
-      sender: feishuOutbox,
+      sender: outbox,
       decisionEngine,
       ...(intakeEngine ? { intakeEngine } : {}),
       // 终审管理员：配置里写邮箱，这里传解析后的 open_id。
@@ -1507,8 +1529,30 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     store,
     config,
     runtimeAdmin,
+    plugins: {
+      runtimes: runtimePlugins.metas.map(meta => ({
+        id: meta.id,
+        name: meta.name,
+        label: meta.label,
+        hint: meta.hint,
+        ...(meta.installHint ? { installHint: meta.installHint } : {}),
+        ...(meta.installUrl ? { installUrl: meta.installUrl } : {}),
+        ...(meta.packageName ? { packageName: meta.packageName } : {}),
+        ...(meta.deprecated ? { deprecated: true } : {}),
+        loadedIds: runtimePlugins.loadedIds[meta.id] ?? [meta.id],
+      })),
+      channels: channelPlugins.metas.map(meta => ({
+        id: meta.id,
+        name: meta.name,
+        hint: meta.hint,
+        ...(meta.default ? { default: true } : {}),
+        ...(meta.packageName ? { packageName: meta.packageName } : {}),
+        loadedIds: channelPlugins.loadedIds[meta.id] ?? [meta.id],
+      })),
+      failures: [...runtimePlugins.failures, ...channelPlugins.failures],
+    },
     update: updateService,
-    feishuBot: feishuChannel.admin,
+    ...(feishuChannel?.admin ? { feishuBot: feishuChannel.admin } : {}),
     identity: identityPort,
     logAssistant,
     issueReporter,
@@ -1548,21 +1592,26 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   const updateTimer = setInterval(() => { void updateService.check(true) }, 6 * 60 * 60 * 1_000)
   updateTimer.unref()
 
-  const consumer = service && config.feishu.chats.length > 0
-    ? new ChannelIngress({
-      adapter: feishuChannel,
-      engine,
-      store,
-      logger,
-      // 只对「会被处理」的消息加回执：@ / 私聊 / 全量接收群，且没被准入拦截。
-      shouldReply: trigger => shouldAcknowledge(trigger, engine.policy(), replyAlwaysChats),
-      onAck: (messageId, handle) => store.saveReaction(messageId, handle, new Date().toISOString()),
-    })
-    : null
-  if (consumer) {
-    void feishuChannel.start(raw => consumer.handleRaw(raw))
-      .then(() => logger.info('feishu:consumer-started', { chats: config.feishu.chats.length }))
-      .catch(error => logger.warn('feishu:consumer-start-failed', { message: errorMessage(error) }))
+  // 所有已加载通道都启动：通道自己决定是否消费事件，飞书仍走同一套 Trigger 入站管线。
+  const consumers = service
+    ? channels.list().map(adapter => ({
+      adapter,
+      ingress: new ChannelIngress({
+        adapter,
+        engine,
+        store,
+        logger,
+        // 只对「会被处理」的消息加回执：@ / 私聊 / 全量接收群，且没被准入拦截。
+        shouldReply: trigger => shouldAcknowledge(trigger, engine.policy(), replyAlwaysChats),
+        onAck: (messageId, handle) => store.saveReaction(messageId, handle, new Date().toISOString(), adapter.id),
+      }),
+    }))
+    : []
+  for (const { adapter, ingress } of consumers) {
+    if (!adapter.start) continue
+    void Promise.resolve(adapter.start(raw => ingress.handleRaw(raw)))
+      .then(() => logger.info('channel:consumer-started', { channel: adapter.id }))
+      .catch(error => logger.warn('channel:consumer-start-failed', { channel: adapter.id, detail: errorMessage(error) }))
   }
   // Web-only 模式下不刷新群目录、也不启动消费循环，等配好 LLM 重启后再跑。
   const refreshChats = (): void => {
@@ -1581,7 +1630,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   }
 
   const stopRuntime = (): void => {
-    feishuChannel.stop()
+    channels.stopAll()
     if (chatTimer) clearInterval(chatTimer)
     clearInterval(updateTimer)
     if (updateRestartTimer) {

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import type { Logger } from '#infra/logger.js'
 import type { CommandRunner } from '#infra/process.js'
-import { CodexAppRuntime } from '#runtime/runtimes/codex/index.js'
+import { CodexAppRuntime } from '@router-agent/runtime-codex'
 import type {
   AgentStatus,
   SessionSnapshot,

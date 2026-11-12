@@ -12,7 +12,7 @@ import {
   parseMessageImageKeys,
   parseSavedPath,
   readImageInput,
-} from '#channel/sources/feishu-image.js'
+} from '@router-agent/channel-feishu'
 import type { CommandRunner } from '#infra/process.js'
 
 function trigger(over: Partial<Trigger> = {}): Trigger {

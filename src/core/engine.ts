@@ -119,6 +119,7 @@ export class Engine {
     // 线程归属统一走别名解析：话题 ID / 根消息 ID / 消息自身 ID 任一到场都能落回同一个 Thread。
     const resolved = this.store.resolveThread({
       source: trigger.source,
+      ...(trigger.channelId ? { channelId: trigger.channelId } : {}),
       chatId: trigger.chatId,
       keys: threadKeysOf(trigger),
       canonicalId: trigger.threadId,
@@ -181,6 +182,7 @@ export class Engine {
       title: input.title?.trim() || deriveTitle(trigger.text),
       threadId: trigger.threadId,
       source: trigger.source,
+      ...(trigger.channelId ? { channelId: trigger.channelId } : {}),
       chatId: trigger.chatId,
       mandateId: this.ids.next('md'),
       stage: 'todo',

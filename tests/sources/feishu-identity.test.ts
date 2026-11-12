@@ -8,7 +8,7 @@ import {
   resolveBotIdentity,
   resolveRuntimeIdentity,
   type IdentityCache,
-} from '#channel/sources/feishu-identity.js'
+} from '@router-agent/channel-feishu'
 import { chatEntry, defaultConfig, type AppConfig, type FeishuSettings } from '../../src/config.js'
 import type { CommandRunner } from '#infra/process.js'
 import type { Logger } from '#infra/logger.js'

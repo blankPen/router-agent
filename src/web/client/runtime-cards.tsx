@@ -10,6 +10,7 @@ import { Icon } from './icons.js'
 import {
   isAcpAgentRuntime,
   isBuiltinRuntime,
+  isCustomRuntime,
   isDeprecatedRuntime,
   isRuntimeSelectable,
   mergeRuntimeChoices,
@@ -21,6 +22,7 @@ import {
 import { RuntimeLogo, runtimeLogoOf } from './runtime-logos.js'
 import { runtimeOptionFields } from './fields.js'
 import { RuntimeSettingsDialog } from './runtime-settings.js'
+import type { PluginView } from './api.js'
 
 export interface RuntimeNotice {
   kind: 'ok' | 'warn' | 'error'
@@ -47,6 +49,8 @@ interface CheckResult {
 
 interface RuntimeCardsProps {
   choices: RuntimeChoiceView[]
+  /** 服务端下发的插件目录；用于把自定义运行时合并进卡片。 */
+  plugins?: PluginView[]
   detecting: boolean
   selected: string
   onSelect: (id: string) => void
@@ -78,6 +82,7 @@ function sleep(ms: number): Promise<void> {
 
 export function RuntimeCards({
   choices,
+  plugins,
   detecting,
   selected,
   onSelect,
@@ -99,7 +104,11 @@ export function RuntimeCards({
 
   useEffect(() => () => { mounted.current = false }, [])
 
-  const cards = useMemo(() => mergeRuntimeChoices(choices), [choices])
+  const cards = useMemo(() => mergeRuntimeChoices(choices, plugins), [choices, plugins])
+  const optionSpecs = useMemo(
+    () => (plugins ?? []).flatMap(plugin => (plugin.kind === 'runtime' && plugin.options ? [plugin.options] : [])),
+    [plugins],
+  )
   const selectedId = normalizeRuntimeId(selected)
   const selectedChoice = cards.find(choice => choice.id === selectedId)
   // 打开设置弹窗的运行时；探测结果刷新后卡片可能消失，这里兜底成 null。
@@ -242,6 +251,7 @@ export function RuntimeCards({
     })
     return [
       { title: '内置运行时', items: visible.filter(choice => isBuiltinRuntime(choice.id)) },
+      { title: '自定义插件', items: visible.filter(choice => isCustomRuntime(choice)) },
       { title: 'ACP Agent', items: visible.filter(choice => isAcpAgentRuntime(choice.id)) },
     ].filter(group => group.items.length > 0)
   }, [cards, selectedId])
@@ -327,7 +337,7 @@ export function RuntimeCards({
                   </p>
 
                   <div className="runtime-card-actions">
-                    {runtimeOptionFields(choice.id).length > 0 && (
+                    {runtimeOptionFields(choice.id, optionSpecs).length > 0 && (
                       <button
                         className="btn ghost tiny"
                         disabled={!onOptionChange}
@@ -395,6 +405,7 @@ export function RuntimeCards({
       {settingsChoice && onOptionChange && (
         <RuntimeSettingsDialog
           choice={settingsChoice}
+          optionSpecs={optionSpecs}
           draft={draft}
           defaults={defaults}
           onChange={onOptionChange}

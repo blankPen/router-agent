@@ -11,6 +11,16 @@ const alias = {
   '#infra': resolve(import.meta.dirname, 'packages/infra/src'),
   '#runtime': resolve(import.meta.dirname, 'packages/runtime/src'),
   '#channel': resolve(import.meta.dirname, 'packages/channel/src'),
+  '@router-agent/core': resolve(import.meta.dirname, 'packages/core/src'),
+  '@router-agent/infra': resolve(import.meta.dirname, 'packages/infra/src'),
+  '@router-agent/runtime': resolve(import.meta.dirname, 'packages/runtime/src'),
+  '@router-agent/runtime-orca': resolve(import.meta.dirname, 'packages/runtime-orca/src'),
+  '@router-agent/runtime-claude-code': resolve(import.meta.dirname, 'packages/runtime-claude-code/src'),
+  '@router-agent/runtime-codex': resolve(import.meta.dirname, 'packages/runtime-codex/src'),
+  '@router-agent/runtime-herdr': resolve(import.meta.dirname, 'packages/runtime-herdr/src'),
+  '@router-agent/runtime-acp': resolve(import.meta.dirname, 'packages/runtime-acp/src'),
+  '@router-agent/channel': resolve(import.meta.dirname, 'packages/channel/src'),
+  '@router-agent/channel-feishu': resolve(import.meta.dirname, 'packages/channel-feishu/src'),
 }
 
 export default defineConfig({

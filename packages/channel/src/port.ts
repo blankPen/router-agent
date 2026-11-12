@@ -1,4 +1,4 @@
-import type { Trigger } from '#core/model.js'
+import type { Trigger } from '@router-agent/core/model.js'
 
 /**
  * 默认通道实例 ID。

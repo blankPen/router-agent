@@ -5,13 +5,14 @@
  * 默认值怎么取、明显不合法的值提前提示」，避免用户点保存后才被后端打回。
  */
 import { WORKER_RUNTIMES } from '#runtime/runtimes/catalog.js'
-import { ACP_AGENTS } from '#runtime/runtimes/acp/agents.js'
+import { ACP_AGENTS } from '#runtime/runtimes/acp-agents.js'
 import {
   RUNTIME_OPTION_SPECS,
   optionSpecOf,
   parseRuntimeOptionPath,
   runtimeOptionDefault,
   runtimeOptionPath,
+  type RuntimeOptionSpec,
 } from '#runtime/runtimes/options.js'
 import { isDeprecatedRuntime, runtimeOptionLabel, runtimeStatusLabel, type RuntimeChoiceView } from './runtime-model.js'
 
@@ -284,8 +285,13 @@ export const FIELD_PATHS: string[] = SECTIONS.flatMap(section => section.fields.
  *
  * 面板不关心具体是哪个运行时：新增运行时只要声明了自己的选项，这里就会自动渲染。
  */
-export function runtimeOptionFields(runtimeId: string): FieldDef[] {
-  const spec = optionSpecOf(runtimeId)
+export function runtimeOptionFields(runtimeId: string, specs?: RuntimeOptionSpec[]): FieldDef[] {
+  const spec = optionSpecOf(runtimeId) ?? specs?.find(item => item.runtimeId === runtimeId) ?? null
+  return spec ? runtimeOptionFieldsOf(runtimeId, spec) : []
+}
+
+/** 插件加载时带上来的 option 声明；自定义运行时也能渲染设置弹窗。 */
+export function runtimeOptionFieldsOf(runtimeId: string, spec: FieldSpec | null | undefined): FieldDef[] {
   if (!spec) return []
   return spec.fields.map(field => ({
     path: runtimeOptionPath(runtimeId, field.key),
@@ -308,9 +314,22 @@ export function runtimeOptionFields(runtimeId: string): FieldDef[] {
   }))
 }
 
+type FieldSpec = RuntimeOptionSpec
+
 /** 所有已声明运行时的选项字段；保存前统一校验，避免某个运行时的脏值溜过去。 */
-export function allRuntimeOptionFields(): FieldDef[] {
-  return RUNTIME_OPTION_SPECS.flatMap(spec => runtimeOptionFields(spec.runtimeId))
+export function allRuntimeOptionFields(specs?: RuntimeOptionSpec[]): FieldDef[] {
+  return [...RUNTIME_OPTION_SPECS, ...(specs ?? [])]
+    .filter((spec, index, all) => all.findIndex(item => item.runtimeId === spec.runtimeId) === index)
+    .flatMap(spec => runtimeOptionFieldsOf(spec.runtimeId, spec))
+}
+
+/** 字段路径 → 声明默认值，供 `fieldValue` 回退；自定义运行时也参与校验。 */
+export function runtimeOptionDefaults(fields: FieldDef[]): Record<string, unknown> {
+  return Object.fromEntries(
+    fields
+      .filter(field => field.defaultValue !== undefined)
+      .map(field => [field.path, field.defaultValue]),
+  )
 }
 
 /**
@@ -378,8 +397,8 @@ export function runtimeOptions(choices?: RuntimeChoiceView[], selectedId?: strin
  * 运行时自己的选项不在页面上平铺：它们通过卡片上的「设置」弹窗编辑，
  * 见 runtime-settings.tsx。
  */
-export function sectionsFor(choices?: RuntimeChoiceView[], selectedId?: string): SectionDef[] {
-  const options = runtimeOptions(choices, selectedId)
+export function sectionsFor(choices?: RuntimeChoiceView[], selectedId?: string, extraChoices?: RuntimeChoiceView[]): SectionDef[] {
+  const options = runtimeOptions([...(choices ?? []), ...(extraChoices ?? [])], selectedId)
   return SECTIONS.map(section => ({
     ...section,
     fields: section.fields.map(field => field.path === 'runtime.default' ? { ...field, options } : field),
@@ -399,12 +418,12 @@ export function getByPath(doc: unknown, path: string): unknown {
  * 运行时选项没配置过时回落到声明里的默认值（没声明默认值则按空串算），
  * 这样面板显示的就是实际会生效的取值，也不会误报「有未保存的修改」。
  */
-export function fieldValue(doc: unknown, path: string): unknown {
+export function fieldValue(doc: unknown, path: string, defaults?: Record<string, unknown>): unknown {
   const value = getByPath(doc, path)
   if (value !== undefined && value !== '') return value
   if (path.startsWith('runtime.options.')) {
     const parsed = parseRuntimeOptionPath(path)
-    const fallback = parsed ? runtimeOptionDefault(parsed.runtimeId, parsed.key) : undefined
+    const fallback = parsed ? runtimeOptionDefault(parsed.runtimeId, parsed.key) ?? defaults?.[path] : undefined
     return fallback ?? ''
   }
   return value

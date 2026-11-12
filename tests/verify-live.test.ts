@@ -12,7 +12,7 @@ import { resolvePiModelConfig } from '../src/router/model-config.js'
 import { RouterToolbox } from '../src/router/tools.js'
 import { defaultConfig, loadConfig, policyOf, chatEntry } from '../src/config.js'
 import { createApiServer } from '../src/router/api.js'
-import { OrcaRuntime } from '#runtime/orca/index.js'
+import { OrcaRuntime } from '@router-agent/runtime-orca'
 import { realRunner } from '#infra/process.js'
 import type { Trigger } from '#core/model.js'
 

@@ -14,6 +14,36 @@ importers:
       '@inquirer/prompts':
         specifier: 7.8.6
         version: 7.8.6(@types/node@22.20.0)
+      '@router-agent/channel':
+        specifier: 0.0.0
+        version: link:packages/channel
+      '@router-agent/channel-feishu':
+        specifier: 0.0.0
+        version: link:packages/channel-feishu
+      '@router-agent/core':
+        specifier: 0.0.0
+        version: link:packages/core
+      '@router-agent/infra':
+        specifier: 0.0.0
+        version: link:packages/infra
+      '@router-agent/runtime':
+        specifier: 0.0.0
+        version: link:packages/runtime
+      '@router-agent/runtime-acp':
+        specifier: 0.0.0
+        version: link:packages/runtime-acp
+      '@router-agent/runtime-claude-code':
+        specifier: 0.0.0
+        version: link:packages/runtime-claude-code
+      '@router-agent/runtime-codex':
+        specifier: 0.0.0
+        version: link:packages/runtime-codex
+      '@router-agent/runtime-herdr':
+        specifier: 0.0.0
+        version: link:packages/runtime-herdr
+      '@router-agent/runtime-orca':
+        specifier: 0.0.0
+        version: link:packages/runtime-orca
       commander:
         specifier: 12.1.0
         version: 12.1.0
@@ -52,13 +82,111 @@ importers:
         specifier: 3.2.4
         version: 3.2.4(@types/node@22.20.0)(jiti@2.7.0)(yaml@2.8.1)
 
-  packages/channel: {}
+  packages/channel:
+    dependencies:
+      '@router-agent/core':
+        specifier: 0.0.0
+        version: link:../core
+      '@router-agent/infra':
+        specifier: 0.0.0
+        version: link:../infra
+
+  packages/channel-feishu:
+    dependencies:
+      '@router-agent/channel':
+        specifier: 0.0.0
+        version: link:../channel
+      '@router-agent/core':
+        specifier: 0.0.0
+        version: link:../core
+      '@router-agent/infra':
+        specifier: 0.0.0
+        version: link:../infra
 
   packages/core: {}
 
   packages/infra: {}
 
-  packages/runtime: {}
+  packages/runtime:
+    dependencies:
+      '@router-agent/core':
+        specifier: 0.0.0
+        version: link:../core
+      '@router-agent/infra':
+        specifier: 0.0.0
+        version: link:../infra
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
+
+  packages/runtime-acp:
+    dependencies:
+      '@router-agent/core':
+        specifier: 0.0.0
+        version: link:../core
+      '@router-agent/infra':
+        specifier: 0.0.0
+        version: link:../infra
+      '@router-agent/runtime':
+        specifier: 0.0.0
+        version: link:../runtime
+      '@router-agent/runtime-codex':
+        specifier: 0.0.0
+        version: link:../runtime-codex
+      '@router-agent/runtime-herdr':
+        specifier: 0.0.0
+        version: link:../runtime-herdr
+
+  packages/runtime-claude-code:
+    dependencies:
+      '@router-agent/core':
+        specifier: 0.0.0
+        version: link:../core
+      '@router-agent/infra':
+        specifier: 0.0.0
+        version: link:../infra
+      '@router-agent/runtime':
+        specifier: 0.0.0
+        version: link:../runtime
+
+  packages/runtime-codex:
+    dependencies:
+      '@router-agent/core':
+        specifier: 0.0.0
+        version: link:../core
+      '@router-agent/infra':
+        specifier: 0.0.0
+        version: link:../infra
+      '@router-agent/runtime':
+        specifier: 0.0.0
+        version: link:../runtime
+
+  packages/runtime-herdr:
+    dependencies:
+      '@router-agent/core':
+        specifier: 0.0.0
+        version: link:../core
+      '@router-agent/infra':
+        specifier: 0.0.0
+        version: link:../infra
+      '@router-agent/runtime':
+        specifier: 0.0.0
+        version: link:../runtime
+
+  packages/runtime-orca:
+    dependencies:
+      '@router-agent/core':
+        specifier: 0.0.0
+        version: link:../core
+      '@router-agent/infra':
+        specifier: 0.0.0
+        version: link:../infra
+      '@router-agent/runtime':
+        specifier: 0.0.0
+        version: link:../runtime
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
 
 packages:
 

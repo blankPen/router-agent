@@ -12,8 +12,8 @@ export type Stage = 'todo' | 'running' | 'review' | 'blocked' | 'done'
 /** Worker 上报的六种状态。 */
 export type ReportState = 'progress' | 'waiting' | 'ready' | 'blocked' | 'failed' | 'dropped'
 
-/** Source 种类。一期只有飞书与 GitHub PR 跟踪。 */
-export type SourceKind = 'feishu' | 'github'
+/** Source 种类：内置飞书与 GitHub PR 跟踪；自定义通道可以写自己的来源名。 */
+export type SourceKind = string
 
 /** 一条消息的寻址方式。 */
 export type AddressMode = 'mention' | 'direct' | 'none'
@@ -77,6 +77,8 @@ export interface Trigger {
 export interface Thread {
   id: string
   source: SourceKind
+  /** 通道实例 ID；历史线程没有该字段时按飞书兜底。 */
+  channelId?: string
   rootId: string
   chatId: string
   createdAt: string
@@ -104,6 +106,8 @@ export interface Ticket {
   title: string
   threadId: string
   source: SourceKind
+  /** 通道实例 ID（channels.<id>）；历史工单没有该字段时按飞书兜底。 */
+  channelId?: string
   chatId: string
   mandateId: string
   stage: Stage

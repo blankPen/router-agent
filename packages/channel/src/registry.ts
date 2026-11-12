@@ -1,4 +1,4 @@
-import { noopLogger, type Logger } from '#infra/logger.js'
+import { noopLogger, type Logger } from '@router-agent/infra/logger.js'
 import { ChannelError } from './errors.js'
 import type { ChannelAdapter, ChannelCapabilities } from './port.js'
 

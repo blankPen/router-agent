@@ -1,5 +1,5 @@
-import type { Trigger } from '#core/model.js'
-import { errorMessage, noopLogger, type Logger } from '#infra/logger.js'
+import type { Trigger } from '@router-agent/core/model.js'
+import { errorMessage, noopLogger, type Logger } from '@router-agent/infra/logger.js'
 import type { ChannelAdapter } from './port.js'
 
 /**

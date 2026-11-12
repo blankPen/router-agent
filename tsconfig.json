@@ -23,7 +23,27 @@
       "#core/*": ["packages/core/src/*"],
       "#infra/*": ["packages/infra/src/*"],
       "#runtime/*": ["packages/runtime/src/*"],
-      "#channel/*": ["packages/channel/src/*"]
+      "#channel/*": ["packages/channel/src/*"],
+      "@router-agent/core": ["packages/core/src/index.ts"],
+      "@router-agent/core/*": ["packages/core/src/*"],
+      "@router-agent/infra": ["packages/infra/src/index.ts"],
+      "@router-agent/infra/*": ["packages/infra/src/*"],
+      "@router-agent/runtime": ["packages/runtime/src/index.ts"],
+      "@router-agent/runtime/*": ["packages/runtime/src/*"],
+      "@router-agent/runtime-orca": ["packages/runtime-orca/src/index.ts"],
+      "@router-agent/runtime-orca/*": ["packages/runtime-orca/src/*"],
+      "@router-agent/runtime-claude-code": ["packages/runtime-claude-code/src/index.ts"],
+      "@router-agent/runtime-claude-code/*": ["packages/runtime-claude-code/src/*"],
+      "@router-agent/runtime-codex": ["packages/runtime-codex/src/index.ts"],
+      "@router-agent/runtime-codex/*": ["packages/runtime-codex/src/*"],
+      "@router-agent/runtime-herdr": ["packages/runtime-herdr/src/index.ts"],
+      "@router-agent/runtime-herdr/*": ["packages/runtime-herdr/src/*"],
+      "@router-agent/runtime-acp": ["packages/runtime-acp/src/index.ts"],
+      "@router-agent/runtime-acp/*": ["packages/runtime-acp/src/*"],
+      "@router-agent/channel": ["packages/channel/src/index.ts"],
+      "@router-agent/channel/*": ["packages/channel/src/*"],
+      "@router-agent/channel-feishu": ["packages/channel-feishu/src/index.ts"],
+      "@router-agent/channel-feishu/*": ["packages/channel-feishu/src/*"]
     }
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "packages/*/src/**/*.ts", "tests/**/*.ts", "scripts/**/*.mjs"]

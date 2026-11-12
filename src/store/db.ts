@@ -143,6 +143,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 CREATE TABLE IF NOT EXISTS triggers (
   id TEXT PRIMARY KEY,
   source TEXT NOT NULL,
+  channel_id TEXT,
   external_id TEXT NOT NULL,
   thread_id TEXT NOT NULL,
   chat_id TEXT NOT NULL,
@@ -165,6 +166,7 @@ CREATE INDEX IF NOT EXISTS idx_triggers_pending ON triggers (disposition, receiv
 CREATE TABLE IF NOT EXISTS threads (
   id TEXT PRIMARY KEY,
   source TEXT NOT NULL,
+  channel_id TEXT,
   root_id TEXT NOT NULL,
   chat_id TEXT NOT NULL,
   created_at TEXT NOT NULL
@@ -214,6 +216,7 @@ CREATE TABLE IF NOT EXISTS tickets (
   title TEXT NOT NULL,
   thread_id TEXT NOT NULL,
   source TEXT NOT NULL,
+  channel_id TEXT,
   chat_id TEXT NOT NULL,
   mandate_id TEXT NOT NULL,
   stage TEXT NOT NULL,
@@ -376,6 +379,7 @@ CREATE INDEX IF NOT EXISTS idx_outbox_due ON outbox (status, next_at);
 
 CREATE TABLE IF NOT EXISTS reactions (
   message_id TEXT PRIMARY KEY,
+  channel_id TEXT,
   reaction_id TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
@@ -451,12 +455,23 @@ export class Store {
     if (!reportColumns.some(column => column.name === 'reply')) {
       this.db.exec('ALTER TABLE reports ADD COLUMN reply TEXT')
     }
+    const reactionColumns = this.db.prepare('PRAGMA table_info(reactions)').all() as Row[]
+    if (!reactionColumns.some(column => column.name === 'channel_id')) {
+      this.db.exec('ALTER TABLE reactions ADD COLUMN channel_id TEXT')
+    }
     const triggerColumns = this.db.prepare('PRAGMA table_info(triggers)').all() as Row[]
     if (!triggerColumns.some(column => column.name === 'media_only')) {
       this.db.exec('ALTER TABLE triggers ADD COLUMN media_only INTEGER NOT NULL DEFAULT 0')
     }
     if (!triggerColumns.some(column => column.name === 'unaddressed_admitted')) {
       this.db.exec('ALTER TABLE triggers ADD COLUMN unaddressed_admitted INTEGER NOT NULL DEFAULT 0')
+    }
+    if (!triggerColumns.some(column => column.name === 'channel_id')) {
+      this.db.exec('ALTER TABLE triggers ADD COLUMN channel_id TEXT')
+    }
+    const threadColumns = this.db.prepare('PRAGMA table_info(threads)').all() as Row[]
+    if (!threadColumns.some(column => column.name === 'channel_id')) {
+      this.db.exec('ALTER TABLE threads ADD COLUMN channel_id TEXT')
     }
     const ticketColumns = this.db.prepare('PRAGMA table_info(tickets)').all() as Row[]
     if (!ticketColumns.some(column => column.name === 'repo')) {
@@ -467,6 +482,10 @@ export class Store {
     }
     if (!ticketColumns.some(column => column.name === 'attachments')) {
       this.db.exec("ALTER TABLE tickets ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'")
+    }
+    // 通道实例只在多通道时需要；历史飞书数据按 feishu 兜底，不回填避免写错别家实例。
+    if (!ticketColumns.some(column => column.name === 'channel_id')) {
+      this.db.exec('ALTER TABLE tickets ADD COLUMN channel_id TEXT')
     }
     const inputColumns = this.db.prepare('PRAGMA table_info(inputs)').all() as Row[]
     if (!inputColumns.some(column => column.name === 'source_key')) {
@@ -548,9 +567,9 @@ export class Store {
 
   insertTrigger(t: Trigger): boolean {
     const result = this.db.prepare(`INSERT OR IGNORE INTO triggers
-      (id, source, external_id, thread_id, chat_id, chat_name, actor_id, actor_name, is_bot, text, addressed, unaddressed_admitted, media_only, received_at, disposition, decision_id, raw)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(t.id, t.source, t.externalId, t.threadId, t.chatId, t.chatName, t.actorId, t.actorName, t.isBot ? 1 : 0,
+      (id, source, channel_id, external_id, thread_id, chat_id, chat_name, actor_id, actor_name, is_bot, text, addressed, unaddressed_admitted, media_only, received_at, disposition, decision_id, raw)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(t.id, t.source, t.channelId ?? null, t.externalId, t.threadId, t.chatId, t.chatName, t.actorId, t.actorName, t.isBot ? 1 : 0,
         t.text, t.addressed, t.unaddressedAdmitted ? 1 : 0, t.mediaOnly ? 1 : 0, t.receivedAt, t.disposition, t.decisionId ?? null, t.raw === undefined ? null : JSON.stringify(t.raw))
     return Number(result.changes) > 0
   }
@@ -596,9 +615,9 @@ export class Store {
     this.db.prepare('UPDATE triggers SET disposition = ?, decision_id = ? WHERE id = ?').run(disposition, decisionId ?? null, id)
   }
 
-  upsertThread(thread: { id: string; source: SourceKind; rootId: string; chatId: string; createdAt: string }): void {
-    this.db.prepare('INSERT OR IGNORE INTO threads (id, source, root_id, chat_id, created_at) VALUES (?, ?, ?, ?, ?)')
-      .run(thread.id, thread.source, thread.rootId, thread.chatId, thread.createdAt)
+  upsertThread(thread: { id: string; source: SourceKind; channelId?: string; rootId: string; chatId: string; createdAt: string }): void {
+    this.db.prepare('INSERT OR IGNORE INTO threads (id, source, channel_id, root_id, chat_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(thread.id, thread.source, thread.channelId ?? null, thread.rootId, thread.chatId, thread.createdAt)
   }
 
   // ---------- Thread alias ----------
@@ -623,6 +642,7 @@ export class Store {
     return rows.map(row => ({
       id: String(row.id),
       source: row.source as SourceKind,
+      ...(row.channel_id ? { channelId: String(row.channel_id) } : {}),
       rootId: String(row.root_id),
       chatId: String(row.chat_id),
       createdAt: String(row.created_at),
@@ -647,7 +667,7 @@ export class Store {
    * 命中已有别名就复用那条线程；否则以 canonicalId 建新线程，并把全部标识登记为别名。
    * 这样「话题 ID / 根消息 ID / 消息自身 ID」任意一个到场，都能落回同一个 Thread。
    */
-  resolveThread(input: { source: SourceKind; chatId: string; keys: string[]; canonicalId: string; createdAt: string }): { threadId: string; created: boolean } {
+  resolveThread(input: { source: SourceKind; channelId?: string; chatId: string; keys: string[]; canonicalId: string; createdAt: string }): { threadId: string; created: boolean } {
     const keys = [...new Set(input.keys.map(key => key.trim()).filter(Boolean))]
     // 按传入顺序逐个查：keys 的先后就是权威性顺序（话题 ID > 根消息 ID > 消息自身 ID）。
     // 不能用 ORDER BY created_at——历史误拆的线程会用自己的 message_id 当根，登记得更早，
@@ -661,6 +681,7 @@ export class Store {
     this.upsertThread({
       id: input.canonicalId,
       source: input.source,
+      ...(input.channelId ? { channelId: input.channelId } : {}),
       rootId: keys[0] ?? input.canonicalId.split(':').at(-1) ?? input.canonicalId,
       chatId: input.chatId,
       createdAt: input.createdAt,
@@ -731,9 +752,9 @@ export class Store {
   // ---------- Ticket / Mandate ----------
 
   insertTicket(t: Ticket): void {
-    this.db.prepare(`INSERT INTO tickets (id, title, thread_id, source, chat_id, mandate_id, stage, repo, branch, attachments, pr_number, pr_url, pr_state, created_at, updated_at, closed_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(t.id, t.title, t.threadId, t.source, t.chatId, t.mandateId, t.stage, t.repo, t.branch, JSON.stringify(t.attachments ?? []), t.prNumber, t.prUrl, t.prState, t.createdAt, t.updatedAt, t.closedAt ?? null)
+    this.db.prepare(`INSERT INTO tickets (id, title, thread_id, source, channel_id, chat_id, mandate_id, stage, repo, branch, attachments, pr_number, pr_url, pr_state, created_at, updated_at, closed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(t.id, t.title, t.threadId, t.source, t.channelId ?? null, t.chatId, t.mandateId, t.stage, t.repo, t.branch, JSON.stringify(t.attachments ?? []), t.prNumber, t.prUrl, t.prState, t.createdAt, t.updatedAt, t.closedAt ?? null)
   }
 
   updateTicket(t: Ticket): void {
@@ -1257,14 +1278,19 @@ export class Store {
 
   // ---------- 回执表情 ----------
 
-  saveReaction(messageId: string, reactionId: string, at: string): void {
-    this.db.prepare('INSERT INTO reactions (message_id, reaction_id, created_at) VALUES (?, ?, ?) ON CONFLICT(message_id) DO UPDATE SET reaction_id = excluded.reaction_id')
-      .run(messageId, reactionId, at)
+  saveReaction(messageId: string, reactionId: string, at: string, channelId?: string): void {
+    this.db.prepare('INSERT INTO reactions (message_id, channel_id, reaction_id, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(message_id) DO UPDATE SET channel_id = excluded.channel_id, reaction_id = excluded.reaction_id')
+      .run(messageId, channelId ?? null, reactionId, at)
   }
 
   getReaction(messageId: string): { messageId: string; reactionId: string } | null {
     const row = this.db.prepare('SELECT * FROM reactions WHERE message_id = ?').get(messageId) as Row | undefined
     return row ? { messageId: String(row.message_id), reactionId: String(row.reaction_id) } : null
+  }
+
+  getReactionChannel(messageId: string): string | null {
+    const row = this.db.prepare('SELECT channel_id FROM reactions WHERE message_id = ?').get(messageId) as Row | undefined
+    return row?.channel_id ? String(row.channel_id) : null
   }
 
   clearReaction(messageId: string): void {
@@ -1395,6 +1421,7 @@ function triggerFromRow(row: Row): Trigger {
   return {
     id: String(row.id),
     source: row.source as SourceKind,
+    ...(row.channel_id ? { channelId: String(row.channel_id) } : {}),
     externalId: String(row.external_id),
     threadId: String(row.thread_id),
     chatId: String(row.chat_id),
@@ -1420,6 +1447,7 @@ function ticketFromRow(row: Row): Ticket {
     title: String(row.title),
     threadId: String(row.thread_id),
     source: row.source as SourceKind,
+    ...(row.channel_id ? { channelId: String(row.channel_id) } : {}),
     chatId: String(row.chat_id),
     mandateId: String(row.mandate_id),
     stage: normalizeStage(row.stage) ?? 'todo',

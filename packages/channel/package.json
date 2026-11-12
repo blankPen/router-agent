@@ -1,12 +1,37 @@
 {
   "name": "@router-agent/channel",
   "version": "0.0.0",
-  "private": true,
   "type": "module",
-  "description": "消息通道：端口、注册表与飞书 / lark-cli 适配器",
+  "description": "消息通道 SDK：端口、注册表、插件协议与入站管线",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/blankPen/router-agent.git",
+    "directory": "packages/channel"
+  },
+  "homepage": "https://github.com/blankPen/router-agent#readme",
+  "bugs": {
+    "url": "https://github.com/blankPen/router-agent/issues"
+  },
+  "main": "./dist/index.js",
   "exports": {
-    ".": "./src/index.ts",
-    "./*.js": "./src/*.ts",
-    "./*": "./src/*"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./*.js": "./dist/*.js",
+    "./*": "./dist/*"
+  },
+  "files": [
+    "dist"
+  ],
+  "types": "./dist/index.d.ts",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "@router-agent/core": "0.0.0",
+    "@router-agent/infra": "0.0.0"
   }
 }

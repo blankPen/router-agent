@@ -9,6 +9,7 @@ import {
   fieldValue,
   getByPath,
   humanizeTime,
+  runtimeOptionDefaults,
   sectionsFor,
   setByPath,
   type FieldDef,
@@ -29,6 +30,7 @@ import {
   type LocalProviderImportResult,
   type LocalProviderList,
   type LocalProviderView,
+  type PluginView,
 } from './api.js'
 import { Icon, LogoMark } from './icons.js'
 import {
@@ -39,6 +41,7 @@ import {
   type IdentityStatusView,
 } from './identity-status.js'
 import { RuntimeCards, type RuntimeNotice } from './runtime-cards.js'
+import { PluginSettings } from './plugin-settings.js'
 import { FeishuBotPanel } from './feishu-panel.js'
 import { LogAssistantFab } from './log-assistant.js'
 import { SpecsEditor } from './specs-editor.js'
@@ -1214,6 +1217,22 @@ function projectIssue(runtimeId: string, projects: ProjectDraft[]): string | nul
   return null
 }
 
+/** 插件入口改动：runtime.plugins.<id> / channels.<id>，保存时按点路径提交。 */
+function changedPluginPaths(draft: ConfigDoc, original: ConfigDoc): string[] {
+  const paths: string[] = []
+  const runtimeEntries = { ...(draft.runtime?.plugins ?? {}), ...(original.runtime?.plugins ?? {}) }
+  for (const id of Object.keys(runtimeEntries)) {
+    const path = `runtime.plugins.${id}`
+    if (JSON.stringify(getByPath(draft, path)) !== JSON.stringify(getByPath(original, path))) paths.push(path)
+  }
+  const channelEntries = { ...(draft.channels ?? {}), ...(original.channels ?? {}) }
+  for (const id of Object.keys(channelEntries)) {
+    const path = `channels.${id}`
+    if (JSON.stringify(getByPath(draft, path)) !== JSON.stringify(getByPath(original, path))) paths.push(path)
+  }
+  return paths
+}
+
 function chatsIssue(chats: unknown): string | null {
   if (!Array.isArray(chats)) return null
   for (const chat of chats as ChatDraft[]) {
@@ -1237,6 +1256,7 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
   const [defaults, setDefaults] = useState<ConfigDoc>({})
   const [configPath, setConfigPath] = useState('')
   const [runtimeChoices, setRuntimeChoices] = useState<RuntimeChoiceView[]>([])
+  const [plugins, setPlugins] = useState<PluginView[]>([])
   const [detecting, setDetecting] = useState(false)
   const [identity, setIdentity] = useState<IdentityStatusView | undefined>(undefined)
   const [active, setActive] = useState<string>('policy')
@@ -1259,6 +1279,7 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
         setDefaults(data.defaults)
         setConfigPath(data.configPath)
         setRuntimeChoices(data.runtimeChoices ?? [])
+        setPlugins(data.plugins ?? [])
         setDetecting(Boolean(data.detecting))
         setIdentity(data.identity)
         setLoadError(null)
@@ -1267,7 +1288,7 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
   }, [])
 
   // 探测轮询由 RuntimeCards 负责；这里只保留静态目录兜底 + 服务端快照合并。
-  const runtimeCatalog = useMemo(() => mergeRuntimeChoices(runtimeChoices), [runtimeChoices])
+  const runtimeCatalog = useMemo(() => mergeRuntimeChoices(runtimeChoices, plugins), [runtimeChoices, plugins])
 
   // 当前选中的运行时：deprecated 的 ACP 运行时仍要留在下拉里，老配置才对得上。
   const selectedRuntimeId = normalizeRuntimeId(
@@ -1275,15 +1296,22 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
   )
 
   const sections = useMemo(
-    () => [...sectionsFor(runtimeChoices, selectedRuntimeId), ...CUSTOM_SECTIONS],
-    [runtimeChoices, selectedRuntimeId],
+    () => [...sectionsFor(runtimeChoices, selectedRuntimeId, runtimeCatalog), ...CUSTOM_SECTIONS],
+    [runtimeChoices, selectedRuntimeId, runtimeCatalog],
   )
+
+  const optionSpecs = useMemo(
+    () => plugins.flatMap(plugin => (plugin.kind === 'runtime' && plugin.options ? [plugin.options] : [])),
+    [plugins],
+  )
+  const optionDefaults = useMemo(() => runtimeOptionDefaults(allRuntimeOptionFields(optionSpecs)), [optionSpecs])
 
   const changed = useMemo(() => {
     if (!draft || !original) return []
     // 运行时的专属选项是动态字段，路径来自各运行时的声明，不在静态 FIELD_PATHS 里。
-    const paths = [...FIELD_PATHS, ...runtimeOptionPaths()]
+    const paths = [...FIELD_PATHS, ...runtimeOptionPaths(), ...allRuntimeOptionFields(optionSpecs).map(field => field.path)]
       .filter(path => JSON.stringify(fieldValue(draft, path)) !== JSON.stringify(fieldValue(original, path)))
+    paths.push(...changedPluginPaths(draft, original))
     for (const runtime of runtimeCatalog) {
       if (JSON.stringify(projectsOf(draft, runtime.id)) !== JSON.stringify(projectsOf(original, runtime.id))) {
         paths.push(projectPatchPath(runtime.id))
@@ -1291,7 +1319,7 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
     }
     if (JSON.stringify(draft.feishu?.chats) !== JSON.stringify(original.feishu?.chats)) paths.push('feishu.chats')
     return paths
-  }, [draft, original, runtimeCatalog])
+  }, [draft, original, runtimeCatalog, optionSpecs])
 
   useEffect(() => {
     onDirtyChange?.(changed.length > 0)
@@ -1332,7 +1360,7 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
     const map = new Map<string, string>()
     for (const section of sections) {
       for (const field of section.fields) {
-        const message = fieldError(field, getByPath(draft, field.path))
+        const message = fieldError(field, fieldValue(draft, field.path, optionDefaults))
         if (message) map.set(field.path, message)
       }
     }
@@ -1343,7 +1371,7 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
       if (issue) map.set(projectPatchPath(runtime.id), `${runtimeDisplayName(runtime)}：${issue}`)
     }
     return map
-  }, [draft, sections, runtimeCatalog])
+  }, [draft, sections, runtimeCatalog, optionDefaults])
 
   const setField = (path: string, value: unknown): void => {
     setDraft(current => (current ? setByPath(current, path, value) : current))
@@ -1376,6 +1404,7 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
       setDefaults(result.defaults)
       setConfigPath(result.configPath)
       if (result.runtimeChoices) setRuntimeChoices(result.runtimeChoices)
+      if (result.plugins) setPlugins(result.plugins)
       if (typeof result.detecting === 'boolean') setDetecting(result.detecting)
       // 保存后服务端会重解析名单，这里同步最新状态（解析失败也不影响保存结果）。
       if (result.identity) setIdentity(result.identity)
@@ -1571,19 +1600,23 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
                 )}
 
                 {section.id === 'delivery' && (
-                  <RuntimeCards
-                    choices={runtimeChoices}
-                    detecting={detecting}
-                    selected={runtimeId}
-                    onSelect={id => setField('runtime.default', id)}
-                    onChoices={setRuntimeChoices}
-                    onDetecting={setDetecting}
-                    onNotice={setNotice}
-                    onPendingRestart={() => setPendingRestart(true)}
-                    draft={draft}
-                    defaults={defaults}
-                    onOptionChange={(path, value) => setField(path, value)}
-                  />
+                  <>
+                    <RuntimeCards
+                      choices={runtimeChoices}
+                      plugins={plugins}
+                      detecting={detecting}
+                      selected={runtimeId}
+                      onSelect={id => setField('runtime.default', id)}
+                      onChoices={setRuntimeChoices}
+                      onDetecting={setDetecting}
+                      onNotice={setNotice}
+                      onPendingRestart={() => setPendingRestart(true)}
+                      draft={draft}
+                      defaults={defaults}
+                      onOptionChange={(path, value) => setField(path, value)}
+                    />
+                    <PluginSettings plugins={plugins} draft={draft} onChange={setField} />
+                  </>
                 )}
 
                 {section.fields.length > 0 && (
@@ -1875,6 +1908,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
   const [defaults, setDefaults] = useState<ConfigDoc>({})
   const [configPath, setConfigPath] = useState('')
   const [runtimeChoices, setRuntimeChoices] = useState<RuntimeChoiceView[]>([])
+  const [plugins, setPlugins] = useState<PluginView[]>([])
   const [detecting, setDetecting] = useState(false)
   const [feishuReady, setFeishuReady] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -1896,13 +1930,14 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
         setDefaults(data.defaults)
         setConfigPath(data.configPath)
         setRuntimeChoices(data.runtimeChoices ?? [])
+        setPlugins(data.plugins ?? [])
         setDetecting(Boolean(data.detecting))
         setLoadError(null)
       })
       .catch(error => setLoadError(error instanceof Error ? error.message : String(error)))
   }, [])
 
-  const runtimeCatalog = useMemo(() => mergeRuntimeChoices(runtimeChoices), [runtimeChoices])
+  const runtimeCatalog = useMemo(() => mergeRuntimeChoices(runtimeChoices, plugins), [runtimeChoices, plugins])
   const runtimeId = normalizeRuntimeId(
     draft && typeof draft.runtime?.default === 'string' ? draft.runtime.default : ORCA_RUNTIME_ID,
   )
@@ -1912,14 +1947,21 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
   const runtimeLabel = selectedRuntime ? runtimeDisplayName(selectedRuntime) : runtimeId
   // 运行时自己声明的选项（例如 Orca 用哪个 Agent）在卡片的「设置」弹窗里编辑；
   // 这里只保留字段声明用于保存前校验，不写死任何运行时。
-  const optionFields = useMemo(() => allRuntimeOptionFields(), [])
+  const optionSpecs = useMemo(
+    () => plugins.flatMap(plugin => (plugin.kind === 'runtime' && plugin.options ? [plugin.options] : [])),
+    [plugins],
+  )
+  const optionFields = useMemo(() => allRuntimeOptionFields(optionSpecs), [optionSpecs])
+  const optionDefaults = useMemo(() => runtimeOptionDefaults(optionFields), [optionFields])
 
   const changed = useMemo(() => {
     if (!draft || !original) return []
-    const paths = ['llm.baseUrl', 'llm.model', 'llm.apiKey', 'llm.api', 'llm.authHeader', 'runtime.default', 'feishu.appId', 'feishu.directMessages', 'feishu.chats', ...runtimeOptionPaths()]
+    const paths = ['llm.baseUrl', 'llm.model', 'llm.apiKey', 'llm.api', 'llm.authHeader', 'runtime.default', 'feishu.appId', 'feishu.directMessages', 'feishu.chats',
+      ...runtimeOptionPaths(), ...optionFields.map(field => field.path)]
+    paths.push(...changedPluginPaths(draft, original))
     for (const runtime of runtimeCatalog) paths.push(projectPatchPath(runtime.id))
     return paths.filter(path => JSON.stringify(fieldValue(draft, path)) !== JSON.stringify(fieldValue(original, path)))
-  }, [draft, original, runtimeCatalog])
+  }, [draft, original, runtimeCatalog, optionFields])
 
   useEffect(() => {
     onDirtyChange?.(changed.length > 0)
@@ -1939,7 +1981,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
     }
     for (const field of optionFields) {
       // 没配置过的运行时选项取声明默认值，否则会被误判成「请选择一个有效值」。
-      const message = fieldError(field, fieldValue(draft, field.path))
+      const message = fieldError(field, fieldValue(draft, field.path, optionDefaults))
       if (message) map.set(field.path, message)
     }
     if (changedSet.has('feishu.chats')) {
@@ -1959,7 +2001,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       map.set('runtime.default', '自定义 acp 未配置 runtime.options.acp.command，重启后服务会启动失败')
     }
     return map
-  }, [draft, changed, runtimeCatalog, runtimeId, optionFields])
+  }, [draft, changed, runtimeCatalog, runtimeId, optionFields, optionDefaults])
 
   const setField = (path: string, value: unknown): void => {
     setDraft(current => (current ? setByPath(current, path, value) : current))
@@ -1992,6 +2034,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       setDefaults(result.defaults)
       setConfigPath(result.configPath)
       if (result.runtimeChoices) setRuntimeChoices(result.runtimeChoices)
+      if (result.plugins) setPlugins(result.plugins)
       if (typeof result.detecting === 'boolean') setDetecting(result.detecting)
       setPendingRestart(result.restartRequired)
       const message = secretDropNotice(patch, result) ?? {
@@ -2024,6 +2067,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
     setDefaults(result.defaults)
     setConfigPath(result.configPath)
     if (result.runtimeChoices) setRuntimeChoices(result.runtimeChoices)
+    if (result.plugins) setPlugins(result.plugins)
     if (typeof result.detecting === 'boolean') setDetecting(result.detecting)
     setPendingRestart(result.restartRequired)
     setProviderPickerOpen(false)
@@ -2147,6 +2191,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
         {errors.get('runtime.default') && <p className="field-error">{errors.get('runtime.default')}</p>}
         <RuntimeCards
           choices={runtimeChoices}
+          plugins={plugins}
           detecting={detecting}
           selected={runtimeId}
           onSelect={id => setField('runtime.default', id)}

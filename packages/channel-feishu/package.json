@@ -1,0 +1,38 @@
+{
+  "name": "@router-agent/channel-feishu",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "飞书通道插件：lark-cli 事件、消息、卡片与授权",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/blankPen/router-agent.git",
+    "directory": "packages/channel-feishu"
+  },
+  "homepage": "https://github.com/blankPen/router-agent#readme",
+  "bugs": {
+    "url": "https://github.com/blankPen/router-agent/issues"
+  },
+  "main": "./dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./*.js": "./dist/*.js",
+    "./*": "./dist/*"
+  },
+  "files": [
+    "dist"
+  ],
+  "types": "./dist/index.d.ts",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "@router-agent/channel": "0.0.0",
+    "@router-agent/core": "0.0.0",
+    "@router-agent/infra": "0.0.0"
+  }
+}

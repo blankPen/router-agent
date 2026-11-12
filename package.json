@@ -42,7 +42,7 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "build:web": "node scripts/build-web.mjs",
-    "build": "tsc -p tsconfig.build.json && node scripts/build-web.mjs && node scripts/flatten-dist.mjs",
+    "build": "tsc -p tsconfig.build.json && node scripts/build-web.mjs && node scripts/flatten-dist.mjs && node scripts/build-packages.mjs",
     "check": "pnpm typecheck && pnpm test",
     "start": "node dist/cli/main.js start"
   },
@@ -52,6 +52,16 @@
     ]
   },
   "dependencies": {
+    "@router-agent/channel-feishu": "0.0.0",
+    "@router-agent/channel": "0.0.0",
+    "@router-agent/core": "0.0.0",
+    "@router-agent/infra": "0.0.0",
+    "@router-agent/runtime": "0.0.0",
+    "@router-agent/runtime-acp": "0.0.0",
+    "@router-agent/runtime-claude-code": "0.0.0",
+    "@router-agent/runtime-codex": "0.0.0",
+    "@router-agent/runtime-herdr": "0.0.0",
+    "@router-agent/runtime-orca": "0.0.0",
     "@inquirer/prompts": "7.8.6",
     "@earendil-works/pi-coding-agent": "1.5.0",
     "commander": "12.1.0",

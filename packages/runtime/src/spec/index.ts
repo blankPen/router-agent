@@ -1,4 +1,4 @@
-import type { Attachment, Ticket } from '#core/model.js'
+import type { Attachment, Ticket } from '@router-agent/core/model.js'
 import { readWorkerSpec } from './reader.js'
 
 export interface WorkerPromptInput {

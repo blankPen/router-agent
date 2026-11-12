@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
-import type { CommandRunner } from '#infra/process.js'
+import type { CommandRunner } from '@router-agent/infra/process.js'
 import { WorkerRuntimeError, type WorkspaceInfo, type WorkspaceProvider, type WorkspaceRequest, type Workspace } from '../port.js'
 
 export interface GitWorktreeProviderOptions {

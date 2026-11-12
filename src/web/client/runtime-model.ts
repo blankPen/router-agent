@@ -4,8 +4,9 @@
  * 这里不能依赖任何 Node 内置模块 —— Web 面板会把它打进前端包；
  * 同时保持纯函数，方便用 vitest 的 node 环境直接测试。
  */
-import { ACP_AGENTS, isDeprecatedAcpRuntimeId } from '#runtime/runtimes/acp/agents.js'
+import { ACP_AGENTS, isDeprecatedAcpRuntimeId } from '#runtime/runtimes/acp-agents.js'
 import { WORKER_RUNTIMES } from '#runtime/runtimes/catalog.js'
+import type { PluginView } from './api.js'
 
 export interface RuntimeRequirementView {
   label: string
@@ -52,6 +53,8 @@ export interface RuntimeChoiceView {
   requires?: RuntimeRequirementView[]
   cli?: RuntimeCliView
   extension?: RuntimeExtensionView
+  /** 插件来源：内置 / 用户配置 / 已加载；服务端插件列表有同名项时为 true。 */
+  plugin?: PluginView
 }
 
 export const RUNTIME_STATUS_LABEL: Record<string, string> = {
@@ -125,6 +128,11 @@ export function isBuiltinRuntime(id: string): boolean {
   return WORKER_RUNTIMES.some(runtime => runtime.id === id)
 }
 
+/** 用户通过 runtime.plugins / channels 配置的插件（含覆盖内置包的情况）。 */
+export function isCustomRuntime(choice: RuntimeChoiceView): boolean {
+  return choice.plugin !== undefined && !isBuiltinRuntime(choice.id) && !isAcpAgentRuntime(choice.id)
+}
+
 /** 只有能真正派工的运行时才允许选中；pending 表示还没探测，先允许。 */
 export function isRuntimeSelectable(choice?: RuntimeChoiceView): boolean {
   if (!choice) return false
@@ -135,7 +143,7 @@ export function isRuntimeSelectable(choice?: RuntimeChoiceView): boolean {
  * 合并静态目录与服务端快照：服务端结果覆盖静态占位，缺项补 pending。
  * 顺序保持稳定（内置运行时 → ACP Agent 目录），避免卡片每次刷新乱跳。
  */
-export function mergeRuntimeChoices(choices?: RuntimeChoiceView[]): RuntimeChoiceView[] {
+export function mergeRuntimeChoices(choices?: RuntimeChoiceView[], plugins?: PluginView[]): RuntimeChoiceView[] {
   const merged = new Map<string, RuntimeChoiceView>()
   for (const runtime of WORKER_RUNTIMES) {
     merged.set(runtime.id, {
@@ -164,6 +172,20 @@ export function mergeRuntimeChoices(choices?: RuntimeChoiceView[]): RuntimeChoic
       ...(agent.deprecated ? { deprecated: true } : {}),
     })
   }
+  for (const plugin of plugins ?? []) {
+    if (plugin.kind !== 'runtime') continue
+    merged.set(plugin.id, {
+      ...(merged.get(plugin.id) ?? {}),
+      id: plugin.id,
+      ...(plugin.name ? { name: plugin.name } : {}),
+      label: plugin.label ?? plugin.name ?? plugin.id,
+      hint: plugin.hint ?? '用户配置的运行时插件',
+      status: plugin.status === 'failed' ? 'incompatible' : 'pending',
+      plugin,
+      ...(plugin.packageName ? { packageName: plugin.packageName } : {}),
+      ...(plugin.error ? { reason: plugin.error } : {}),
+    })
+  }
   // 服务端快照优先，静态目录补齐它没带上的字段（如 name / deprecated）。
   for (const choice of choices ?? []) {
     merged.set(choice.id, { ...merged.get(choice.id), ...choice })
@@ -173,6 +195,7 @@ export function mergeRuntimeChoices(choices?: RuntimeChoiceView[]): RuntimeChoic
   const order = [
     ...WORKER_RUNTIMES.map(runtime => runtime.id),
     ...ACP_AGENTS.map(agent => agent.runtimeId),
+    ...(plugins ?? []).filter(plugin => plugin.kind === 'runtime').map(plugin => plugin.id),
   ]
   for (const id of order) {
     const choice = merged.get(id)

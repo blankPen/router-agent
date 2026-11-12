@@ -3,7 +3,7 @@ import { createIdentityPort } from '../../src/cli/index.js'
 import { chatEntry, defaultConfig, type AppConfig } from '../../src/config.js'
 import type { CommandRunner } from '#infra/process.js'
 import type { Logger } from '#infra/logger.js'
-import type { IdentityCache } from '#channel/sources/feishu-identity.js'
+import type { IdentityCache } from '@router-agent/channel-feishu'
 
 type Reply = { code: number; stdout: string; stderr: string }
 

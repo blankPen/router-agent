@@ -11,6 +11,7 @@ import {
   policyOf,
   projectsForRuntime,
   publicConfig,
+  publicPlugins,
   setConfigValue,
   setProjectsForRuntime,
   writeConfig,
@@ -607,6 +608,45 @@ describe('Worker 运行时配置', () => {
     expect(setConfigValue(cfg, 'runtime.default', 'acp-claude')).toBe(true)
     expect(setConfigValue(cfg, 'runtime.default', 'acp-nope')).toBe(false)
     expect(applyConfigPatch(cfg, { 'runtime.default': 'acp-nope' }).errors).toHaveLength(1)
+  })
+
+  it('同一次保存里声明插件并选为默认运行时不会被拒绝', () => {
+    const cfg = defaultConfig()
+    const result = applyConfigPatch(cfg, {
+      'runtime.plugins.my-runtime': './my-runtime',
+      'runtime.default': 'my-runtime',
+    })
+    expect(result.errors).toEqual([])
+    expect(cfg.runtime.default).toBe('my-runtime')
+    expect(cfg.runtime.plugins?.['my-runtime']).toBe('./my-runtime')
+  })
+
+  it('同一次保存里新增 channel 插件不会因未知 id 被拒绝', () => {
+    const cfg = defaultConfig()
+    const result = applyConfigPatch(cfg, { 'channels.slack': '@scope/channel-slack' })
+    expect(result.errors).toEqual([])
+    expect(cfg.channels?.slack).toBe('@scope/channel-slack')
+  })
+
+  it('插件 createAll 注册的实例 id 可作为默认运行时', () => {
+    const cfg = defaultConfig()
+    cfg.runtime.plugins = { multi: './multi-runtime' }
+    cfg.runtime.loadedIds = ['multi-a', 'multi-b']
+    expect(applyConfigPatch(cfg, { 'runtime.default': 'multi-a' }).errors).toEqual([])
+    expect(cfg.runtime.default).toBe('multi-a')
+  })
+
+  it('多实例插件只出面板一行，实例 id 收进 loadedIds', () => {
+    const cfg = defaultConfig()
+    cfg.runtime.plugins = { multi: './multi-runtime' }
+    const views = publicPlugins(cfg, {
+      runtimes: [{ id: 'multi', name: 'Multi', label: 'multi', hint: '多实例', loadedIds: ['multi-a', 'multi-b'] }],
+    })
+    const multi = views.filter(view => view.kind === 'runtime' && view.id === 'multi')
+    expect(multi).toHaveLength(1)
+    expect(multi[0]?.loadedIds).toEqual(['multi-a', 'multi-b'])
+    // createAll 的实例 id 不该各自再占一行。
+    expect(views.some(view => view.id === 'multi-a')).toBe(false)
   })
 
   it('runtime.projects.acp-codex 写回后重读不丢', () => {

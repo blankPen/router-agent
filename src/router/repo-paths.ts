@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import type { CommandRunner } from '#infra/process.js'
-import { parseOrcaRepos } from '#channel/sources/lark.js'
+import { parseOrcaRepos } from '@router-agent/channel-feishu'
 
 /** orca repo list 的超时：超过就按「拿不到路径」处理，退化为纯对话分析。 */
 const ORCA_LOOKUP_TIMEOUT_MS = 15_000

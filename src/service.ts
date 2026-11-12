@@ -2537,7 +2537,7 @@ let repo = ticket.repo
       this.store.enqueueOutbox({
         id: `ob_${`${key}:${index}`.replace(/[^a-zA-Z0-9:_-]/g, '_')}`,
         key: `${key}:${index}`,
-        channelKind: DEFAULT_CHANNEL_ID,
+        channelKind: ticket.channelId ?? DEFAULT_CHANNEL_ID,
         channelId: ticket.chatId,
         threadId: ticket.threadId.split(':').at(-1) ?? '',
         text: `${chunk}${suffix}`,
@@ -2550,7 +2550,7 @@ let repo = ticket.repo
     this.store.enqueueOutbox({
       id: `ob_${key.replace(/[^a-zA-Z0-9:_-]/g, '_')}`,
       key,
-      channelKind: DEFAULT_CHANNEL_ID,
+      channelKind: ticket.channelId ?? DEFAULT_CHANNEL_ID,
       channelId: ticket.chatId,
       threadId: ticket.threadId.split(':').at(-1) ?? '',
       text,
@@ -2592,7 +2592,7 @@ export interface CreateServiceDeps {
 }
 
 /** 旧版出站兼容层；生产路径已改为 `ChannelRouter`，这里仅保留导出。 */
-export { createEffectsSender, type FeishuOutbound } from '#channel/legacy.js'
+export { createEffectsSender, type FeishuOutbound } from '@router-agent/channel-feishu'
 
 /** 按行切成不超过 limit 的消息块，保证长回复不会被截断。 */
 export function splitMessage(text: string, limit = 3500): string[] {

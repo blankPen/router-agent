@@ -7,6 +7,7 @@
 export * from './logger.js'
 export * from './process.js'
 export * from './chat.js'
+export * from './plugin-loader.js'
 export {
   createVisionTranscriber,
   type ImageInput,

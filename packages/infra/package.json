@@ -1,12 +1,33 @@
 {
   "name": "@router-agent/infra",
   "version": "0.0.0",
-  "private": true,
   "type": "module",
   "description": "基础设施：日志、子进程、对话模型与图片识别",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/blankPen/router-agent.git",
+    "directory": "packages/infra"
+  },
+  "homepage": "https://github.com/blankPen/router-agent#readme",
+  "bugs": {
+    "url": "https://github.com/blankPen/router-agent/issues"
+  },
+  "main": "./dist/index.js",
   "exports": {
-    ".": "./src/index.ts",
-    "./*.js": "./src/*.ts",
-    "./*": "./src/*"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./*.js": "./dist/*.js",
+    "./*": "./dist/*"
+  },
+  "files": [
+    "dist"
+  ],
+  "types": "./dist/index.d.ts",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   }
 }

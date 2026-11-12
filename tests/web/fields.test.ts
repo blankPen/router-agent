@@ -42,4 +42,17 @@ describe('运行时下拉选项', () => {
     expect(field?.kind).toBe('select')
     expect(field?.options?.some(option => option.value === 'orca')).toBe(true)
   })
+
+  it('自定义运行时也进入 runtime.default 下拉，不被静态目录覆盖', () => {
+    const custom: RuntimeChoiceView = {
+      id: 'example',
+      name: 'Example',
+      label: 'example · 自定义',
+      hint: '插件',
+      status: 'pending',
+    }
+    const sections = sectionsFor(undefined, 'orca', [custom])
+    const field = sections.find(section => section.id === 'delivery')?.fields.find(item => item.path === 'runtime.default')
+    expect(field?.options?.some(option => option.value === 'example')).toBe(true)
+  })
 })

@@ -9,16 +9,20 @@ import {
   fieldError,
   fieldValue,
   getByPath,
+  runtimeOptionDefaults,
   runtimeOptionPatchValue,
   runtimeOptionFields,
   type RuntimeChoiceView,
 } from './fields.js'
+import type { RuntimeOptionSpec } from '#runtime/runtimes/options.js'
 import { FieldRow } from './field-row.js'
 import { Icon } from './icons.js'
 import { runtimeDisplayName } from './runtime-model.js'
 
 export interface RuntimeSettingsProps {
   choice: RuntimeChoiceView
+  /** 插件加载时带来的选项 schema；自定义运行时靠它渲染。 */
+  optionSpecs?: RuntimeOptionSpec[]
   /** 当前配置草稿（整份 config），按字段路径取值。 */
   draft: unknown
   /** 默认值快照，用于「恢复默认」。 */
@@ -27,13 +31,14 @@ export interface RuntimeSettingsProps {
   onClose: () => void
 }
 
-export function RuntimeSettingsDialog({ choice, draft, defaults, onChange, onClose }: RuntimeSettingsProps): JSX.Element | null {
-  const fields = useMemo(() => runtimeOptionFields(choice.id), [choice.id])
+export function RuntimeSettingsDialog({ choice, optionSpecs, draft, defaults, onChange, onClose }: RuntimeSettingsProps): JSX.Element | null {
+  const fields = useMemo(() => runtimeOptionFields(choice.id, optionSpecs), [choice.id, optionSpecs])
+  const optionDefaults = useMemo(() => runtimeOptionDefaults(fields), [fields])
   const [touched, setTouched] = useState<Record<string, boolean>>({})
   if (fields.length === 0) return null
 
   const errors = fields
-    .map(field => ({ path: field.path, message: fieldError(field, fieldValue(draft, field.path)) }))
+    .map(field => ({ path: field.path, message: fieldError(field, fieldValue(draft, field.path, optionDefaults)) }))
     .filter((item): item is { path: string; message: string } => Boolean(item.message))
   const hasError = errors.length > 0
   const name = runtimeDisplayName(choice)
@@ -56,7 +61,7 @@ export function RuntimeSettingsDialog({ choice, draft, defaults, onChange, onClo
             <FieldRow
               key={field.path}
               field={field}
-              value={fieldValue(draft, field.path)}
+              value={fieldValue(draft, field.path, optionDefaults)}
               defaultValue={getByPath(defaults, field.path)}
               error={touched[field.path] ? errors.find(item => item.path === field.path)?.message : undefined}
               onChange={value => {

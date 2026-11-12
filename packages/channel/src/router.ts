@@ -1,4 +1,4 @@
-import { noopLogger, type Logger } from '#infra/logger.js'
+import { noopLogger, type Logger } from '@router-agent/infra/logger.js'
 import type { ChannelRegistry } from './registry.js'
 
 /** Outbox 交给通道层的最小字段集；与 store 的 OutboxItem 结构兼容。 */

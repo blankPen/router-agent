@@ -111,10 +111,16 @@ Router 不做对话，只在必要时说话：
 | `channel:not-registered` | Channel Router | `channel` `target` `key` | Outbox 里的通道没有注册，跳过发送（历史脏数据不会卡死队列） |
 | `channel:duplicate-id` | Channel Registry | `channel` `kind` | 同一通道实例被重复注册，保留最后一次 |
 | `channel:ack-failed` | Channel Ingress | `channel` `messageId` `detail` | 回执表情添加失败，不影响消息入库与回复 |
+| `plugin:loaded` | Runtime / Channel loader | `kind` `id` | 插件创建成功并注册了实例；`kind=runtime` 时 `id` 是运行时 id，`kind=channel` 时是通道实例 id |
+| `plugin:load-failed` | Plugin loader | `kind` `id` `package` `detail` | 插件包无法解析或导入（路径错、缺依赖、未安装）；服务继续启动，面板与 `/api/config` 会显示失败原因 |
+| `plugin:create-failed` | Runtime / Channel loader | `kind` `id` `detail` | 插件入口已导入，但 `create()` / `createAll()` 抛错；该实例不注册，其它插件不受影响 |
+| `plugin:id-mismatch` | Runtime / Channel loader | `kind` `id` `declared` `detail` | 配置里的插件 id 与插件声明的 `meta.id` 不一致；面板按配置 id 回链，提示用户统一命名 |
+| `channel:consumer-started` / `channel:consumer-start-failed` | CLI | `channel` / `channel` `detail` | 已加载通道的入站消费启动结果；自定义通道启动失败不会阻塞其它通道 |
+| `channel:feishu-missing` | CLI | `detail` | 配置里没有可用的飞书通道；服务继续启动，但飞书消息不会入站 |
+| `channel:unreact-failed` | CLI | `channel` `messageId` `detail` | 回复发送后撤销回执失败；不影响已发出的回复 |
 | `session:migrated` | CLI | `sessions` `resets` | 人工执行 `ra migrate sessions --apply` 完成 |
 | `session:migration-required` | CLI | `pending` | 存在未迁移的历史 sessionKey，服务拒绝启动 |
 | `session:migration-incomplete` / `session:migration-verify-failed` / `session:migration-failed` | CLI | 计数与异常数 / `detail` | 迁移执行失败（已回滚）或迁移后校验未通过 |
-| `feishu:consumer-start-failed` | CLI | `detail` | 飞书通道启动失败 |
 | `feishu:reconnecting` | Source | `attempt` `delayMs` | 事件消费者断开，已安排退避重连 |
 | `feishu:spawn-failed` | Source | `detail` | lark-cli 无法拉起（未安装 / 无权限），会继续重试 |
 | `feishu:card-fallback` | Sender | `target` `key` `code` `detail` | 互动卡片发送失败，已自动降级为富文本 |

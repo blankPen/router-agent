@@ -107,6 +107,29 @@ describe('Store', () => {
     s.close()
   })
 
+  it('通道实例 ID 随 Trigger / Ticket / Reaction 落库，重启后仍能按通道回发', () => {
+    const s = store()
+    s.insertTrigger(trigger({ id: 't1', externalId: 'om_1', channelId: 'slack-main' }))
+    expect(s.getTrigger('t1')?.channelId).toBe('slack-main')
+
+    s.insertTicket({ ...ticket, channelId: 'slack-main' })
+    expect(s.getTicket('tk1')?.channelId).toBe('slack-main')
+
+    s.saveReaction('om_1', 're_1', '2026-11-06T10:00:00.000Z', 'slack-main')
+    expect(s.getReactionChannel('om_1')).toBe('slack-main')
+    s.close()
+  })
+
+  it('未声明通道的历史数据保持无 channelId，不凭空写默认值', () => {
+    const s = store()
+    s.insertTrigger(trigger({ id: 't1', externalId: 'om_1' }))
+    s.insertTicket(ticket)
+    expect(s.getTrigger('t1')?.channelId).toBeUndefined()
+    expect(s.getTicket('tk1')?.channelId).toBeUndefined()
+    expect(s.getReactionChannel('missing')).toBeNull()
+    s.close()
+  })
+
   it('工单可按阶段查询，并保留 PR 字段', () => {
     const s = store()
     s.insertTicket(ticket)

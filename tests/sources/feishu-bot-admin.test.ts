@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { FeishuBotAdmin, FEISHU_AUTH_DOMAINS, FEISHU_AUTH_SCOPES, feishuAuthScopeArgs } from '#channel/sources/feishu-bot-admin.js'
+import { FeishuBotAdmin, FEISHU_AUTH_DOMAINS, FEISHU_AUTH_SCOPES, feishuAuthScopeArgs } from '@router-agent/channel-feishu'
 import type { CommandRunner } from '#infra/process.js'
 
 describe('飞书授权参数', () => {

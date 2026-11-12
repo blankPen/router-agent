@@ -8,8 +8,8 @@
  *    避免把「验证不了」误判成「缺证据」；真正缺失才拦截或告警。
  */
 import { existsSync } from 'node:fs'
-import type { CommandRunner } from '#infra/process.js'
-import type { PrInfo } from '#core/pr.js'
+import type { CommandRunner } from '@router-agent/infra/process.js'
+import type { PrInfo } from '@router-agent/core/pr.js'
 
 /** 门禁档位：off=关闭；warn=只记日志不拦；enforce=拦截 ready。 */
 export type UiEvidenceMode = 'off' | 'warn' | 'enforce'

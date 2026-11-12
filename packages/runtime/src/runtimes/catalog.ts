@@ -3,7 +3,7 @@
  *
  * 这里只放纯常量，不能依赖任何 Node 内置模块 —— Web 面板会把它一起打进前端包。
  */
-import { ACP_AGENTS } from './acp/agents.js'
+import { ACP_AGENTS } from './acp-agents.js'
 
 export const ORCA_RUNTIME_ID = 'orca'
 export const CLAUDE_CODE_RUNTIME_ID = 'claude-code'

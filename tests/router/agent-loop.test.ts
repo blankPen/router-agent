@@ -14,7 +14,7 @@ import { extractJsonObject } from '../../src/router/model-config.js'
 import type { Trigger } from '#core/model.js'
 import { DEFAULT_ADMISSION, effectiveAllowed, effectiveAllowedByChat, type Policy } from '#core/policy.js'
 import { chatEntry } from '../../src/config.js'
-import { normalizeFeishuEventDetailed, type FeishuConfig, type UnaddressedContext } from '#channel/sources/feishu.js'
+import { normalizeFeishuEventDetailed, type FeishuConfig, type UnaddressedContext } from '@router-agent/channel-feishu'
 import type { DispatchSettings } from '../../src/router/dispatch.js'
 import type { SessionKeyParts } from '../../src/router/session-registry.js'
 

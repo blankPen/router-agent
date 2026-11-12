@@ -1,6 +1,6 @@
 import { chatEntry } from '../../src/config.js'
 import { describe, expect, it } from 'vitest'
-import { attachQuotedMessage, FeishuSender, feishuCard, feishuCardSendCommand, feishuCreateDocCommand, feishuReactionCommand, fitIdempotencyKey, normalizeCardMarkdown, normalizeFeishuEvent, normalizeFeishuEventDetailed, parseDocumentUrl, parseMessageThreadIds, parseQuotedMessage, quotedMessageCommand, shouldSendAsText, type FeishuConfig, type UnaddressedContext } from '#channel/sources/feishu.js'
+import { attachQuotedMessage, FeishuSender, feishuCard, feishuCardSendCommand, feishuCreateDocCommand, feishuReactionCommand, fitIdempotencyKey, normalizeCardMarkdown, normalizeFeishuEvent, normalizeFeishuEventDetailed, parseDocumentUrl, parseMessageThreadIds, parseQuotedMessage, quotedMessageCommand, shouldSendAsText, type FeishuConfig, type UnaddressedContext } from '@router-agent/channel-feishu'
 
 const cfg: FeishuConfig = {
   chats: [chatEntry('oc_dev'), chatEntry('oc_other', { mode: 'mention' })],

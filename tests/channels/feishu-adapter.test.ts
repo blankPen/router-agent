@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { FeishuChannel, type FeishuSenderLike } from '#channel/feishu/index.js'
+import { FeishuChannel, type FeishuSenderLike } from '@router-agent/channel-feishu'
 import { chatEntry } from '../../src/config.js'
-import type { FeishuConfig } from '#channel/sources/feishu.js'
+import type { FeishuConfig } from '@router-agent/channel-feishu'
 import type { Trigger } from '#core/model.js'
 
 const cfg: FeishuConfig = {

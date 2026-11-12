@@ -4,8 +4,8 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import type { CommandRunner } from '#infra/process.js'
-import { AcpRuntime } from '#runtime/runtimes/acp/index.js'
-import { decidePermission, shellAllowed } from '#runtime/runtimes/acp/permissions.js'
+import { AcpRuntime } from '@router-agent/runtime-acp'
+import { decidePermission, shellAllowed } from '@router-agent/runtime-acp'
 import type {
   AgentStatus,
   SessionSnapshot,

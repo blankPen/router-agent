@@ -10,8 +10,8 @@ import {
   readDetectionSnapshot,
   resolveAgentCommand,
   writeDetectionSnapshot,
-} from '#runtime/runtimes/acp/detect.js'
-import { acpAgentOf } from '#runtime/runtimes/acp/agents.js'
+} from '@router-agent/runtime-acp'
+import { acpAgentOf } from '@router-agent/runtime-acp'
 
 const fixture = fileURLToPath(new URL('../fixtures/fake-acp-agent.mjs', import.meta.url))
 

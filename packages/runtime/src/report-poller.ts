@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { z } from 'zod'
-import type { ReportState } from '#core/model.js'
+import type { ReportState } from '@router-agent/core/model.js'
 
 /** 旧版 state.json 的交付物字段，仅用于向后兼容，不再参与新协议。 */
 const LegacyDeliverableSchema = z.object({

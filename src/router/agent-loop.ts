@@ -703,11 +703,11 @@ export class AgentLoop {
   /** 回一句到原会话；key 保证同一件事只发一次。 */
   /** thread=true 时用话题回复（挂到原消息下）；否则发普通消息。 */
   private reply(trigger: Trigger, text: string, key: string, opts: { thread?: boolean } = {}): boolean {
-    const rootId = opts.thread ? (trigger.threadId.split(':').at(-1) ?? '') : ''
+    const rootId = opts.thread ? (trigger.threadKeys?.[0] ?? trigger.threadId.split(':').at(-1) ?? '') : ''
     return this.store.enqueueOutbox({
       id: `ob_${key.replace(/[^a-zA-Z0-9:_-]/g, '_')}`,
       key,
-      channelKind: trigger.source,
+      channelKind: trigger.channelId ?? DEFAULT_CHANNEL_ID,
       channelId: trigger.chatId,
       threadId: rootId,
       text,

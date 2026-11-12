@@ -3,11 +3,12 @@ export { ChannelRegistry } from './registry.js'
 export { ChannelRouter } from './router.js'
 export { ChannelError } from './errors.js'
 export { ChannelIngress, type AckStore, type IngressSink } from './ingress.js'
-export { createEffectsSender, type FeishuOutbound } from './legacy.js'
-export { FeishuChannel, createFeishuChannel, createFeishuDocumenter } from './feishu/index.js'
-export * from './sources/feishu.js'
-export * from './sources/feishu-image.js'
-export * from './sources/feishu-bot-admin.js'
-export * from './sources/feishu-directory.js'
-export * from './sources/feishu-identity.js'
-export * from './sources/lark.js'
+export * from './plugins/types.js'
+export {
+  DEFAULT_CHANNEL_PLUGINS,
+  channelPluginEntryOf,
+  describeChannelPluginLoadError,
+  loadChannelPlugins,
+} from './plugins/loader.js'
+export type { ChannelPluginConfigView, ChannelPluginDeps, LoadedChannelPlugins } from './plugins/loader.js'
+export * from './config.js'

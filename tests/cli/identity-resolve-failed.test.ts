@@ -7,8 +7,8 @@ import type { CliIo } from '../../src/cli/index.js'
 // 身份装配整体失败只发生在 CLI 的守护逻辑里（`resolveRuntimeIdentitySafely`），
 // 且这个函数不导出。这里把解析器本身替换成必然失败，用 `ra simulate` 走到同一条兜底链路，
 // 断言 error 事件确实带着事件名与 detail 落盘。
-vi.mock('#channel/sources/feishu-identity.js', async importOriginal => {
-  const actual = await importOriginal<typeof import('#channel/sources/feishu-identity.js')>()
+vi.mock('@router-agent/channel-feishu', async importOriginal => {
+  const actual = await importOriginal<typeof import('@router-agent/channel-feishu')>()
   return {
     ...actual,
     resolveRuntimeIdentity: async () => {

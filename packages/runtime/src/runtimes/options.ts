@@ -4,8 +4,8 @@
  * 这里只放纯类型与纯函数，不能依赖任何 Node 内置模块 —— Web 面板会把它一起打进前端包。
  * 配置落点是通用的 `runtime.options.<runtimeId>.<key>`，新增运行时不需要改内核或面板。
  */
-import { ORCA_OPTION_SPEC } from '../orca/options.js'
-import { HERDR_OPTION_SPEC } from './herdr/options.js'
+import { ORCA_OPTION_SPEC, HERDR_OPTION_SPEC } from './builtin-options.js'
+export { ORCA_OPTION_SPEC, HERDR_OPTION_SPEC } from './builtin-options.js'
 
 export type RuntimeOptionKind = 'text' | 'select' | 'switch' | 'number'
 

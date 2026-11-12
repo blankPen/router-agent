@@ -4,8 +4,8 @@
  * 这里只放纯类型与纯函数，不能依赖任何 Node 内置模块 —— Web 面板会把它打进前端包。
  * 服务层负责扫磁盘、按运行时分组；HTTP 层只透传这些结构。
  */
-import type { Stage } from '#core/model.js'
-import { ACP_AGENTS } from '../runtimes/acp/agents.js'
+import type { Stage } from '@router-agent/core/model.js'
+import { ACP_AGENTS } from '../runtimes/acp-agents.js'
 import { WORKER_RUNTIMES, normalizeRuntimeId } from '../runtimes/catalog.js'
 
 /** 一个仍在磁盘上的工单工作区。 */

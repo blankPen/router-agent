@@ -20,6 +20,8 @@ export interface ChatAdmissionSettings {
 export interface RuntimeSettingsView {
   default: string
   options?: Record<string, unknown>
+  /** 运行时插件入口：id → npm 包名 / 本地路径 / 目录。 */
+  plugins?: Record<string, unknown>
 }
 
 /** 运行时装配用到的配置视图；AppConfig 结构上兼容。 */
@@ -29,6 +31,8 @@ export interface RuntimeConfigView {
 
 /** 通道装配用到的配置视图；AppConfig 结构上兼容。 */
 export interface ChannelConfigView {
+  /** 通道插件入口：id → npm 包名 / 本地路径 / 目录。 */
+  channels?: Record<string, unknown>
   feishu: {
     appId: string
     allowed: string[]

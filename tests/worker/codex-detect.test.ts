@@ -9,7 +9,7 @@ import {
   detectCodexBinary,
   probeCodexHandshake,
   resolveCodexBinary,
-} from '#runtime/runtimes/codex/detect.js'
+} from '@router-agent/runtime-codex'
 
 function home(): string {
   return mkdtempSync(join(tmpdir(), 'ra-codex-detect-'))
