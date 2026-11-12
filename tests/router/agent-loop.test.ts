@@ -971,7 +971,7 @@ describe('已绑定工单的话题：名单内成员不 @ 也触发回复', () =
     expect(store.pendingInputs(ticket.id)[0]?.text).toContain('60 秒')
     // 未 @ 放行的消息要有一句话题回执：否则用户既没有表情也等不到回应。
     const outbox = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)
-    const admitted = outbox.find(item => item.key === 'admitted:feishu_om_2')
+    const admitted = outbox.find(item => item.key === `admitted:${ticket.id}`)
     expect(admitted?.text).toContain('已转给工单')
     expect(admitted?.text).toContain(ticket.id)
     expect(admitted?.threadId).toBe('om_1')
@@ -986,6 +986,43 @@ describe('已绑定工单的话题：名单内成员不 @ 也触发回复', () =
       admit,
     )
     expect(outsider.dropped).toBe('mention:required')
+  })
+
+  it('同一张工单的话题里，后续追问不再重复发「已转给工单」回执', async () => {
+    const { engine, loop, store } = setup([ACCEPT()])
+    engine.ingest(trigger({ id: 't0', externalId: 'om_1', threadId: 'feishu:oc_dev:om_1' }))
+    await loop.tick()
+    const ticket = store.listTickets()[0]!
+    engine.startAssignment(ticket.id, { runtimeId: 'orca', handle: 'h', workdir: '/tmp/wt' })
+
+    const admit = ({ chatId, actorId, threadKeys }: UnaddressedContext) => {
+      const scoped = effectiveAllowedByChat(engine.policy(), chatId)
+      if (scoped && scoped.length === 0) return false
+      const allowed = scoped ?? effectiveAllowed(engine.policy())
+      return allowed.includes(actorId) && store.hasLiveTicketForThreadKeys('feishu', threadKeys)
+    }
+
+    // 第一条未 @ 的追问：回执一条。
+    const first = normalizeFeishuEventDetailed(feishuEvent(), mentionCfg, '研发群', admit)
+    engine.ingest(first.trigger!)
+    await loop.tick()
+    const outbox = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)
+    expect(outbox.filter(item => item.key.startsWith('admitted:'))).toHaveLength(1)
+
+    // 后续追问：消息照样投给 worker，但不再冒第二条一模一样的回执。
+    const second = normalizeFeishuEventDetailed(
+      feishuEvent({ message_id: 'om_3', content: '那超时再放宽到 90 秒呢' }),
+      mentionCfg,
+      '研发群',
+      admit,
+    )
+    engine.ingest(second.trigger!)
+    const result = await loop.tick()
+    expect(result.fannedOut).toBe(1)
+    expect(store.pendingInputs(ticket.id).map(item => item.text).join('\n')).toContain('90 秒')
+
+    const later = store.claimOutbox('2026-11-06T10:00:30.000Z', 10)
+    expect(later.some(item => item.key.startsWith('admitted:'))).toBe(false)
   })
 
   it('话题没有绑定在办工单时，名单内成员不 @ 也不会被放行', async () => {
