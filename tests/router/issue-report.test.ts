@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildIssueBody, createIssueReporter, DEFAULT_ISSUE_REPO } from '../../src/router/issue-report.js'
+import { buildIssueBody, createIssueReporter, explainFailure, DEFAULT_ISSUE_REPO } from '../../src/router/issue-report.js'
 import type { CommandRunner } from '../../src/infra/process.js'
 import type { Logger } from '../../src/infra/logger.js'
 import type { LogDiagnosis } from '../../src/router/log-assistant.js'
@@ -56,6 +56,58 @@ describe('buildIssueBody', () => {
     })
     expect(body).toContain('（没有匹配到日志条目）')
     expect(body).toContain('由 router-agent Web 面板')
+  })
+
+  it('错误日志单独提到证据最前面', () => {
+    const body = buildIssueBody({
+      question: 'worker 卡住了',
+      diagnosis: {
+        ...diagnosis,
+        evidence: [
+          { at: '2026-11-09T10:00:00.000Z', level: 'info', message: 'launch', detail: 'ticketId=tk-1' },
+          { at: '2026-11-09T10:00:01.000Z', level: 'error', message: 'effect:failed', detail: 'error=boom' },
+        ],
+      },
+    })
+    expect(body).toContain('### 错误日志')
+    // 错误段落里先出现 effect:failed，再出现完整证据里的 launch。
+    expect(body.indexOf('### 错误日志')).toBeLessThan(body.indexOf('effect:failed'))
+    expect(body.indexOf('effect:failed')).toBeLessThan(body.indexOf('## 证据日志') + 200)
+  })
+})
+
+describe('explainFailure', () => {
+  it('没装 gh 时给出安装指引', () => {
+    expect(explainFailure(127, 'spawn gh ENOENT')).toContain('未找到 gh 命令')
+    expect(explainFailure(127, 'spawn gh ENOENT')).toContain('brew install gh')
+  })
+
+  it('没登录时给出登录指引', () => {
+    const message = explainFailure(1, 'You are not logged into any GitHub hosts. To log in, run: gh auth login')
+    expect(message).toContain('gh 未登录')
+    expect(message).toContain('gh auth login')
+  })
+
+  it('凭据无效时提示重新登录', () => {
+    expect(explainFailure(1, 'HTTP 401: Bad credentials')).toContain('凭据无效')
+    // 401 的提示里也带 gh auth login，不能被归到「未登录」那一档。
+    expect(explainFailure(1, 'HTTP 401: Bad credentials\nTry authenticating with: gh auth login -h github.com'))
+      .toContain('凭据无效')
+  })
+
+  it('权限不足时提示换账号或改仓库', () => {
+    expect(explainFailure(1, 'HTTP 403: Resource not accessible by integration'))
+      .toContain('没有该仓库的创建权限')
+  })
+
+  it('仓库不存在时提示检查 RA_ISSUE_REPO', () => {
+    expect(explainFailure(1, "Could not resolve to a Repository with the name 'a/b'"))
+      .toContain('RA_ISSUE_REPO')
+  })
+
+  it('认不出来的失败保留原始报错，不吞信息', () => {
+    expect(explainFailure(1, 'something unexpected happened')).toContain('something unexpected happened')
+    expect(explainFailure(2, '')).toContain('gh 退出码 2')
   })
 })
 

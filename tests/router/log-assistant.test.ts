@@ -254,6 +254,26 @@ describe('nextStepsFor', () => {
     const steps = nextStepsFor([], '配置改了不生效')
     expect(steps[0]?.kind).toBe('config')
   })
+
+  it('配置类与缺陷类同时命中时两个入口都给，缺陷不能被配置引导挡住', () => {
+    const hits = matchSymptoms([
+      entry('2026-11-09T10:01:00.000Z', 'warn', 'trigger:dropped'),
+      entry('2026-11-09T10:02:00.000Z', 'error', 'codex:turn-failed'),
+    ])
+    const steps = nextStepsFor(hits, '机器人没反应')
+    expect(steps.map(step => step.kind)).toEqual(['config', 'issue'])
+  })
+
+  it('正常事件不当作症状命中：消息进线与建单本身不是「没建工单」', () => {
+    const hits = matchSymptoms([
+      entry('2026-11-09T10:01:00.000Z', 'info', 'trigger:ingested'),
+      entry('2026-11-09T10:02:00.000Z', 'info', 'thread:created'),
+      entry('2026-11-09T10:03:00.000Z', 'info', 'router:decision'),
+      entry('2026-11-09T10:04:00.000Z', 'info', 'launch'),
+      entry('2026-11-09T10:05:00.000Z', 'info', 'api:config'),
+    ])
+    expect(hits).toEqual([])
+  })
 })
 
 describe('nextStepsFromCauses', () => {
@@ -268,11 +288,15 @@ describe('nextStepsFromCauses', () => {
     expect(nextStepsFromCauses([{ title: 'a', detail: '', events: [] }])).toEqual([])
   })
 
-  it('多条原因分类不同时，按最可能的第一条给动作', () => {
+  it('多条原因分类不同时，两个入口都给，缺陷不会被配置引导吞掉', () => {
     expect(nextStepsFromCauses([
       { title: '主因', detail: '', events: [], category: 'defect' },
       { title: '次因', detail: '', events: [], category: 'config' },
     ]).map(step => step.kind)).toEqual(['issue'])
+    expect(nextStepsFromCauses([
+      { title: '主因', detail: '', events: [], category: 'config' },
+      { title: '次因', detail: '', events: [], category: 'defect' },
+    ]).map(step => step.kind)).toEqual(['config', 'issue'])
   })
 })
 

@@ -13,6 +13,8 @@ export const MAX_LOG_LINES = 1_000
 const TAIL_WINDOW_BYTES = 256 * 1024
 /** 单次增量读取的字节上限；还有剩余时前端按 nextCursor 继续拉。 */
 const MAX_READ_BYTES = 512 * 1024
+/** 排查助手回看日志的字节窗口：比面板大，保证错误日志不被 info 挤掉。 */
+const ASSISTANT_WINDOW_BYTES = 4 * 1024 * 1024
 
 export interface LogEntry {
   /** 写入时间（ISO 8601）；非 JSON 行或字段缺失时为空串。 */
@@ -99,6 +101,24 @@ export function readLogs(path: string, options: { cursor?: number; limit?: numbe
 function clampLimit(limit: number | undefined): number {
   if (limit === undefined || !Number.isFinite(limit) || limit <= 0) return 200
   return Math.min(Math.floor(limit), MAX_LOG_LINES)
+}
+
+/**
+ * 排查助手专用：一次性回看较长的日志尾部。
+ *
+ * 面板的 readLogs 是为「边看边跟」设计的，窗口只有 256KB / 1000 行。
+ * 助手要把结论与证据一起贴进 issue，需要更长的回看范围——
+ * 否则服务一忙，最后 500 行全是 info，早先的 error 被挤出去，
+ * 用户上报的 issue 正文里就一条错误日志都没有。
+ */
+export function readLogTail(path: string, options: { lines?: number; windowBytes?: number } = {}): LogEntry[] {
+  if (!path || !existsSync(path)) return []
+  const lines = Math.max(1, Math.floor(options.lines ?? 5_000))
+  const windowBytes = Math.max(TAIL_WINDOW_BYTES, Math.floor(options.windowBytes ?? ASSISTANT_WINDOW_BYTES))
+  const size = statSync(path).size
+  const start = Math.max(0, size - windowBytes)
+  const segment = readSegment(path, start, windowBytes, size, start > 0)
+  return segment.lines.slice(-lines).map(parseLine)
 }
 
 /**

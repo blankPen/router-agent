@@ -15,13 +15,19 @@ import { preview } from '../core/events.js'
 import { noopLogger, errorMessage, type Logger } from '../infra/logger.js'
 import { createChatClient, type ChatClient, type ChatMessage, type ChatModelConfig } from '../infra/chat.js'
 import { extractJsonObject } from './model-config.js'
-import { readLogs, type LogEntry } from './log-tail.js'
+import { readLogTail, type LogEntry } from './log-tail.js'
 import { toolSpecs, type DiagnosisTool } from './diagnosis-tools.js'
 
 /** 一次排查最多带多少条证据给模型。 */
 export const MAX_ASSISTANT_EVIDENCE = 40
-/** 读取日志时一次回看的行数上限。 */
-const READ_LIMIT = 500
+/**
+ * 读取日志时一次回看的行数上限。
+ *
+ * 取 5000 而不是 500：服务繁忙时一小时内能写几千行日志，
+ * 只看最后 500 行的话，早先的 error 会被 info 挤出去——
+ * 排查助手给出的证据里一条错误都没有，用户上报 issue 时正文也就没有错误日志。
+ */
+const READ_LIMIT = 5_000
 /** 用户问题的字符上限，超出部分截断。 */
 const MAX_QUESTION_CHARS = 2_000
 
@@ -168,8 +174,8 @@ const SYMPTOMS: Array<{
     kind: 'config',
     fixLabel: '去「配置」页逐项核对',
     events: [
-      'api:config', 'config:parse-failed', 'config:patch-rejected', 'config:write-failed',
-      'config:created', 'config:legacy-backend', 'config:invalid-security-override',
+      'config:parse-failed', 'config:patch-rejected', 'config:write-failed',
+      'config:legacy-backend', 'config:invalid-security-override',
       'identity:refresh-failed', 'config:identity-invalid',
     ],
     keywords: ['不生效', '没生效', '配置', '保存', '重启'],
@@ -188,8 +194,7 @@ const SYMPTOMS: Array<{
     section: 'policy',
     fixLabel: '去检查「准入策略 · 接单模式」',
     events: [
-      'router:decision', 'decision:engine-failed', 'loop:trigger-failed',
-      'thread:created', 'thread:resolved', 'chat:reply-failed', 'trigger:ingested',
+      'decision:engine-failed', 'loop:trigger-failed', 'chat:reply-failed',
     ],
     keywords: ['工单', '派工', '没开始', '没建', '没派'],
     advice: [
@@ -206,7 +211,7 @@ const SYMPTOMS: Array<{
     kind: 'defect',
     events: [
       'worker:status-failed', 'codex:turn-failed', 'codex:process-exit', 'codex:resume-failed',
-      'codex:launch-failed', 'launch', 'effect:failed', 'worker:event-log-failed',
+      'codex:launch-failed', 'effect:failed', 'worker:event-log-failed',
       'idle:stale', 'codex:error',
     ],
     keywords: ['卡住', '不动', 'worker', '超时', '没进展', '执行失败'],
@@ -242,7 +247,7 @@ const SYMPTOMS: Array<{
     kind: 'defect',
     events: [
       'outbox:failed', 'channel:not-registered', 'feishu:card-fallback',
-      'chat:reply-failed', 'progress:dedup', 'channel:ack-failed',
+      'chat:reply-failed', 'channel:ack-failed',
     ],
     keywords: ['没发出去', '没回复', '发送失败', '通知'],
     advice: [
@@ -311,8 +316,7 @@ export function createLogAssistant(opts: LogAssistantOptions): LogAssistant {
     diagnose(question: LogAssistantQuestion): Promise<LogDiagnosis> {
       return run(async () => {
         const text = question.question.trim().slice(0, MAX_QUESTION_CHARS)
-        const read = readLogs(opts.logPath, { limit: READ_LIMIT })
-        const entries = read.entries
+        const entries = readLogTail(opts.logPath, { lines: READ_LIMIT })
         // 助手与日志页共用同一套过滤：用户看到的范围就是排查范围。
         const scoped = filterEntries(entries, {
           ...(question.level ? { level: question.level } : {}),
@@ -561,25 +565,26 @@ export function ruleDiagnosis(question: string, evidence: LogEvidence[], hits: S
 /**
  * 由命中的问题模式推导处置建议。
  *
- * 只按**最可能的那一类**给动作：用户要的是一个判断——配置类去改配置，
- * 缺陷 / 体验类去上报 issue；日志里同时有其它现象时，建议仍列在「建议的下一步」里，
- * 但不在按钮上分叉，免得把人引到不相干的配置项。
+ * 动作按**最可能的那一类**排在前面：用户要的是一个判断——配置类去改配置，
+ * 缺陷 / 体验类去上报 issue。
+ *
+ * 但两类都命中时**两个入口都给**：日志里同时出现「配置没生效」和「Worker 卡住」，
+ * 只给配置按钮的话，缺陷就永远报不上去——上报 issue 的入口必须是可达的。
  */
 export function nextStepsFor(hits: SymptomHit[], question: string): LogNextStep[] {
   const primary = hits[0]
   if (primary) {
     if (primary.symptom.kind === 'config') {
-      return [{
+      const steps: LogNextStep[] = [{
         kind: 'config',
         label: primary.symptom.fixLabel ?? `去「配置」页检查与「${primary.symptom.title}」相关的设置`,
         ...(primary.symptom.section ? { section: primary.symptom.section } : {}),
       }]
+      const defect = hits.find(item => item.symptom.kind === 'defect')
+      if (defect) steps.push(issueStepOf(defect))
+      return steps
     }
-    return [{
-      kind: 'issue',
-      label: '一键上报 GitHub issue',
-      issueTitle: `[排查助手] ${primary.symptom.title}`,
-    }]
+    return [issueStepOf(primary)]
   }
   // 日志里没有命中事件，但问题描述点名了配置类现象：给一条配置引导。
   for (const symptom of SYMPTOMS) {
@@ -592,6 +597,15 @@ export function nextStepsFor(hits: SymptomHit[], question: string): LogNextStep[
     }]
   }
   return []
+}
+
+/** 缺陷类症状对应的「上报 issue」入口。 */
+function issueStepOf(hit: SymptomHit): LogNextStep {
+  return {
+    kind: 'issue',
+    label: '一键上报 GitHub issue',
+    issueTitle: `[排查助手] ${hit.symptom.title}`,
+  }
 }
 
 /** 问题里是否点名了这一类症状。 */
@@ -758,13 +772,25 @@ export async function askModel(
  *
  * 模型给 causes 标了 config / defect 时，页面才有「去改配置」或「上报 issue」的入口；
  * 没标就不硬塞按钮，避免给错方向。
+ *
+ * 分类不一致时两个入口都给：只看第一条的话，排在后面的缺陷会被吞掉，
+ * 用户想反馈问题时页面上找不到上报入口。
  */
 export function nextStepsFromCauses(causes: LogCause[]): LogNextStep[] {
   // 与规则式排查一致：只按最可能的那条原因给动作。
   const primary = causes.find(cause => cause.category)
   if (!primary?.category) return []
-  if (primary.category === 'config') return [{ kind: 'config', label: '去「配置」页按建议修改' }]
-  return [{ kind: 'issue', label: '一键上报 GitHub issue' }]
+  const steps: LogNextStep[] = []
+  if (primary.category === 'config') {
+    steps.push({ kind: 'config', label: '去「配置」页按建议修改' })
+    // 还有缺陷类原因就一并给上报入口，别让缺陷被配置引导挡住。
+    if (causes.some(cause => cause.category === 'defect')) {
+      steps.push({ kind: 'issue', label: '一键上报 GitHub issue' })
+    }
+    return steps
+  }
+  steps.push({ kind: 'issue', label: '一键上报 GitHub issue' })
+  return steps
 }
 
 /** 工具执行出错不该拖垮整次排查：把错误当工具结果回给模型。 */
