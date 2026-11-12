@@ -163,6 +163,16 @@ describe('/api/logs/assistant/issue', () => {
     expect(created[0]?.body).toContain('outbox:failed')
   })
 
+  it('前端给了标题就用它，不用兜底标题', async () => {
+    const res = await call(server, '/api/logs/assistant/issue', 'POST', {
+      question: '消息没发出去',
+      title: '[排查助手] Worker 卡住 / 执行失败',
+      diagnosis,
+    })
+    expect(res.status).toBe(200)
+    expect(created[0]?.title).toBe('[排查助手] Worker 卡住 / 执行失败')
+  })
+
   it('缺少排查结论时返回 400', async () => {
     const res = await call(server, '/api/logs/assistant/issue', 'POST', { question: '消息没发出去' })
     expect(res.status).toBe(400)

@@ -145,7 +145,9 @@ export function LogAssistantFab({ onOpenConfig }: { onOpenConfig: (section?: str
       const data = await sendJson<{ issue: { number: number; url: string } }>(
         '/api/logs/assistant/issue',
         'POST',
-        { question, diagnosis: result },
+        { question, diagnosis: result, ...(result.next?.find(step => step.kind === 'issue')?.issueTitle
+          ? { title: result.next.find(step => step.kind === 'issue')?.issueTitle }
+          : {}) },
       )
       setIssue(data.issue)
     } catch (err) {
@@ -160,6 +162,36 @@ export function LogAssistantFab({ onOpenConfig }: { onOpenConfig: (section?: str
     setQuestion(text)
     void analyze(text)
   }, [analyze])
+
+  /**
+   * 「上报 GitHub issue」快捷入口：先分析，再直接建 issue。
+   *
+   * 之前这个入口只调 openWithAnalysis，等于「点了只出结论、什么也没上报」，
+   * 用户以为已经建好 issue，实际一条都没发出去。现在分析完直接提交，
+   * 失败原因也会显示在弹窗里。
+   */
+  const openWithIssue = useCallback(async (text: string): Promise<void> => {
+    setOpen(true)
+    setQuestion(text)
+    setBusy(true)
+    setFailure(null)
+    setIssue(null)
+    try {
+      const data = await sendJson<{ diagnosis: LogDiagnosis }>('/api/logs/assistant', 'POST', { question: text })
+      setResult(data.diagnosis)
+      const issueStep = data.diagnosis.next?.find(step => step.kind === 'issue')
+      const issue = await sendJson<{ issue: { number: number; url: string } }>(
+        '/api/logs/assistant/issue',
+        'POST',
+        { question: text, diagnosis: data.diagnosis, ...(issueStep?.issueTitle ? { title: issueStep.issueTitle } : {}) },
+      )
+      setIssue(issue.issue)
+    } catch (err) {
+      setFailure(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }, [])
 
   useEffect(() => {
     if (!open) return
@@ -198,9 +230,8 @@ export function LogAssistantFab({ onOpenConfig }: { onOpenConfig: (section?: str
           <button
             type="button"
             role="menuitem"
-            disabled={!status?.llmConfigured}
-            title={status?.llmConfigured ? '先分析，再把结论与日志贴成 issue' : '需要先配置模型才能分析'}
-            onClick={() => openWithAnalysis('最近的错误日志是什么问题？帮我排查一下。')}
+            title="分析最近的错误日志，并把结论与证据上报成 issue"
+            onClick={() => void openWithIssue('最近的错误日志是什么问题？帮我排查一下。')}
           >
             <Icon name="external" size={14} />
             上报 GitHub issue
