@@ -4,12 +4,14 @@
  * 选中状态由父级 draft 控制；探测轮询、检测、安装、日志等临时状态收在组件内部。
  */
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react'
-import { ACP_RUNTIME_ID, normalizeRuntimeId } from '../../worker/runtimes/catalog.js'
+import { ACP_RUNTIME_ID, normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
 import { getJson, sendJson } from './api.js'
 import { Icon } from './icons.js'
 import {
   isAcpAgentRuntime,
   isBuiltinRuntime,
+  isCustomRuntime,
+  isDeprecatedRuntime,
   isRuntimeSelectable,
   mergeRuntimeChoices,
   runtimeDisplayName,
@@ -18,6 +20,9 @@ import {
   type RuntimeChoiceView,
 } from './runtime-model.js'
 import { RuntimeLogo, runtimeLogoOf } from './runtime-logos.js'
+import { runtimeOptionFields } from './fields.js'
+import { RuntimeSettingsDialog } from './runtime-settings.js'
+import type { PluginView } from './api.js'
 
 export interface RuntimeNotice {
   kind: 'ok' | 'warn' | 'error'
@@ -44,6 +49,8 @@ interface CheckResult {
 
 interface RuntimeCardsProps {
   choices: RuntimeChoiceView[]
+  /** 服务端下发的插件目录；用于把自定义运行时合并进卡片。 */
+  plugins?: PluginView[]
   detecting: boolean
   selected: string
   onSelect: (id: string) => void
@@ -54,6 +61,11 @@ interface RuntimeCardsProps {
   onPendingRestart?: () => void
   /** 标题由外层配置块承担时关掉自带表头，避免同一屏出现两层标题。 */
   showHead?: boolean
+  /** 配置草稿与默认值：运行时选项弹窗直接读写父级 draft。 */
+  draft?: unknown
+  defaults?: unknown
+  /** 运行时选项改动；缺省时设置按钮不可用。 */
+  onOptionChange?: (path: string, value: unknown) => void
 }
 
 function errorText(error: unknown): string {
@@ -72,6 +84,7 @@ function sleep(ms: number): Promise<void> {
 
 export function RuntimeCards({
   choices,
+  plugins,
   detecting,
   selected,
   onSelect,
@@ -80,19 +93,29 @@ export function RuntimeCards({
   onNotice,
   onPendingRestart,
   showHead = true,
+  draft,
+  defaults,
+  onOptionChange,
 }: RuntimeCardsProps): JSX.Element {
   const [busy, setBusy] = useState<Record<string, 'check' | 'install'>>({})
   const [jobs, setJobs] = useState<Record<string, InstallJobView>>({})
   const [openLogs, setOpenLogs] = useState<Record<string, boolean>>({})
   const [checks, setChecks] = useState<Record<string, CheckResult>>({})
+  const [settingsFor, setSettingsFor] = useState<string | null>(null)
   const mounted = useRef(true)
   const autoDetected = useRef(false)
 
   useEffect(() => () => { mounted.current = false }, [])
 
-  const cards = useMemo(() => mergeRuntimeChoices(choices), [choices])
+  const cards = useMemo(() => mergeRuntimeChoices(choices, plugins), [choices, plugins])
+  const optionSpecs = useMemo(
+    () => (plugins ?? []).flatMap(plugin => (plugin.kind === 'runtime' && plugin.options ? [plugin.options] : [])),
+    [plugins],
+  )
   const selectedId = normalizeRuntimeId(selected)
   const selectedChoice = cards.find(choice => choice.id === selectedId)
+  // 打开设置弹窗的运行时；探测结果刷新后卡片可能消失，这里兜底成 null。
+  const settingsChoice = settingsFor ? cards.find(choice => choice.id === settingsFor) ?? null : null
 
   const refresh = async (): Promise<void> => {
     onDetecting(true)
@@ -155,15 +178,16 @@ export function RuntimeCards({
       }
       const status = result.choice?.status ?? (result.ok ? 'ready' : 'incompatible')
       const verb = isAcpAgentRuntime(choice.id) ? '握手' : '检测'
+      const name = runtimeDisplayName(choice)
       if (status === 'needs-auth') {
-        onNotice({ kind: 'warn', text: `${choice.label} 握手通过，但仍需登录：${result.choice?.reason ?? result.detail}` })
+        onNotice({ kind: 'warn', text: `${name} 握手通过，但仍需登录：${result.choice?.reason ?? result.detail}` })
       } else if (result.ok) {
-        onNotice({ kind: 'ok', text: `${choice.label} ${verb}通过：${result.detail}` })
+        onNotice({ kind: 'ok', text: `${name} ${verb}通过：${result.detail}` })
       } else {
-        onNotice({ kind: 'error', text: `${choice.label} ${verb}失败：${result.detail}` })
+        onNotice({ kind: 'error', text: `${name} ${verb}失败：${result.detail}` })
       }
     } catch (error) {
-      if (mounted.current) onNotice({ kind: 'error', text: `${choice.label} 检测失败：${errorText(error)}` })
+      if (mounted.current) onNotice({ kind: 'error', text: `${runtimeDisplayName(choice)} 检测失败：${errorText(error)}` })
     } finally {
       if (mounted.current) setBusy(current => withoutKey(current, choice.id))
     }
@@ -180,7 +204,7 @@ export function RuntimeCards({
         if (job.status === 'running') continue
         setBusy(current => withoutKey(current, choice.id))
         if (job.status === 'ok') {
-          onNotice({ kind: 'ok', text: `${choice.label} 安装完成${job.version ? `（${job.version}）` : ''}，重启服务后用于派工` })
+          onNotice({ kind: 'ok', text: `${runtimeDisplayName(choice)} 安装完成${job.version ? `（${job.version}）` : ''}，重启服务后用于派工` })
           onPendingRestart?.()
           const snapshot = await getJson<{ choices?: RuntimeChoiceView[] }>('/api/runtimes')
           if (snapshot.choices && mounted.current) onChoices(snapshot.choices)
@@ -206,7 +230,7 @@ export function RuntimeCards({
   }
 
   const install = async (choice: RuntimeChoiceView): Promise<void> => {
-    const target = choice.extension?.packageName ?? choice.packageName ?? choice.label
+    const target = choice.extension?.packageName ?? choice.packageName ?? runtimeDisplayName(choice)
     if (!confirm(`安装 ACP 扩展 ${target} 到 ~/.router-agent/runtimes？需要联网下载 npm 包。`)) return
     setBusy(current => ({ ...current, [choice.id]: 'install' }))
     setJobs(current => withoutKey(current, choice.id))
@@ -221,12 +245,16 @@ export function RuntimeCards({
 
   const groups = useMemo(() => {
     const visible = cards.filter(choice => {
+      // 已有原生运行时替代品的（Claude Code / Codex 的 ACP 版本）不再展示，
+      // 但当前正选中的要留着，否则用户看不到自己在用的运行时。
+      if (isDeprecatedRuntime(choice) && choice.id !== selectedId) return false
       // 未配置的自定义 acp 只有当前选中时才展示，避免普通用户看到一张空卡。
       if (choice.id === ACP_RUNTIME_ID && choice.status === 'not-installed' && choice.id !== selectedId) return false
       return true
     })
     return [
       { title: '内置运行时', items: visible.filter(choice => isBuiltinRuntime(choice.id)) },
+      { title: '自定义插件', items: visible.filter(choice => isCustomRuntime(choice)) },
       { title: 'ACP Agent', items: visible.filter(choice => isAcpAgentRuntime(choice.id)) },
     ].filter(group => group.items.length > 0)
   }, [cards, selectedId])
@@ -314,6 +342,16 @@ export function RuntimeCards({
                   </p>
 
                   <div className="runtime-card-actions">
+                    {runtimeOptionFields(choice.id, optionSpecs).length > 0 && (
+                      <button
+                        className="btn ghost tiny"
+                        disabled={!onOptionChange}
+                        title={onOptionChange ? `设置 ${runtimeDisplayName(choice)}` : '当前页面不支持修改运行时设置'}
+                        onClick={() => setSettingsFor(choice.id)}
+                      >
+                        <Icon name="sliders" size={12} />设置
+                      </button>
+                    )}
                     <button
                       className={`btn tiny ${isSelected ? '' : 'primary'}`}
                       disabled={!selectable || isSelected}
@@ -368,6 +406,17 @@ export function RuntimeCards({
           </div>
         </div>
       ))}
+
+      {settingsChoice && onOptionChange && (
+        <RuntimeSettingsDialog
+          choice={settingsChoice}
+          optionSpecs={optionSpecs}
+          draft={draft}
+          defaults={defaults}
+          onChange={onOptionChange}
+          onClose={() => setSettingsFor(null)}
+        />
+      )}
     </div>
   )
 }

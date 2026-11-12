@@ -122,3 +122,48 @@ describe('线程别名解析', () => {
     expect(db.listThreadAliases('feishu', 'feishu:oc_3:om_x_only')).toEqual([])
   })
 })
+describe('话题是否绑在办工单（只读查询）', () => {
+  it('别名换算到在办工单才算命中；已关闭与未订阅都不算', () => {
+    const db = store()
+    db.upsertThread({ id: 'feishu:oc_1:om_root', source: 'feishu', rootId: 'om_root', chatId: 'oc_1', createdAt: AT })
+    db.registerThreadAlias({ source: 'feishu', alias: 'omt_topic_1', threadId: 'feishu:oc_1:om_root', createdAt: AT })
+
+    // 线程有了，但还没有工单订阅它
+    expect(db.hasLiveTicketForThreadKeys('feishu', ['omt_topic_1'])).toBe(false)
+
+    db.subscribe({ threadId: 'feishu:oc_1:om_root', ticketId: 'tk_1', contextOnly: false, createdAt: AT })
+    db.insertTicket({
+      id: 'tk_1',
+      title: '改登录超时',
+      threadId: 'feishu:oc_1:om_root',
+      source: 'feishu',
+      chatId: 'oc_1',
+      mandateId: 'md_1',
+      stage: 'running',
+      repo: '',
+      branch: '',
+      prNumber: 0,
+      prUrl: '',
+      prState: 'none',
+      createdAt: AT,
+      updatedAt: AT,
+    })
+    expect(db.hasLiveTicketForThreadKeys('feishu', ['omt_topic_1'])).toBe(true)
+    // 消息只带根消息 ID 也能命中：别名表把两个标识收敛到同一条线程
+    expect(db.hasLiveTicketForThreadKeys('feishu', ['om_root'])).toBe(false)
+    expect(db.hasLiveTicketForThreadKeys('feishu', ['omt_topic_1', 'om_2'])).toBe(true)
+
+    // 工单关闭后不再算绑定
+    db.updateTicket({ ...db.getTicket('tk_1')!, stage: 'done', closedAt: AT, updatedAt: AT })
+    expect(db.hasLiveTicketForThreadKeys('feishu', ['omt_topic_1'])).toBe(false)
+  })
+
+  it('认不出的标识返回 false，且不创建线程', () => {
+    const db = store()
+    expect(db.hasLiveTicketForThreadKeys('feishu', [])).toBe(false)
+    expect(db.hasLiveTicketForThreadKeys('feishu', ['omt_unknown'])).toBe(false)
+    expect(db.findThreadIdByAlias('feishu', 'omt_unknown')).toBeNull()
+    expect(db.findThreadIdByAlias('feishu', '  ')).toBeNull()
+    expect(db.listThreads('feishu')).toEqual([])
+  })
+})

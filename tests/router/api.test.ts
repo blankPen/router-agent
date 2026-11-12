@@ -7,12 +7,12 @@ import type { AddressInfo } from 'node:net'
 import { Store } from '../../src/store/db.js'
 import { Engine } from '../../src/core/engine.js'
 import { createApiServer, type ApiServer, type IdentityPort } from '../../src/router/api.js'
-import { InstallStartError } from '../../src/worker/runtimes/acp/admin.js'
-import type { ResumeHint } from '../../src/worker/port.js'
+import { InstallStartError } from '@router-agent/runtime-acp'
+import type { ResumeHint } from '#runtime/port.js'
 import { defaultConfig, loadConfig, policyOf, projectsForRuntime, type AppConfig, chatEntry, type PolicyResolution } from '../../src/config.js'
-import { FeishuBotAdmin } from '../../src/sources/feishu-bot-admin.js'
-import type { IdentityStatusView } from '../../src/sources/feishu-identity.js'
-import { ReportRejectedError } from '../../src/worker/evidence-gate.js'
+import { FeishuBotAdmin } from '@router-agent/channel-feishu'
+import type { IdentityStatusView } from '@router-agent/channel-feishu'
+import { ReportRejectedError } from '#runtime/evidence-gate.js'
 
 function call(server: ApiServer, method: string, path: string, body?: unknown): Promise<{ status: number; json: any }> {
   return new Promise((resolve, reject) => {

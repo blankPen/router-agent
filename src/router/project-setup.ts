@@ -1,8 +1,8 @@
 import { existsSync, mkdirSync, realpathSync, statSync } from 'node:fs'
 import { basename, isAbsolute, join, resolve } from 'node:path'
-import { realRunner, type CommandRunner } from '../infra/process.js'
-import { parseOrcaRepos } from '../sources/lark.js'
-import { normalizeRuntimeId, ORCA_RUNTIME_ID } from '../worker/runtimes/catalog.js'
+import { realRunner, type CommandRunner } from '#infra/process.js'
+import { parseOrcaRepos } from '@router-agent/channel-feishu'
+import { normalizeRuntimeId, ORCA_RUNTIME_ID } from '#runtime/runtimes/catalog.js'
 
 /** 目录选择结果：用户取消时 canceled=true，path 为空。 */
 export interface PickedDirectory {

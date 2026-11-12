@@ -1,10 +1,10 @@
 import { existsSync } from 'node:fs'
 import type { AppConfig } from '../config.js'
 import { projectsForRuntime } from '../config.js'
-import type { CommandRunner } from '../infra/process.js'
-import { checkMemberPayload, resolveBotIdentity } from '../sources/feishu-identity.js'
-import type { WorkerRuntime } from '../worker/port.js'
-import type { RuntimeChoice } from '../worker/runtimes/acp/detect.js'
+import type { CommandRunner } from '#infra/process.js'
+import { checkMemberPayload, resolveBotIdentity } from '@router-agent/channel-feishu'
+import type { WorkerRuntime } from '#runtime/port.js'
+import type { RuntimeChoice } from '@router-agent/runtime-acp'
 import {
   parseAuthUser,
   parseBotAvailable,
@@ -13,7 +13,7 @@ import {
   parseLarkMembers,
   parseOrcaRepos,
   parseOrcaStatus,
-} from '../sources/lark.js'
+} from '@router-agent/channel-feishu'
 
 export type CheckStatus = 'ok' | 'warn' | 'fail'
 

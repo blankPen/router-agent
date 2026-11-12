@@ -5,6 +5,7 @@
  */
 import type { RuntimeChoiceView } from './runtime-model.js'
 import type { IdentityStatusView } from './identity-status.js'
+import type { RuntimeOptionSpec } from '#runtime/runtimes/options.js'
 
 export type { IdentityEntryView, IdentityStatusView } from './identity-status.js'
 
@@ -16,6 +17,8 @@ export interface ConfigBundle {
   configPath: string
   runtimeChoices?: RuntimeChoiceView[]
   detecting?: boolean
+  /** 插件目录与加载状态；旧版服务端可能没有这个字段。 */
+  plugins?: PluginView[]
   /** 允许名单与机器人身份的解析状态；旧版服务端可能没有这个字段。 */
   identity?: IdentityStatusView
   /** 保存后立即生效的配置路径前缀；旧版服务端可能没有这个字段。 */
@@ -25,6 +28,28 @@ export interface ConfigBundle {
 /** 服务端已注册的消息渠道。 */
 export interface ChannelRegistryView {
   channels?: { id: string; kind: string }[]
+}
+
+export type PluginKind = 'runtime' | 'channel'
+
+export interface PluginView {
+  id: string
+  kind: PluginKind
+  name?: string
+  label?: string
+  hint?: string
+  installHint?: string
+  installUrl?: string
+  packageName?: string
+  default?: boolean
+  entry?: unknown
+  loadedIds?: string[]
+  /** 运行时插件声明的配置项；自定义运行时据此渲染设置弹窗。 */
+  options?: RuntimeOptionSpec
+  status: 'builtin' | 'configured' | 'loaded' | 'failed'
+  error?: string
+  /** 加载失败时实际尝试的包名 / 路径。 */
+  specifier?: string
 }
 
 export async function getJson<T>(path: string): Promise<T> {

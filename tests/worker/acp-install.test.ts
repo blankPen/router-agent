@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileS
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { installAcpAgent, uninstallAcpAgent } from '../../src/worker/runtimes/acp/install.js'
+import { installAcpAgent, uninstallAcpAgent } from '@router-agent/runtime-acp'
 
 function home(): string {
   return mkdtempSync(join(tmpdir(), 'ra-acp-install-'))

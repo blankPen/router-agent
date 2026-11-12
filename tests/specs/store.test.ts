@@ -13,9 +13,9 @@ import {
   specPath,
 } from '../../src/specs/index.js'
 import { buildSystemPrompt } from '../../src/router/agent-loop.js'
-import { buildWorkerPrompt } from '../../src/worker/spec/index.js'
+import { buildWorkerPrompt } from '#runtime/spec/index.js'
 import { defaultConfig, policyOf } from '../../src/config.js'
-import type { Ticket } from '../../src/core/model.js'
+import type { Ticket } from '#core/model.js'
 
 const ticket: Ticket = {
   id: 'tk_1',
@@ -52,6 +52,8 @@ describe('规范 markdown 内置存储', () => {
       'router.orchestrator',
       'router.admission',
       'router.conversation',
+      'router.intake-screener',
+      'router.intake-analyst',
       'worker.prompt-mode',
       'worker.contract',
     ])

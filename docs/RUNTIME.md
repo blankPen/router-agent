@@ -8,9 +8,10 @@ Worker 不在 Router 进程里跑。每张工单开工时，Router 按 `runtime.
 
 | runtime id | 拉起方式 | workspace | 状态读取 | 追问 / 恢复 | 适用场景 |
 |-|-|-|-|-|-|
-| `orca`（默认） | Orca 创建 worktree + Claude Code 终端 | `orca worktree create --repo … --base-branch …` | Orca `AgentStatus`（`connected` / `orphaned` / `lastOutputAt`） | 终端常驻，追问直接投递；巡检优先读 Claude 会话记录 | 本机已用 Orca 管仓库，想同时看到终端 |
-| `claude-code` | `git worktree` + `claude --bg` 后台会话 | 本地 git 仓库绝对路径 | `claude agents --json --all` | 会话结束后用 `claude --bg --resume <sessionId>` 追问；进程退出不自动 resume | 不用 Orca，直接跑 Claude Code |
+| `orca`（默认） | Orca 创建 worktree + Agent 终端（默认 Claude Code，也可指定 codex 等） | `orca worktree create --repo … --base-branch …` | Orca `AgentStatus`（`connected` / `orphaned` / `lastOutputAt`） | 终端常驻，追问直接投递；巡检优先读 Agent 自己的会话记录 | 本机已用 Orca 管仓库，想同时看到终端 |
+| `claude-code` | `git worktree` + `claude --bg` 后台会话 | 本地 git 仓库绝对路径 | `claude agents --json --all` | 本轮进行中用 `claude attach <id>` 插话（TUI 排队语义）；本轮结束后先 `claude stop <id>` 再 `claude --bg --resume <完整 sessionId> <prompt>`（不带任何新参数），保证一个话题只对应一个会话；进程退出不自动 resume | 不用 Orca，直接跑 Claude Code |
 | `codex-app` | `git worktree` + `codex app-server --stdio` | 本地 git 仓库绝对路径 | Codex `thread/status/changed`、`turn/*`、`item/*` 事件 | `thread/resume` 接回；执行中 `turn/steer`；停止用 `turn/interrupt` | 想用 Codex，且希望 Router 创建的 thread 能在 Codex 桌面端看到 |
+| `herdr` | ra 用 git worktree 建检出，Herdr 开终端窗口跑 Agent | `git worktree add` + `herdr workspace create --cwd …` | Herdr `agent get`（`idle` / `working` / `done` / `blocked` / `unknown`） | 终端常驻，追问直接投递；巡检优先读 Agent 自己的会话记录 | 本机已用 Herdr 管终端，想在 Herdr 侧栏里看到工单 |
 | `acp` / `acp-*` | ACP 子进程：`initialize` → `session/new` → `session/prompt` | `git worktree`（本地绝对路径） | ACP `session/update` | Agent 声明 `loadSession` 时用 `session/load` 恢复 | 想接 Codex / Gemini / OpenCode 等 |
 
 `acp` 是自定义命令入口；`acp-*` 是内置 ACP Agent，共用同一套 `AcpRuntime`。
@@ -23,6 +24,9 @@ Worker 不在 Router 进程里跑。每张工单开工时，Router 按 `runtime.
 - **安装 CLI** 跳转该 Agent 的官方安装页；**安装 ACP 扩展** 由 ra 把 npm 适配包装到 `~/.router-agent/runtimes/<agent>`；
 - **检测 / 试启动** 做一次真实 ACP 握手（`initialize` + `session/new`），避免只看版本号；
 - 点卡片即切换 `runtime.default`，只影响新工单；已开工的工单保留原运行时。
+- 运行时声明了自己的选项时，选项卡片会出现在运行时卡片下方（例如 Orca 的「执行 Agent」）。
+
+卡片标题用首字母大写的运行时名（`Orca` / `Claude Code` / `Codex App`，ACP Agent 为 `OpenCode` / `Gemini CLI` 等），标题下方的小字是机器可读的 runtime id。已有原生运行时替代品的 ACP Agent（`acp-claude` / `acp-codex`）不在卡片里出现，但当前正选中的会保留，老配置不会「找不到自己」。
 
 ![Web 初始化页的运行时卡片：内置运行时与 ACP Agent 的可用性检测](assets/readme/setup-runtime-dark.png)
 
@@ -30,6 +34,7 @@ Worker 不在 Router 进程里跑。每张工单开工时，Router 按 `runtime.
 
 ```bash
 ra config set runtime.default claude-code
+ra config set runtime.options.orca.agent codex   # Orca 派工时用 Codex；不配 = 默认 Claude Code
 ra runtime list                    # 本机 ACP Agent 状态、版本、来源
 ra runtime install acp-claude      # 装到 ~/.router-agent/runtimes/claude
 ra runtime check acp-claude        # 完整 initialize + session/new 握手
@@ -44,6 +49,8 @@ runtime:
   default: acp-codex        # orca | claude-code | codex-app | acp | acp-*
   # 运行时专属的非安全参数
   options:
+    orca:
+      agent: codex          # 不配 = 默认 Claude Code
     claude-code:
       model: claude-sonnet-5-5
     codex-app:
@@ -67,6 +74,29 @@ runtime:
 ```
 
 `allowedTools` / `permissionMode` / `sandbox` / `shellAllow` / `allowNetwork` / `fileAccess` 这些安全字段不允许写在 `runtime.options` 里，写了会直接启动失败。Worker 权限统一由 `worker.tools` 与 adapter 内置基线决定。
+
+## 运行时选项：各运行时自己声明
+
+`runtime.options.<运行时 id>.<键>` 是通用的扩展点。每个运行时在自己的 `options.ts` 里声明「能配什么、取值有哪些、默认是什么」，于是：
+
+- **面板**按声明自动渲染字段（运行时卡片上的「设置」弹窗），不写死任何运行时；
+- **后端**按声明校验取值，声明之外的键直接拒绝；
+- **命令行**统一用 `ra config set runtime.options.<运行时 id>.<键> <值>` 改。
+
+Orca 与 Herdr 都声明了 `agent`：
+
+```bash
+ra config set runtime.options.orca.agent codex   # Orca 派工时启动 Codex
+ra config set runtime.options.orca.agent claude  # 回到默认的 Claude Code
+ra config set runtime.options.herdr.agent codex  # Herdr 派工时启动 Codex
+ra config set runtime.options.herdr.model sonnet # 可选；留空用 Agent 自己的默认模型
+```
+
+默认值都是 `claude`。Orca 的 `worktree create --prompt` 必须同时给 `--agent`，没有「不传」这种形态，所以 ra 总是显式传一个 Agent；没配置时用选项声明里的默认值。选定的 Agent 会记进工单 meta，人工恢复会话时用它的 CLI 语法（`claude --resume` / `codex resume`）。
+
+Herdr 的 `agent` 取值是 Herdr 自己的 kind（`claude` / `codex` / `opencode`）；每个 kind 的无人值守启动参数由适配器按目录给出，声明里只暴露「选哪个 Agent」与「用哪个模型」。
+
+进展巡检读的是 Agent 自己的结构化会话记录：Claude 读 `~/.claude/projects/<cwd>/`，Codex 读 `~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl`。没指定 Agent 时按默认值 `claude` 读，读不到就退回终端屏幕渲染。
 
 ## Codex App Server 运行时（`codex-app`）
 
@@ -167,19 +197,94 @@ runtime:
 
 实际生效的路径会打在 `codex:codex-home` 事件里，排查「桌面端看不到 thread」时先看这条。
 
+## Herdr 运行时（`herdr`）
+
+`herdr` 与 `orca` 同构：都把 Agent 跑在真实终端里，差别在控制面 —— Herdr 的命令走本地 socket 服务端，Orca 走 Orca 自己的 CLI。
+
+```bash
+ra config set runtime.default herdr
+ra config set runtime.options.herdr.agent claude   # claude / codex / opencode
+ra config set runtime.options.herdr.model sonnet    # 可选；留空用 Agent 自己的默认
+```
+
+项目清单按运行时隔离，与 `claude-code` / `codex-app` 一样填**本地仓库绝对路径**：
+
+```yaml
+runtime:
+  default: herdr
+  projects:
+    herdr:
+      - name: router-agent
+        repo: /Users/me/router-agent
+        defaultBranch: main
+```
+
+### 职责切分：检出归 ra，窗口归 Herdr
+
+Herdr 自带 `worktree create` / `open` / `remove`，但**不用它**。原因是那条命令会把仓库登记进
+Herdr 的全局仓库表；仓库目录一旦被删（例如临时目录被清理），之后**所有** `herdr worktree *`
+命令都会报 `worktree_list_failed: cannot change to '<path>'`，一颗老鼠屎坏一锅汤。
+
+所以切成两半：
+
+| 运行时动作 | 谁来做 | 具体命令 |
+| --- | --- | --- |
+| 建隔离检出 | **ra 自己**（`GitWorktreeProvider`） | `git worktree add -b <workBranch> -- <workdir> <baseBranch>` |
+| 开终端窗口 | Herdr | `herdr workspace create --cwd <workdir> --label ra-<ticket> --no-focus` |
+| 拉起 Agent | Herdr | `herdr agent start <name> --kind <kind> --pane <paneId> -- <无人值守参数>` |
+| 投递契约 / 追问 | Herdr | `herdr agent prompt <paneId> "<文本>"` |
+| 读状态 | Herdr | `herdr agent get <paneId>` |
+| 读输出 | Herdr | `herdr agent read <paneId> --source recent-unwrapped --lines N` |
+| 停止 | Herdr | `herdr pane close <paneId>` + `herdr workspace close <workspaceId>` |
+| 回收检出 | **ra 自己** | `git worktree remove -- <workdir>`（有改动时追加 `--force`） |
+
+检出目录落在 `<RA_HOME>/worktrees/<worktreeName>/`（与 `claude-code` 运行时同一套目录规则）。
+
+### 五个必须知道的差异
+
+1. **服务端不用手动管**。`herdr` 的命令全部走本地 socket；服务端没起时每条命令都返回
+   `server_not_running`。适配器在**探测（`ra doctor` / 面板探测）和派工**两个时机都会先探一下，
+   没在跑就用 detached 方式把 `herdr server` 拉起来再等它就绪。拉不起来才报
+   `runtime:unavailable`（可重试）。
+2. **状态是屏幕识别出来的**。Herdr 通过 Agent 画在屏幕上的内容判断 `idle` / `working` /
+   `done` / `blocked` / `unknown`，不是结构化会话记录。`blocked` 表示它认出了确认 / 提问弹窗，
+   此时 `agent prompt` 会拒收输入（适配器返回可重试的拒收），不会往弹窗里乱写。
+   结构化活动仍然从 Agent 自己的会话记录里读（Claude 读 `~/.claude/projects/`，Codex 读 rollout）。
+3. **「信任此文件夹」弹窗会被自动确认**。Claude Code 在新目录第一次启动会问一次是否信任，
+   Herdr 把它识别成 `blocked`，`agent start` 直接以 `agent_not_ready` 失败。
+   注意 `--dangerously-skip-permissions` **不会**跳过这个弹窗。适配器的处理是：
+   读 pane 文本确认命中「信任此文件夹」→ 往下挪一格选「Yes, I trust this folder」→ 回车 → 等 Agent 变 `idle`。
+   只在文本确实命中时才动手，别的确认框不会被误触。
+4. **Agent 名字是「项目 + 分支 + 短哈希」**。Herdr 要求名字匹配 `[a-z][a-z0-9_-]{0,31}`
+   且存活期间唯一。适配器按「工具 + 项目路径 + 分支」算一个 8 位 sha256 短哈希当后缀，
+   例如 `ra-router-agent-tk-65-he-3f2a91cd`。同一组合永远得到同一个名字（重派工可预期），
+   换工具或换分支立刻不同 —— 比工单号这种递增数字稳定。撞名时说明上一轮残留还没回收，
+   适配器会从错误里捞出占用者的 pane 关掉再试一次。
+5. **关 pane 会连带关掉 workspace**。`herdr pane close` 关掉最后一个 pane 时 workspace 一起消失。
+   这不影响回收：检出归 git 管，删检出走 `git worktree remove`，与 Herdr 的窗口状态解耦。
+
+### 能力边界
+
+- 仓库发现（`listRepos`）不支持：Herdr 没有仓库清单接口，项目按本地绝对路径登记。
+- PR 关联（`inspectWorkspace` 返回 `linkedPr`）不支持：Herdr 不跟踪 PR，PR 跟踪仍走 GitHub / GitLab 侧。
+- 检出目录不在 `runtime.projects` 里登记，而是跟 `claude-code` 一样放在 `<RA_HOME>/worktrees/` 下。
+- 回收检出**不会删分支**（与其它运行时一致：分支只在启动失败回滚时删）。
+
 ## ACP Agent 目录
 
 任何实现了 [Agent Client Protocol](https://agentclientprotocol.com) 的 Agent，都可以用同一套 `AcpRuntime` 接入。ra 启动后自动探测本机可用的 ACP Agent，未安装 / 版本不兼容 / 未登录的项会在面板里置灰并给出原因。
 
 | runtime id | Agent | 启动方式 | 可在线安装 | 断线恢复 | 说明 |
 |-|-|-|-|-|-|
-| `acp-claude` | Claude Code | `claude-agent-acp` | ✅ | ✅ `session/load` | 需先登录 Claude Code |
-| `acp-codex` | Codex | `codex-acp` | ✅ | ❌ | 需本机 `codex` CLI；先 `codex-acp login`；默认带 `--message-streaming` |
+| `acp-claude` | Claude Code | `claude-agent-acp` | ✅ | ✅ `session/load` | 需先登录 Claude Code；已有 `claude-code` 运行时，面板不再列为可选项 |
+| `acp-codex` | Codex | `codex-acp` | ✅ | ❌ | 需本机 `codex` CLI；先 `codex-acp login`；默认带 `--message-streaming`；已有 `codex-app` 运行时，面板不再列为可选项 |
 | `acp-opencode` | OpenCode | `opencode acp` | ❌ | ✅ | 本机安装后自动识别，建议先 `ra runtime check` |
 | `acp-gemini` | Gemini CLI | `gemini --acp` | ❌ | — | 实验性 ACP 模式 |
 | `acp-copilot` | GitHub Copilot CLI | `copilot --acp --stdio` | ❌ | — | |
 | `acp-cursor` | Cursor CLI | `cursor-agent acp` | ❌ | — | 旧版本可能没有 `acp` 子命令 |
 | `acp-goose` | Goose | `goose acp` | ❌ | — | |
+
+> `acp-claude` / `acp-codex` 只在「面板不再作为可选项展示」这一层被隐藏：运行时 id、配置项与已安装的扩展都保留，老配置（`runtime.default: acp-claude`、`runtime.projects.acp-*`）继续可用，`ra runtime install / check / login` 也不受影响。默认运行时改成 `claude-code` / `codex-app` 即可用原生运行时替代。
 
 `AcpRuntime` 负责：spawn Agent 子进程 → `initialize` → `session/new` → `session/prompt`；从 `session/update` 读取助手文本与工具调用；把 Agent 的 `session/request_permission` 按 `worker.tools` 策略自动放行或拒绝；进程退出后，若 Agent 声明 `loadSession`，追问时会用 `session/load` 恢复会话。
 
@@ -217,6 +322,6 @@ runtime:
 
 ## Worker 规范注入
 
-Worker 手册（`worker/spec/prompt-mode.md`）会拼进启动 prompt；非 Orca 运行时使用运行时中立的 `worker/spec/contract.md`。两者都不改项目自己的 `CLAUDE.md`。
+Worker 手册（`packages/runtime/src/spec/prompt-mode.md`）会拼进启动 prompt；非 Orca 运行时使用运行时中立的 `packages/runtime/src/spec/contract.md`。两者都不改项目自己的 `AGENTS.md`。
 
 这些规范 markdown 统一存放在状态目录的 `specs/` 下，可在 Web 面板「配置 → 规范文件」直接编辑或恢复默认；保存后对之后派出的新工单生效。

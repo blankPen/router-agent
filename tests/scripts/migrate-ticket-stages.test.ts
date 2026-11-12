@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, expect, it } from 'vitest'
 import { applyMigration, buildPlan, STAGE_MAP } from '../../scripts/migrate-ticket-stages.mjs'
-import { LEGACY_STAGE_MAP, STAGE_VALUES } from '../../src/core/stage.js'
+import { LEGACY_STAGE_MAP, STAGE_VALUES } from '#core/stage.js'
 
 function tempDb(rows: { id: string; stage: string }[]): string {
   const dir = mkdtempSync(join(tmpdir(), 'ra-stage-migration-'))

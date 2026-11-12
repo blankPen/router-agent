@@ -2,18 +2,24 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type
 import { createRoot } from 'react-dom/client'
 import {
   LLM_FIELDS,
+  allRuntimeOptionFields,
   blockEffect,
   blockPaths,
   fieldError,
+  fieldValue,
   getByPath,
   groupEffect,
   groupsFor,
   humanizeTime,
+  runtimeOptionDefaults,
   setByPath,
   type ConfigBlock,
   type ConfigGroup,
+  type FieldDef,
   type RuntimeChoiceView,
 } from './fields.js'
+import { FieldRow } from './field-row.js'
+import { runtimeOptionPaths } from '#runtime/runtimes/options.js'
 import {
   channelSetupBlocks,
   channelSetupExtraFields,
@@ -24,7 +30,6 @@ import {
   type ChannelPanelProps,
 } from './channels.js'
 import { ChannelPicker } from './channel-picker.js'
-import { FieldRow } from './field-row.js'
 import {
   chatsIssue,
   projectIssue,
@@ -45,13 +50,18 @@ import {
   type LocalProviderImportResult,
   type LocalProviderList,
   type LocalProviderView,
+  type PluginView,
 } from './api.js'
 import { Icon, LogoMark } from './icons.js'
 import type { IdentityStatusView } from './identity-status.js'
 import { RuntimeCards, type RuntimeNotice } from './runtime-cards.js'
+import { PluginSettings } from './plugin-settings.js'
+import { FeishuBotPanel } from './feishu-panel.js'
+import { LogAssistantFab } from './log-assistant.js'
 import { SpecsEditor } from './specs-editor.js'
 import {
   mergeRuntimeChoices,
+  runtimeDisplayName,
   runtimeStatusLabel,
 } from './runtime-model.js'
 import { hashForTab, tabFromHash, type Tab } from './tabs.js'
@@ -63,13 +73,13 @@ import {
   type UpdateRunPhase,
   type UpdateSnapshot,
 } from './update.js'
-import { ACP_RUNTIME_ID, ORCA_RUNTIME_ID, normalizeRuntimeId } from '../../worker/runtimes/catalog.js'
+import { ACP_RUNTIME_ID, ORCA_RUNTIME_ID, normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
 import type {
   WorkspaceCleanupResultView,
   WorkspaceOverviewView,
   WorkspaceRuntimeGroupView,
   WorkspaceSkipView,
-} from '../../worker/workspaces/overview.js'
+} from '#runtime/workspaces/overview.js'
 
 /** 三态各自一个图标：跟随系统用显示器，亮色用太阳，暗色用月亮。 */
 const THEME_ICON: Record<ThemeMode, 'monitor' | 'sun' | 'moon'> = {
@@ -195,6 +205,7 @@ const INPUT_STATUS_LABEL: Record<string, string> = {
   pending: '待投递',
   delivered: '已投递',
   acked: '已确认',
+  expired: '会话丢失',
 }
 
 const PR_STATE_LABEL: Record<string, string> = {
@@ -239,6 +250,8 @@ function App(): JSX.Element {
   const [skippedVersion, setSkippedVersion] = useState<string | null>(readSkippedVersion)
   const [updatePhase, setUpdatePhase] = useState<UpdateRunPhase>('idle')
   const [updateError, setUpdateError] = useState<string | null>(null)
+  // 排查助手给的配置引导：切到配置页后滚到对应小节。
+  const [configTarget, setConfigTarget] = useState<string | null>(null)
   const [updatedTo, setUpdatedTo] = useState<string | null>(null)
   // 主题是纯前端偏好：不进配置页，也不写服务端配置，只落在浏览器 localStorage。
   const theme = useThemeMode()
@@ -260,6 +273,8 @@ function App(): JSX.Element {
     // 让地址栏与当前页签保持同步：刷新页面或分享链接时能回到同一页。
     window.history.replaceState(null, '', hashForTab(next))
   }, [tab])
+
+  // `configTarget` 只负责把「要滚到哪个小节」交给配置页；滚动与高亮由配置页自己处理。
 
   // 外部直接改 hash（例如再次执行 ra start）时切到对应页签。
   useEffect(() => {
@@ -477,10 +492,18 @@ function App(): JSX.Element {
             restarting={restartPhase === 'restarting'}
             onRestart={() => void restartDaemon()}
             onDirtyChange={dirty => { dirtyRef.current = dirty }}
+            focusSection={configTarget}
+            onFocusHandled={() => setConfigTarget(null)}
           />
         )}
         {tab === 'sources' && <SourcesView />}
       </div>
+
+      {/* 智能排查助手：常驻右下角，任何页面都能开。 */}
+      <LogAssistantFab onOpenConfig={section => {
+        setConfigTarget(section ?? null)
+        switchTab('config')
+      }} />
     </div>
   )
 }
@@ -1149,23 +1172,43 @@ function matchesText(query: string, ...parts: (string | undefined)[]): boolean {
   return parts.some(part => String(part ?? '').toLowerCase().includes(query))
 }
 
+/** 插件入口改动：runtime.plugins.<id> / channels.<id>，保存时按点路径提交。 */
+function changedPluginPaths(draft: ConfigDoc, original: ConfigDoc): string[] {
+  const paths: string[] = []
+  const runtimeEntries = { ...(draft.runtime?.plugins ?? {}), ...(original.runtime?.plugins ?? {}) }
+  for (const id of Object.keys(runtimeEntries)) {
+    const path = `runtime.plugins.${id}`
+    if (JSON.stringify(getByPath(draft, path)) !== JSON.stringify(getByPath(original, path))) paths.push(path)
+  }
+  const channelEntries = { ...(draft.channels ?? {}), ...(original.channels ?? {}) }
+  for (const id of Object.keys(channelEntries)) {
+    const path = `channels.${id}`
+    if (JSON.stringify(getByPath(draft, path)) !== JSON.stringify(getByPath(original, path))) paths.push(path)
+  }
+  return paths
+}
+
 /**
  * 配置页。
  *
- * 层次：分组（渠道 / 准入 / 研判 / 派工 / 运维）→ 配置块（可折叠）→ 字段。
+ * 层次：分组 → 配置块（可折叠）→ 字段。
  * 渠道分组的内容来自渠道注册表（channels.ts），页面本身不认识任何具体渠道：
  * 新增渠道只要再加一份描述与表单。
  */
-function ConfigView({ restarting, onRestart, onDirtyChange }: {
+function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocusHandled }: {
   restarting: boolean
   onRestart: () => void
   onDirtyChange?: (dirty: boolean) => void
+  /** 排查助手的配置引导目标：滚到该小节并高亮左栏。 */
+  focusSection?: string | null
+  onFocusHandled?: () => void
 }): JSX.Element {
   const [original, setOriginal] = useState<ConfigDoc | null>(null)
   const [draft, setDraft] = useState<ConfigDoc | null>(null)
   const [defaults, setDefaults] = useState<ConfigDoc>({})
   const [configPath, setConfigPath] = useState('')
   const [runtimeChoices, setRuntimeChoices] = useState<RuntimeChoiceView[]>([])
+  const [plugins, setPlugins] = useState<PluginView[]>([])
   const [detecting, setDetecting] = useState(false)
   const [identity, setIdentity] = useState<IdentityStatusView | undefined>(undefined)
   const [hotPaths, setHotPaths] = useState<string[]>([])
@@ -1192,6 +1235,7 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
         setDefaults(data.defaults)
         setConfigPath(data.configPath)
         setRuntimeChoices(data.runtimeChoices ?? [])
+        setPlugins(data.plugins ?? [])
         setDetecting(Boolean(data.detecting))
         setIdentity(data.identity)
         setHotPaths(Array.isArray(data.hotPaths) ? data.hotPaths : [])
@@ -1205,10 +1249,23 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
   }, [])
 
   // 探测轮询由 RuntimeCards 负责；这里只保留静态目录兜底 + 服务端快照合并。
-  const runtimeCatalog = useMemo(() => mergeRuntimeChoices(runtimeChoices), [runtimeChoices])
-  const groups = useMemo(() => groupsFor(runtimeChoices), [runtimeChoices])
+  const runtimeCatalog = useMemo(() => mergeRuntimeChoices(runtimeChoices, plugins), [runtimeChoices, plugins])
+
+  // 当前选中的运行时：deprecated 的 ACP 运行时仍要留在下拉里，老配置才对得上。
+  const selectedRuntimeId = normalizeRuntimeId(
+    draft && typeof draft.runtime?.default === 'string' ? draft.runtime.default : ORCA_RUNTIME_ID,
+  )
+
+  const groups = useMemo(() => groupsFor(runtimeChoices, selectedRuntimeId, runtimeCatalog), [runtimeChoices, selectedRuntimeId, runtimeCatalog])
   const channels = useMemo(() => mergeChannels(registered), [registered])
   const activeChannel = channels.find(channel => channel.id === channelId) ?? channels[0]
+
+  const optionSpecs = useMemo(
+    () => plugins.flatMap(plugin => (plugin.kind === 'runtime' && plugin.options ? [plugin.options] : [])),
+    [plugins],
+  )
+  const optionFields = useMemo(() => allRuntimeOptionFields(optionSpecs), [optionSpecs])
+  const optionDefaults = useMemo(() => runtimeOptionDefaults(optionFields), [optionFields])
 
   const groupBlocks = useMemo(() => groups.flatMap(group => group.blocks), [groups])
   const channelBlocks = useMemo(() => channels.flatMap(channel => channel.blocks), [channels])
@@ -1217,25 +1274,62 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
 
   const changed = useMemo(() => {
     if (!draft || !original) return []
-    const paths = trackedPaths.filter(path =>
-      JSON.stringify(getByPath(draft, path)) !== JSON.stringify(getByPath(original, path)))
+    // 运行时专属选项是动态字段，路径来自各运行时的声明，不在静态块字段里。
+    const paths = [...trackedPaths, ...runtimeOptionPaths(), ...optionFields.map(field => field.path)]
+      .filter(path => JSON.stringify(fieldValue(draft, path)) !== JSON.stringify(fieldValue(original, path)))
+    paths.push(...changedPluginPaths(draft, original))
     for (const runtime of runtimeCatalog) {
       if (JSON.stringify(projectsOf(draft, runtime.id)) !== JSON.stringify(projectsOf(original, runtime.id))) {
         paths.push(projectPatchPath(runtime.id))
       }
     }
     return paths
-  }, [draft, original, runtimeCatalog, trackedPaths])
+  }, [draft, original, runtimeCatalog, trackedPaths, optionFields])
 
   useEffect(() => {
     onDirtyChange?.(changed.length > 0)
   }, [changed.length, onDirtyChange])
 
+  // 排查助手给的配置引导：滚到对应小节并把左栏高亮切过去。
+  // 配置数据是异步拉的，刚切过来时小节可能还没渲染，重试一小段时间。
+  useEffect(() => {
+    if (!focusSection) return
+    let cancelled = false
+    let attempts = 0
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const tryScroll = (): void => {
+      if (cancelled) return
+      const target = document.getElementById(`sec-${focusSection}`)
+      if (target) {
+        setActive(focusSection)
+        target.scrollIntoView({ block: 'start' })
+        onFocusHandled?.()
+        return
+      }
+      attempts += 1
+      if (attempts >= 20) {
+        onFocusHandled?.()
+        return
+      }
+      timer = setTimeout(tryScroll, 100)
+    }
+    timer = setTimeout(tryScroll, 0)
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [focusSection, onFocusHandled])
+
   const errors = useMemo(() => {
     if (!draft) return new Map<string, string>()
     const map = new Map<string, string>()
     for (const field of allBlocks.flatMap(block => block.fields)) {
-      const message = fieldError(field, getByPath(draft, field.path))
+      const message = fieldError(field, fieldValue(draft, field.path, optionDefaults))
+      if (message) map.set(field.path, message)
+    }
+    // 运行时专属选项是动态字段，默认值来自各运行时的声明。
+    for (const field of optionFields) {
+      const message = fieldError(field, fieldValue(draft, field.path, optionDefaults))
       if (message) map.set(field.path, message)
     }
     // 渠道自己的校验（群列表之类），由渠道描述提供。
@@ -1246,10 +1340,10 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
     }
     for (const runtime of runtimeCatalog) {
       const issue = projectIssue(runtime.id, projectsOf(draft, runtime.id))
-      if (issue) map.set(projectPatchPath(runtime.id), `${runtime.label}：${issue}`)
+      if (issue) map.set(projectPatchPath(runtime.id), `${runtimeDisplayName(runtime)}：${issue}`)
     }
     return map
-  }, [draft, allBlocks, channels, runtimeCatalog])
+  }, [draft, allBlocks, channels, runtimeCatalog, optionFields, optionDefaults])
 
   const setField = (path: string, value: unknown): void => {
     setDraft(current => (current ? setByPath(current, path, value) : current))
@@ -1282,6 +1376,7 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
       setDefaults(result.defaults)
       setConfigPath(result.configPath)
       if (result.runtimeChoices) setRuntimeChoices(result.runtimeChoices)
+      if (result.plugins) setPlugins(result.plugins)
       if (typeof result.detecting === 'boolean') setDetecting(result.detecting)
       // 保存后服务端会重解析名单，这里同步最新状态（解析失败也不影响保存结果）。
       if (result.identity) setIdentity(result.identity)
@@ -1345,8 +1440,10 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
   if (loadError) return <div className="banner danger"><Icon name="alert" />读取配置失败：{loadError}</div>
   if (!draft || !original) return <div className="empty-state tall"><p>正在读取配置…</p></div>
 
-  const runtimeId = normalizeRuntimeId(typeof draft.runtime?.default === 'string' ? draft.runtime.default : ORCA_RUNTIME_ID)
-  const runtimeLabel = runtimeCatalog.find(runtime => runtime.id === runtimeId)?.label ?? runtimeId
+  const runtimeId = selectedRuntimeId
+  const selectedRuntime = runtimeCatalog.find(runtime => runtime.id === runtimeId)
+  const runtimeLabel = selectedRuntime ? runtimeDisplayName(selectedRuntime) : runtimeId
+  const activeProjectsPath = projectPatchPath(runtimeId)
   const activeProjects = projectsOf(draft, runtimeId)
 
   const matches = (...parts: (string | undefined)[]): boolean => matchesText(query, ...parts)
@@ -1397,9 +1494,13 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
         return (
           <RuntimeCards
             choices={runtimeChoices}
+            plugins={plugins}
             detecting={detecting}
             selected={runtimeId}
             showHead={false}
+            draft={draft}
+            defaults={defaults}
+            onOptionChange={(path, value) => setField(path, value)}
             onSelect={id => setField('runtime.default', id)}
             onChoices={setRuntimeChoices}
             onDetecting={setDetecting}
@@ -1407,6 +1508,9 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
             onPendingRestart={() => setPendingRestart(true)}
           />
         )
+      }
+      if (block.render === 'plugins') {
+        return <PluginSettings plugins={plugins} draft={draft} onChange={setField} />
       }
       if (block.render === 'projects') {
         return (
@@ -1822,6 +1926,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
   const [defaults, setDefaults] = useState<ConfigDoc>({})
   const [configPath, setConfigPath] = useState('')
   const [runtimeChoices, setRuntimeChoices] = useState<RuntimeChoiceView[]>([])
+  const [plugins, setPlugins] = useState<PluginView[]>([])
   const [detecting, setDetecting] = useState(false)
   const [channelReady, setChannelReady] = useState(false)
   const [registered, setRegistered] = useState<{ id: string; kind: string }[]>([])
@@ -1846,6 +1951,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
         setDefaults(data.defaults)
         setConfigPath(data.configPath)
         setRuntimeChoices(data.runtimeChoices ?? [])
+        setPlugins(data.plugins ?? [])
         setDetecting(Boolean(data.detecting))
         setIdentity(data.identity)
         setLoadError(null)
@@ -1857,13 +1963,22 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       .catch(() => undefined)
   }, [])
 
-  const runtimeCatalog = useMemo(() => mergeRuntimeChoices(runtimeChoices), [runtimeChoices])
+  const runtimeCatalog = useMemo(() => mergeRuntimeChoices(runtimeChoices, plugins), [runtimeChoices, plugins])
   const runtimeId = normalizeRuntimeId(
     draft && typeof draft.runtime?.default === 'string' ? draft.runtime.default : ORCA_RUNTIME_ID,
   )
   const activeProjectsPath = projectPatchPath(runtimeId)
   const activeProjects = draft ? projectsOf(draft, runtimeId) : []
-  const runtimeLabel = runtimeCatalog.find(runtime => runtime.id === runtimeId)?.label ?? runtimeId
+  const selectedRuntime = runtimeCatalog.find(runtime => runtime.id === runtimeId)
+  const runtimeLabel = selectedRuntime ? runtimeDisplayName(selectedRuntime) : runtimeId
+  // 运行时自己声明的选项（例如 Orca 用哪个 Agent）在卡片的「设置」弹窗里编辑；
+  // 这里只保留字段声明用于保存前校验，不写死任何运行时。
+  const optionSpecs = useMemo(
+    () => plugins.flatMap(plugin => (plugin.kind === 'runtime' && plugin.options ? [plugin.options] : [])),
+    [plugins],
+  )
+  const optionFields = useMemo(() => allRuntimeOptionFields(optionSpecs), [optionSpecs])
+  const optionDefaults = useMemo(() => runtimeOptionDefaults(optionFields), [optionFields])
 
   // 渠道与它的接入项都来自渠道注册表；初始化页不再写死飞书。
   const channels = useMemo(() => mergeChannels(registered), [registered])
@@ -1875,10 +1990,12 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
 
   const changed = useMemo(() => {
     if (!draft || !original) return []
-    const paths = ['llm.baseUrl', 'llm.model', 'llm.apiKey', 'llm.api', 'llm.authHeader', 'runtime.default', ...setupPaths]
+    const paths = ['llm.baseUrl', 'llm.model', 'llm.apiKey', 'llm.api', 'llm.authHeader', 'runtime.default', ...setupPaths,
+      ...runtimeOptionPaths(), ...optionFields.map(field => field.path)]
+    paths.push(...changedPluginPaths(draft, original))
     for (const runtime of runtimeCatalog) paths.push(projectPatchPath(runtime.id))
-    return paths.filter(path => JSON.stringify(getByPath(draft, path)) !== JSON.stringify(getByPath(original, path)))
-  }, [draft, original, runtimeCatalog, setupPaths])
+    return paths.filter(path => JSON.stringify(fieldValue(draft, path)) !== JSON.stringify(fieldValue(original, path)))
+  }, [draft, original, runtimeCatalog, setupPaths, optionFields])
 
   useEffect(() => {
     onDirtyChange?.(changed.length > 0)
@@ -1900,12 +2017,17 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
     for (const [path, message] of Object.entries(activeChannel?.validate?.(draft) ?? {})) {
       if (message && changedSet.has(path)) map.set(path, message)
     }
+    for (const field of optionFields) {
+      // 没配置过的运行时选项取声明默认值，否则会被误判成「请选择一个有效值」。
+      const message = fieldError(field, fieldValue(draft, field.path, optionDefaults))
+      if (message) map.set(field.path, message)
+    }
     for (const runtime of runtimeCatalog) {
       const path = projectPatchPath(runtime.id)
       // 只校验当前运行时的清单 + 本次确实要提交的其它清单，避免历史脏数据挡住保存。
       if (runtime.id !== runtimeId && !changedSet.has(path)) continue
       const issue = projectIssue(runtime.id, projectsOf(draft, runtime.id))
-      if (issue) map.set(path, `${runtime.label}：${issue}`)
+      if (issue) map.set(path, `${runtimeDisplayName(runtime)}：${issue}`)
     }
     // 自定义 acp 没有 command 时重启会直接启动失败，保存前就挡住。
     const selected = runtimeCatalog.find(runtime => runtime.id === runtimeId)
@@ -1913,7 +2035,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       map.set('runtime.default', '自定义 acp 未配置 runtime.options.acp.command，重启后服务会启动失败')
     }
     return map
-  }, [draft, changed, runtimeCatalog, runtimeId, setupFields, activeChannel])
+  }, [draft, changed, runtimeCatalog, runtimeId, setupFields, activeChannel, optionFields, optionDefaults])
 
   const setField = (path: string, value: unknown): void => {
     setDraft(current => (current ? setByPath(current, path, value) : current))
@@ -1946,6 +2068,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       setDefaults(result.defaults)
       setConfigPath(result.configPath)
       if (result.runtimeChoices) setRuntimeChoices(result.runtimeChoices)
+      if (result.plugins) setPlugins(result.plugins)
       if (typeof result.detecting === 'boolean') setDetecting(result.detecting)
       setPendingRestart(result.restartRequired)
       const message = secretDropNotice(patch, result) ?? {
@@ -1978,6 +2101,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
     setDefaults(result.defaults)
     setConfigPath(result.configPath)
     if (result.runtimeChoices) setRuntimeChoices(result.runtimeChoices)
+    if (result.plugins) setPlugins(result.plugins)
     if (typeof result.detecting === 'boolean') setDetecting(result.detecting)
     setPendingRestart(result.restartRequired)
     setProviderPickerOpen(false)
@@ -2149,6 +2273,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
         {errors.get('runtime.default') && <p className="field-error">{errors.get('runtime.default')}</p>}
         <RuntimeCards
           choices={runtimeChoices}
+          plugins={plugins}
           detecting={detecting}
           selected={runtimeId}
           onSelect={id => setField('runtime.default', id)}
@@ -2156,6 +2281,9 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
           onDetecting={setDetecting}
           onNotice={setNotice}
           onPendingRestart={() => setPendingRestart(true)}
+          draft={draft}
+          defaults={defaults}
+          onOptionChange={(path, value) => setField(path, value)}
         />
       </section>
 
@@ -2593,6 +2721,8 @@ function ProjectsEditor({ runtimeId, projects, error, onChange }: {
   )
 }
 
+
+// ---------------------------------------------------------------------------
 // 来源
 // ---------------------------------------------------------------------------
 

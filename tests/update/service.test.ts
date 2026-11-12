@@ -4,7 +4,7 @@ import {
   type LatestVersionResult,
   type UpgradeResult,
 } from '../../src/update/index.js'
-import type { Logger } from '../../src/infra/logger.js'
+import type { Logger } from '#infra/logger.js'
 
 function captureLogger(): { logger: Logger; events: { level: string; message: string; extra: Record<string, unknown> }[] } {
   const events: { level: string; message: string; extra: Record<string, unknown> }[] = []
@@ -142,6 +142,33 @@ describe('UpdateService', () => {
     expect(snapshot.message).toContain('permission denied')
     expect(events.at(-1)).toMatchObject({ level: 'error', message: 'update:upgrade-failed' })
     expect(events.at(-1)?.extra).toMatchObject({ from: '0.3.0', to: '0.4.0', code: 1 })
+  })
+
+  it('安装超时时写明是超时，不退化成「npm 退出码 1」', async () => {
+    const { logger, events } = captureLogger()
+    const service = new UpdateService({
+      current: '0.3.0',
+      logger,
+      isGlobalInstall: () => true,
+      fetchLatest: async () => latest('0.4.0'),
+      runUpgrade: async () => upgradeResult({
+        ok: false,
+        code: 1,
+        stdout: '',
+        stderr: '',
+        timedOut: true,
+        signal: 'SIGKILL',
+        timeoutMs: 300_000,
+      }),
+    })
+
+    const snapshot = await service.upgrade()
+
+    expect(snapshot).toMatchObject({ phase: 'failed', error: 'install-timeout' })
+    expect(snapshot.message).toContain('超时')
+    expect(snapshot.message).toContain('SIGKILL')
+    expect(events.at(-1)).toMatchObject({ level: 'error', message: 'update:upgrade-failed' })
+    expect(events.at(-1)?.extra).toMatchObject({ timedOut: true, signal: 'SIGKILL', timeoutMs: 300_000 })
   })
 
   it('源码 / link 运行默认拒绝全局安装，force 才继续', async () => {

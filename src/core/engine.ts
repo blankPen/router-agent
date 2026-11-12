@@ -1,8 +1,8 @@
 import type { Store } from '../store/db.js'
 import { attachmentsOf, withAttachmentManifest } from './attachments.js'
-import { negotiateAcceptance, type Policy, type Acceptance } from './policy.js'
-import { computeStage } from './stage.js'
-import { noopSink, preview, type EventSink } from './events.js'
+import { negotiateAcceptance, type Policy, type Acceptance } from '#core/policy.js'
+import { computeStage } from '#core/stage.js'
+import { noopSink, preview, type EventSink } from '#core/events.js'
 import type {
   Assignment,
   Decision,
@@ -16,11 +16,17 @@ import type {
   Strength,
   Ticket,
   Trigger,
-} from './model.js'
+} from '#core/model.js'
 
 export interface Clock {
   now(): string
 }
+
+/**
+ * 输入去重窗口：同工单内 kind + 文本完全相同、且还在 pending/delivered 时，
+ * 这段时间内只保留第一条。跨来源重复（飞书消息 + 面板补录）靠它兜住。
+ */
+export const INPUT_DEDUP_WINDOW_MS = 120_000
 
 export interface IdGen {
   next(prefix: string): string
@@ -47,6 +53,13 @@ export interface DecideInput {
   repo?: string
   /** 派工起始分支。 */
   branch?: string
+  /**
+   * 工单归属人（可选）。
+   *
+   * 默认归属触发消息的人；需求识别终审时归属提出人——管理员只是代为确认，
+   * 工单该算在提出人名下。
+   */
+  owner?: { actorId: string; actorName: string }
 }
 
 export interface DecideOutcome {
@@ -106,6 +119,7 @@ export class Engine {
     // 线程归属统一走别名解析：话题 ID / 根消息 ID / 消息自身 ID 任一到场都能落回同一个 Thread。
     const resolved = this.store.resolveThread({
       source: trigger.source,
+      ...(trigger.channelId ? { channelId: trigger.channelId } : {}),
       chatId: trigger.chatId,
       keys: threadKeysOf(trigger),
       canonicalId: trigger.threadId,
@@ -168,6 +182,7 @@ export class Engine {
       title: input.title?.trim() || deriveTitle(trigger.text),
       threadId: trigger.threadId,
       source: trigger.source,
+      ...(trigger.channelId ? { channelId: trigger.channelId } : {}),
       chatId: trigger.chatId,
       mandateId: this.ids.next('md'),
       stage: 'todo',
@@ -187,8 +202,8 @@ export class Engine {
       strength: input.strength,
       scope: input.scope?.trim() || `完成：${ticket.title}`,
       rules: input.rules ?? [],
-      actorId: trigger.actorId,
-      actorName: trigger.actorName,
+      actorId: input.owner?.actorId ?? trigger.actorId,
+      actorName: input.owner?.actorName ?? trigger.actorName,
       source: trigger.source,
       chatId: trigger.chatId,
       threadId: trigger.threadId,
@@ -230,8 +245,11 @@ export class Engine {
     return assignment
   }
 
-  /** 记录 worker 上报，并在同一事务语义内刷新阶段、PR 与待答问题。 */
-  report(assignmentId: string, state: WorkerState): Report {
+  /**
+   * 记录 worker 上报，并在同一事务语义内刷新阶段、PR 与待答问题。
+   * 返回这次真正被 ack 的输入 id（旧派工下投递、新派工下 ack 的也算）。
+   */
+  report(assignmentId: string, state: WorkerState): { report: Report; ackedInputs: string[] } {
     const assignment = this.store.getAssignment(assignmentId)
     if (!assignment) throw new Error('assignment:not-found')
     const ticket = this.requireTicket(assignment.ticketId)
@@ -252,7 +270,9 @@ export class Engine {
       at: now,
     }
     this.store.insertReport(report)
-    this.store.ackInputs(assignmentId, report.ackedInputs, now)
+    // ack 按 ticket 收敛，不限定 assignment：worker 丢失后换了新派工，旧派工下创建、
+    // 但实际被新 worker 消费的输入同样要落成 acked，否则会被无限重投（tk-51）。
+    const ackedInputs = this.store.ackInputs(ticket.id, report.ackedInputs, now)
     if (assignment.status === 'pending') {
       this.store.updateAssignment({ ...assignment, status: 'running' })
     }
@@ -270,12 +290,25 @@ export class Engine {
     }
 
     this.refreshStage(ticket.id)
-    return report
+    return { report, ackedInputs }
   }
 
-  deliverInput(ticketId: string, opts: { kind: InputKind; text: string; assignmentId?: string }): Input {
+  deliverInput(ticketId: string, opts: { kind: InputKind; text: string; assignmentId?: string; sourceKey?: string }): Input {
     const ticket = this.requireTicket(ticketId)
     if (ticket.stage === 'done') throw new Error('ticket:closed')
+    const duplicate = this.findDuplicateInput(ticketId, opts)
+    if (duplicate) {
+      // 同一条外部消息重复到达（飞书重投 / 面板再点一次）：只保留第一条，不重复投给 worker。
+      this.onEvent({
+        event: 'input:deduped',
+        ticketId,
+        inputId: duplicate.id,
+        seq: duplicate.seq,
+        kind: duplicate.kind,
+        ...(opts.sourceKey ? { sourceKey: opts.sourceKey } : {}),
+      })
+      return duplicate
+    }
     // 工单已接但还没派工时先挂起，派工后由 startAssignment 重新绑定。
     const assignment = opts.assignmentId ?? this.store.latestAssignment(ticketId)?.id ?? ''
     const input: Input = {
@@ -285,18 +318,49 @@ export class Engine {
       seq: this.store.nextInputSeq(ticketId),
       kind: opts.kind,
       text: opts.text,
+      ...(opts.sourceKey ? { sourceKey: opts.sourceKey } : {}),
       status: 'pending',
       createdAt: this.clock.now(),
     }
     this.store.insertInput(input)
+    if (!this.store.getInput(input.id)) {
+      // 唯一键冲突：同一条消息并发入库时命中了已有行，复用那一条而不是丢掉这次投递。
+      const existing = opts.sourceKey ? this.store.findInputBySourceKey(ticketId, opts.sourceKey) : null
+      if (existing) {
+        this.onEvent({ event: 'input:deduped', ticketId, inputId: existing.id, seq: existing.seq, kind: existing.kind })
+        return existing
+      }
+      throw new Error('input:insert-conflict')
+    }
     this.onEvent({ event: 'input:queued', ticketId, inputId: input.id, seq: input.seq, kind: input.kind, text: preview(input.text) })
     return input
   }
 
+  /**
+   * 找到「已经入库过」的同一条输入。
+   *
+   * 两层判定：
+   * 1. sourceKey 精确匹配 —— 同一条外部消息（飞书 message_id）只入库一次；
+   * 2. 内容窗口 —— 同一工单内 kind + 文本完全相同、且还在 pending/delivered 状态、
+   *    且发生在 INPUT_DEDUP_WINDOW_MS 内时视为重复（面板与飞书各插了一条的兜底）。
+   *    已经 ack / expired 的不参与去重：用户确实可以再发一遍「继续」。
+   */
+  private findDuplicateInput(
+    ticketId: string,
+    opts: { kind: InputKind; text: string; sourceKey?: string },
+  ): Input | null {
+    if (opts.sourceKey) {
+      const existing = this.store.findInputBySourceKey(ticketId, opts.sourceKey)
+      if (existing) return existing
+    }
+    const since = new Date(Date.parse(this.clock.now()) - INPUT_DEDUP_WINDOW_MS).toISOString()
+    return this.store.findRecentInputByText(ticketId, opts.kind, opts.text, since)
+  }
+
   ackInputs(ticketId: string, ids: string[]): void {
-    const assignment = this.store.latestAssignment(ticketId)
-    if (!assignment) return
-    this.store.ackInputs(assignment.id, ids, this.clock.now())
+    const ticket = this.store.getTicket(ticketId)
+    if (!ticket) return
+    this.store.ackInputs(ticket.id, ids, this.clock.now())
   }
 
   /** 订阅扇出：把某条 Trigger 投给订阅了该 Thread 的所有未关闭工单。 */
@@ -312,7 +376,8 @@ export class Engine {
     for (const sub of subscriptions) {
       const ticket = this.store.getTicket(sub.ticketId)
       if (!ticket || ticket.stage === 'done') continue
-      this.deliverInput(ticket.id, { kind: 'followup', text })
+      // sourceKey 用 trigger 的外部事件 id：同一条消息只会变成一条输入。
+      this.deliverInput(ticket.id, { kind: 'followup', text, sourceKey: `trigger:${trigger.externalId}` })
       delivered.push(ticket)
     }
     this.store.setTriggerDisposition(trigger.id, delivered.length > 0 ? 'fanned_out' : 'pending')

@@ -5,9 +5,9 @@ import { join } from 'node:path'
 import { Store } from '../src/store/db.js'
 import { Engine } from '../src/core/engine.js'
 import { RouterService, extractTerminalSnippet, extractSessionSnippet, formatProbeMessage } from '../src/service.js'
-import { claudeProjectSlug } from '../src/worker/orca/session.js'
+import { claudeProjectSlug } from '#runtime/agents/claude.js'
 import { defaultConfig, policyOf, type AppConfig, chatEntry } from '../src/config.js'
-import { DEFAULT_ADMISSION } from '../src/core/policy.js'
+import { DEFAULT_ADMISSION } from '#core/policy.js'
 import type {
   WorkerRuntime,
   WorkerContext,
@@ -18,8 +18,8 @@ import type {
   AgentStatus,
   WorkspaceInfo,
   WorkspaceRef,
-} from '../src/worker/port.js'
-import type { Trigger } from '../src/core/model.js'
+} from '#runtime/port.js'
+import type { Trigger } from '#core/model.js'
 import type { DecisionEngine } from '../src/router/decision-engine.js'
 
 /** 测试用：所有候选都 accept，回复为空。 */
@@ -68,6 +68,10 @@ class FakeRuntime implements WorkerRuntime {
   interruptedCalls: string[] = []
   /** 模拟 ACP 回合未结束：始终返回 queued。 */
   deliverQueue = false
+  /** 模拟投递抛错（例如 Claude resume fork 但没有拿到新 id）。 */
+  deliverError = ''
+  /** 模拟运行时在投递时切换了会话。 */
+  deliverHandle = ''
   handles = new Map<string, { lastOutputAt: string }>()
   linkedPr: Record<string, unknown> | null = null
   /** 主动巡检读取的终端渲染屏幕。 */
@@ -84,9 +88,14 @@ class FakeRuntime implements WorkerRuntime {
   }
   async deliver(ref: WorkerRef | string, inputs: { text: string; id: string }[]): Promise<DeliveryReceipt> {
     if (this.deliverQueue) return { status: 'queued', inputIds: inputs.map(input => input.id), reason: 'acp:busy' }
+    if (this.deliverError) throw new Error(this.deliverError)
     const handle = typeof ref === 'string' ? ref : ref.handle
     for (const input of inputs) this.delivered.push({ handle, text: input.text })
-    return { status: 'accepted', inputIds: inputs.map(input => input.id) }
+    return {
+      status: 'accepted',
+      inputIds: inputs.map(input => input.id),
+      ...(this.deliverHandle ? { handle: this.deliverHandle, sessionId: 's-new' } : {}),
+    }
   }
   async reattach(ref: WorkerRef | string) {
     this.reattachCalls.push(typeof ref === 'string' ? ref : ref.handle)
@@ -209,6 +218,58 @@ describe('运行时机制', () => {
     const afterFirst = runtime.delivered.length
     await service.runOnce()
     expect(runtime.delivered.length).toBe(afterFirst)
+  })
+
+  it('deliver 抛错也计入重投次数并遵守退避，不会每秒拉起新会话', async () => {
+    const { ticketId } = await launchOne()
+    runtime.deliverError = 'claude:resume-forked'
+    engine.deliverInput(ticketId, { kind: 'followup', text: '继续' })
+
+    // 第一轮发起投递并失败。
+    await service.runOnce()
+    const failed = logs.filter(item => item.message === 'input:deliver-failed')
+    expect(failed).toHaveLength(1)
+    expect(failed[0]?.extra).toMatchObject({ ticketId, attempt: 1 })
+
+    // cooldown 内每个 tick 都不应再次投递。
+    now += 1_000
+    await service.runOnce()
+    now += 5_000
+    await service.runOnce()
+    expect(logs.filter(item => item.message === 'input:deliver-failed')).toHaveLength(1)
+
+    // 退避结束后才进行第 2 次尝试。
+    now += 31_000
+    await service.runOnce()
+    expect(logs.filter(item => item.message === 'input:deliver-failed').at(-1)?.extra).toMatchObject({ attempt: 2 })
+  })
+
+  it('连续失败达到上限后转人工，不再无限重投', async () => {
+    const { ticketId } = await launchOne()
+    runtime.deliverError = 'claude:resume-forked'
+    engine.deliverInput(ticketId, { kind: 'followup', text: '继续' })
+
+    for (let i = 0; i < 6; i++) {
+      await service.deliverPendingInputs()
+      now += 10 * 60_000
+    }
+    expect(logs.some(item => item.message === 'input:redeliver-giveup')).toBe(true)
+    expect(store.getAttention(ticketId)?.question ?? '').toContain('5 次')
+  })
+
+  it('运行时投递时接管了新会话，Assignment 的 handle 同步更新', async () => {
+    const { ticketId, handle } = await launchOne()
+    runtime.deliverHandle = 'term-new'
+    runtime.handles.set('term-new', { lastOutputAt: new Date(now).toISOString() })
+    engine.deliverInput(ticketId, { kind: 'followup', text: '继续' })
+    await service.runOnce()
+
+    expect(store.latestAssignment(ticketId)?.handle).toBe('term-new')
+    expect(store.latestAssignment(ticketId)?.handle).not.toBe(handle)
+    expect(logs.find(item => item.message === 'input:adopted-handle')?.extra).toMatchObject({
+      from: handle,
+      to: 'term-new',
+    })
   })
 
   it('worker 忙时 queued 不累计重投次数，长回合不会被误判为未 ack', async () => {
@@ -733,7 +794,19 @@ describe('运行时机制', () => {
     now += 1_000
     engine.startAssignment(ticketId, { runtimeId: 'orca', handle: 'term-2', workdir })
     writeFileSync(metaPath, JSON.stringify({
-      ticketId, runtime: 'orca', handle: 'term-2', workdir, sessionId: 'sess_1',
+      ticketId, runtime: 'orca', handle: 'term-2', workdir, sessionId: 'sess_1', agent: 'claude',
+    }))
+    expect(await service.resumeHint(ticketId)).toEqual({
+      command: `cd '${workdir}' && claude '--resume' 'sess_1'`,
+      sessionId: 'sess_1',
+      note: expect.stringContaining('不再由 Orca 托管'),
+    })
+
+    // meta 里没记 Agent：按选项声明的默认值（claude）解释 sessionId。
+    now += 1_000
+    engine.startAssignment(ticketId, { runtimeId: 'orca', handle: 'term-3', workdir })
+    writeFileSync(metaPath, JSON.stringify({
+      ticketId, runtime: 'orca', handle: 'term-3', workdir, sessionId: 'sess_1',
     }))
     expect(await service.resumeHint(ticketId)).toEqual({
       command: `cd '${workdir}' && claude '--resume' 'sess_1'`,

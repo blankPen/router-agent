@@ -8,10 +8,10 @@ import {
   resolveBotIdentity,
   resolveRuntimeIdentity,
   type IdentityCache,
-} from '../../src/sources/feishu-identity.js'
+} from '@router-agent/channel-feishu'
 import { chatEntry, defaultConfig, type AppConfig, type FeishuSettings } from '../../src/config.js'
-import type { CommandRunner } from '../../src/infra/process.js'
-import type { Logger } from '../../src/infra/logger.js'
+import type { CommandRunner } from '#infra/process.js'
+import type { Logger } from '#infra/logger.js'
 
 type Reply = { code: number; stdout: string; stderr: string }
 
@@ -730,6 +730,42 @@ describe('运行时身份装配', () => {
 
     expect(identity.allowedByChatOpenIds).toEqual({ oc_1: [OPEN_ID] })
     expect(identity.names.get(OPEN_ID)).toBe('阿振(Pz)')
+  })
+
+  it('需求分析助手的终审管理员支持邮箱，按群解析成 open_id', async () => {
+    const runner = makeRunner(argv => {
+      if (isBatch(argv)) return OK_BATCH('pengzhen02@dewu.com', OPEN_ID)
+      if (requestedUserId(argv) === OPEN_ID) return OK_USER(OPEN_ID, '阿振(Pz)')
+      return MEMBERS()
+    })
+    const config = appConfig({
+      appId: 'cli_a',
+      chats: [
+        chatEntry('oc_1', { mode: 'all', intake: { enabled: true, maxQuestions: 10, codeAccess: true, approvers: ['pengzhen02@dewu.com'] } }),
+        chatEntry('oc_2', { mode: 'all' }),
+      ],
+    })
+
+    const identity = await resolveRuntimeIdentity({ config, lark: runner })
+
+    expect(identity.approverOpenIdsByChat).toEqual({ oc_1: [OPEN_ID] })
+    expect(identity.names.get(OPEN_ID)).toBe('阿振(Pz)')
+  })
+
+  it('终审管理员配了邮箱却解析不出来时写 error 事件，该群没有可终审的人', async () => {
+    const runner = makeRunner(() => ({ code: 1, stdout: '', stderr: 'permission denied' }))
+    const { events, logger } = captureLogger()
+    const config = appConfig({
+      appId: 'cli_a',
+      chats: [chatEntry('oc_1', { mode: 'all', intake: { enabled: true, maxQuestions: 10, codeAccess: true, approvers: ['pengzhen02@dewu.com'] } })],
+    })
+
+    const identity = await resolveRuntimeIdentity({ config, lark: runner, logger })
+
+    expect(identity.approverOpenIdsByChat).toEqual({ oc_1: [] })
+    const empty = events.find(event => event.message === 'feishu:intake-approver-empty')
+    expect(empty?.level).toBe('error')
+    expect(empty?.extra?.chat).toBe('oc_1')
   })
 
   it('群级名单配了却一个都解析不出来时写 error 事件，该群拒绝所有人', async () => {

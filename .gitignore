@@ -1,6 +1,8 @@
 node_modules/
 dist/
+packages/*/dist/
 *.log
 .DS_Store
 .taste-skill/
 .playwright-cli/
+.env

@@ -1,11 +1,13 @@
 import type { Store } from '../store/db.js'
 import type { Clock, Engine } from '../core/engine.js'
-import { effectiveAllowed, effectiveAllowedByChat, gate, type Policy } from '../core/policy.js'
-import type { SourceKind, Strength, Ticket, Trigger } from '../core/model.js'
-import { DEFAULT_CHANNEL_ID } from '../channels/port.js'
-import { noopLogger, errorMessage, type Logger } from '../infra/logger.js'
+import { effectiveAllowed, effectiveAllowedByChat, gate, type Policy } from '#core/policy.js'
+import type { SourceKind, Strength, Ticket, Trigger } from '#core/model.js'
+import { DEFAULT_CHANNEL_ID } from '#channel/port.js'
+import { noopLogger, errorMessage, type Logger } from '#infra/logger.js'
 import { activeDraft, resolveDispatch, type DispatchMissing, type DispatchSettings } from './dispatch.js'
 import { readRouterPrompt } from '../specs/index.js'
+import { IntakeCoordinator, type IntakeSettingsView } from './intake-flow.js'
+import type { IntakeEngine } from './intake-engine.js'
 import type { SessionKeyParts } from './session-registry.js'
 import type {
   DecisionAudit,
@@ -44,6 +46,16 @@ export interface AgentLoopOptions {
   onAudit?: (audit: DecisionAudit) => void
   /** 关键链路日志：消息处理失败、模型不可用、会话读写失败都会在这里留痕。 */
   logger?: Logger
+  /**
+   * 需求识别（intake）：普通成员在群里反馈问题时由它初筛、澄清并整理需求单。
+   * 不传时保持原有行为：群里未 @ 的消息只在 mode=all 时回复，普通成员不能自助提需。
+   */
+  intake?: {
+    llm: IntakeEngine
+    settings: IntakeSettingsView
+    /** 项目选择器 → 本地目录；返回空表示这一轮不读代码。 */
+    resolveProjectPath?: (project: { name: string; repo: string }) => Promise<string | undefined>
+  }
 }
 
 export interface ClarifyInfo {
@@ -78,6 +90,16 @@ const THREAD_INTRO = (title: string, id: string) => `工单「${title}」已开�
 
 /** 已关闭话题里，用户明确要求继续的关键词。 */
 const REOPEN_PATTERN = /重新开工|重新开单|重开|继续做|继续干|接着做|接着干|继续|reopen|retry|continue/i
+
+/**
+ * 被群级白名单拒绝的 Gate 原因：intake 不得绕过。
+ * 「配了白名单但一个都没解析出来」是安全边界，也不允许普通成员自助触发。
+ */
+const BLOCKED_BY_CHAT_ALLOWLIST = new Set(['admission:chat-allowlist-empty', 'admission:not-in-chat-allowlist'])
+
+function isAllowlistBlocked(verdict: ReturnType<typeof gate>): boolean {
+  return 'reason' in verdict && BLOCKED_BY_CHAT_ALLOWLIST.has(verdict.reason)
+}
 
 export function isReopenRequest(text: string): boolean {
   const normalized = text.trim()
@@ -143,6 +165,7 @@ export class AgentLoop {
   decisionEngine: DecisionEngine
   private onAudit?: (audit: DecisionAudit) => void
   private logger: Logger
+  private intake?: IntakeCoordinator
 
   constructor(opts: AgentLoopOptions) {
     this.engine = opts.engine
@@ -163,6 +186,21 @@ export class AgentLoop {
     this.decisionEngine = opts.decisionEngine
     this.onAudit = opts.onAudit
     this.logger = opts.logger ?? noopLogger
+    this.intake = opts.intake
+      ? new IntakeCoordinator({
+          store: this.store,
+          engine: this.engine,
+          llm: opts.intake.llm,
+          clock: this.clock,
+          logger: this.logger,
+          settings: opts.intake.settings,
+          dispatch: this.dispatch ?? { projects: [], bindings: [] },
+          ...(opts.intake.resolveProjectPath ? { resolveProjectPath: opts.intake.resolveProjectPath } : {}),
+          reply: (trigger, text, key, opts) => this.reply(trigger, text, key, opts),
+          fallbackApprovers: () => effectiveAllowed(this.engine.policy()),
+          ...(this.home ? { home: this.home } : {}),
+        })
+      : undefined
   }
 
   setPolicy(policy: Policy): void {
@@ -212,6 +250,18 @@ export class AgentLoop {
         if (delivered.length > 0) {
           await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}`)
           result.fannedOut += delivered.length
+          // 未 @ 但被放行的消息（tk-59）：Router 自己也要在话题里回一句。
+          // 否则这条消息既没有确认表情、也没有任何回应，用户只看到「消息被吞了」。
+          if (trigger.unaddressedAdmitted) this.replyAdmitted(trigger, delivered, result)
+          return
+        }
+      }
+
+      // 需求识别：进行中的澄清会话、待终审的需求单优先处理，不进入研判/派工。
+      if (this.intake) {
+        const intakeAction = await this.intake.handleBeforeGate(trigger)
+        if (intakeAction === 'handled') {
+          await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}`)
           return
         }
       }
@@ -224,6 +274,16 @@ export class AgentLoop {
       }
 
       const verdict = gate(trigger, this.engine.policy())
+      // 需求识别：群里未 @ 的消息统一先过轻量初筛，名单内外的普通反馈一视同仁。
+      // 群级白名单（含「配了但一个都没解析出来」）是硬边界，不允许 intake 绕过。
+      if (this.intake && trigger.addressed === 'none' && !trigger.mediaOnly && !isAllowlistBlocked(verdict)) {
+        const handled = await this.intake.handleUnaddressed(trigger)
+        if (handled) {
+          await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}`)
+          result.ignored += 1
+          return
+        }
+      }
       if (verdict.action === 'ignore') {
         await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}`)
         this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'inferred', reason: verdict.reason })
@@ -592,22 +652,62 @@ export class AgentLoop {
    * 这条消息要不要回。
    *
    * - 私聊、@机器人：一定回；
+   * - 群里没 @ 但话题已绑定在办工单、被放行处理（tk-59）：也回，
+   *   否则用户既看不到确认表情，也等不到任何回应；
    * - 群里没 @：只有配置为 `mode: all` 的会话才回。
    *   全量接收意味着「所有消息都当对话听」，不能只听不回。
    */
   private shouldReply(trigger: Trigger): boolean {
     if (trigger.addressed !== 'none') return true
+    if (trigger.unaddressedAdmitted) return true
     return this.replyAlwaysChats.has(trigger.chatId)
+  }
+
+  /**
+   * 未 @ 但被放行的消息：在话题里回一句「已转给工单的 worker」。
+   *
+   * 按【工单】去重，不是按【消息】：一张工单的话题里只回一次。
+   * 否则用户在话题里每追问一次，就会收到一条一模一样的「已转给工单…」，
+   * 看起来像消息被反复转发（tk-59 的回执收敛）。
+   *
+   * 只发一条、尽量短：worker 的进展与结论会挂在同一条话题里，
+   * Router 不重复展开，避免同一条消息收到两条回执。
+   */
+  private replyAdmitted(trigger: Trigger, delivered: Ticket[], result: TickResult): void {
+    const ticket = delivered[0]
+    if (!ticket) return
+    const queued = this.reply(
+      trigger,
+      `收到，已转给工单「${ticket.title}」（${ticket.id}）的 worker，后续进展会在这个话题里更新。`,
+      `admitted:${ticket.id}`,
+      { thread: true },
+    )
+    if (!queued) {
+      // 这张工单已经回过执了：追问不再重复刷屏，靠确认表情 + worker 在话题里的进展。
+      this.logger.info('loop:admitted-suppressed', {
+        triggerId: trigger.id,
+        chat: trigger.chatId,
+        ticketId: ticket.id,
+      })
+      return
+    }
+    result.replied += 1
+    this.logger.info('loop:admitted-replied', {
+      triggerId: trigger.id,
+      chat: trigger.chatId,
+      ticketId: ticket.id,
+      tickets: delivered.length,
+    })
   }
 
   /** 回一句到原会话；key 保证同一件事只发一次。 */
   /** thread=true 时用话题回复（挂到原消息下）；否则发普通消息。 */
-  private reply(trigger: Trigger, text: string, key: string, opts: { thread?: boolean } = {}): void {
-    const rootId = opts.thread ? (trigger.threadId.split(':').at(-1) ?? '') : ''
-    this.store.enqueueOutbox({
+  private reply(trigger: Trigger, text: string, key: string, opts: { thread?: boolean } = {}): boolean {
+    const rootId = opts.thread ? (trigger.threadKeys?.[0] ?? trigger.threadId.split(':').at(-1) ?? '') : ''
+    return this.store.enqueueOutbox({
       id: `ob_${key.replace(/[^a-zA-Z0-9:_-]/g, '_')}`,
       key,
-      channelKind: trigger.source,
+      channelKind: trigger.channelId ?? DEFAULT_CHANNEL_ID,
       channelId: trigger.chatId,
       threadId: rootId,
       text,

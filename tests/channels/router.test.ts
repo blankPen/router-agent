@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { ChannelRegistry } from '../../src/channels/registry.js'
-import { ChannelRouter } from '../../src/channels/router.js'
-import type { ChannelAdapter, OutboundMessage } from '../../src/channels/port.js'
-import type { Logger } from '../../src/infra/logger.js'
+import { ChannelRegistry } from '#channel/registry.js'
+import { ChannelRouter } from '#channel/router.js'
+import type { ChannelAdapter, OutboundMessage } from '#channel/port.js'
+import type { Logger } from '#infra/logger.js'
 
 function adapter(over: Partial<ChannelAdapter> = {}): ChannelAdapter & { sent: OutboundMessage[] } {
   const sent: OutboundMessage[] = []

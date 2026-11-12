@@ -1,12 +1,12 @@
 import { spawn } from 'node:child_process'
 import { loadConfig } from '../config.js'
-import { acpAgentOf } from '../worker/runtimes/acp/agents.js'
-import { CODEX_APP_RUNTIME_ID, normalizeRuntimeId } from '../worker/runtimes/catalog.js'
-import { detectCodexBinary } from '../worker/runtimes/codex/detect.js'
-import { AcpRuntimeAdmin } from '../worker/runtimes/acp/admin.js'
-import { resolveAgentCommand, resolveExecutable } from '../worker/runtimes/acp/detect.js'
-import { installAcpAgent, uninstallAcpAgent } from '../worker/runtimes/acp/install.js'
-import type { RuntimeChoice } from '../worker/runtimes/acp/detect.js'
+import { acpAgentOf } from '@router-agent/runtime-acp'
+import { CODEX_APP_RUNTIME_ID, normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
+import { detectCodexBinary } from '@router-agent/runtime-codex'
+import { AcpRuntimeAdmin } from '@router-agent/runtime-acp'
+import { resolveAgentCommand, resolveExecutable } from '@router-agent/runtime-acp'
+import { installAcpAgent, uninstallAcpAgent } from '@router-agent/runtime-acp'
+import type { RuntimeChoice } from '@router-agent/runtime-acp'
 
 export interface RuntimeCliIo {
   stdout(line: string): void

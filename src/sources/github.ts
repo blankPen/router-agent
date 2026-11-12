@@ -1,14 +1,7 @@
-import type { CommandRunner } from '../infra/process.js'
+import type { CommandRunner } from '#infra/process.js'
 
-export interface PrInfo {
-  number: number
-  url: string
-  state: 'open' | 'merged' | 'closed'
-  title: string
-  branch: string
-  /** PR 描述正文；UI 证据门禁用它检查 Before / After。列表查询不返回时为 undefined。 */
-  body?: string
-}
+export type { PrInfo } from '#core/pr.js'
+import type { PrInfo } from '#core/pr.js'
 
 function normalizeState(state: string): PrInfo['state'] {
   if (state === 'MERGED' || state === 'merged') return 'merged'

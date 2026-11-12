@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process'
 import { checkbox, confirm, input, password, select } from '@inquirer/prompts'
-import { realRunner } from '../infra/process.js'
-import { createLarkRunner } from '../sources/lark.js'
+import { realRunner } from '#infra/process.js'
+import { createLarkRunner } from '@router-agent/channel-feishu'
 import { runCli, type CliIo } from './index.js'
 import type { Prompter } from './prompts.js'
 
@@ -22,6 +22,7 @@ const io: CliIo = {
   orca: realRunner('orca'),
   claude: realRunner('claude'),
   git: realRunner('git'),
+  herdr: realRunner('herdr'),
   lark: createLarkRunner(),
   stream: (argv, env) => new Promise<number>(resolve => {
     const child = spawn('lark-cli', argv, { stdio: 'inherit', env })

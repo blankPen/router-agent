@@ -2,24 +2,28 @@ import { appendFileSync, existsSync, mkdirSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import type { Clock, Engine } from './core/engine.js'
-import type { Assignment, Report, Ticket, Trigger } from './core/model.js'
+import type { Assignment, Report, Ticket, Trigger } from '#core/model.js'
 import type { Store } from './store/db.js'
 import type { AppConfig, RetentionSettings, WorkspaceSettings } from './config.js'
-import { replyAlwaysChatsOf } from './config.js'
-import { STAGE_LABELS } from './core/stage.js'
-import { WorkerRuntimeError, type WorkerRuntime, type WorkerContext, type SessionEvent, type WorkerRef, type AgentStatus, type ResumeHint } from './worker/port.js'
+import { DEFAULT_CHAT_INTAKE, replyAlwaysChatsOf } from './config.js'
+import { STAGE_LABELS } from '#core/stage.js'
+import { WorkerRuntimeError, type WorkerRuntime, type WorkerContext, type SessionEvent, type WorkerRef, type AgentStatus, type ResumeHint } from '#runtime/port.js'
 import { AgentLoop } from './router/agent-loop.js'
 import type { DecisionAudit, DecisionEngine } from './router/decision-engine.js'
 import { dispatchSettingsOf } from './router/dispatch.js'
-import { ReportPoller, appendEvent, readWorkerMeta, type WorkerMeta, type WorkerStateFile } from './worker/report-poller.js'
-import { classifyAgentStatus } from './worker/status.js'
-import { RuntimeRegistry } from './worker/registry.js'
-import { normalizeRuntimeId, ORCA_RUNTIME_ID } from './worker/runtimes/catalog.js'
-import { buildNeutralContract, buildWorkerPrompt } from './worker/spec/index.js'
+import type { IntakeEngine } from './router/intake-engine.js'
+import type { IntakeChatSettings } from './router/intake-flow.js'
+import { createRepoPathResolver } from './router/repo-paths.js'
+import { ReportPoller, appendEvent, readWorkerMeta, type WorkerMeta, type WorkerStateFile } from '#runtime/report-poller.js'
+import { classifyAgentStatus } from '#runtime/status.js'
+import { RuntimeRegistry } from '#runtime/registry.js'
+import { normalizeRuntimeId, ORCA_RUNTIME_ID } from '#runtime/runtimes/catalog.js'
+import { buildNeutralContract, buildWorkerPrompt } from '#runtime/spec/index.js'
 import { migrateLegacySoul } from './specs/index.js'
-import { workBranch } from './worker/naming.js'
-import { buildResumeHint } from './worker/resume.js'
-import { latestClaudeSessionId } from './worker/orca/session.js'
+import { workBranch } from '#runtime/naming.js'
+import { buildResumeHint } from '#runtime/resume.js'
+import { resolveSession } from '#runtime/agents/registry.js'
+import { runtimeOptionString } from '#runtime/runtimes/options.js'
 import {
   workspaceRuntimeLabel,
   type WorkspaceCleanupRequest,
@@ -27,23 +31,24 @@ import {
   type WorkspaceEntryView,
   type WorkspaceOverviewView,
   type WorkspaceRuntimeGroupView,
-} from './worker/workspaces/overview.js'
+} from '#runtime/workspaces/overview.js'
 import { EffectsProcessor } from './core/effects.js'
-import { preview } from './core/events.js'
-import { DEFAULT_CHANNEL_ID } from './channels/port.js'
-import type { CommandRunner } from './infra/process.js'
-import { realRunner } from './infra/process.js'
-import { errorMessage, noopLogger, type Logger } from './infra/logger.js'
+import { preview } from '#core/events.js'
+import { DEFAULT_CHANNEL_ID } from '#channel/port.js'
+import type { CommandRunner } from '#infra/process.js'
+import { realRunner } from '#infra/process.js'
+import { errorMessage, noopLogger, type Logger } from '#infra/logger.js'
 import type { PrInfo } from './sources/github.js'
 import {
+
   ReportRejectedError,
   decisionLogDetail,
   evaluateUiEvidence,
   evidenceRejectedMessage,
-} from './worker/evidence-gate.js'
+} from '#runtime/evidence-gate.js'
 
 // Logger 的实现放在 infra/logger.ts；这里保留 re-export，兼容既有 import。
-export type { Logger } from './infra/logger.js'
+export type { Logger } from '#infra/logger.js'
 
 export interface PrTracker {
   /** hint 用于把项目名/path 选择器解析成真实仓库：优先 PR/MR 链接，其次 workdir。 */
@@ -65,6 +70,20 @@ export interface RouterServiceOptions {
   runtimes?: RuntimeRegistry
   /** 唯一研判引擎（Pi）。 */
   decisionEngine: DecisionEngine
+  /**
+   * 需求识别引擎（初筛 + 分析子 Agent）。
+   * 只在有群开启「需求分析助手」时装配；不传则普通成员仍无法自助提需。
+   */
+  intakeEngine?: IntakeEngine
+  /**
+   * 群 id → 终审管理员 open_id（启动时已把邮箱解析成 open_id）。
+   * 没传时按「没配管理员」处理，终审回退到全局允许名单。
+   */
+  intakeApprovers?: Record<string, string[]>
+  /** intake 读代码时把 repo 选择器解析成本地目录；不传则只基于对话分析。 */
+  resolveIntakeProjectPath?: (project: { name: string; repo: string }) => Promise<string | undefined>
+  /** Orca 命令；传了但没传 resolveIntakeProjectPath 时用默认解析器。 */
+  orca?: CommandRunner
   prTracker: PrTracker
   clock?: Clock
   logger?: Logger
@@ -95,6 +114,14 @@ function progressCursorKey(ticketId: string): string {
 /** 派工失败水位：持久化到 cursors，重启后仍能区分「失败前积压的旧输入」与「用户新回复」。 */
 function launchFailureCursorKey(ticketId: string): string {
   return `launch-failure:${ticketId}`
+}
+
+/**
+ * 重新派工水位：记录上一次「为积压输入重建 worker」时处理到的最大输入 seq。
+ * 同一条输入只允许触发一次重建，避免新 worker 也投递失败时无限重建（tk-51）。
+ */
+function relaunchCursorKey(ticketId: string): string {
+  return `relaunch:${ticketId}`
 }
 
 /**
@@ -146,6 +173,15 @@ interface ReminderRecord {
 /** 工作区删除里不值得重试的错误：脏工作区、目录已经不存在等。 */
 function isCleanupSkipError(message: string): boolean {
   return /dirty|uncommitted|modified|untracked|not clean|not found|does not exist|no such file|not a git repository/i.test(message)
+}
+
+/**
+ * Orca 终端句柄失效：句柄只在签发它的那个 Orca 服务实例里有效。
+ * 服务重启 / 终端早已关闭后再关，永远会报 terminal_handle_stale。
+ */
+function isStaleHandleError(error: unknown): boolean {
+  const message = errorMessage(error)
+  return /terminal_handle_stale|terminal not found|no such terminal/i.test(message)
 }
 
 interface LaunchFailureRecord {
@@ -486,6 +522,8 @@ export class RouterService {
   private deliveryAttempts = new Map<string, number>()
   /** queued/rejected 后的退避截止时间，避免每秒拉起一次 Agent 查询。 */
   private deliveryCooldown = new Map<string, number>()
+  /** 每个工单最近一次真正发起投递时的最大输入 seq；用于区分「同一批重试」与「新输入」。 */
+  private deliveryAttemptedSeq = new Map<string, number>()
   /** 派工失败记录：用于限制「旧输入」反复触发重试，并累计尝试次数。内存缓存 + cursors 持久化。 */
   private launchFailures = new Map<string, LaunchFailureRecord>()
   /** 排队状态的去重签名，避免每秒刷同一条排队日志。 */
@@ -561,6 +599,15 @@ export class RouterService {
       sessionKeyScope: opts.config.router.session.keyScope,
       persona: opts.config.router.persona,
       ...(opts.onDecisionAudit ? { onAudit: opts.onDecisionAudit } : {}),
+      ...(opts.intakeEngine
+        ? {
+            intake: {
+              llm: opts.intakeEngine,
+              settings: { forChat: (chatId: string) => this.intakeSettingsOf(opts, chatId) },
+              resolveProjectPath: this.intakeProjectPathOf(opts),
+            },
+          }
+        : {}),
     })
     this.poller = opts.poller ?? new ReportPoller({
       workersDir: join(opts.config.home, 'workers'),
@@ -586,7 +633,15 @@ export class RouterService {
       const assignment = this.store.latestAssignment(ticketId)
       if (!assignment?.handle) return
       const runtime = this.runtimeFor(assignment)
-      await runtime.stop(this.refOf(assignment), 'ticket-stopped')
+      try {
+        await runtime.stop(this.refOf(assignment), 'ticket-stopped')
+      } catch (error) {
+        // 终端句柄属于当时签发它的 Orca 服务；服务重启 / 终端早已关闭时永远关不掉。
+        // 这种失败重试再多次也不会成功，只会无限刷 effect:failed，所以吞掉并记一次。
+        if (!isStaleHandleError(error)) throw error
+        this.logger.info('worker:stop-stale', { ticketId, handle: assignment.handle })
+        return
+      }
       this.log('worker:stopped', ticketId, { handle: assignment.handle })
     })
     effects.register('launch-worker', async payload => {
@@ -608,8 +663,34 @@ export class RouterService {
     }
   }
 
-  private workspaceRefOf(assignment: Assignment): { ticketId: string; workdir: string } {
-    return { ticketId: assignment.ticketId, workdir: assignment.workdir }
+  private workspaceRefOf(assignment: Assignment): { ticketId: string; workdir: string; repo?: string } {
+    const repo = this.store.getTicket(assignment.ticketId)?.repo
+    return { ticketId: assignment.ticketId, workdir: assignment.workdir, ...(repo ? { repo } : {}) }
+  }
+
+  /** intake 用：优先注入的解析器，其次按 Orca 仓库清单解析；两者都没有就只做对话分析。 */
+  private intakeProjectPathOf(opts: RouterServiceOptions): (project: { name: string; repo: string }) => Promise<string | undefined> {
+    if (opts.resolveIntakeProjectPath) return opts.resolveIntakeProjectPath
+    // 没有 orca 也能解析 path:/abs 这类直接选择器；只有 name:/id: 选择器才需要 orca。
+    const resolve = createRepoPathResolver({ ...(opts.orca ? { orca: opts.orca } : {}) })
+    return async project => (await resolve(project.repo)) ?? (project.name ? resolve(project.name) : undefined)
+  }
+
+  /**
+   * 某个群的需求分析配置。
+   *
+   * 管理员取解析后的 open_id：配置里写邮箱时原始条目是邮箱，
+   * 拿邮箱去比 open_id 永远匹配不上，终审就没人能过。
+   */
+  private intakeSettingsOf(opts: RouterServiceOptions, chatId: string): IntakeChatSettings {
+    const chat = opts.config.feishu.chats.find(item => item.chat === chatId)
+    const intake = chat?.intake
+    return {
+      enabled: intake?.enabled ?? false,
+      approvers: opts.intakeApprovers?.[chatId] ?? [],
+      maxQuestions: intake?.maxQuestions ?? DEFAULT_CHAT_INTAKE.maxQuestions,
+      codeAccess: intake?.codeAccess ?? DEFAULT_CHAT_INTAKE.codeAccess,
+    }
   }
 
   /** 按 assignment 的 runtimeId 取运行时；旧工单不会被新默认运行时接管。 */
@@ -655,21 +736,40 @@ export class RouterService {
 
     const runtimeId = metaRuntime || assignment.runtimeId
     let sessionId = typeof meta.sessionId === 'string' && meta.sessionId ? meta.sessionId : undefined
-    // Orca 的 meta 只记录终端句柄；按 workdir 从 Claude 会话记录里补出真实 session id。
-    // 找不到记录时 resume 模块会退回 orca terminal switch。
-    if (!sessionId && normalizeRuntimeId(runtimeId) === ORCA_RUNTIME_ID) {
-      sessionId = latestClaudeSessionId(
-        workdir,
-        this.claudeProjectsDir ? { projectsDir: this.claudeProjectsDir } : {},
-      ) ?? undefined
+    // 恢复命令要用「真正在跑的那个 Agent」的语法：meta 里记了就用它，
+    // 其次看配置，最后看这个 workdir 里到底是哪个 Agent 留下了会话。
+    let agentId = typeof meta.agent === 'string' ? meta.agent : ''
+    if (normalizeRuntimeId(runtimeId) === ORCA_RUNTIME_ID) {
+      const configured = agentId || this.orcaAgentId()
+      if (!sessionId) {
+        // Orca 的 meta 只记录终端句柄；按 workdir 从 Agent 自己的会话记录里补出真实 session id。
+        // 找不到记录时 resume 模块会退回 orca terminal switch。
+        const resolved = resolveSession(workdir, configured, {
+          ...(this.claudeProjectsDir ? { roots: { claude: this.claudeProjectsDir } } : {}),
+        })
+        sessionId = resolved?.reader.latestSessionId(workdir) ?? undefined
+        agentId = resolved?.profile.id ?? configured
+      } else {
+        agentId = configured
+      }
     }
     const handle = (typeof meta.handle === 'string' && meta.handle) || assignment.handle
 
     return buildResumeHint(
       runtimeId,
-      { workdir, sessionId, handle },
+      {
+        workdir,
+        sessionId,
+        handle,
+        ...(agentId ? { agentId } : {}),
+      },
       { workdirExists: existsSync(workdir) },
     )
+  }
+
+  /** Orca 派工时用的 Agent；没配置时取选项声明的默认值。 */
+  private orcaAgentId(): string {
+    return runtimeOptionString(this.config.runtime.options, ORCA_RUNTIME_ID, 'agent')
   }
 
   /**
@@ -1220,28 +1320,34 @@ export class RouterService {
       if (pending.length === 0 && unacked.length === 0) continue
       const nowMs = Date.parse(this.clock.now())
       const cooldownUntil = this.deliveryCooldown.get(ticket.id) ?? 0
-      // 有新输入时立即投递；只有「纯粹等 ack」才走退避。
-      if (pending.length === 0 && Number.isFinite(nowMs) && cooldownUntil > nowMs) continue
       // 没有活着的 worker：新输入视为「重试派工」信号。
-      // 派工失败后工单会转人工，用户在该话题里回复即可重新拉起 worker。
+      // 这条路径有自己的 seq 水位去重，不能被投递退避挡住。
       if (!assignment || assignment.status === 'ended' || !assignment.handle) {
-        await this.relaunchForInput(ticket, pending)
+        await this.relaunchForInput(ticket)
         continue
       }
+      // 只有「确实有新 seq 的输入」才允许立即投递；同一批 pending / 未 ack 必须走退避。
+      // 否则 deliver 抛错时 input 仍是 pending，会绕过退避每轮重试（Claude 会反复 resume）。
+      const maxPendingSeq = pending.at(-1)?.seq ?? 0
+      const attemptedSeq = this.deliveryAttemptedSeq.get(ticket.id) ?? 0
+      const hasNewerPending = maxPendingSeq > attemptedSeq
+      if (!hasNewerPending && Number.isFinite(nowMs) && cooldownUntil > nowMs) continue
       // 下次唤醒时把上次已投递但没 ack 的输入一并重发，靠 id 去重。
       const batch = [...unacked, ...pending.filter(item => !unacked.some(u => u.id === item.id))]
+      const lastId = batch.at(-1)?.id
+      const prevAttempt = lastId ? (this.deliveryAttempts.get(lastId) ?? 0) : 0
+      const attempt = prevAttempt + 1
+      const maxBatchSeq = batch.reduce((max, item) => Math.max(max, item.seq), 0)
       try {
         // 用 input.id（而不是 assignmentId:seq）作为投递 id：worker 会原样写进 acked_inputs。
         const runtime = this.runtimeFor(assignment)
-        const lastId = batch.at(-1)?.id
-        const prevAttempt = lastId ? (this.deliveryAttempts.get(lastId) ?? 0) : 0
         if (prevAttempt >= 5) {
           this.engine.setAttention(ticket.id, `输入 ${lastId ?? ''} 已重投 ${prevAttempt} 次仍未 ack，请人工确认`)
           this.deliveryCooldown.set(ticket.id, nowMs + 10 * 60_000)
           this.logger.warn('input:redeliver-giveup', { ticketId: ticket.id, inputId: lastId, attempt: prevAttempt + 1 })
           continue
         }
-        const attempt = prevAttempt + 1
+        this.deliveryAttemptedSeq.set(ticket.id, maxBatchSeq)
         const receipt = await runtime.deliver(
           this.refOf(assignment),
           batch.map(input => ({ id: input.id, kind: input.kind, text: input.text })),
@@ -1254,6 +1360,15 @@ export class RouterService {
           continue
         }
         if (lastId) this.deliveryAttempts.set(lastId, attempt)
+        if (receipt.status === 'accepted' && receipt.handle && receipt.handle !== assignment.handle) {
+          // 运行时接管了新会话（Claude resume fork）：持久化新 handle，后续 status/stop 才命中。
+          this.store.updateAssignment({ ...assignment, handle: receipt.handle })
+          this.log('input:adopted-handle', ticket.id, {
+            from: assignment.handle,
+            to: receipt.handle,
+            ...(receipt.sessionId ? { sessionId: receipt.sessionId } : {}),
+          })
+        }
         if (receipt.status === 'rejected') {
           if (receipt.retryable === false) {
             this.handleLostWorker(ticket, `input-rejected:${receipt.reason}`)
@@ -1271,24 +1386,47 @@ export class RouterService {
           text: preview(batch.map(item => item.text).join(' / ')),
         })
       } catch (error) {
-        this.deliveryCooldown.set(ticket.id, nowMs + 30_000)
+        // 抛错也代表一次真实投递尝试：必须累计，否则重投上限永远触发不了。
+        if (lastId) this.deliveryAttempts.set(lastId, attempt)
+        this.deliveryAttemptedSeq.set(ticket.id, maxBatchSeq)
+        const backoffMs = Math.min(30_000 * 2 ** Math.max(0, attempt - 1), 10 * 60_000)
+        this.deliveryCooldown.set(ticket.id, nowMs + backoffMs)
+        if (attempt >= 5) {
+          this.engine.setAttention(ticket.id, `输入 ${lastId ?? ''} 已重投 ${attempt} 次仍未成功，请人工确认`)
+          this.deliveryCooldown.set(ticket.id, nowMs + 10 * 60_000)
+          this.logger.warn('input:redeliver-giveup', { ticketId: ticket.id, inputId: lastId, attempt })
+        }
         // 终端被删掉时 send 会一直失败；先确认会话是否还在，别每秒重试。
         if (await this.workerGone(assignment)) {
           this.handleLostWorker(ticket, 'input-deliver-failed')
           continue
         }
-        this.logger.warn('input:deliver-failed', { ticketId: ticket.id, message: error instanceof Error ? error.message : String(error) })
+        this.logger.warn('input:deliver-failed', {
+          ticketId: ticket.id,
+          attempt,
+          message: error instanceof Error ? error.message : String(error),
+        })
       }
     }
   }
 
   /**
    * 旧 worker 已结束、但有新输入时重新派工。
-   * 只对「上次失败之后新到的输入」触发，避免同一批积压输入每秒重试打爆 Orca。
+   *
+   * 只对「上次失败 / 丢失之后新到的输入」触发，避免同一批积压输入每秒重试打爆 Orca。
+   * 两个水位任一挡住都不许重建：
+   *   - 派工失败：失败水位记录当时积压的最大 seq，同一批输入不再重试；
+   *   - 重新派工：上一次为积压输入重建 worker 时处理到的 seq，同一批输入只重建一次。
+   * worker 丢失时已投递未 ack 的输入会被标成 expired，不再算作「新输入」（tk-51）。
    */
-  private async relaunchForInput(ticket: Ticket, pending: { seq: number }[]): Promise<void> {
+  private async relaunchForInput(ticket: Ticket): Promise<void> {
+    // 只认 pending：worker 丢失时已投递未 ack 的输入已经标成 expired，
+    // 用户新发的消息才会是 pending 且 seq 更大。
+    const pending = this.store.pendingInputs(ticket.id)
     const failure = this.loadLaunchFailure(ticket.id)
-    if (failure && !pending.some(input => input.seq > failure.lastSeq)) return
+    const relaunchSeq = this.loadRelaunchSeq(ticket.id)
+    const candidates = pending.filter(input => input.seq > relaunchSeq && input.seq > (failure?.lastSeq ?? 0))
+    if (candidates.length === 0) return
     if (this.activeWorkers() >= this.config.policy.maxWorkers) {
       this.logger.info('launch:queued-input', {
         ticketId: ticket.id,
@@ -1300,10 +1438,25 @@ export class RouterService {
     this.engine.clearAttention(ticket.id)
     try {
       await this.launch(ticket)
+      // 记下这次处理到的最大 seq：新 worker 仍投递失败时不会再触发一次重建。
+      const maxSeq = candidates.reduce((max, input) => Math.max(max, input.seq), 0)
+      this.saveRelaunchSeq(ticket.id, maxSeq)
       this.log('input:relaunch', ticket.id, { pending: pending.length })
     } catch {
       // launch() 内部已记录原因、转人工并通知发起人。
     }
+  }
+
+  /** 读取重新派工水位；没有记录时返回 0。 */
+  private loadRelaunchSeq(ticketId: string): number {
+    const raw = this.store.getCursor(relaunchCursorKey(ticketId))
+    if (!raw) return 0
+    const value = Number(raw)
+    return Number.isFinite(value) && value > 0 ? value : 0
+  }
+
+  private saveRelaunchSeq(ticketId: string, seq: number): void {
+    this.store.setCursor(relaunchCursorKey(ticketId), String(seq), this.clock.now())
   }
 
   // ---------- 空闲与失联 ----------
@@ -1819,7 +1972,7 @@ export class RouterService {
       return
     }
     const reply = state.reply?.trim() ?? ''
-    const report = this.engine.report(assignment.id, {
+    const { report, ackedInputs } = this.engine.report(assignment.id, {
       ticketId: ticket.id,
       turn: state.turn,
       state: state.state,
@@ -1830,8 +1983,10 @@ export class RouterService {
       ...(reply ? { reply } : {}),
       ackedInputs: state.ackedInputs,
     })
-    for (const id of state.ackedInputs) this.deliveryAttempts.delete(id)
-    if (state.ackedInputs.length > 0) this.deliveryCooldown.delete(ticket.id)
+    // 只清真正落成 acked 的输入：worker 声称 ack 了但库里没匹配到时，
+    // 清掉计数会让「重投 5 次放弃」永远触发不了（tk-51）。
+    for (const id of ackedInputs) this.deliveryAttempts.delete(id)
+    if (ackedInputs.length > 0) this.deliveryCooldown.delete(ticket.id)
     this.appendEventLog(ticket.id, { kind: 'report', state: state.state, turn: state.turn, at: state.updatedAt })
     this.log('report', ticket.id, {
       state: state.state,
@@ -2353,6 +2508,11 @@ let repo = ticket.repo
    */
   private handleLostWorker(ticket: Ticket, reason: string): void {
     const assignment = this.store.latestAssignment(ticket.id)
+    const lastSeq = this.store.listInputs(ticket.id).reduce((max, input) => Math.max(max, input.seq), 0)
+    // 旧终端已经不在了：已投递但没 ack 的输入不会再有人确认，标记 expired 而不是
+    // 一直停在 delivered——否则「未 ack 输入」会被当成待重投任务反复处理（tk-51）。
+    // 之后只有用户新发的消息（pending、seq 更大）才会触发重新派工。
+    const expired = this.store.expireUnackedInputs(ticket.id)
     if (assignment && assignment.status !== 'ended') {
       this.store.updateAssignment({ ...assignment, status: 'ended', endedAt: this.clock.now() })
     }
@@ -2364,7 +2524,7 @@ let repo = ticket.repo
       `工单「${ticket.title}」的执行会话已不存在（电脑重启、终端关闭或进程退出都会导致），无法继续执行。${workdirNote}如果还需要继续，请在本话题里说明，我会重新开一张工单。`,
       `worker-lost:${ticket.id}`,
     )
-    this.log('worker:lost', ticket.id, { handle: assignment?.handle ?? '', reason })
+    this.log('worker:lost', ticket.id, { handle: assignment?.handle ?? '', reason, lastSeq, expired })
   }
 
   /** 长内容按行切块并顺序进入 outbox，避免超过飞书单条消息长度。 */
@@ -2377,7 +2537,7 @@ let repo = ticket.repo
       this.store.enqueueOutbox({
         id: `ob_${`${key}:${index}`.replace(/[^a-zA-Z0-9:_-]/g, '_')}`,
         key: `${key}:${index}`,
-        channelKind: DEFAULT_CHANNEL_ID,
+        channelKind: ticket.channelId ?? DEFAULT_CHANNEL_ID,
         channelId: ticket.chatId,
         threadId: ticket.threadId.split(':').at(-1) ?? '',
         text: `${chunk}${suffix}`,
@@ -2390,7 +2550,7 @@ let repo = ticket.repo
     this.store.enqueueOutbox({
       id: `ob_${key.replace(/[^a-zA-Z0-9:_-]/g, '_')}`,
       key,
-      channelKind: DEFAULT_CHANNEL_ID,
+      channelKind: ticket.channelId ?? DEFAULT_CHANNEL_ID,
       channelId: ticket.chatId,
       threadId: ticket.threadId.split(':').at(-1) ?? '',
       text,
@@ -2432,7 +2592,7 @@ export interface CreateServiceDeps {
 }
 
 /** 旧版出站兼容层；生产路径已改为 `ChannelRouter`，这里仅保留导出。 */
-export { createEffectsSender, type FeishuOutbound } from './channels/legacy.js'
+export { createEffectsSender, type FeishuOutbound } from '@router-agent/channel-feishu'
 
 /** 按行切成不超过 limit 的消息块，保证长回复不会被截断。 */
 export function splitMessage(text: string, limit = 3500): string[] {

@@ -5,8 +5,8 @@ import { Store } from '../../src/store/db.js'
 import { Engine } from '../../src/core/engine.js'
 import { createApiServer, type ApiServer } from '../../src/router/api.js'
 import { defaultConfig, policyOf, type AppConfig } from '../../src/config.js'
-import { ChannelRegistry } from '../../src/channels/registry.js'
-import type { ChannelAdapter, ChannelCapabilities } from '../../src/channels/port.js'
+import { ChannelRegistry } from '#channel/registry.js'
+import type { ChannelAdapter, ChannelCapabilities } from '#channel/port.js'
 
 function call(server: ApiServer, method: string, path: string): Promise<{ status: number; json: any }> {
   return new Promise((resolve, reject) => {

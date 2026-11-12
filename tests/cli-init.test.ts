@@ -5,8 +5,8 @@ import { describe, expect, it } from 'vitest'
 import { runInitWizard, type InitDeps } from '../src/cli/init.js'
 import type { Prompter } from '../src/cli/prompts.js'
 import { loadConfig, writeConfig, chatEntry } from '../src/config.js'
-import type { CommandRunner } from '../src/infra/process.js'
-import { LARK_PROFILE_HOME } from '../src/sources/lark.js'
+import type { CommandRunner } from '#infra/process.js'
+import { LARK_PROFILE_HOME } from '@router-agent/channel-feishu'
 
 const ORCA_REPOS = JSON.stringify({ result: { repos: [
   { displayName: 'teamwork-repos', path: '/p', kind: 'git' },
@@ -192,7 +192,12 @@ describe('交互式 ra init', () => {
     await runInitWizard(deps)
     const authCall = streamCalls.find(call => call.argv[0] === 'auth' && call.argv[1] === 'login')
     expect(authCall).toBeTruthy()
-    expect(authCall?.argv).toEqual(['auth', 'login', '--domain', 'im,docs,drive,contact'])
+    expect(authCall?.argv).toEqual([
+      'auth', 'login',
+      '--domain', 'im,docs,drive,contact',
+      // contact 域映射不含 contact:user.id:readonly，邮箱→open_id 依赖它，必须显式申请。
+      '--scope', 'contact:user.id:readonly',
+    ])
     expect(authCall?.env.HOME).toBe(LARK_PROFILE_HOME)
   })
 

@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { createIdentityPort } from '../../src/cli/index.js'
 import { chatEntry, defaultConfig, type AppConfig } from '../../src/config.js'
-import type { CommandRunner } from '../../src/infra/process.js'
-import type { Logger } from '../../src/infra/logger.js'
-import type { IdentityCache } from '../../src/sources/feishu-identity.js'
+import type { CommandRunner } from '#infra/process.js'
+import type { Logger } from '#infra/logger.js'
+import type { IdentityCache } from '@router-agent/channel-feishu'
 
 type Reply = { code: number; stdout: string; stderr: string }
 

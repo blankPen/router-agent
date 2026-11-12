@@ -6,7 +6,7 @@ import { Store } from '../src/store/db.js'
 import { Engine } from '../src/core/engine.js'
 import { RouterService } from '../src/service.js'
 import { defaultConfig, policyOf, type AppConfig, chatEntry } from '../src/config.js'
-import { DEFAULT_ADMISSION } from '../src/core/policy.js'
+import { DEFAULT_ADMISSION } from '#core/policy.js'
 import type {
   WorkerRuntime,
   WorkerContext,
@@ -15,9 +15,9 @@ import type {
   DeliveryReceipt,
   AgentStatus,
   WorkspaceInfo,
-} from '../src/worker/port.js'
+} from '#runtime/port.js'
 import type { DecisionEngine, DecisionEngineResult, DecisionRequest } from '../src/router/decision-engine.js'
-import type { Trigger } from '../src/core/model.js'
+import type { Trigger } from '#core/model.js'
 
 class FakeRuntime implements WorkerRuntime {
   readonly id = 'orca'
@@ -556,6 +556,80 @@ describe('RouterService 编排', () => {
     await service.runOnce()
     expect(runtime.delivered.length).toBe(before)
     expect(store.claimOutbox('2026-11-06T10:11:00.000Z', 20).filter(item => item.text.includes('执行会话已不存在'))).toHaveLength(0)
+  })
+
+  it('worker 被删后不会因为未 ack 的旧输入反复重建（tk-51）', async () => {
+    engine.ingest(makeTrigger())
+    await service.runOnce()
+    const ticket = store.listTickets()[0]!
+    const assignment = store.latestAssignment(ticket.id)!
+
+    // 输入已投递但 worker 还没 ack，此时终端被意外删除
+    engine.deliverInput(ticket.id, { kind: 'followup', text: '合并' })
+    await service.runOnce()
+    expect(runtime.delivered.some(d => d.text.includes('合并'))).toBe(true)
+    expect(store.unackedInputs(ticket.id)).toHaveLength(1)
+
+    runtime.handles.delete(assignment.handle)
+    await service.checkIdle()
+    expect(store.getTicket(ticket.id)?.stage).toBe('blocked')
+    // 旧输入标记 expired，不再挂成「待确认」
+    expect(store.unackedInputs(ticket.id)).toHaveLength(0)
+    expect(store.listInputs(ticket.id).at(-1)?.status).toBe('expired')
+    expect(runtime.starts).toHaveLength(1)
+
+    // 连续多轮巡检都不能再建 worker（原来这里每秒新建一个）
+    const before = runtime.starts.length
+    for (let i = 0; i < 5; i++) await service.runOnce()
+    expect(runtime.starts).toHaveLength(before)
+    expect(logs.filter(entry => entry.message === 'worker:lost')).toHaveLength(1)
+
+    // 用户在该话题里发新消息 = 明确要继续，才允许重新派工
+    engine.deliverInput(ticket.id, { kind: 'followup', text: '继续' })
+    await service.runOnce()
+    expect(runtime.starts).toHaveLength(before + 1)
+    expect(store.getTicket(ticket.id)?.stage).toBe('running')
+  })
+
+  it('新派工消费旧派工下创建的输入时也能落成 acked，不会无限重投（tk-51）', async () => {
+    engine.ingest(makeTrigger())
+    await service.runOnce()
+    const ticket = store.listTickets()[0]!
+    const first = store.latestAssignment(ticket.id)!
+
+    const input = engine.deliverInput(ticket.id, { kind: 'followup', text: '合并' })
+    await service.runOnce()
+    expect(input.assignmentId).toBe(first.id)
+
+    // worker 被删 → 用户发新消息拉起新派工
+    runtime.handles.delete(first.handle)
+    // 下一轮投递会打到已删除的终端：确认丢失后把旧输入标 expired，不再拿它重建
+    await service.runOnce()
+    engine.deliverInput(ticket.id, { kind: 'followup', text: '继续' })
+    await service.runOnce()
+    // 这一轮才根据 pending 的新消息重新派工
+    await service.runOnce()
+    const second = store.latestAssignment(ticket.id)!
+    expect(second.id).not.toBe(first.id)
+
+    // 新 worker 上报时一并 ack 旧输入（input 仍挂在 first 上）
+    service.onWorkerState({
+      ticketId: ticket.id,
+      assignmentId: second.id,
+      turn: 2,
+      state: 'progress',
+      summary: '已处理',
+      prNumber: 0,
+      prUrl: '',
+      ackedInputs: [input.id],
+      updatedAt: new Date(Date.now() + 1000).toISOString(),
+    })
+    expect(store.listInputs(ticket.id).find(item => item.id === input.id)?.status).toBe('acked')
+
+    // 之后不应该再有重投这一条旧消息
+    const deliveredBefore = runtime.delivered.length
+    await service.runOnce()
+    expect(runtime.delivered.slice(deliveredBefore).some(d => d.text.includes('合并'))).toBe(false)
   })
 
   it('停止工单会停止 worker 并回收 workspace', async () => {

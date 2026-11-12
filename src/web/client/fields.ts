@@ -10,9 +10,17 @@
  *   字段     FieldDef    —— 一个可编辑项。
  * 分组与块的顺序即优先级：接入与可用性在前，低频与高级项下沉折叠。
  */
-import { WORKER_RUNTIMES } from '../../worker/runtimes/catalog.js'
-import { ACP_AGENTS } from '../../worker/runtimes/acp/agents.js'
-import { runtimeStatusLabel, type RuntimeChoiceView } from './runtime-model.js'
+import { WORKER_RUNTIMES } from '#runtime/runtimes/catalog.js'
+import { ACP_AGENTS } from '#runtime/runtimes/acp-agents.js'
+import {
+  RUNTIME_OPTION_SPECS,
+  optionSpecOf,
+  parseRuntimeOptionPath,
+  runtimeOptionDefault,
+  runtimeOptionPath,
+  type RuntimeOptionSpec,
+} from '#runtime/runtimes/options.js'
+import { isDeprecatedRuntime, runtimeOptionLabel, runtimeStatusLabel, type RuntimeChoiceView } from './runtime-model.js'
 
 export type { RuntimeChoiceView } from './runtime-model.js'
 
@@ -41,6 +49,8 @@ export interface FieldDef {
   /** 毫秒字段：额外展示「≈ 1 分钟」这类可读换算。 */
   ms?: boolean
   placeholder?: string
+  /** 字段自带默认值（运行时选项用它，页面「默认值快照」里没有这些动态路径）。 */
+  defaultValue?: unknown
 }
 
 /**
@@ -53,7 +63,7 @@ export interface ConfigBlock {
   id: string
   title: string
   description?: string
-  render?: 'fields' | 'runtime' | 'projects' | 'specs' | 'custom'
+  render?: 'fields' | 'runtime' | 'projects' | 'specs' | 'plugins' | 'custom'
   fields: FieldDef[]
   /** 块自己管理的、不是普通字段的配置路径（如群列表）。 */
   paths?: string[]
@@ -365,6 +375,15 @@ export const CONFIG_GROUPS: ConfigGroup[] = [
           },
         ],
       },
+      {
+        id: 'plugins',
+        title: '插件',
+        description: '内置运行时与通道之外，还可以按包名或路径加载自定义插件；保存后重启服务生效。',
+        render: 'plugins',
+        fields: [],
+        folded: true,
+        effectLabel: '保存后重启生效',
+      },
     ],
   },
 ]
@@ -384,38 +403,110 @@ export function fieldPaths(fields: FieldDef[]): string[] {
   return fields.map(field => field.path)
 }
 
+/**
+ * 运行时自己声明的选项 → 面板字段。
+ *
+ * 面板不关心具体是哪个运行时：新增运行时只要声明了自己的选项，这里就会自动渲染。
+ */
+export function runtimeOptionFields(runtimeId: string, specs?: RuntimeOptionSpec[]): FieldDef[] {
+  const spec = optionSpecOf(runtimeId) ?? specs?.find(item => item.runtimeId === runtimeId) ?? null
+  return spec ? runtimeOptionFieldsOf(runtimeId, spec) : []
+}
+
+/** 插件加载时带上来的 option 声明；自定义运行时也能渲染设置弹窗。 */
+export function runtimeOptionFieldsOf(runtimeId: string, spec: FieldSpec | null | undefined): FieldDef[] {
+  if (!spec) return []
+  return spec.fields.map(field => ({
+    path: runtimeOptionPath(runtimeId, field.key),
+    label: field.label,
+    kind: field.kind === 'select' ? 'select' : field.kind === 'switch' ? 'switch' : field.kind === 'number' ? 'number' : 'text',
+    ...(field.options
+      ? {
+          options: field.options.map(option => ({
+            value: option.value,
+            label: option.label,
+            ...(option.hint ? { hint: option.hint } : {}),
+          })),
+        }
+      : {}),
+    ...(field.placeholder ? { placeholder: field.placeholder } : {}),
+    ...(field.hint ? { hint: field.hint } : {}),
+    ...(field.default !== undefined ? { defaultValue: field.default } : {}),
+    ...(field.min !== undefined ? { min: field.min } : {}),
+    ...(field.max !== undefined ? { max: field.max } : {}),
+  }))
+}
+
+type FieldSpec = RuntimeOptionSpec
+
+/** 所有已声明运行时的选项字段；保存前统一校验，避免某个运行时的脏值溜过去。 */
+export function allRuntimeOptionFields(specs?: RuntimeOptionSpec[]): FieldDef[] {
+  return [...RUNTIME_OPTION_SPECS, ...(specs ?? [])]
+    .filter((spec, index, all) => all.findIndex(item => item.runtimeId === spec.runtimeId) === index)
+    .flatMap(spec => runtimeOptionFieldsOf(spec.runtimeId, spec))
+}
+
+/** 字段路径 → 声明默认值，供 `fieldValue` 回退；自定义运行时也参与校验。 */
+export function runtimeOptionDefaults(fields: FieldDef[]): Record<string, unknown> {
+  return Object.fromEntries(
+    fields
+      .filter(field => field.defaultValue !== undefined)
+      .map(field => [field.path, field.defaultValue]),
+  )
+}
+
+/**
+ * 运行时选项回写值：选回声明默认值时写成空串，让后端把键删掉。
+ *
+ * 这样 config.yaml 里不会留下一个「和默认值相同」的多余配置，
+ * 后续调整声明默认值也能直接生效。
+ */
+export function runtimeOptionPatchValue(field: FieldDef, value: unknown): unknown {
+  const parsed = parseRuntimeOptionPath(field.path)
+  if (!parsed) return value
+  const fallback = runtimeOptionDefault(parsed.runtimeId, parsed.key)
+  if (fallback === undefined) return value
+  return JSON.stringify(value) === JSON.stringify(fallback) ? '' : value
+}
+
 /** 探测结果 → runtime.default 的下拉选项；无探测结果时回退静态清单。 */
-export function runtimeOptions(choices?: RuntimeChoiceView[]): FieldOption[] {
+export function runtimeOptions(choices?: RuntimeChoiceView[], selectedId?: string): FieldOption[] {
   // 内置运行时永远保留；探测结果按 id 覆盖，避免旧缓存里缺 orca / claude-code。
   const merged = new Map<string, RuntimeChoiceView>()
   for (const runtime of WORKER_RUNTIMES) {
-    merged.set(runtime.id, { id: runtime.id, label: runtime.label, hint: runtime.hint, status: 'pending' })
+    merged.set(runtime.id, { id: runtime.id, name: runtime.name, label: runtime.label, hint: runtime.hint, status: 'pending' })
   }
-  for (const choice of choices ?? []) merged.set(choice.id, choice)
+  for (const choice of choices ?? []) merged.set(choice.id, { ...merged.get(choice.id), ...choice })
   // 探测结果还没回来时，把目录里的 ACP 运行时以「待检测」占位，避免已配置的
   // acp-* 默认值被前端误判成非法值、卡住保存。
   for (const agent of ACP_AGENTS) {
     if (!merged.has(agent.runtimeId)) {
       merged.set(agent.runtimeId, {
         id: agent.runtimeId,
+        name: agent.name,
         label: agent.label,
         hint: agent.hint,
         status: 'pending',
         installable: Boolean(agent.package),
+        ...(agent.deprecated ? { deprecated: true } : {}),
       })
     }
   }
   const source = [...merged.values()]
+    // 已有原生运行时替代品的（Claude Code / Codex 的 ACP 版本）不再列为可选项；
+    // 当前正选中的要留着，否则老配置在下拉里找不到自己。
+    .filter(choice => !isDeprecatedRuntime(choice) || choice.id === selectedId)
   return source.map(choice => {
     const available = choice.status === 'ready' || choice.status === 'unverified' || choice.status === 'pending'
     const statusLabel = runtimeStatusLabel(choice.status)
+    const name = runtimeOptionLabel(choice)
     return {
       value: choice.id,
       label: choice.status === 'pending'
-        ? `${choice.label} · 待检测`
+        ? `${name} · 待检测`
         : available
-          ? `${choice.label}${choice.version ? ` · ${choice.version}` : ''}`
-          : `${choice.label}（${statusLabel}）`,
+          ? `${name}${choice.version ? ` · ${choice.version}` : ''}`
+          : `${name}（${statusLabel}）`,
       hint: choice.reason ?? choice.hint,
       disabled: !available,
       ...(choice.reason ? { reason: choice.reason } : {}),
@@ -423,9 +514,14 @@ export function runtimeOptions(choices?: RuntimeChoiceView[]): FieldOption[] {
   })
 }
 
-/** 用动态 choices 替换 runtime.default 的 options；其余字段原样保留。 */
-export function groupsFor(choices?: RuntimeChoiceView[]): ConfigGroup[] {
-  const options = runtimeOptions(choices)
+/**
+ * 用动态 choices 替换 runtime.default 的 options；其余字段原样保留。
+ *
+ * 运行时自己的选项不在页面上平铺：它们通过卡片上的「设置」弹窗编辑，
+ * 见 runtime-settings.tsx。
+ */
+export function groupsFor(choices?: RuntimeChoiceView[], selectedId?: string, extraChoices?: RuntimeChoiceView[]): ConfigGroup[] {
+  const options = runtimeOptions([...(choices ?? []), ...(extraChoices ?? [])], selectedId)
   return CONFIG_GROUPS.map(group => ({
     ...group,
     blocks: group.blocks.map(block => ({
@@ -461,6 +557,23 @@ export function getByPath(doc: unknown, path: string): unknown {
     if (!node || typeof node !== 'object') return undefined
     return (node as Record<string, unknown>)[part]
   }, doc)
+}
+
+/**
+ * 取字段当前值。
+ *
+ * 运行时选项没配置过时回落到声明里的默认值（没声明默认值则按空串算），
+ * 这样面板显示的就是实际会生效的取值，也不会误报「有未保存的修改」。
+ */
+export function fieldValue(doc: unknown, path: string, defaults?: Record<string, unknown>): unknown {
+  const value = getByPath(doc, path)
+  if (value !== undefined && value !== '') return value
+  if (path.startsWith('runtime.options.')) {
+    const parsed = parseRuntimeOptionPath(path)
+    const fallback = parsed ? runtimeOptionDefault(parsed.runtimeId, parsed.key) ?? defaults?.[path] : undefined
+    return fallback ?? ''
+  }
+  return value
 }
 
 /** 不可变地写入点路径，供 React draft 使用。 */
@@ -499,6 +612,8 @@ export function fieldError(field: FieldDef, value: unknown): string | null {
     if (field.max !== undefined && value > field.max) return `不能大于 ${field.max}`
   }
   if (field.kind === 'select' && field.options) {
+    // 没有配置过（值为空）时，只要声明里留了空选项，就视为「不覆盖」。
+    if ((value === undefined || value === '') && field.options.some(item => item.value === '')) return null
     const option = field.options.find(item => item.value === value)
     if (!option) return '请选择一个有效值'
     // 当前选中项不可用（未安装/不兼容）时只置灰，不阻止用户保存其它字段。

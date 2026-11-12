@@ -33,14 +33,20 @@ const MAX_BUMP_STEPS = 100
 /**
  * 不会进入 npm 包（package.json 的 files 白名单只有 bin/ 与 dist/）的改动。
  * 命中这些路径的改动不触发自动升版。
+ *
+ * 适配器包的源码（`packages/<name>/src/`）会被 tsc 编进 `dist/packages/`，
+ * 因此属于产物改动；包内的测试 / 文档 / 清单（package.json、tests/、*.md）
+ * 不会进包，单独命中时不触发发版。
  */
 const NON_SHIPPING_PATTERNS = [
   /^docs\//,
   /^tests\//,
+  /^packages\/[^/]+\/tests\//,
+  /^packages\/[^/]+\/package\.json$/,
   /^\.github\//,
   /^\.claude\//,
   /\.md$/,
-  /^(?:LICENSE|\.gitignore|\.npmrc|\.nvmrc)$/,
+  /^(?:LICENSE|\.gitignore|\.npmrc|\.nvmrc|pnpm-workspace\.yaml)$/,
 ]
 
 /**

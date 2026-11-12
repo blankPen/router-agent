@@ -12,6 +12,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseDocument } from 'yaml'
+import { readWorkerSpec as readRuntimeWorkerSpec } from '#runtime/spec/reader.js'
 
 export type SpecGroup = 'router' | 'worker'
 
@@ -63,6 +64,22 @@ const SPECS: SpecDefinition[] = [
     label: '会话回复规范',
     description: '会话模式下如何组织回复与追问。',
     applyHint: '保存后需重启服务生效',
+  },
+  {
+    id: 'router.intake-screener',
+    group: 'router',
+    file: 'intake-screener.md',
+    label: '需求初筛规范',
+    description: '轻量模型如何把群消息分成闲聊 / 咨询 / 疑似问题三类。',
+    applyHint: '保存后立即生效',
+  },
+  {
+    id: 'router.intake-analyst',
+    group: 'router',
+    file: 'intake-analyst.md',
+    label: '需求分析规范',
+    description: '分析子 Agent 如何追问、甄别并整理结构化需求单。',
+    applyHint: '保存后立即生效',
   },
   {
     id: 'worker.prompt-mode',
@@ -134,8 +151,7 @@ function definitionForFile(group: SpecGroup, file: string): SpecDefinition | und
 }
 
 function builtinPath(group: SpecGroup, file: string): string {
-  const dir = group === 'router' ? 'router/prompts' : 'worker/spec'
-  return fileURLToPath(new URL(`../${dir}/${file}`, import.meta.url))
+  return fileURLToPath(new URL(`../router/prompts/${file}`, import.meta.url))
 }
 
 /** 覆盖文件的固定路径：`<home>/specs/<group>/<file>`。 */
@@ -154,6 +170,8 @@ function stats(path: string): { isCustom: boolean; updatedAt: string | null } {
 }
 
 function builtinContent(def: SpecDefinition): string {
+  // Worker 模板由运行时包自带（并负责 `<home>/specs/worker` 覆盖），这里不重复维护路径。
+  if (def.group === 'worker') return readRuntimeWorkerSpec(undefined, def.file)
   return readFileSync(builtinPath(def.group, def.file), 'utf8')
 }
 

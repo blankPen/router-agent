@@ -1,6 +1,6 @@
 import { chatEntry } from '../../src/config.js'
 import { describe, expect, it } from 'vitest'
-import { attachQuotedMessage, FeishuSender, feishuCard, feishuCardSendCommand, feishuCreateDocCommand, feishuReactionCommand, fitIdempotencyKey, normalizeCardMarkdown, normalizeFeishuEvent, normalizeFeishuEventDetailed, parseDocumentUrl, parseMessageThreadIds, parseQuotedMessage, quotedMessageCommand, shouldSendAsText, type FeishuConfig } from '../../src/sources/feishu.js'
+import { attachQuotedMessage, FeishuSender, feishuCard, feishuCardSendCommand, feishuCreateDocCommand, feishuReactionCommand, fitIdempotencyKey, normalizeCardMarkdown, normalizeFeishuEvent, normalizeFeishuEventDetailed, parseDocumentUrl, parseMessageThreadIds, parseQuotedMessage, quotedMessageCommand, shouldSendAsText, type FeishuConfig, type UnaddressedContext } from '@router-agent/channel-feishu'
 
 const cfg: FeishuConfig = {
   chats: [chatEntry('oc_dev'), chatEntry('oc_other', { mode: 'mention' })],
@@ -181,6 +181,20 @@ describe('线程归属（话题 ID 参与别名收敛）', () => {
     const t = normalizeFeishuEvent(evt(), cfg)!
     expect(t.threadId).toBe('feishu:oc_dev:om_100')
     expect(t.threadKeys).toEqual(['om_100'])
+  })
+
+  it('话题内直接发言：飞书自动填的 reply_to=root_id 不算引用（tk-51）', () => {
+    // 实测飞书：在话题里直接发言时，会把 reply_to / parent_id 填成话题根消息。
+    // 这不是用户主动引用，拿它回查正文会让每条回复都拼上根消息。
+    const t = normalizeFeishuEvent(evt({ thread_id: 'omt_topic_1', root_id: 'om_root', reply_to: 'om_root' }), cfg)!
+    expect(t.raw).not.toHaveProperty('parentId')
+    expect(t.raw).toMatchObject({ quoteIgnored: 'om_root' })
+    expect(t.text).toBe('帮我把登录超时改成 30 秒')
+  })
+
+  it('话题内真正引用另一条消息时仍然回查正文', () => {
+    const t = normalizeFeishuEvent(evt({ thread_id: 'omt_topic_1', root_id: 'om_root', reply_to: 'om_quoted' }), cfg)!
+    expect(t.raw).toMatchObject({ parentId: 'om_quoted' })
   })
 
   it('线程标识去重：root_id 与 message_id 相同时不重复登记', () => {
@@ -507,6 +521,50 @@ describe('飞书通信日志', () => {
     expect(t).toBe(base)
     expect(logs[0]).toMatchObject({ level: 'warn', message: 'feishu:quote-fetch-failed' })
     expect(logs[0]?.extra).toMatchObject({ messageId: 'om_parent', code: 1 })
+  })
+})
+
+describe('未寻址消息放行（tk-59：已绑定工单话题内名单内成员）', () => {
+  const mentionCfg: FeishuConfig = { ...cfg, chats: [chatEntry('oc_only_at', { mode: 'mention' })] }
+
+  it('判定放行时不丢弃消息，地址类型保持 none', () => {
+    const result = normalizeFeishuEventDetailed(evt({ chat_id: 'oc_only_at', thread_id: 'omt_topic_1' }), mentionCfg, '', () => true)
+    expect(result.dropped).toBeUndefined()
+    expect(result.trigger?.addressed).toBe('none')
+  })
+
+  it('放行的消息标记 unaddressedAdmitted，后面加表情与回执都靠它', () => {
+    const result = normalizeFeishuEventDetailed(evt({ chat_id: 'oc_only_at', thread_id: 'omt_topic_1' }), mentionCfg, '', () => true)
+    expect(result.trigger?.unaddressedAdmitted).toBe(true)
+  })
+
+  it('正常 @ 的消息不带放行标记', () => {
+    const result = normalizeFeishuEventDetailed(evt({ chat_id: 'oc_only_at', mentions: [{ id: 'ou_bot' }] }), mentionCfg, '', () => true)
+    expect(result.trigger?.unaddressedAdmitted).toBeUndefined()
+  })
+
+  it('放行判定拿得到群、发送者与线程标识', () => {
+    const seen: UnaddressedContext[] = []
+    normalizeFeishuEventDetailed(evt({ chat_id: 'oc_only_at', thread_id: 'omt_topic_1' }), mentionCfg, '', ctx => {
+      seen.push(ctx)
+      return true
+    })
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toMatchObject({ chatId: 'oc_only_at', actorId: 'ou_alice' })
+    expect(seen[0]?.threadKeys).toEqual(['omt_topic_1', 'om_100'])
+  })
+
+  it('判定不放行时照旧丢弃', () => {
+    expect(normalizeFeishuEventDetailed(evt({ chat_id: 'oc_only_at' }), mentionCfg, '', () => false)).toMatchObject({ dropped: 'mention:required' })
+  })
+
+  it('没有注入判定时行为不变：只 @ 模式群仍然只收 @', () => {
+    expect(normalizeFeishuEventDetailed(evt({ chat_id: 'oc_only_at' }), mentionCfg)).toMatchObject({ dropped: 'mention:required' })
+  })
+
+  it('全量接收的群不受影响，本来就不丢弃', () => {
+    const result = normalizeFeishuEventDetailed(evt({ chat_id: 'oc_dev' }), cfg, '', () => false)
+    expect(result.dropped).toBeUndefined()
   })
 })
 

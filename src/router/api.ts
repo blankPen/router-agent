@@ -4,22 +4,24 @@ import { homedir } from 'node:os'
 import { extname, join, normalize, resolve } from 'node:path'
 import type { Store } from '../store/db.js'
 import type { Engine } from '../core/engine.js'
-import { applyConfigPatch, HOT_CONFIG_PREFIXES, policyOf, publicConfig, publicDefaults, requiresRestart, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
-import { InstallStartError, type AcpRuntimeAdmin } from '../worker/runtimes/acp/admin.js'
-import { isWorkerRuntimeId, normalizeRuntimeId } from '../worker/runtimes/catalog.js'
-import { ReportRejectedError } from '../worker/evidence-gate.js'
+import { applyConfigPatch, HOT_CONFIG_PREFIXES, isKnownRuntimeId, policyOf, publicConfig, publicDefaults, publicPlugins, requiresRestart, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
+import { InstallStartError, type AcpRuntimeAdmin } from '@router-agent/runtime-acp'
+import { normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
+import { ReportRejectedError } from '#runtime/evidence-gate.js'
 import { ProjectSetupError, type ProjectSetupPort } from './project-setup.js'
-import type { ChannelAdmin } from '../channels/port.js'
-import type { ChannelRegistry } from '../channels/registry.js'
-import type { AcceptMode } from '../core/policy.js'
-import type { Ticket } from '../core/model.js'
-import { noopSink, preview, type EventSink } from '../core/events.js'
-import { noopLogger, errorMessage, type Logger } from '../infra/logger.js'
-import type { IdentityStatusView } from '../sources/feishu-identity.js'
-import type { WorkerStateFile } from '../worker/report-poller.js'
-import type { ResumeHint } from '../worker/port.js'
-import type { WorkspaceAdminPort } from '../worker/workspaces/overview.js'
+import type { ChannelAdmin } from '#channel/port.js'
+import type { ChannelRegistry } from '#channel/registry.js'
+import type { AcceptMode } from '#core/policy.js'
+import type { Ticket } from '#core/model.js'
+import { noopSink, preview, type EventSink } from '#core/events.js'
+import { noopLogger, errorMessage, type Logger } from '#infra/logger.js'
+import type { IdentityStatusView } from '@router-agent/channel-feishu'
+import type { WorkerStateFile } from '#runtime/report-poller.js'
+import type { ResumeHint } from '#runtime/port.js'
+import type { WorkspaceAdminPort } from '#runtime/workspaces/overview.js'
 import { readLogs } from './log-tail.js'
+import type { LogAssistantQuestion, LogDiagnosis, LogSuggestion } from './log-assistant.js'
+import { buildIssueBody, type IssueReporter } from './issue-report.js'
 import { getSpec, listSpecs, resetSpec, saveSpec, SpecError } from '../specs/index.js'
 import { PACKAGE_VERSION, type UpdateSnapshot } from '../update/index.js'
 import {
@@ -70,6 +72,20 @@ export function emptyIdentityStatus(): IdentityStatusView {
   }
 }
 
+/**
+ * 日志页排查助手的端口。
+ *
+ * 缺省时面板不显示助手入口（端点返回 404），避免旧版本服务端让面板报错。
+ */
+export interface LogAssistantPort {
+  /** 模型是否配齐；面板据此提示「去配置模型」。 */
+  llmConfigured(): boolean
+  /** 常见问题快捷入口。 */
+  suggestions(): LogSuggestion[]
+  /** 基于最近日志给出排查结论。 */
+  diagnose(question: LogAssistantQuestion): Promise<LogDiagnosis>
+}
+
 export interface ApiServerOptions {
   engine: Engine
   store: Store
@@ -107,8 +123,18 @@ export interface ApiServerOptions {
   localProviders?: { discover(): Promise<LocalProviderScan> }
   /** 允许名单的解析能力；缺省时面板只拿到空状态，名单按原始条目生效。 */
   identity?: IdentityPort
+  /** 日志页的智能排查助手；缺省时相关端点返回 404。 */
+  logAssistant?: LogAssistantPort
+  /** 排查结果一键上报 GitHub issue；缺省时端点返回 404。 */
+  issueReporter?: IssueReporter
   /** 请求级异常与配置写入失败的日志出口。 */
   logger?: Logger
+  /** 当前进程加载的插件元数据；启动时由 CLI 注入，面板据此展示自定义运行时/通道。 */
+  plugins?: {
+    runtimes?: Array<{ id: string; name: string; label: string; hint: string; installHint?: string; installUrl?: string; packageName?: string; deprecated?: boolean; loadedIds?: string[] }>
+    channels?: Array<{ id: string; name: string; hint: string; default?: boolean; packageName?: string; loadedIds?: string[] }>
+    failures?: Array<{ kind: 'runtime' | 'channel'; id: string; specifier: string; message: string }>
+  }
 }
 
 export interface ApiServer {
@@ -204,8 +230,10 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         const text = String((body as Record<string, unknown>).text ?? '').trim()
         if (!text) return respond(res, 400, { error: 'text-required' })
         const kind = String((body as Record<string, unknown>).kind ?? 'followup') as never
+        // 调用方可以自带来源标识做精确去重（例如面板按消息 id 提交）。
+        const sourceKey = String((body as Record<string, unknown>).sourceKey ?? '').trim()
         try {
-          const input = opts.engine.deliverInput(ticketId, { kind, text })
+          const input = opts.engine.deliverInput(ticketId, { kind, text, ...(sourceKey ? { sourceKey } : {}) })
           onEvent({ event: 'api:input', ticketId, inputId: input.id, kind, text: preview(text) })
           return respond(res, 201, { input })
         } catch (error) {
@@ -355,7 +383,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
 
     if (path === '/api/config') {
       if (req.method === 'GET') {
-        return respond(res, 200, configPayload(config, opts.runtimeAdmin, opts.identity))
+        return respond(res, 200, configPayload(config, opts.runtimeAdmin, opts.identity, opts.plugins))
       }
       if (req.method === 'PUT' || req.method === 'POST') {
         const body = await readJson(req)
@@ -408,7 +436,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         const restartRequired = requiresRestart(result.changed)
         onEvent({ event: 'api:config', changed: result.changed, policyChanged, restartRequired, identityEffective })
         return respond(res, 200, {
-          ...configPayload(config, opts.runtimeAdmin, opts.identity),
+          ...configPayload(config, opts.runtimeAdmin, opts.identity, opts.plugins),
           ok: true,
           changed: result.changed,
           policyChanged,
@@ -484,7 +512,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       })
       onEvent({ event: 'api:llm-import', source: candidate.source, model: candidate.model, changed: result.changed })
       return respond(res, 200, {
-        ...configPayload(config, opts.runtimeAdmin, opts.identity),
+        ...configPayload(config, opts.runtimeAdmin, opts.identity, opts.plugins),
         ok: true,
         changed: result.changed,
         restartRequired: requiresRestart(result.changed),
@@ -539,7 +567,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       return respond(res, 200, {
         ok: true,
         message: result.message,
-        ...configPayload(config, opts.runtimeAdmin, opts.identity),
+        ...configPayload(config, opts.runtimeAdmin, opts.identity, opts.plugins),
       })
     }
 
@@ -590,6 +618,63 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         ...(cursor !== undefined ? { cursor } : {}),
         limit: Number.isFinite(limit) ? limit : undefined,
       }))
+    }
+
+    // 日志页的智能排查助手：GET 看状态与常见问题，POST 拿排查结论。
+    if (path === '/api/logs/assistant') {
+      if (!opts.logAssistant) return respond(res, 404, { error: 'log-assistant-not-available' })
+      if (req.method === 'GET') {
+        return respond(res, 200, {
+          llmConfigured: opts.logAssistant.llmConfigured(),
+          suggestions: opts.logAssistant.suggestions(),
+        })
+      }
+      if (req.method === 'POST') {
+        const body = await readJson(req)
+        const question = typeof body.question === 'string' ? body.question.trim() : ''
+        const level = typeof body.level === 'string' ? body.level : undefined
+        const keyword = typeof body.keyword === 'string' ? body.keyword : undefined
+        try {
+          const diagnosis = await opts.logAssistant.diagnose({
+            question,
+            ...(level ? { level } : {}),
+            ...(keyword ? { keyword } : {}),
+          })
+          return respond(res, 200, { diagnosis })
+        } catch (error) {
+          logger.error('api:log-assistant-failed', {
+            detail: errorMessage(error),
+            question: preview(question, 120),
+          })
+          return respond(res, 500, { error: 'log-assistant-failed', message: errorMessage(error) })
+        }
+      }
+      return respond(res, 405, { error: 'method-not-allowed' })
+    }
+
+    // 排查结论一键上报 GitHub issue：问题描述 + 结论 + 证据日志直接贴成 issue。
+    if (path === '/api/logs/assistant/issue' && req.method === 'POST') {
+      if (!opts.issueReporter) return respond(res, 404, { error: 'issue-report-not-available' })
+      const body = await readJson(req)
+      const question = typeof body.question === 'string' ? body.question.trim() : ''
+      const diagnosis = body.diagnosis as LogDiagnosis | undefined
+      if (!diagnosis || typeof diagnosis.summary !== 'string') {
+        return respond(res, 400, { error: 'diagnosis-required', message: '缺少排查结论' })
+      }
+      const title = typeof body.title === 'string' && body.title.trim()
+        ? body.title.trim().slice(0, 200)
+        : `[排查助手] ${(question || diagnosis.summary).slice(0, 120)}`
+      try {
+        const issue = await opts.issueReporter.create({
+          title,
+          body: buildIssueBody({ question, diagnosis, version: PACKAGE_VERSION }),
+        })
+        onEvent({ event: 'api:issue', number: issue.number, url: issue.url })
+        return respond(res, 200, { issue })
+      } catch (error) {
+        logger.error('api:issue-create-failed', { detail: errorMessage(error) })
+        return respond(res, 500, { error: 'issue-create-failed', message: errorMessage(error) })
+      }
     }
 
     // 规范 markdown：列表 / 读取 / 保存 / 恢复默认。内容落在 `<home>/specs/`，不再配置外部路径。
@@ -657,7 +742,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       const body = await readJson(req)
       const target = typeof body.path === 'string' ? body.path.trim() : ''
       if (!target) return respond(res, 400, { error: 'path-required', message: '请先选择或填写本地目录' })
-      const runtimeId = readRuntimeId(body, config.runtime.default)
+      const runtimeId = readRuntimeId(body, config.runtime.default, config)
       if (runtimeId === null) return respond(res, 400, { error: 'invalid-runtime', message: '未知的 Worker 运行时' })
       try {
         return respond(res, 200, await opts.projectSetup.prepareLocal(target, runtimeId))
@@ -671,7 +756,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       const body = await readJson(req)
       const url = typeof body.url === 'string' ? body.url.trim() : ''
       if (!url) return respond(res, 400, { error: 'url-required', message: '请填写 Git 地址' })
-      const runtimeId = readRuntimeId(body, config.runtime.default)
+      const runtimeId = readRuntimeId(body, config.runtime.default, config)
       if (runtimeId === null) return respond(res, 400, { error: 'invalid-runtime', message: '未知的 Worker 运行时' })
       try {
         return respond(res, 200, await opts.projectSetup.cloneRepository(url, runtimeId))
@@ -836,13 +921,19 @@ function optionalBoolean(value: unknown): boolean | undefined {
 }
 
 /** 配置面板的读/写都用同一份口径：安全快照 + 默认值 + 配置文件路径。 */
-function configPayload(config: AppConfig, runtimeAdmin?: AcpRuntimeAdmin, identity?: IdentityPort): Record<string, unknown> {
+function configPayload(
+  config: AppConfig,
+  runtimeAdmin?: AcpRuntimeAdmin,
+  identity?: IdentityPort,
+  plugins?: ApiServerOptions['plugins'],
+): Record<string, unknown> {
   const snapshot = runtimeAdmin?.snapshot()
   return {
     config: publicConfig(config),
     defaults: publicDefaults(),
     configPath: config.home ? join(config.home, 'config.yaml') : '',
     runtimeChoices: snapshot?.choices ?? [],
+    plugins: publicPlugins(config, plugins),
     detecting: runtimeAdmin?.isDetecting() ?? false,
     identity: identity?.snapshot() ?? emptyIdentityStatus(),
     // 哪些配置路径保存后立即生效：面板按它给配置项标「立即生效 / 重启生效」。
@@ -902,10 +993,10 @@ function respondSpecError(res: ServerResponse, error: unknown): void {
  * 面板里切换运行时后未必已经保存，所以允许请求显式带 runtimeId；
  * 不传时沿用当前默认运行时，传了未知值则返回 null 让调用方报 400。
  */
-function readRuntimeId(body: Record<string, unknown>, fallback: string): string | null {
+function readRuntimeId(body: Record<string, unknown>, fallback: string, config: AppConfig): string | null {
   if (typeof body.runtimeId !== 'string' || !body.runtimeId.trim()) return fallback
   const id = normalizeRuntimeId(body.runtimeId)
-  return isWorkerRuntimeId(id) ? id : null
+  return isKnownRuntimeId(config, id) ? id : null
 }
 
 function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {

@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { Store } from '../../src/store/db.js'
 import { Engine, type Clock, type IdGen } from '../../src/core/engine.js'
-import type { Trigger } from '../../src/core/model.js'
-import { DEFAULT_ADMISSION, type Policy } from '../../src/core/policy.js'
+import type { Trigger } from '#core/model.js'
+import { DEFAULT_ADMISSION, type Policy } from '#core/policy.js'
 
 class FixedClock implements Clock {
   constructor(private value: string) {}
@@ -249,6 +249,50 @@ describe('Engine', () => {
     expect(store.pendingInputs(ticket!.id).map(i => i.id)).toEqual([i2.id])
   })
 
+  it('同一条来源消息只入库一次：sourceKey 命中已有输入', () => {
+    engine.ingest(makeTrigger())
+    const { ticket } = engine.decide({ triggerId: 'trg_1', decision: 'accept', strength: 'explicit', reason: 'ok' })
+
+    const first = engine.deliverInput(ticket!.id, { kind: 'followup', text: '继续', sourceKey: 'trigger:om_1' })
+    const second = engine.deliverInput(ticket!.id, { kind: 'followup', text: '继续', sourceKey: 'trigger:om_1' })
+
+    expect(second.id).toBe(first.id)
+    expect(store.listInputs(ticket!.id)).toHaveLength(1)
+  })
+
+  it('跨来源重复（飞书 + 面板各插一条）也只入库一次', () => {
+    engine.ingest(makeTrigger())
+    const { ticket } = engine.decide({ triggerId: 'trg_1', decision: 'accept', strength: 'explicit', reason: 'ok' })
+
+    const fromFeishu = engine.deliverInput(ticket!.id, { kind: 'followup', text: '继续做', sourceKey: 'trigger:om_2' })
+    const fromPanel = engine.deliverInput(ticket!.id, { kind: 'followup', text: '继续做' })
+
+    expect(fromPanel.id).toBe(fromFeishu.id)
+    expect(store.listInputs(ticket!.id)).toHaveLength(1)
+  })
+
+  it('已经 ack 的输入不参与去重：用户可以再发一遍同样的内容', () => {
+    engine.ingest(makeTrigger())
+    const { ticket } = engine.decide({ triggerId: 'trg_1', decision: 'accept', strength: 'explicit', reason: 'ok' })
+    const first = engine.deliverInput(ticket!.id, { kind: 'followup', text: '继续做' })
+    engine.ackInputs(ticket!.id, [first.id])
+
+    const again = engine.deliverInput(ticket!.id, { kind: 'followup', text: '继续做' })
+
+    expect(again.id).not.toBe(first.id)
+    expect(store.listInputs(ticket!.id)).toHaveLength(2)
+  })
+
+  it('扇出用 trigger 的外部 id 做来源标识，重复扇出不会插两条', () => {
+    engine.ingest(makeTrigger({ id: 't1', externalId: 'e1' }))
+    const { ticket } = engine.decide({ triggerId: 't1', decision: 'accept', strength: 'explicit', reason: 'ok' })
+    engine.startAssignment(ticket!.id, { runtimeId: 'orca', handle: 'term-1', workdir: '/tmp/wt' })
+
+    engine.ingest(makeTrigger({ id: 't2', externalId: 'e2', text: '继续做', addressed: 'none' }))
+    engine.fanOut('t2')
+
+    expect(store.listInputs(ticket!.id)[0]?.sourceKey).toBe('trigger:e2')
+  })
   it('订阅扇出把新消息作为 Input 投给所有活跃工单，并跳过 contextOnly 授权判断', () => {
     engine.ingest(makeTrigger({ id: 't1', externalId: 'e1' }))
     const { ticket } = engine.decide({ triggerId: 't1', decision: 'accept', strength: 'explicit', reason: 'ok' })

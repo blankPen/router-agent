@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import type { Trigger } from '../../src/core/model.js'
+import type { Trigger } from '#core/model.js'
 import {
   attachImageText,
   imageDownloadCommand,
@@ -12,8 +12,8 @@ import {
   parseMessageImageKeys,
   parseSavedPath,
   readImageInput,
-} from '../../src/sources/feishu-image.js'
-import type { CommandRunner } from '../../src/infra/process.js'
+} from '@router-agent/channel-feishu'
+import type { CommandRunner } from '#infra/process.js'
 
 function trigger(over: Partial<Trigger> = {}): Trigger {
   return {

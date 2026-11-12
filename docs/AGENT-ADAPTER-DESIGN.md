@@ -67,18 +67,18 @@
 
 | 层 | 现状 | 位置（证据） | 判定 |
 |-|-|-|-|
-| L0 领域内核 | 只认 `Ticket/Assignment/Report/Stage`，无 Orca | `src/core/*`、`src/store/db.ts` | 已解耦，保持 |
-| L1 工作区创建 | `orca worktree create --repo --name --base-branch --branch --agent claude --surface terminal --prompt` | `src/worker/orca/commands.ts:21-36`，`src/worker/orca/index.ts:188-215` | 强耦合，必须抽象 |
+| L0 领域内核 | 只认 `Ticket/Assignment/Report/Stage`，无 Orca | `packages/core/src/*`、`src/store/db.ts` | 已解耦，保持 |
+| L1 工作区创建 | `orca worktree create --repo --name --base-branch --branch --agent claude --surface terminal --prompt` | `packages/runtime/src/orca/commands.ts:21-36`，`packages/runtime/src/orca/index.ts:188-215` | 强耦合，必须抽象 |
 | L2 Agent 启动 | Agent 与 worktree 在同一条 Orca 命令里创建，Agent 固定 `claude` | `commands.ts:28`、`index.ts:210` | 强耦合，必须抽象 |
 | L3 输入投递 | `orca terminal send --terminal <handle> --text <text> --enter` | `commands.ts:48-50`、`index.ts:217-222` | 强耦合，必须抽象 |
-| L4 活性/状态 | `orca terminal list --json` + `connected/orphaned/writable/lastOutputAt` | `index.ts:235-241`、`src/worker/orca/report-poller.ts:156-176` | 强耦合，必须抽象 |
-| L5 活动读取 | 优先 Claude Code JSONL（`~/.claude/projects/<slug>/*.jsonl`），兜底 Orca 终端屏幕 | `src/worker/orca/session.ts:7-102`、`index.ts:244-263`、`src/service.ts:1373-1396` | 双重耦合，必须抽象 |
+| L4 活性/状态 | `orca terminal list --json` + `connected/orphaned/writable/lastOutputAt` | `index.ts:235-241`、`packages/runtime/src/orca/report-poller.ts:156-176` | 强耦合，必须抽象 |
+| L5 活动读取 | 优先 Claude Code JSONL（`~/.claude/projects/<slug>/*.jsonl`），兜底 Orca 终端屏幕 | `packages/runtime/src/orca/session.ts:7-102`、`index.ts:244-263`、`src/service.ts:1373-1396` | 双重耦合，必须抽象 |
 | L6 工作区回收 | `orca worktree show` / `orca worktree rm --worktree path:<dir>` | `commands.ts:65-77`、`index.ts:265-274`、`src/service.ts:1165-1205` | 强耦合，必须抽象 |
 | L7 PR 线索 | `worktree.linkedPR / linkedGitLabMR` | `src/service.ts:1475-1497` | 中耦合，可降级 |
 | L8 仓库发现/自检 | `orca status`、`orca repo list --json`，解析器放在 `sources/lark.ts` | `src/cli/doctor.ts:59-78`、`src/cli/init.ts:124-147`、`src/sources/lark.ts:117-160` | 中耦合，需要抽象 |
 | L9 服务装配 | `new OrcaRuntime(...)` 硬编码；`runtime.default` 只接受 `'orca'` | `src/cli/index.ts:642-649`、`src/config.ts:158/300-304/899-901`、`src/router/api.ts:118` | 中耦合，需要注册表 |
-| L10 Worker 手册 | 手册直接写「你在一个独立的 Orca worktree 里工作」「Claude Code」；agent 模式写入 `~/.claude/agents/` | `src/worker/spec/prompt-mode.md:3`、`src/worker/spec/index.ts:46-56` | 中耦合，需要拆分「任务契约」与「启动方式」 |
-| L11 报告通道 | `ra report` HTTP + `state.json` 兜底，与运行时无关 | `src/cli/report.ts`、`src/worker/orca/report-poller.ts:1-154` | 已解耦，保留 |
+| L10 Worker 手册 | 手册直接写「你在一个独立的 Orca worktree 里工作」「Claude Code」；agent 模式写入 `~/.claude/agents/` | `packages/runtime/src/spec/prompt-mode.md:3`、`packages/runtime/src/spec/index.ts:46-56` | 中耦合，需要拆分「任务契约」与「启动方式」 |
+| L11 报告通道 | `ra report` HTTP + `state.json` 兜底，与运行时无关 | `src/cli/report.ts`、`packages/runtime/src/orca/report-poller.ts:1-154` | 已解耦，保留 |
 | L12 效果队列 | `launch-worker / stop-worker / cleanup-workspace` 只带 `ticketId` | `src/service.ts:536-552` | 已解耦，保留 |
 
 ### 2.2 关键漏抽象点（必须修）
@@ -95,7 +95,7 @@
 
 - `Engine` 是唯一状态写入口（`src/core/engine.ts`）。
 - `EffectsProcessor` 的 `launch-worker / stop-worker / cleanup-workspace` 只依赖 `ticketId`，运行时无关（`src/core/effects.ts`）。
-- `ReportPoller` 轮询 `~/.router-agent/workers/<ticketId>/state.json`，运行时无关（`src/worker/orca/report-poller.ts:68-110`）。
+- `ReportPoller` 轮询 `~/.router-agent/workers/<ticketId>/state.json`，运行时无关（`packages/runtime/src/orca/report-poller.ts:68-110`）。
 - `ra report` 协议与 CLI（`src/cli/report.ts`）完全运行时无关。
 - `Assignment` 已存 `runtime_id / handle / workdir`（`src/core/model.ts:106-115`、`src/store/db.ts:227`），天然支持多运行时。
 
@@ -103,13 +103,13 @@
 
 ## 3. 设计原则
 
-1. **端口-适配器**：内核只依赖 `src/worker/port.ts` 中的中立模型；运行时实现放 `src/worker/runtimes/<id>/`。
+1. **端口-适配器**：内核只依赖 `packages/runtime/src/port.ts` 中的中立模型；运行时实现放 `packages/runtime/src/runtimes/<id>/`。
 2. **能力协商，不做最低公分母**：运行时声明能力，Router 按能力降级；缺能力时明确降级，不静默假设。
 3. **结构化优先，文本兜底**：活性优先读进程/会话元数据，活动优先读 Agent 会话 JSONL；终端屏幕永远是最后兜底，且只用于给人看的摘要。
 4. **重启可还原**：`handle` 必须是运行时可持久化、重启后仍能还原上下文的标识（Orca=terminal handle，Claude=sessionId，Codex=sessionId）；禁止只存在内存 map。
 5. **报告协议是硬契约**：任何运行时都必须让 Agent 能执行 `ra report`（shell 工具或等价能力），并遵守 `【Router 输入 in_xxx】` 投递格式。
 6. **零行为回归**：Orca 路径的输出、日志、错误文案、阶段流转保持一致；每阶段都有回滚开关。
-7. **参数数组，不拼 shell**：沿用 `CommandRunner` 的 `spawn(bin, argv)` 模式（`src/infra/process.ts:15-45`），新增长驻进程 spawner 同样禁止 shell 拼接。
+7. **参数数组，不拼 shell**：沿用 `CommandRunner` 的 `spawn(bin, argv)` 模式（`packages/infra/src/process.ts:15-45`），新增长驻进程 spawner 同样禁止 shell 拼接。
 8. **安全默认值**：新运行时默认最小权限（工作区可写、网络按需、非交互审批策略显式配置），不默认 `--dangerously-skip-permissions` / `--dangerously-bypass-approvals-and-sandbox`。
 
 ---
@@ -148,7 +148,7 @@
 ### 4.3 目录规划
 
 ```text
-src/worker/
+packages/runtime/src/
   port.ts                      # 端口与中立模型（唯一契约）
   registry.ts                  # RuntimeRegistry / createRuntimes 注册表
   status.ts                    # judgeIdle 的中立版本（从 orca/ 上移）
@@ -168,7 +168,7 @@ src/worker/
     codex-cli/index.ts         # Codex CLI
 ```
 
-> 迁移期保留 `src/worker/orca/*` 的 re-export，避免一次性搬文件导致 review 噪音；P1 完成后再删旧路径。
+> 迁移期保留 `packages/runtime/src/orca/*` 的 re-export，避免一次性搬文件导致 review 噪音；P1 完成后再删旧路径。
 
 ---
 
@@ -553,7 +553,7 @@ export interface ProcessSpawner {
 | 仓库发现 | `orca repo list` | 配置文件 / `git` 目录 | 配置文件 / `git` 目录 |
 | 工具策略 | Agent 规范 + Orca 启动参数 | `--allowedTools` / `--permission-mode` | `-s workspace-write` / 配置覆盖 |
 
-> Claude / Codex 的 CLI 事实已在本机实测：Claude Code `2.1.318` 的 `claude --bg`、`claude agents --json --all`、`claude --bg --resume <session-id>`、`claude stop/attach/logs` 均可用于后台会话管理；`--bg --resume` 不带新 flags 且会话处于 `done/stopped` 时继续同一 id，否则 fork 新 id。Codex `0.166.0` 支持 `codex exec --json`、`-C <dir>`、`--output-last-message`、`codex exec resume <session-id> <prompt>`。完整实测记录见附录 C。
+> Claude / Codex 的 CLI 事实已在本机实测：Claude Code `2.1.322` 的 `claude --bg`、`claude agents --json --all`、`claude --bg --resume <session-id>`、`claude stop/attach/logs` 均可用于后台会话管理；`--bg --resume` 要继续同一 id，必须「先 `claude stop` 停掉后台 worker」+「传完整 session id」+「不带新 flags」，否则 CLI 会复制出一个副本。Codex `0.166.0` 支持 `codex exec --json`、`-C <dir>`、`--output-last-message`、`codex exec resume <session-id> <prompt>`。完整实测记录见附录 C。
 
 ### 6.2 降级规则（Router 侧）
 
@@ -865,10 +865,11 @@ claude --bg --name <ticketId>-<slug> \
 `startedAt` 是毫秒时间戳，转 ISO；`lastActivityAt` 取 session JSONL 的 mtime 或最后一条事件时间。`claude logs` 是 TUI 渲染（含 ANSI/spinner），只作为最后兜底并清洗，不用于状态判定。
 
 **追问投递**：
-- `working` / `blocked`：`deliver` 返回 `queued`，输入留在 `inputs` 表；`blocked` 额外置 attention（权限/人工），等状态变成 `done/stopped` 再投；
-- `done/stopped`：`claude --bg --resume <sessionId> "<short input>"`，**不带任何 flags**；输入正文写临时文件，prompt 只指向文件；
-- 需要打断当前轮：先 `claude stop <id>`（会话保留），再按上一步 resume；会丢弃当前轮进行中的输出，需在话题里说明；
-- 同一 `sessionId` 单飞；按 `(input.id, attempt)` 去重；如果 `--resume` 意外产生新 id（fork），adapter 必须报错并记日志，禁止静默切换 handle。
+- `working`：通过 `claude attach <id>` 把输入敲进 TUI 输入框并回车，CLI 会把它当作「本轮中途发来的消息」交给当前回合（与用户在 TUI 里连续追问一致，不产生新会话）；注入后用会话记录校验是否真的收下，校验不过则退回 `queued`；
+- `blocked`：`deliver` 返回 `queued`，输入留在 `inputs` 表并置 attention（权限/人工），等状态变成 `done/stopped` 再投；此时插话不会被执行；
+- `done/stopped`：先 `claude stop <id>` 停掉后台 worker（会话与对话都保留），再 `claude --bg --resume <完整 sessionId> "<short input>"`，**不带任何新 flags**；输入正文写临时文件，prompt 只指向文件；
+- 必须传完整 session id（`claude agents --json` 打印的 UUID）：传 short id 会被 CLI 判成另开一个会话；
+- 同一 `sessionId` 单飞；按 `(input.id, attempt)` 去重；如果 `--resume` 仍产生新 id（fork），adapter 必须停掉副本、保留原会话并退避重投，禁止静默切换 handle。
 
 **活动**：`ClaudeSessionActivity` 按 `sessionId` 精确匹配 `~/.claude/projects/<slug>/<sessionId>.jsonl`；找不到返回 `null`，不退化成「最新文件」，避免串工单。
 
@@ -879,7 +880,7 @@ claude --bg --name <ticketId>-<slug> \
 
 **风险**：
 - `state=blocked` 是权限/人工输入卡点；headless 场景默认用 `acceptEdits` + 命令级 `allowedTools` 尽量不触发，但无法完全避免；
-- `--bg --resume` 在不满足条件时会 fork 副本；adapter 必须把“新 id”当错误而不是成功；
+- `--bg --resume` 在不满足条件时会 fork 副本（会话还在跑 / 被别的进程打开 / 状态读不到）；adapter 必须把“新 id”当错误而不是成功；
 - `cli` 版本升级可能改变 `agents --json` 字段；解析器要按版本容错，失败返回 `null`；
 - Claude 没有 OS 级文件沙箱：`fileAccess` 只是约定；需要强制隔离时用 macOS `sandbox-exec` 或容器，一期不做，但必须在 doctor 里提示风险。
 
@@ -1029,7 +1030,7 @@ worker:
 ### 11.2 注册表
 
 ```ts
-// src/worker/registry.ts
+// packages/runtime/src/registry.ts
 export class RuntimeRegistry {
   constructor(
     private runtimes: Map<string, WorkerRuntime>,
@@ -1085,8 +1086,8 @@ export function createRuntimes(config: AppConfig, deps: RuntimeDeps): RuntimeReg
 
 ### P0 · 契约先行（不改行为，可独立合并）
 
-- 新增 `src/worker/port.ts` 的中立模型与 `WorkerRuntime` v2（含 `WorkerRef / StartResult / DeliveryReceipt / AgentStatus | null`）；
-- **同时**把 `report-poller.ts` / `judgeIdle` 上移到 `src/worker/`（旧路径 re-export），否则 `service.ts:13` 的旧 import 会让「去 Orca 化」验收失败；
+- 新增 `packages/runtime/src/port.ts` 的中立模型与 `WorkerRuntime` v2（含 `WorkerRef / StartResult / DeliveryReceipt / AgentStatus | null`）；
+- **同时**把 `report-poller.ts` / `judgeIdle` 上移到 `packages/runtime/src/`（旧路径 re-export），否则 `service.ts:13` 的旧 import 会让「去 Orca 化」验收失败；
 - `OrcaRuntime` 实现新签名（`status` 包装 `inspect`、`output` 包装 `read`、`activity` 包装 `session`、`inspectWorkspace/removeWorkspace` 包装旧方法）；
 - `RouterService` 改成只依赖端口；`describeLaunchError` 改读 `WorkerRuntimeError`；`src/router/api.ts` 的旧路径 import 一并修正；
 - 新增 `buildWorkerContext()` 与 `buildWorkerBrief()`：report 路径由 `workersDir` 推导，tools 来自 `config.worker.tools`；Orca 走 `buildOrcaBrief()`，输出必须与当前 `buildWorkerPrompt()` 逐字节一致；
@@ -1148,7 +1149,7 @@ export function createRuntimes(config: AppConfig, deps: RuntimeDeps): RuntimeReg
 
 - 删除旧 `OrcaRuntime` 兼容层与死代码 `relaunchAgent`；
 - 列出并修正所有旧路径 importer：`src/service.ts`、`src/router/api.ts`、`src/cli/index.ts`、`tests/**`；
-- 同步 `scripts/build-web.mjs` 的 Markdown 资产数组与 `src/worker/spec/index.ts` 的文件名；
+- 同步 `scripts/build-web.mjs` 的 Markdown 资产数组与 `packages/runtime/src/spec/index.ts` 的文件名；
 - README 更新「WorkerRuntime 是唯一扩展点」的能力矩阵；
 - 新增 `docs/AGENT-ADAPTER.md`（本设计定稿版）。
 - **验收**：`pnpm typecheck && pnpm build && pnpm test` 全绿；`ra doctor` 三运行时可切换。
@@ -1192,7 +1193,7 @@ Orca 运行时用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.t
 
 ### 14.4 静态约束
 
-- `tests/architecture.test.ts`（新增）：扫描 `src/service.ts`、`src/router/api.ts`、`src/core/**`，禁止出现 `Orca` / `orca` 类型导入与字段访问（白名单：`worker/runtimes/orca/**`、re-export 层、注释）。
+- `tests/architecture.test.ts`（新增）：扫描 `src/service.ts`、`src/router/api.ts`、`packages/core/src/**`，禁止出现 `Orca` / `orca` 类型导入与字段访问（白名单：`worker/runtimes/orca/**`、re-export 层、注释）。
 - `pnpm typecheck` + `pnpm build`。
 
 ---
@@ -1355,13 +1356,13 @@ Orca 运行时用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.t
 
 已落地：
 
-- `src/worker/port.ts`：`WorkerRuntime` v2、`WorkerRef / StartResult / DeliveryReceipt / AgentStatus / WorkerRuntimeError`；
-- `src/worker/status.ts`：`classifyAgentStatus`，`checkIdle / isZombie / recover / workerGone` 统一消费；
-- `src/worker/registry.ts`：`RuntimeRegistry`，按 `assignment.runtimeId` 取运行时；默认运行时启动期校验；
+- `packages/runtime/src/port.ts`：`WorkerRuntime` v2、`WorkerRef / StartResult / DeliveryReceipt / AgentStatus / WorkerRuntimeError`；
+- `packages/runtime/src/status.ts`：`classifyAgentStatus`，`checkIdle / isZombie / recover / workerGone` 统一消费；
+- `packages/runtime/src/registry.ts`：`RuntimeRegistry`，按 `assignment.runtimeId` 取运行时；默认运行时启动期校验；
 - `src/service.ts`：去 Orca 类型、按 assignment 路由、`buildWorkerContext`、launch 半成功清理、投递 receipt；
-- `src/worker/orca/*`：Orca 适配新契约（status/output/activity/inspectWorkspace/removeWorkspace/nudge）；
-- `src/worker/runtimes/claude-code/*`：`claude --bg` + `claude agents --json --all` + `claude --bg --resume`（无 flags）+ `claude stop`；
-- `src/worker/workspaces/git-worktree.ts`：git worktree、分支/路径校验、失败回滚；
+- `packages/runtime/src/orca/*`：Orca 适配新契约（status/output/activity/inspectWorkspace/removeWorkspace/nudge）；
+- `packages/runtime/src/runtimes/claude-code/*`：`claude --bg` + `claude agents --json --all` + `claude --bg --resume`（无 flags）+ `claude stop`；
+- `packages/runtime/src/workspaces/git-worktree.ts`：git worktree、分支/路径校验、失败回滚；
 - 配置：`worker.tools`、`runtime.default/options` 解析；`ra init` 在 Claude 运行时下问本地路径；
 - `ra report --port` / `RA_PORT`；`ra serve` 单实例锁；doctor 追加当前运行时自检。
 
@@ -1385,11 +1386,11 @@ Orca 运行时用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.t
 
 | 主题 | 文件:行 |
 |-|-|
-| WorkerRuntime 端口 | `src/worker/port.ts:51-62` |
-| OrcaRuntime | `src/worker/orca/index.ts:174-311` |
-| Orca CLI 参数 | `src/worker/orca/commands.ts:21-81` |
-| Claude 会话解析 | `src/worker/orca/session.ts:7-102` |
-| 终端活性判定 | `src/worker/orca/report-poller.ts:156-176` |
+| WorkerRuntime 端口 | `packages/runtime/src/port.ts:51-62` |
+| OrcaRuntime | `packages/runtime/src/orca/index.ts:174-311` |
+| Orca CLI 参数 | `packages/runtime/src/orca/commands.ts:21-81` |
+| Claude 会话解析 | `packages/runtime/src/orca/session.ts:7-102` |
+| 终端活性判定 | `packages/runtime/src/orca/report-poller.ts:156-176` |
 | 服务层 Orca 类型泄漏 | `src/service.ts:14`、`40-44`、`443-447`、`1633-1638` |
 | 空闲/僵尸判定 | `src/service.ts:884-929`、`1023-1040` |
 | 工作区回收 | `src/service.ts:1165-1205` |
@@ -1399,15 +1400,15 @@ Orca 运行时用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.t
 | 配置写死 orca | `src/config.ts:157-158`、`232`、`399`、`899-901` |
 | CLI 装配 | `src/cli/index.ts:642-649` |
 | 手工绑定写死 runtime | `src/router/api.ts:118`、旧路径 import `:9` |
-| 子进程环境继承 | `src/infra/process.ts:19-23` |
+| 子进程环境继承 | `packages/infra/src/process.ts:19-23` |
 | 失败诊断强类型 | `src/service.ts:1686-1719`、`1760`、`1774` |
 | 投递未 ack 重投 | `src/service.ts:819-852`、`src/store/db.ts:729-756` |
 | 单实例 pid 覆盖 | `src/cli/index.ts:619-622` |
 | doctor Orca 检查 | `src/cli/doctor.ts:59-78` |
 | init 仓库选择 | `src/cli/init.ts:124-147` |
 | Orca JSON 解析器放错文件 | `src/sources/lark.ts:117-160` |
-| Worker 手册 | `src/worker/spec/prompt-mode.md:3`、`src/worker/spec/index.ts:46-56` |
-| 报告协议 | `src/cli/report.ts`、`src/worker/orca/report-poller.ts:1-154` |
+| Worker 手册 | `packages/runtime/src/spec/prompt-mode.md:3`、`packages/runtime/src/spec/index.ts:46-56` |
+| 报告协议 | `src/cli/report.ts`、`packages/runtime/src/orca/report-poller.ts:1-154` |
 | 效果队列 | `src/service.ts:536-552`、`src/core/effects.ts` |
 
 ## 附录 B · 新运行时接入 Checklist
@@ -1456,9 +1457,45 @@ Orca 运行时用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.t
 - `deliver()` 在 `working/blocked` 只排队，绝不 resume；`blocked` 置 attention；
 - `stop()` 用 `claude stop`；清理 worktree 用 GitWorktreeProvider，不用 `claude rm`；
 - 不需要 `ProcessSpawner`；Claude 自己的后台管理承担进程生命周期。
+
+### C.4 复核（2.1.322，2026-11-12）
+
+2.1.318 的结论「`done` + 不带新 flags → 继续同一 id」已经不成立，本机复测矩阵如下（`claude agents --json --all` 观察 id 是否变化）：
+
+| 场景 | CLI 输出 | 结果 |
+|-|-|-|
+| `state=done`（后台 worker 仍存活）→ `--bg --resume <完整 id>` | `note: session X is already running in the background, so this started a copy as Y` | **复制** |
+| 先 `claude stop X` → `--bg --resume <完整 id>` | `note: woke session X with its saved options (--dangerously-skip-permissions, --model)` | **同一会话原地续跑** |
+| 先 `claude stop X` → `--bg --resume <完整 id> -- "<prompt>"` | 同上 | 同一会话（`--` 不是 flag） |
+| 先 `claude stop X` → `--bg --resume <short id>` | `note: started a copy of that conversation as Y. To continue a session under its own id, pass its full session id ...` | **复制** |
+
+要点：
+- 后台 worker 在本轮结束后**仍然存活**（`state=done`、`status=idle`，但 `pid` 还在），这才是 `done` 状态下依然 fork 的根因；`--` 分隔符无害；
+- 「新 flag」指会改变会话自身配置的参数（`--model` / `--permission-mode` / `--allowedTools` / `--add-dir` 等）。会话已经保存了自己的选项，resume 时再传新选项无法合并，CLI 只能复制：`background session X keeps its own saved options, so the flags you passed started a copy as Y`；
+- `claude stop` 停的是后台 worker 进程，**对话记录完整保留**（`claude stop` 自带说明：`Its conversation is kept`），`claude --resume works once it is stopped`；因此 stop → resume 是同一会话继续下一轮，不会丢上下文；
+- 结论：一个话题 = 一个会话是可达成的。
+
+### C.5 轮内插话（2.1.322 实测）
+
+`--bg --resume` 只能「续下一轮」，做不到 TUI 那种「本轮中途插一句话」。实测发现唯一能进当前轮的通道是 `claude attach`：
+
+| 场景 | 做法 | 结果 |
+|-|-|-|
+| `state=working` | `claude attach <id>`，往 stdin 写文本 + 回车 | 会话记录当前回合出现 `The user sent a new message while you were working: …`，agent 在本轮就回应 |
+| `state=done`（后台 worker 仍存活） | 同上 | 不新开会话，直接在同一会话里开始下一轮 |
+| 已 `claude stop` | 同上 | 同样可用（attach 会唤醒会话） |
+| `claude -p --input-format stream-json --resume <id>` | — | 被拒绝：`That session is running in the background` |
+
+实现要点：
+- 不需要 PTY，普通 pipe 即可（Node `spawn` 的 stdin 直接写）；
+- TUI 输入框会保留未提交内容：注入前先发 `Ctrl-U` 清行，写完等 2–3 秒再回车，避免被当成粘贴；
+- 偶发重复提交（同一条消息出现两次），所以必须用会话记录（`input-<id>` 标记）校验；校验不过退回 `queued`，不能当成已送达；
+- 同一 `input.id` 按 meta 水位线幂等，Router 重投不会重复插话；
+- 人工 `claude attach` 与 Router 注入可以并存（实测互不抢占）。
+
 ## 附录 D · ACP Runtime 实现（2026-11-09）
 
-`AcpRuntime`（`src/worker/runtimes/acp/`）是协议层实现：一个客户端同时适配所有实现 ACP 的 Agent。
+`AcpRuntime`（`packages/runtime/src/runtimes/acp/`）是协议层实现：一个客户端同时适配所有实现 ACP 的 Agent。
 
 ### D.1 协议与消息
 
@@ -1492,7 +1529,7 @@ Orca 运行时用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.t
 多 ACP Agent 并行接入后，运行时不再只有一个 `acp`：
 
 - **运行时 id**：目录里的每个 Agent 注册为 `acp-<agent>`（`acp-claude` / `acp-codex` / `acp-opencode` / `acp-gemini` / `acp-copilot` / `acp-cursor` / `acp-goose`）。旧的 `acp` 保留为自定义命令入口。
-- **静态目录**：`src/worker/runtimes/acp/agents.ts`，纯常量，Web 可 import。包含启动命令、默认参数、可在线安装的 npm 包、版本探测参数、外部依赖（如 codex app-server）、登录命令与 `loadSession` 能力。
+- **静态目录**：`packages/runtime/src/runtimes/acp/agents.ts`，纯常量，Web 可 import。包含启动命令、默认参数、可在线安装的 npm 包、版本探测参数、外部依赖（如 codex app-server）、登录命令与 `loadSession` 能力。
 - **注册表**：`createRuntimes` 保持同步，注册目录里的全部运行时；命令解析只做文件存在性检查（`runtime.options.<id>.command` → `~/.router-agent/runtimes/<agent>/node_modules/.bin` → PATH），不 spawn。未安装的运行时也注册，`start()` 在创建 worktree 之前抛 `runtime:unavailable`，附原因和 `ra runtime install` 提示。
 - **探测**：`detect.ts` 分三层：
   - L0：命令 + 版本探测（每项 2.5s，缺失项不 spawn）；

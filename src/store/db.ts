@@ -5,6 +5,9 @@ import type {
   DecisionRecord,
   DispatchDraft,
   Input,
+  Intake,
+  IntakeReport,
+  IntakeTurn,
   Mandate,
   Report,
   SourceKind,
@@ -14,9 +17,9 @@ import type {
   Thread,
   Trigger,
   TriggerDisposition,
-} from '../core/model.js'
-import type { Policy } from '../core/policy.js'
-import { normalizeStage, stageAliases } from '../core/stage.js'
+} from '#core/model.js'
+import type { Policy } from '#core/policy.js'
+import { normalizeStage, stageAliases } from '#core/stage.js'
 
 /** sessionKey 迁移记录 ID；与手工执行的 SQL 文件保持一致。 */
 export const SESSION_KEY_MIGRATION_ID = '2026-11-session-key-channel'
@@ -140,6 +143,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 CREATE TABLE IF NOT EXISTS triggers (
   id TEXT PRIMARY KEY,
   source TEXT NOT NULL,
+  channel_id TEXT,
   external_id TEXT NOT NULL,
   thread_id TEXT NOT NULL,
   chat_id TEXT NOT NULL,
@@ -149,6 +153,7 @@ CREATE TABLE IF NOT EXISTS triggers (
   is_bot INTEGER NOT NULL,
   text TEXT NOT NULL,
   addressed TEXT NOT NULL,
+  unaddressed_admitted INTEGER NOT NULL DEFAULT 0,
   media_only INTEGER NOT NULL DEFAULT 0,
   received_at TEXT NOT NULL,
   disposition TEXT NOT NULL,
@@ -161,6 +166,7 @@ CREATE INDEX IF NOT EXISTS idx_triggers_pending ON triggers (disposition, receiv
 CREATE TABLE IF NOT EXISTS threads (
   id TEXT PRIMARY KEY,
   source TEXT NOT NULL,
+  channel_id TEXT,
   root_id TEXT NOT NULL,
   chat_id TEXT NOT NULL,
   created_at TEXT NOT NULL
@@ -210,6 +216,7 @@ CREATE TABLE IF NOT EXISTS tickets (
   title TEXT NOT NULL,
   thread_id TEXT NOT NULL,
   source TEXT NOT NULL,
+  channel_id TEXT,
   chat_id TEXT NOT NULL,
   mandate_id TEXT NOT NULL,
   stage TEXT NOT NULL,
@@ -235,6 +242,30 @@ CREATE TABLE IF NOT EXISTS dispatch_drafts (
   updated_at TEXT NOT NULL,
   PRIMARY KEY (chat_id, actor_id)
 );
+
+-- 需求识别（intake）：初筛后的疑似问题由分析引擎在这里沉淀多轮对话与结构化报告。
+-- 只有管理员终审通过后才会走原有 Engine.decide() 生成正式工单。
+CREATE TABLE IF NOT EXISTS intakes (
+  id           TEXT PRIMARY KEY,
+  thread_id    TEXT NOT NULL,
+  chat_id      TEXT NOT NULL,
+  actor_id     TEXT NOT NULL,
+  actor_name   TEXT NOT NULL DEFAULT '',
+  project      TEXT NOT NULL DEFAULT '',
+  repo         TEXT NOT NULL DEFAULT '',
+  branch       TEXT NOT NULL DEFAULT '',
+  status       TEXT NOT NULL,
+  kind         TEXT NOT NULL,
+  raw_text     TEXT NOT NULL,
+  turns        TEXT NOT NULL DEFAULT '[]',
+  report       TEXT,
+  questions    INTEGER NOT NULL DEFAULT 0,
+  ticket_id    TEXT,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_intakes_thread ON intakes (thread_id, actor_id, status);
+CREATE INDEX IF NOT EXISTS idx_intakes_status ON intakes (status, updated_at);
 
 -- 会话复用：一个 session_key（群/话题 + 人）对应一个落盘的 Pi session。
 -- 一个 key 会随着 /new 留下多行历史：active 是当前，superseded 等清理，purged 是已删文件。
@@ -308,6 +339,7 @@ CREATE TABLE IF NOT EXISTS inputs (
   seq INTEGER NOT NULL,
   kind TEXT NOT NULL,
   text TEXT NOT NULL,
+  source_key TEXT,
   status TEXT NOT NULL,
   created_at TEXT NOT NULL,
   delivered_at TEXT,
@@ -347,6 +379,7 @@ CREATE INDEX IF NOT EXISTS idx_outbox_due ON outbox (status, next_at);
 
 CREATE TABLE IF NOT EXISTS reactions (
   message_id TEXT PRIMARY KEY,
+  channel_id TEXT,
   reaction_id TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
@@ -422,9 +455,23 @@ export class Store {
     if (!reportColumns.some(column => column.name === 'reply')) {
       this.db.exec('ALTER TABLE reports ADD COLUMN reply TEXT')
     }
+    const reactionColumns = this.db.prepare('PRAGMA table_info(reactions)').all() as Row[]
+    if (!reactionColumns.some(column => column.name === 'channel_id')) {
+      this.db.exec('ALTER TABLE reactions ADD COLUMN channel_id TEXT')
+    }
     const triggerColumns = this.db.prepare('PRAGMA table_info(triggers)').all() as Row[]
     if (!triggerColumns.some(column => column.name === 'media_only')) {
       this.db.exec('ALTER TABLE triggers ADD COLUMN media_only INTEGER NOT NULL DEFAULT 0')
+    }
+    if (!triggerColumns.some(column => column.name === 'unaddressed_admitted')) {
+      this.db.exec('ALTER TABLE triggers ADD COLUMN unaddressed_admitted INTEGER NOT NULL DEFAULT 0')
+    }
+    if (!triggerColumns.some(column => column.name === 'channel_id')) {
+      this.db.exec('ALTER TABLE triggers ADD COLUMN channel_id TEXT')
+    }
+    const threadColumns = this.db.prepare('PRAGMA table_info(threads)').all() as Row[]
+    if (!threadColumns.some(column => column.name === 'channel_id')) {
+      this.db.exec('ALTER TABLE threads ADD COLUMN channel_id TEXT')
     }
     const ticketColumns = this.db.prepare('PRAGMA table_info(tickets)').all() as Row[]
     if (!ticketColumns.some(column => column.name === 'repo')) {
@@ -436,6 +483,15 @@ export class Store {
     if (!ticketColumns.some(column => column.name === 'attachments')) {
       this.db.exec("ALTER TABLE tickets ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'")
     }
+    // 通道实例只在多通道时需要；历史飞书数据按 feishu 兜底，不回填避免写错别家实例。
+    if (!ticketColumns.some(column => column.name === 'channel_id')) {
+      this.db.exec('ALTER TABLE tickets ADD COLUMN channel_id TEXT')
+    }
+    const inputColumns = this.db.prepare('PRAGMA table_info(inputs)').all() as Row[]
+    if (!inputColumns.some(column => column.name === 'source_key')) {
+      this.db.exec('ALTER TABLE inputs ADD COLUMN source_key TEXT')
+    }
+    this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_inputs_source_key ON inputs (ticket_id, source_key)')
     // 派工草稿从「一个群一条」改成「一个群 + 一个人一条」：旧库需要重建主键。
     const draftColumns = this.db.prepare('PRAGMA table_info(dispatch_drafts)').all() as Row[]
     const actorPk = Number(draftColumns.find(column => column.name === 'actor_id')?.pk ?? 0)
@@ -511,10 +567,10 @@ export class Store {
 
   insertTrigger(t: Trigger): boolean {
     const result = this.db.prepare(`INSERT OR IGNORE INTO triggers
-      (id, source, external_id, thread_id, chat_id, chat_name, actor_id, actor_name, is_bot, text, addressed, media_only, received_at, disposition, decision_id, raw)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(t.id, t.source, t.externalId, t.threadId, t.chatId, t.chatName, t.actorId, t.actorName, t.isBot ? 1 : 0,
-        t.text, t.addressed, t.mediaOnly ? 1 : 0, t.receivedAt, t.disposition, t.decisionId ?? null, t.raw === undefined ? null : JSON.stringify(t.raw))
+      (id, source, channel_id, external_id, thread_id, chat_id, chat_name, actor_id, actor_name, is_bot, text, addressed, unaddressed_admitted, media_only, received_at, disposition, decision_id, raw)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(t.id, t.source, t.channelId ?? null, t.externalId, t.threadId, t.chatId, t.chatName, t.actorId, t.actorName, t.isBot ? 1 : 0,
+        t.text, t.addressed, t.unaddressedAdmitted ? 1 : 0, t.mediaOnly ? 1 : 0, t.receivedAt, t.disposition, t.decisionId ?? null, t.raw === undefined ? null : JSON.stringify(t.raw))
     return Number(result.changes) > 0
   }
 
@@ -559,9 +615,9 @@ export class Store {
     this.db.prepare('UPDATE triggers SET disposition = ?, decision_id = ? WHERE id = ?').run(disposition, decisionId ?? null, id)
   }
 
-  upsertThread(thread: { id: string; source: SourceKind; rootId: string; chatId: string; createdAt: string }): void {
-    this.db.prepare('INSERT OR IGNORE INTO threads (id, source, root_id, chat_id, created_at) VALUES (?, ?, ?, ?, ?)')
-      .run(thread.id, thread.source, thread.rootId, thread.chatId, thread.createdAt)
+  upsertThread(thread: { id: string; source: SourceKind; channelId?: string; rootId: string; chatId: string; createdAt: string }): void {
+    this.db.prepare('INSERT OR IGNORE INTO threads (id, source, channel_id, root_id, chat_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(thread.id, thread.source, thread.channelId ?? null, thread.rootId, thread.chatId, thread.createdAt)
   }
 
   // ---------- Thread alias ----------
@@ -586,6 +642,7 @@ export class Store {
     return rows.map(row => ({
       id: String(row.id),
       source: row.source as SourceKind,
+      ...(row.channel_id ? { channelId: String(row.channel_id) } : {}),
       rootId: String(row.root_id),
       chatId: String(row.chat_id),
       createdAt: String(row.created_at),
@@ -610,7 +667,7 @@ export class Store {
    * 命中已有别名就复用那条线程；否则以 canonicalId 建新线程，并把全部标识登记为别名。
    * 这样「话题 ID / 根消息 ID / 消息自身 ID」任意一个到场，都能落回同一个 Thread。
    */
-  resolveThread(input: { source: SourceKind; chatId: string; keys: string[]; canonicalId: string; createdAt: string }): { threadId: string; created: boolean } {
+  resolveThread(input: { source: SourceKind; channelId?: string; chatId: string; keys: string[]; canonicalId: string; createdAt: string }): { threadId: string; created: boolean } {
     const keys = [...new Set(input.keys.map(key => key.trim()).filter(Boolean))]
     // 按传入顺序逐个查：keys 的先后就是权威性顺序（话题 ID > 根消息 ID > 消息自身 ID）。
     // 不能用 ORDER BY created_at——历史误拆的线程会用自己的 message_id 当根，登记得更早，
@@ -624,6 +681,7 @@ export class Store {
     this.upsertThread({
       id: input.canonicalId,
       source: input.source,
+      ...(input.channelId ? { channelId: input.channelId } : {}),
       rootId: keys[0] ?? input.canonicalId.split(':').at(-1) ?? input.canonicalId,
       chatId: input.chatId,
       createdAt: input.createdAt,
@@ -632,6 +690,39 @@ export class Store {
       this.registerThreadAlias({ source: input.source, alias, threadId: input.canonicalId, createdAt: input.createdAt })
     }
     return { threadId: input.canonicalId, created: true }
+  }
+
+  /**
+   * 只读：按外部标识反查规范 Thread ID；没有登记过别名时返回 null。
+   *
+   * 与 resolveThread 的区别：不创建线程、不写别名表，只做查询。
+   */
+  findThreadIdByAlias(source: SourceKind, alias: string): string | null {
+    const key = alias.trim()
+    if (!key) return null
+    const row = this.db
+      .prepare('SELECT thread_id FROM thread_aliases WHERE source = ? AND alias = ?')
+      .get(source, key) as Row | undefined
+    return row ? String(row.thread_id) : null
+  }
+
+  /**
+   * 只读：这些线程标识里，是否有任意一个命中「在办工单」的订阅。
+   *
+   * 用于判断「这个话题是不是已绑定工单」：工单订阅的是规范 Thread ID，
+   * 消息带的是话题 / 根消息 / 消息自身的标识，要靠别名表换算。
+   * 已关闭（stage=done）的工单不算绑定。
+   */
+  hasLiveTicketForThreadKeys(source: SourceKind, keys: string[]): boolean {
+    for (const key of keys) {
+      const threadId = this.findThreadIdByAlias(source, key)
+      if (!threadId) continue
+      for (const sub of this.listSubscriptions(threadId)) {
+        const ticket = this.getTicket(sub.ticketId)
+        if (ticket && ticket.stage !== 'done') return true
+      }
+    }
+    return false
   }
 
   // ---------- Decision ----------
@@ -661,9 +752,9 @@ export class Store {
   // ---------- Ticket / Mandate ----------
 
   insertTicket(t: Ticket): void {
-    this.db.prepare(`INSERT INTO tickets (id, title, thread_id, source, chat_id, mandate_id, stage, repo, branch, attachments, pr_number, pr_url, pr_state, created_at, updated_at, closed_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(t.id, t.title, t.threadId, t.source, t.chatId, t.mandateId, t.stage, t.repo, t.branch, JSON.stringify(t.attachments ?? []), t.prNumber, t.prUrl, t.prState, t.createdAt, t.updatedAt, t.closedAt ?? null)
+    this.db.prepare(`INSERT INTO tickets (id, title, thread_id, source, channel_id, chat_id, mandate_id, stage, repo, branch, attachments, pr_number, pr_url, pr_state, created_at, updated_at, closed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(t.id, t.title, t.threadId, t.source, t.channelId ?? null, t.chatId, t.mandateId, t.stage, t.repo, t.branch, JSON.stringify(t.attachments ?? []), t.prNumber, t.prUrl, t.prState, t.createdAt, t.updatedAt, t.closedAt ?? null)
   }
 
   updateTicket(t: Ticket): void {
@@ -719,6 +810,98 @@ export class Store {
 
   clearDispatchDraft(chatId: string, actorId: string): void {
     this.db.prepare('DELETE FROM dispatch_drafts WHERE chat_id = ? AND actor_id = ?').run(chatId, actorId)
+  }
+
+  // ---------- 需求识别（intake） ----------
+
+  insertIntake(intake: Intake): void {
+    this.db.prepare(`INSERT INTO intakes (id, thread_id, chat_id, actor_id, actor_name, project, repo, branch, status, kind, raw_text, turns, report, questions, ticket_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(
+        intake.id,
+        intake.threadId,
+        intake.chatId,
+        intake.actorId,
+        intake.actorName,
+        intake.project,
+        intake.repo,
+        intake.branch,
+        intake.status,
+        intake.kind,
+        intake.rawText,
+        JSON.stringify(intake.turns),
+        intake.report ? JSON.stringify(intake.report) : null,
+        intake.questions,
+        intake.ticketId ?? null,
+        intake.createdAt,
+        intake.updatedAt,
+      )
+  }
+
+  updateIntake(intake: Intake): void {
+    this.db.prepare(`UPDATE intakes SET project = ?, repo = ?, branch = ?, status = ?, kind = ?, raw_text = ?, turns = ?, report = ?, questions = ?, ticket_id = ?, updated_at = ? WHERE id = ?`)
+      .run(
+        intake.project,
+        intake.repo,
+        intake.branch,
+        intake.status,
+        intake.kind,
+        intake.rawText,
+        JSON.stringify(intake.turns),
+        intake.report ? JSON.stringify(intake.report) : null,
+        intake.questions,
+        intake.ticketId ?? null,
+        intake.updatedAt,
+        intake.id,
+      )
+  }
+
+  getIntake(id: string): Intake | null {
+    const row = this.db.prepare('SELECT * FROM intakes WHERE id = ?').get(id) as Row | undefined
+    return row ? intakeFromRow(row) : null
+  }
+
+  /** 找一条仍在进行（clarifying / ready）的 intake：同群 + 同人 + 同话题只允许一条。 */
+  activeIntake(threadId: string, actorId: string): Intake | null {
+    const row = this.db.prepare("SELECT * FROM intakes WHERE thread_id = ? AND actor_id = ? AND status IN ('clarifying', 'ready') ORDER BY updated_at DESC LIMIT 1")
+      .get(threadId, actorId) as Row | undefined
+    return row ? intakeFromRow(row) : null
+  }
+
+  /** 按群 + 人查最近一条 intake，不限制状态；用于「管理员终审通过后查原单」。 */
+  latestIntakeByThread(threadId: string, actorId?: string): Intake | null {
+    const row = actorId
+      ? this.db.prepare('SELECT * FROM intakes WHERE thread_id = ? AND actor_id = ? ORDER BY updated_at DESC LIMIT 1').get(threadId, actorId) as Row | undefined
+      : this.db.prepare('SELECT * FROM intakes WHERE thread_id = ? ORDER BY updated_at DESC LIMIT 1').get(threadId) as Row | undefined
+    return row ? intakeFromRow(row) : null
+  }
+
+  /** 按话题取待终审（ready）的那条 intake；没有就返回 null。 */
+  readyIntakeByThread(threadId: string): Intake | null {
+    const row = this.db.prepare("SELECT * FROM intakes WHERE thread_id = ? AND status = 'ready' ORDER BY updated_at DESC LIMIT 1")
+      .get(threadId) as Row | undefined
+    return row ? intakeFromRow(row) : null
+  }
+
+  /**
+   * 按需求单号反查已生成的工单。
+   *
+   * 终审流程里「建工单」和「回写需求单」是两步，中间崩溃会留下已建单但没回写的需求单；
+   * 重试时按需求单号找到那张工单并复用，避免建出第二张重复工单。
+   */
+  ticketByIntakeRef(intakeId: string): Ticket | null {
+    const marker = `需求单：${intakeId}`
+    for (const ticket of this.listTickets()) {
+      const mandate = this.getMandate(ticket.mandateId)
+      if (mandate?.scope.includes(marker)) return ticket
+    }
+    return null
+  }
+
+  /** 按工单号反查 intake：终审通过后用于把工单与原需求单关联。 */
+  intakeByTicket(ticketId: string): Intake | null {
+    const row = this.db.prepare('SELECT * FROM intakes WHERE ticket_id = ? ORDER BY updated_at DESC LIMIT 1').get(ticketId) as Row | undefined
+    return row ? intakeFromRow(row) : null
   }
 
   // ---------- 会话 key 迁移（只由 ra migrate sessions 手动触发） ----------
@@ -955,9 +1138,9 @@ export class Store {
   }
 
   insertInput(i: Input): void {
-    this.db.prepare(`INSERT INTO inputs (id, ticket_id, assignment_id, seq, kind, text, status, created_at, delivered_at, acked_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(i.id, i.ticketId, i.assignmentId, i.seq, i.kind, i.text, i.status, i.createdAt, i.deliveredAt ?? null, i.ackedAt ?? null)
+    this.db.prepare(`INSERT OR IGNORE INTO inputs (id, ticket_id, assignment_id, seq, kind, text, source_key, status, created_at, delivered_at, acked_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(i.id, i.ticketId, i.assignmentId, i.seq, i.kind, i.text, i.sourceKey ?? null, i.status, i.createdAt, i.deliveredAt ?? null, i.ackedAt ?? null)
   }
 
   updateInput(i: Input): void {
@@ -967,6 +1150,27 @@ export class Store {
 
   listInputs(ticketId: string): Input[] {
     return (this.db.prepare('SELECT * FROM inputs WHERE ticket_id = ? ORDER BY seq').all(ticketId) as Row[]).map(inputFromRow)
+  }
+
+  /** 按来源标识找已入库的输入；用于「同一条外部消息只入库一次」。 */
+  findInputBySourceKey(ticketId: string, sourceKey: string): Input | null {
+    const row = this.db.prepare('SELECT * FROM inputs WHERE ticket_id = ? AND source_key = ? ORDER BY seq LIMIT 1')
+      .get(ticketId, sourceKey) as Row | undefined
+    return row ? inputFromRow(row) : null
+  }
+
+  /** 按 id 取输入；用来确认刚插入的行是否真的落库。 */
+  getInput(id: string): Input | null {
+    const row = this.db.prepare('SELECT * FROM inputs WHERE id = ?').get(id) as Row | undefined
+    return row ? inputFromRow(row) : null
+  }
+
+  /** 最近一段时间内内容相同的输入；用于跨来源（飞书 / 面板）去重。 */
+  findRecentInputByText(ticketId: string, kind: Input['kind'], text: string, since: string): Input | null {
+    const row = this.db.prepare(
+      "SELECT * FROM inputs WHERE ticket_id = ? AND kind = ? AND text = ? AND created_at >= ? AND status IN ('pending','delivered') ORDER BY seq LIMIT 1",
+    ).get(ticketId, kind, text, since) as Row | undefined
+    return row ? inputFromRow(row) : null
   }
 
   pendingInputs(ticketId: string): Input[] {
@@ -983,9 +1187,22 @@ export class Store {
     return Number(row.m) + 1
   }
 
-  ackInputs(assignmentId: string, ids: string[], at: string): void {
-    const stmt = this.db.prepare("UPDATE inputs SET status = 'acked', acked_at = ? WHERE id = ? AND assignment_id = ?")
-    for (const id of ids) stmt.run(at, id, assignmentId)
+  /**
+   * 按输入 id 标记已 ack。
+   *
+   * 刻意不限定 assignment_id：worker 丢失后 Router 会换一个新的派工接着投递，
+   * 而输入是在旧派工下创建的。带上 assignment_id 会让新 worker 的 ack 匹配 0 行，
+   * 输入永远停在 delivered，Router 于是无限重投（tk-51）。
+   * 返回真正从「未 ack」变成「已 ack」的 id，供调用方清理重投计数。
+   */
+  ackInputs(ticketId: string, ids: string[], at: string): string[] {
+    if (ids.length === 0) return []
+    const update = this.db.prepare("UPDATE inputs SET status = 'acked', acked_at = ? WHERE id = ? AND ticket_id = ? AND status != 'acked'")
+    const acked: string[] = []
+    for (const id of ids) {
+      if (Number(update.run(at, id, ticketId).changes) > 0) acked.push(id)
+    }
+    return acked
   }
 
   /** 把工单上尚未绑定派工的输入挂到新派工上。 */
@@ -995,6 +1212,14 @@ export class Store {
 
   markInputsDelivered(ticketId: string, at: string): void {
     this.db.prepare("UPDATE inputs SET status = 'delivered', delivered_at = ? WHERE ticket_id = ? AND status = 'pending'").run(at, ticketId)
+  }
+
+  /**
+   * worker 在 ack 之前就丢了：把已投递未确认的输入标记为 expired。
+   * 这些输入确实进过旧终端，但任务没完成；保留记录供审计，不再参与重投与派工判断。
+   */
+  expireUnackedInputs(ticketId: string): number {
+    return Number(this.db.prepare("UPDATE inputs SET status = 'expired' WHERE ticket_id = ? AND status = 'delivered'").run(ticketId).changes)
   }
 
   // ---------- Subscription ----------
@@ -1053,14 +1278,19 @@ export class Store {
 
   // ---------- 回执表情 ----------
 
-  saveReaction(messageId: string, reactionId: string, at: string): void {
-    this.db.prepare('INSERT INTO reactions (message_id, reaction_id, created_at) VALUES (?, ?, ?) ON CONFLICT(message_id) DO UPDATE SET reaction_id = excluded.reaction_id')
-      .run(messageId, reactionId, at)
+  saveReaction(messageId: string, reactionId: string, at: string, channelId?: string): void {
+    this.db.prepare('INSERT INTO reactions (message_id, channel_id, reaction_id, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(message_id) DO UPDATE SET channel_id = excluded.channel_id, reaction_id = excluded.reaction_id')
+      .run(messageId, channelId ?? null, reactionId, at)
   }
 
   getReaction(messageId: string): { messageId: string; reactionId: string } | null {
     const row = this.db.prepare('SELECT * FROM reactions WHERE message_id = ?').get(messageId) as Row | undefined
     return row ? { messageId: String(row.message_id), reactionId: String(row.reaction_id) } : null
+  }
+
+  getReactionChannel(messageId: string): string | null {
+    const row = this.db.prepare('SELECT channel_id FROM reactions WHERE message_id = ?').get(messageId) as Row | undefined
+    return row?.channel_id ? String(row.channel_id) : null
   }
 
   clearReaction(messageId: string): void {
@@ -1191,6 +1421,7 @@ function triggerFromRow(row: Row): Trigger {
   return {
     id: String(row.id),
     source: row.source as SourceKind,
+    ...(row.channel_id ? { channelId: String(row.channel_id) } : {}),
     externalId: String(row.external_id),
     threadId: String(row.thread_id),
     chatId: String(row.chat_id),
@@ -1200,6 +1431,7 @@ function triggerFromRow(row: Row): Trigger {
     isBot: Number(row.is_bot) === 1,
     text: String(row.text),
     addressed: row.addressed as Trigger['addressed'],
+    ...(Number(row.unaddressed_admitted) === 1 ? { unaddressedAdmitted: true } : {}),
     mediaOnly: Number(row.media_only) === 1,
     receivedAt: String(row.received_at),
     disposition: row.disposition as TriggerDisposition,
@@ -1215,6 +1447,7 @@ function ticketFromRow(row: Row): Ticket {
     title: String(row.title),
     threadId: String(row.thread_id),
     source: row.source as SourceKind,
+    ...(row.channel_id ? { channelId: String(row.channel_id) } : {}),
     chatId: String(row.chat_id),
     mandateId: String(row.mandate_id),
     stage: normalizeStage(row.stage) ?? 'todo',
@@ -1227,6 +1460,74 @@ function ticketFromRow(row: Row): Ticket {
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     ...(row.closed_at ? { closedAt: String(row.closed_at) } : {}),
+  }
+}
+
+function intakeFromRow(row: Row): Intake {
+  return {
+    id: String(row.id),
+    threadId: String(row.thread_id),
+    chatId: String(row.chat_id),
+    actorId: String(row.actor_id),
+    actorName: String(row.actor_name ?? ''),
+    project: String(row.project ?? ''),
+    repo: String(row.repo ?? ''),
+    branch: String(row.branch ?? ''),
+    status: row.status as Intake['status'],
+    kind: row.kind as Intake['kind'],
+    rawText: String(row.raw_text),
+    turns: parseIntakeTurns(row.turns),
+    ...(row.report ? { report: parseIntakeReport(row.report) } : {}),
+    questions: Number(row.questions ?? 0),
+    ...(row.ticket_id ? { ticketId: String(row.ticket_id) } : {}),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  }
+}
+
+/** intakes.turns 是 JSON 数组；旧库/脏数据一律退回空数组。 */
+function parseIntakeTurns(value: unknown): IntakeTurn[] {
+  if (!value) return []
+  try {
+    const doc = JSON.parse(String(value)) as unknown
+    if (!Array.isArray(doc)) return []
+    const out: IntakeTurn[] = []
+    for (const item of doc) {
+      if (!item || typeof item !== 'object') continue
+      const record = item as Record<string, unknown>
+      const text = typeof record.text === 'string' ? record.text : ''
+      if (!text) continue
+      out.push({
+        role: record.role === 'router' ? 'router' : 'user',
+        text,
+        at: typeof record.at === 'string' ? record.at : '',
+        ...(typeof record.actorId === 'string' && record.actorId ? { actorId: record.actorId } : {}),
+      })
+    }
+    return out
+  } catch {
+    return []
+  }
+}
+
+/** intakes.report 是结构化需求单；字段缺失时按空字符串兜底，避免旧数据把整条 intake 读挂。 */
+function parseIntakeReport(value: unknown): IntakeReport | undefined {
+  try {
+    const doc = JSON.parse(String(value)) as Record<string, unknown>
+    if (!doc || typeof doc !== 'object') return undefined
+    const text = (key: string): string => (typeof doc[key] === 'string' ? String(doc[key]) : '')
+    return {
+      title: text('title'),
+      problem: text('problem'),
+      background: text('background'),
+      steps: text('steps'),
+      environment: text('environment'),
+      impact: text('impact'),
+      expected: text('expected'),
+      assessment: text('assessment'),
+    }
+  } catch {
+    return undefined
   }
 }
 
@@ -1304,6 +1605,7 @@ function inputFromRow(row: Row): Input {
     seq: Number(row.seq),
     kind: row.kind as Input['kind'],
     text: String(row.text),
+    ...(row.source_key ? { sourceKey: String(row.source_key) } : {}),
     status: row.status as Input['status'],
     createdAt: String(row.created_at),
     ...(row.delivered_at ? { deliveredAt: String(row.delivered_at) } : {}),

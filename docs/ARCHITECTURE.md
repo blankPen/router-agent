@@ -17,13 +17,37 @@ Router（AgentLoop + DecisionEngine(Pi) + HTTP API + Web）
 WorkerRuntime 端口 ── OrcaRuntime（默认）/ ClaudeCodeRuntime / AcpRuntime（acp 与 7 个 acp-*）
 ```
 
-源码目录见 [README](../README.md#开发)，运行时的差异与选型见 [RUNTIME.md](RUNTIME.md)。
+仓库是 pnpm workspace：领域内核、基础设施、Worker 运行时与消息通道分别在
+`packages/core`、`packages/infra`、`packages/runtime`、`packages/channel`，宿主应用仍在 `src/`。
+依赖单向向下（`core ← infra ← runtime / channel ← src`），跨包用 `#core/*` / `#infra/*` /
+`#runtime/*` / `#channel/*` 别名。包划分、依赖约束与新增适配器的步骤见 [MONOREPO.md](MONOREPO.md)。
+
+运行时的差异与选型见 [RUNTIME.md](RUNTIME.md)。
+
+某个群开启「需求分析助手」（`feishu.chats[].intake.enabled`）后，Router 与 Worker 之间多一条**并行**的能力链：
+
+```text
+群消息（普通成员，可不 @）
+        │
+        ▼
+IntakeCoordinator ── 初筛（轻量 LM）── chat / question / issue
+        │                                   │
+        │ question / issue                  │ chat → 静默忽略
+        ▼
+PiIntakeEngine（只读项目代码：code_ls / code_read / code_grep）
+        │ 多轮追问，补齐场景 / 环境 / 复现步骤 / 影响 / 预期
+        ▼
+结构化需求单 ──@管理员终审── 确认派单 → 原有 Engine.decide() → WorkerRuntime
+                              └─ 驳回 / 补要求 → 结束 / 重新分析
+```
+
+这条链**不改原有架构**：Router 仍只调度与收尾，读代码与业务判断全部落在子 Agent；派单仍只经 `Engine.decide()`；权限、项目隔离、五阶段工单、Outbox 与 PR 闭环一行不改。详见 [CONFIGURATION.md](CONFIGURATION.md#需求分析助手群级-intake)。
 
 ## 一条消息的四个步骤
 
 1. **听**：常驻消费飞书群 / 私聊消息，按名单与 `@` 规则做确定性准入。
 2. **判**：未被直接指派的候选交给 Pi 研判（可批量），输出 `accept / stop / ignore / unavailable` 四类决定。
-3. **派**：接单后创建工单与授权（Mandate），先确认「项目 + 起始分支」，再按 `runtime.default` 选择运行时：Orca 用 `orca worktree create --repo ... --base-branch ...` 开 worktree + Claude Code 终端；Claude Code 用 `git worktree` + `claude --bg` 后台会话；ACP 用 `AcpRuntime` 拉起对应的 ACP Agent。缺项目或分支时不开单，先在会话里追问（群配置里可固定项目和分支，免问答）。
+3. **派**：接单后创建工单与授权（Mandate），先确认「项目 + 起始分支」，再按 `runtime.default` 选择运行时：Orca 用 `orca worktree create --repo ... --base-branch ...` 开 worktree + Agent 终端（默认 Claude Code，可用 `runtime.options.orca.agent` 指定）；Claude Code 用 `git worktree` + `claude --bg` 后台会话；ACP 用 `AcpRuntime` 拉起对应的 ACP Agent。缺项目或分支时不开单，先在会话里追问（群配置里可固定项目和分支，免问答）。
 4. **跟**：Worker 用 `ra report` 上报（失败自动落盘 `state.json`），Router 刷新工单阶段；PR 合并 / 关闭后闭环并通知发起人。
 
 ## 关键约束
@@ -137,12 +161,12 @@ Worker **不手写状态文件**，统一用 `ra report` 上报。CLI 会 POST �
 - 需要长文档时，Worker 自己执行 `ra doc --title "…" --content @answer.md`，拿到链接后写进 `--reply`。
 - 追问以 `【Router 输入 in_xxx】` 前缀投递；Worker 用 `--ack in_xxx` 确认，否则会被反复重投。
 - `--state progress` 的 `--reply` / `--summary` 默认不即时发送：Router 按 `progress.syncMs` 定时合并后同步到话题，同一内容只发一次；带 `--ack` 的追问回答，以及 ready / blocked / failed 等终态仍即时发送。
-- **不依赖 worker 上报**：worker 超过 `progress.silenceMs` 没有新上报 / 新输入时，Router 按 `progress.probeMs` 主动取进展——优先读 Agent 自己的结构化会话记录（Claude Code 的 `~/.claude/projects/.../*.jsonl`），读不到再退回 `orca terminal read --screen` 的渲染屏幕；把进展整理成语义摘要（助手文本 + 一行动作概要，工具调用噪音不逐条回放）同步到话题，同一静默期按 `progress.repeatMs` 限流。`review` 之后又收到新输入的工单也会被巡检。
+- **不依赖 worker 上报**：worker 超过 `progress.silenceMs` 没有新上报 / 新输入时，Router 按 `progress.probeMs` 主动取进展——优先读 Agent 自己的结构化会话记录（Claude Code 的 `~/.claude/projects/.../*.jsonl`；Codex 的 `~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl`），读不到再退回 `orca terminal read --screen` 的渲染屏幕；把进展整理成语义摘要（助手文本 + 一行动作概要，工具调用噪音不逐条回放）同步到话题，同一静默期按 `progress.repeatMs` 限流。`review` 之后又收到新输入的工单也会被巡检。
 - Router 每轮按文件变化增量读取（`state.json` 兜底通道），成功后调 `Engine.report()`。
 - 终端长时间无输出 → 主动发 `status?`；仍无响应 → 标记 stale 并通知人。
 - 审计事件追加到同目录 `events.log`。
 
-Worker 手册会拼进启动 prompt；非 Orca 运行时使用运行时中立的契约文件。两者都不改项目 `CLAUDE.md`。详见 [RUNTIME.md](RUNTIME.md#worker-规范注入)。
+Worker 手册会拼进启动 prompt；非 Orca 运行时使用运行时中立的契约文件。两者都不改项目 `AGENTS.md`。详见 [RUNTIME.md](RUNTIME.md#worker-规范注入)。
 
 ### 上报协议
 

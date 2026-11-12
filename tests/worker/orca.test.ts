@@ -2,12 +2,12 @@ import { describe, expect, it } from 'vitest'
 import { mkdtempSync, mkdirSync, readFileSync, existsSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { OrcaRuntime, OrcaCommandError, parseCreateResult, summarizeArgs } from '../../src/worker/orca/index.js'
-import { claudeProjectSlug, describeToolInfo, describeToolUse } from '../../src/worker/orca/session.js'
-import { worktreeCreate, terminalSend, terminalClose, terminalList, terminalRead, worktreeRemove, agentLaunch } from '../../src/worker/orca/commands.js'
-import type { CommandRunner, CommandResult } from '../../src/worker/orca/commands.js'
-import type { Assignment, Ticket } from '../../src/core/model.js'
-import { buildNeutralContract, buildWorkerPrompt } from '../../src/worker/spec/index.js'
+import { OrcaRuntime, OrcaCommandError, parseCreateResult, summarizeArgs } from '@router-agent/runtime-orca'
+import { claudeProjectSlug, describeToolInfo, describeToolUse } from '#runtime/agents/claude.js'
+import { worktreeCreate, terminalSend, terminalClose, terminalList, terminalRead, worktreeRemove, agentLaunch } from '@router-agent/runtime-orca'
+import type { CommandRunner, CommandResult } from '@router-agent/runtime-orca'
+import type { Assignment, Ticket } from '#core/model.js'
+import { buildNeutralContract, buildWorkerPrompt } from '#runtime/spec/index.js'
 
 class FakeRunner implements CommandRunner {
   calls: { argv: string[]; cwd?: string }[] = []
@@ -46,18 +46,23 @@ const assignment: Assignment = {
 }
 
 describe('Orca 命令构造', () => {
-  it('worktree create 使用文档约定的参数组合', () => {
+  it('worktree create 不写死 Agent：不传 agent 时不拼 --agent', () => {
     expect(worktreeCreate({ repo: 'dsh/router-agent', name: 'ra-tk_1', prompt: '做这个' })).toEqual([
       'worktree', 'create',
       '--repo', 'name:dsh/router-agent',
       '--name', 'ra-tk_1',
-      '--agent', 'claude',
       '--surface', 'terminal',
       '--prompt', '做这个',
       '--no-parent',
       '--setup', 'skip',
       '--json',
     ])
+  })
+
+  it('worktree create 配了 Agent 时传 --agent', () => {
+    const argv = worktreeCreate({ repo: 'dsh/router-agent', name: 'ra-tk_1', prompt: '做这个', agent: 'codex' })
+    expect(argv).toContain('--agent')
+    expect(argv[argv.indexOf('--agent') + 1]).toBe('codex')
   })
 
   it('repo 支持直接写 Orca 选择器（id: / path: / name:），不重复加 name:', () => {
@@ -81,7 +86,10 @@ describe('Orca 命令构造', () => {
     // 默认不 --force：脏工作区交给 Orca 拒绝，避免误删未提交改动。
     expect(worktreeRemove('path:/tmp/wt')).toEqual(['worktree', 'rm', '--worktree', 'path:/tmp/wt', '--json'])
     expect(worktreeRemove('path:/tmp/wt', { force: true })).toEqual(['worktree', 'rm', '--worktree', 'path:/tmp/wt', '--force', '--json'])
-    expect(agentLaunch({ worktree: 'path:/tmp/wt', prompt: '继续' })).toEqual(['agent', 'launch', '--agent', 'claude', '--worktree', 'path:/tmp/wt', '--prompt', '继续'])
+    // 命令构造层不猜默认值；默认值由 Orca 选项声明提供。
+    expect(agentLaunch({ worktree: 'path:/tmp/wt', prompt: '继续' })).toEqual(['agent', 'launch', '--worktree', 'path:/tmp/wt', '--prompt', '继续'])
+    expect(agentLaunch({ worktree: 'path:/tmp/wt', prompt: '继续', agent: 'codex' }))
+      .toEqual(['agent', 'launch', '--agent', 'codex', '--worktree', 'path:/tmp/wt', '--prompt', '继续'])
   })
 })
 
@@ -173,6 +181,25 @@ describe('OrcaRuntime', () => {
     const meta = JSON.parse(readFileSync(metaPath, 'utf8'))
     expect(meta.handle).toBe('term-9')
     expect(meta.assignmentId).toBe('as_1')
+  })
+
+  it('未配置时用声明默认 claude；配置后按配置传', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ra-workers-'))
+    const stdout = JSON.stringify({ ok: true, result: { launch: { outcome: { handle: 'term-9' } } } })
+    const runner = new FakeRunner([{ code: 0, stdout, stderr: '' }])
+    await new OrcaRuntime({ runner, workersDir: dir }).start({ ticket, assignment, workdir: '/tmp/wt-9' })
+    const defaultArgv = runner.calls[0]!.argv
+    // Orca 的 --prompt 必须配 --agent，所以缺省也要传声明里的默认值。
+    expect(defaultArgv[defaultArgv.indexOf('--agent') + 1]).toBe('claude')
+
+    const runner2 = new FakeRunner([{ code: 0, stdout, stderr: '' }])
+    const adapter = new OrcaRuntime({ runner: runner2, workersDir: dir, agent: 'codex' })
+    await adapter.start({ ticket, assignment, workdir: '/tmp/wt-9' })
+    const argv = runner2.calls[0]!.argv
+    expect(argv[argv.indexOf('--agent') + 1]).toBe('codex')
+    // meta 里记下 Agent，人工恢复会话时才知道该用哪个 CLI。
+    const meta = JSON.parse(readFileSync(join(dir, 'tk_1', 'meta.json'), 'utf8'))
+    expect(meta.agent).toBe('codex')
   })
 
   it('prompt 模式把 worker 手册与 Mandate 一起拼进启动 prompt', async () => {
@@ -334,7 +361,7 @@ describe('Worker 提示词', () => {
     expect(prompt).toContain('/tmp/ra-images/tk_1/img_a.png')
     expect(prompt).toContain('/tmp/ra-images/tk_1/img_b.png')
     expect(prompt).toContain('引用消息里的图片')
-    expect(prompt).toContain('Read 工具')
+    expect(prompt).toContain('读图工具')
   })
 
   it('改 UI 的工单要求 PR / MR 描述带 Before / After 对比', () => {

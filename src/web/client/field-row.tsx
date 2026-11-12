@@ -1,11 +1,15 @@
 /**
- * 配置项行：一个字段的标签 / 提示 / 控件。
+ * 设置项行控件：配置页与运行时设置弹窗共用。
  *
- * 抽成独立模块，让「渠道专属面板」也能复用同一套行结构与控件，
- * 避免渠道表单另起一套视觉。
+ * 只负责「标签 + 提示 + 控件」的展示，值由调用方提供并回写。
  */
 import { Icon } from './icons.js'
-import { fromInputValue, humanizeMs, toInputValue, type FieldDef } from './fields.js'
+import {
+  fromInputValue,
+  humanizeMs,
+  toInputValue,
+  type FieldDef,
+} from './fields.js'
 
 export function FieldRow({ field, value, defaultValue, error, onChange }: {
   field: FieldDef
@@ -14,7 +18,8 @@ export function FieldRow({ field, value, defaultValue, error, onChange }: {
   error?: string
   onChange: (value: unknown) => void
 }): JSX.Element {
-  const changedFromDefault = defaultValue !== undefined && JSON.stringify(value) !== JSON.stringify(defaultValue)
+  const baseline = defaultValue ?? field.defaultValue
+  const changedFromDefault = baseline !== undefined && JSON.stringify(value) !== JSON.stringify(baseline)
   const hint = error
     ? <span className="field-error">{error}</span>
     : <>
@@ -30,8 +35,8 @@ export function FieldRow({ field, value, defaultValue, error, onChange }: {
           {changedFromDefault && (
             <button
               className="reset-link"
-              title={`恢复默认值：${JSON.stringify(defaultValue)}`}
-              onClick={() => onChange(defaultValue)}
+              title={`恢复默认值：${JSON.stringify(baseline)}`}
+              onClick={() => onChange(baseline)}
             >
               恢复默认
             </button>
@@ -39,12 +44,12 @@ export function FieldRow({ field, value, defaultValue, error, onChange }: {
         </div>
         {(field.hint || field.ms || error) && <div className="setting-hint">{hint}</div>}
       </div>
-      <div className="setting-control">{control(field, value, onChange)}</div>
+      <div className="setting-control">{fieldControl(field, value, onChange)}</div>
     </div>
   )
 }
 
-export function control(field: FieldDef, value: unknown, onChange: (value: unknown) => void): JSX.Element {
+export function fieldControl(field: FieldDef, value: unknown, onChange: (value: unknown) => void): JSX.Element {
   if (field.kind === 'switch') {
     const on = value === true
     return (

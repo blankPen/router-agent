@@ -15,6 +15,11 @@ feishu:
       repo: router-agent   # 可选：群绑定项目（只能是当前后端项目清单里的项目名）
       branch: main         # 由项目默认分支自动决定，面板不可单独编辑
       allowed: [ou_xxx]    # 可选：本群只允许这些人操作（空=沿用全局 allowed）；支持邮箱（推荐）或 ou_xxx
+      intake:          # 可选：本群的「需求分析助手」（Web 面板里点群配置里的「需求分析助手」按钮编辑）
+        enabled: false     # 开启后，本群未 @ 机器人的消息也会先经过初筛
+        maxQuestions: 10  # 最多主动追问几轮；达到上限按现有信息收口
+        codeAccess: true   # 分析子 Agent 是否只读本群绑定项目的本地代码
+        approvers: []      # 终审管理员；支持邮箱（推荐）或 ou_xxx；空 = 回退到全局 allowed 名单
   directMessages: true
   allowed: []          # 允许发起工作的人（邮箱，推荐；兼容 ou_xxx）
   bots: []             # 允许产生推断候选的机器人
@@ -151,10 +156,12 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 | `policy.admission.listedNotAddressed` / `unlistedAddressed` / `unlistedNotAddressed` | 见「准入规则」 |
 | `router.timeoutMs` / `router.tokenBudget` / `router.agentDir` | 毫秒（1s–600s） / token（0=不限） / Pi 配置目录 |
 | `progress.syncMs` / `probeMs` / `silenceMs` / `repeatMs` | 毫秒；前两项 0 = 关闭 |
+| `feishu.chats[].intake.enabled` / `maxQuestions` / `codeAccess` / `approvers` | 见「需求分析助手」 |
 | `retention.enabled` / `idleHours` / `closeGraceHours` / `zombieHours` / `sweepMinutes` | 见「闲置工单治理」 |
 | `workspace.enabled` / `keepHours` / `sweepMinutes` | 见「关单后的工作区回收」 |
 | `worker.evidence.ui` | `off` / `warn` / `enforce`；UI 证据门禁档位（保存后需重启） |
 | `runtime.default` | `orca` / `claude-code` / `acp` / `acp-*` |
+| `runtime.options.<运行时>.<键>` | 运行时自己的选项；键由该运行时声明，见「运行时选项」 |
 | `server.port` | 1–65535 |
 | `feishu.appId` / `reaction` / `directMessages` / `allowed` / `bots` / `botOpenIds` / `botNames` | 字符串、布尔或逗号分隔列表 |
 | `feishu.chats` | 逗号分隔 chat_id；已有条目的 mode / 绑定 / sync 保留，新条目默认 `all` |
@@ -169,8 +176,23 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 | `chatMode.<chatId>` | `ra config set chatMode.oc_xxx mention` | `all` / `mention` |
 | `chatSync.<chatId>` | `ra config set chatSync.oc_xxx true` | 启动时补拉该群历史 |
 | `chatAllow.<chatId>` | `ra config set chatAllow.oc_xxx ou_a,ou_b` | 空值 = 沿用全局 `feishu.allowed` |
+| `runtime.options.<运行时>.<键>` | `ra config set runtime.options.orca.agent codex` | 运行时专属选项；按该运行时的声明校验 |
 
-`router.session.*`、`router.persona.*`、`feishu.images.*` 不在 `config set` 的白名单里，用 `ra config edit` 或 Web 面板改；`worker.tools.*` 与 `runtime.options.*` 面板不提供，只能 `ra config edit` 直接改文件。
+`router.session.*`、`router.persona.*`、`feishu.images.*` 不在 `config set` 的白名单里，用 `ra config edit` 或 Web 面板改；`worker.tools.*` 面板不提供，只能 `ra config edit` 直接改文件。
+
+## 运行时选项
+
+每个运行时可以声明自己的可配置项，落在通用的 `runtime.options.<运行时 id>.<键>` 下：
+
+- **面板**：声明过的选项出现在对应运行时卡片的「设置」弹窗里，不写死任何运行时；
+- **命令行**：`ra config set runtime.options.orca.agent codex`；
+- **校验**：后端按该运行时的声明校验取值，声明之外的键一律拒绝。
+
+目前只有 Orca 声明了一个选项：`agent` —— 决定 Orca 在工单 worktree 里启动哪个 Agent。默认 `claude`；填 `codex` / `claude` / `opencode` 等则显式指定。改了要重启服务才生效，只影响新工单。
+
+默认值写在选项声明里（`RuntimeOptionField.default`），后端、面板、文档都从同一处取值。如果某个运行时的选项没有「可省略」的形态（例如 Orca 的 `--prompt` 必须配 `--agent`），就用声明默认值兜底，而不是让调用方猜。
+
+新增运行时只要声明自己的选项即可，内核与面板都不用改；选项声明见 `packages/runtime/src/runtimes/options.ts` 与各运行时的 `options.ts`。
 
 ## 环境变量
 
@@ -240,6 +262,10 @@ router-agent 固定使用 `~/.router-agent-lark` 作为 lark-cli profile，**不
 
 之后如果需要用户身份（按名字搜索群 / 成员、创建文档），在 Web 配置页点「开始授权」完成授权，或由 `ra init` 询问后执行 `lark-cli auth login`。授权只申请 **IM（消息 / 群 / 成员）、云文档、云空间、通讯录** 四个业务域，不再请求日历、邮箱、审批等无关权限。
 
+四个业务域之外还会**显式追加一个 scope：`contact:user.id:readonly`**。原因是 lark-cli 的 `contact` 域只映射到 `contact:user.basic_profile:readonly` 与 `contact:user:search`，不含这一条；而 router-agent 要用 `contact/v3/users/batch_get_id` 把允许名单里的**邮箱解析成 open_id**（`src/sources/feishu-identity.ts`），这个接口依赖的正是 `contact:user.id:readonly`。域映射不覆盖 → 用户授权页看不到这一项 → 授权 100% 成功、token 里却没有该权限，表现成「用户已经授权好飞书，却没有这个权限」。`lark-cli` 的 `--scope` 与 `--domain` 是叠加关系，所以 router-agent 在授权参数里显式带上它（`src/sources/feishu-bot-admin.ts` 的 `FEISHU_AUTH_SCOPES`）。
+
+> 应用侧（机器人身份 / tenant_access_token）同样需要这一条权限。若 `batch_get_id` 报 `99991672 app_scope_not_applied`，说明应用后台尚未开通，按报错里的 `console_url`（开放平台 scope-apply 链接）补开通即可；用户身份是否授权与它无关。
+
 机器人凭据由 lark-cli 的加密存储管理，`router-agent` 只在 `config.yaml` 保存 `appId`。运行期所有 lark-cli 子进程（事件消费、发消息、群名刷新、凭据与授权）都会带上 `HOME=~/.router-agent-lark`，与其它 agent 的 lark-cli profile 完全隔离。
 
 ## 项目与仓库选择
@@ -290,6 +316,50 @@ Web 面板的「登记项目」提供两种添加方式：
 | `policy.admission.unlistedNotAddressed` | 名单外、未 @ | `inferred` / `ignore` | `ignore` |
 
 `inferred` 进入研判（再由 `acceptMode` 决定 observe 时是否真的开工），`explicit` 直接按显式请求开单，`ignore` 直接丢弃。这三项属于 `policy.*`：Web 面板保存后立即生效；`ra config set` 写的是文件，重启服务后生效。
+
+## 需求分析助手（群级 intake）
+
+每个群单独开关，默认关闭。开启后 Router 仍然是纯路由层，但多了一条「普通成员自助提需」的链路：
+
+1. **初筛**：群里的消息（包括没 @ 机器人的）先过一遍轻量模型，分成 `chat` / `question` / `issue`；
+2. **分析**：`question` / `issue` 交给分析子 Agent，它只读当前群绑定项目的代码，主动追问补齐信息；
+3. **终审**：信息收敛后整理成结构化需求单，@终审管理员（本群 `approvers`，为空则用全局 `allowed`）；
+4. **派单**：管理员回复「确认派单」才走原有 `Engine.decide()` 生成工单；回复「驳回」结束这条需求。
+
+配置入口在 Web 面板：**「配置 → 项目清单 → 群与绑定」**里每一行都有一个「需求分析助手」按钮，点开弹窗就能开关、填管理员、调轮次、决定是否读代码；也可以直接改 `config.yaml`：
+
+```bash
+feishu:
+  chats:
+    - chat: oc_dev
+      mode: all
+      repo: router-agent
+      intake:
+        enabled: true
+        maxQuestions: 10          # 最多追问 10 轮（默认 10，0 = 不追问）
+        codeAccess: true          # false = 分析 Agent 不读代码，只基于对话判断
+        approvers: [lead@example.com]   # 终审管理员：邮箱（推荐）或 ou_xxx；空 = 回退到全局 allowed
+```
+
+| 字段 | 含义 |
+|-|-|
+| `enabled` | 是否在这个群开启需求分析助手；一个群开了不影响别的群 |
+| `maxQuestions` | 最多主动追问几轮，默认 **10**，上限 50；到顶后按现有信息收口成需求单 |
+| `codeAccess` | 分析子 Agent 是否只读本群绑定项目的代码；关闭后只依据对话与通用业务知识判断 |
+| `approvers` | 终审管理员：支持**邮箱**（推荐）或 `ou_xxx`；启动时把邮箱解析成 open_id，解析不到就没人能终审（不会退回全局名单） |
+
+| 约束 | 实现 |
+|-|-|
+| Router 不读代码、不做业务分析 | 读代码与判断只发生在 `IntakeEngine`；主链路只做调度、落库与出站 |
+| 权限不变 | 普通成员没有派单权限；终审口令只认本群 `approvers`（或全局 allowed） |
+| 项目隔离 | 分析工具（`code_ls` / `code_read` / `code_grep`）只接受项目目录内的相对路径，越界直接拒绝 |
+| 群级白名单 | 群配了 `allowed` 时，只有名单内成员能触发 intake；「配了但没解析出来」的群一律拒绝 |
+| 不干扰存量派单流程 | 同一话题里管理员 @机器人 的新指令仍走原研判，不会被待审需求单截走 |
+| 旧配置自动迁移 | 旧版全局 `intake:` 段（`enabled` / `chats` / `maxQuestions` / `codeAccess` / `approvers`）在启动时迁移到对应群；写回配置后全局段消失 |
+
+需求分析会话在 `~/.router-agent/state.db` 的 `intakes` 表里持久化；72 小时没有新消息自动放弃，不会挡住后续新问题。分析 Agent 的追问 / 收口规范在 Web 面板「配置 → 规范文件」里可查看和修改（`需求初筛规范` / `需求分析规范`）。
+
+> 注意：需求分析助手依赖群已绑定项目（`chatBinding` / `feishu.chats[].repo`）。没有绑定项目的群里，它不会接管消息，仍按原准入规则处理——因为拿不到项目就无法生成可派单的需求单。
 
 ## 闲置工单治理
 

@@ -4,8 +4,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Store } from '../../src/store/db.js'
-import type { Assignment, Input, Report, Ticket, Trigger } from '../../src/core/model.js'
-import { DEFAULT_ADMISSION, type Policy } from '../../src/core/policy.js'
+import type { Assignment, Input, Intake, Report, Ticket, Trigger } from '#core/model.js'
+import { DEFAULT_ADMISSION, type Policy } from '#core/policy.js'
 
 function store(): Store {
   return new Store(':memory:')
@@ -98,6 +98,38 @@ describe('Store', () => {
     s.close()
   })
 
+  it('未 @ 放行标记随 Trigger 落库，取回来还在', () => {
+    const s = store()
+    s.insertTrigger(trigger({ id: 't1', externalId: 'om_1', addressed: 'none', unaddressedAdmitted: true }))
+    s.insertTrigger(trigger({ id: 't2', externalId: 'om_2', addressed: 'none' }))
+    expect(s.getTrigger('t1')?.unaddressedAdmitted).toBe(true)
+    expect(s.getTrigger('t2')?.unaddressedAdmitted).toBeUndefined()
+    s.close()
+  })
+
+  it('通道实例 ID 随 Trigger / Ticket / Reaction 落库，重启后仍能按通道回发', () => {
+    const s = store()
+    s.insertTrigger(trigger({ id: 't1', externalId: 'om_1', channelId: 'slack-main' }))
+    expect(s.getTrigger('t1')?.channelId).toBe('slack-main')
+
+    s.insertTicket({ ...ticket, channelId: 'slack-main' })
+    expect(s.getTicket('tk1')?.channelId).toBe('slack-main')
+
+    s.saveReaction('om_1', 're_1', '2026-11-06T10:00:00.000Z', 'slack-main')
+    expect(s.getReactionChannel('om_1')).toBe('slack-main')
+    s.close()
+  })
+
+  it('未声明通道的历史数据保持无 channelId，不凭空写默认值', () => {
+    const s = store()
+    s.insertTrigger(trigger({ id: 't1', externalId: 'om_1' }))
+    s.insertTicket(ticket)
+    expect(s.getTrigger('t1')?.channelId).toBeUndefined()
+    expect(s.getTicket('tk1')?.channelId).toBeUndefined()
+    expect(s.getReactionChannel('missing')).toBeNull()
+    s.close()
+  })
+
   it('工单可按阶段查询，并保留 PR 字段', () => {
     const s = store()
     s.insertTicket(ticket)
@@ -171,6 +203,47 @@ describe('Store', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
+  it('旧库的 inputs 表补 source_key 列，并建来源唯一索引', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ra-db-'))
+    const path = join(dir, 'ra.sqlite')
+    const legacy = new DatabaseSync(path)
+    legacy.exec(`
+      CREATE TABLE inputs (
+        id TEXT PRIMARY KEY,
+        ticket_id TEXT NOT NULL,
+        assignment_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        text TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        delivered_at TEXT,
+        acked_at TEXT,
+        UNIQUE (ticket_id, seq)
+      );
+      INSERT INTO inputs VALUES
+        ('in1', 'tk1', 'as1', 1, 'followup', '继续', 'pending', '2026-11-06T10:00:00.000Z', NULL, NULL);
+    `)
+    legacy.close()
+
+    const s = new Store(path)
+    expect(s.getInput('in1')?.text).toBe('继续')
+    s.insertInput({
+      id: 'in2',
+      ticketId: 'tk1',
+      assignmentId: 'as1',
+      seq: 2,
+      kind: 'followup',
+      text: '继续',
+      sourceKey: 'trigger:om_1',
+      status: 'pending',
+      createdAt: '2026-11-06T10:01:00.000Z',
+    })
+    expect(s.findInputBySourceKey('tk1', 'trigger:om_1')?.id).toBe('in2')
+    s.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
   it('派工、报告与投递记录可以按工单取回，seq 单调递增', () => {
     const s = store()
     s.insertTicket(ticket)
@@ -203,8 +276,59 @@ describe('Store', () => {
     s.insertReport(report)
     expect(s.latestReport('tk1')?.summary).toBe('已定位')
 
-    s.ackInputs('as1', ['in1'], '2026-11-06T10:04:00.000Z')
+    expect(s.ackInputs('tk1', ['in1'], '2026-11-06T10:04:00.000Z')).toEqual(['in1'])
     expect(s.listInputs('tk1')[0]?.status).toBe('acked')
+    s.close()
+  })
+
+  it('ack 不限定 assignment：换派工后旧派工下投递的输入仍能被新 worker 确认（tk-51）', () => {
+    const s = store()
+    s.insertTicket(ticket)
+    s.insertAssignment(assignment)
+    s.insertAssignment({ ...assignment, id: 'as2', handle: 'term-2', startedAt: '2026-11-06T10:05:00.000Z' })
+    // 输入创建时挂在 as1 上，实际被 as2 消费
+    s.insertInput({
+      id: 'in1',
+      ticketId: 'tk1',
+      assignmentId: 'as1',
+      seq: 1,
+      kind: 'followup',
+      text: '继续',
+      status: 'delivered',
+      createdAt: '2026-11-06T10:03:00.000Z',
+    })
+
+    expect(s.ackInputs('tk1', ['in1'], '2026-11-06T10:06:00.000Z')).toEqual(['in1'])
+    expect(s.listInputs('tk1')[0]).toMatchObject({ status: 'acked', ackedAt: '2026-11-06T10:06:00.000Z' })
+    // 已 acked 的不再重复返回，避免调用方误以为自己清了新的计数
+    expect(s.ackInputs('tk1', ['in1'], '2026-11-06T10:07:00.000Z')).toEqual([])
+    s.close()
+  })
+
+  it('放错工单的 id 不会被 ack；会话丢失时未确认的输入标记 expired', () => {
+    const s = store()
+    s.insertTicket(ticket)
+    s.insertTicket({ ...ticket, id: 'tk2' })
+    s.insertAssignment(assignment)
+    s.insertInput({
+      id: 'in1',
+      ticketId: 'tk1',
+      assignmentId: 'as1',
+      seq: 1,
+      kind: 'followup',
+      text: '继续',
+      status: 'delivered',
+      createdAt: '2026-11-06T10:03:00.000Z',
+    })
+
+    expect(s.ackInputs('tk2', ['in1'], '2026-11-06T10:06:00.000Z')).toEqual([])
+    expect(s.listInputs('tk1')[0]?.status).toBe('delivered')
+
+    expect(s.expireUnackedInputs('tk1')).toBe(1)
+    expect(s.listInputs('tk1')[0]?.status).toBe('expired')
+    // expired 既不算待投递，也不算待确认：巡检时不应再被当成重投任务
+    expect(s.unackedInputs('tk1')).toHaveLength(0)
+    expect(s.pendingInputs('tk1')).toHaveLength(0)
     s.close()
   })
 
@@ -416,6 +540,71 @@ describe('会话复用存储', () => {
     db.clearDispatchDraft('oc_chat', 'ou_alice')
     expect(db.getDispatchDraft('oc_chat', 'ou_alice')).toBeNull()
     expect(db.getDispatchDraft('oc_chat', 'ou_bob')?.task).toBe('改支付回调')
+  })
+})
+
+describe('需求识别存储', () => {
+  const intake: Intake = {
+    id: 'it_1',
+    threadId: 'feishu:oc_chat:om_root',
+    chatId: 'oc_chat',
+    actorId: 'ou_bob',
+    actorName: 'Bob',
+    project: 'router-agent',
+    repo: 'name:dsh/router-agent',
+    branch: 'main',
+    status: 'clarifying',
+    kind: 'issue',
+    rawText: '登录报错',
+    turns: [{ role: 'user', text: '登录报错', at: '2026-11-12T10:00:00.000Z', actorId: 'ou_bob' }],
+    questions: 1,
+    createdAt: '2026-11-12T10:00:00.000Z',
+    updatedAt: '2026-11-12T10:00:00.000Z',
+  }
+
+  it('读写 intake，turns 与 report 序列化后保持原样', () => {
+    const db = store()
+    db.insertIntake(intake)
+    db.updateIntake({
+      ...intake,
+      turns: [...intake.turns, { role: 'router', text: '请补充报错原文', at: '2026-11-12T10:01:00.000Z' }],
+      report: {
+        title: '登录报错',
+        problem: '500',
+        background: '',
+        steps: '点登录',
+        environment: '',
+        impact: '',
+        expected: '',
+        assessment: '疑似 BUG',
+      },
+    })
+
+    const loaded = db.getIntake('it_1')
+    expect(loaded?.turns.map(turn => turn.role)).toEqual(['user', 'router'])
+    expect(loaded?.report?.title).toBe('登录报错')
+    expect(loaded?.report?.steps).toBe('点登录')
+    db.close()
+  })
+
+  it('activeIntake 只返回 clarifying / ready，且按人隔离', () => {
+    const db = store()
+    db.insertIntake(intake)
+    expect(db.activeIntake(intake.threadId, 'ou_bob')?.id).toBe('it_1')
+    expect(db.activeIntake(intake.threadId, 'ou_alice')).toBeNull()
+
+    db.updateIntake({ ...intake, status: 'approved' })
+    expect(db.activeIntake(intake.threadId, 'ou_bob')).toBeNull()
+    expect(db.latestIntakeByThread(intake.threadId)?.status).toBe('approved')
+    db.close()
+  })
+
+  it('按工单号反查 intake', () => {
+    const db = store()
+    db.insertIntake({ ...intake, status: 'approved', ticketId: 'tk-7' })
+    expect(db.intakeByTicket('tk-7')?.id).toBe('it_1')
+    expect(db.intakeByTicket('tk-8')).toBeNull()
+    db.close()
   })
 })
 

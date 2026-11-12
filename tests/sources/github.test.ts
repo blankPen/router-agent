@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { GitHubTracker, ghPrViewCommand, ghRepoOf, isGithubPullRequestUrl, parsePrView, parsePrList } from '../../src/sources/github.js'
-import type { CommandRunner } from '../../src/infra/process.js'
+import type { CommandRunner } from '#infra/process.js'
 
 describe('GitHub PR 状态解析', () => {
   it('merged PR 归一化为 merged', () => {

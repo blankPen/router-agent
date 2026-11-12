@@ -4,8 +4,9 @@
  * 这里不能依赖任何 Node 内置模块 —— Web 面板会把它打进前端包；
  * 同时保持纯函数，方便用 vitest 的 node 环境直接测试。
  */
-import { ACP_AGENTS } from '../../worker/runtimes/acp/agents.js'
-import { WORKER_RUNTIMES } from '../../worker/runtimes/catalog.js'
+import { ACP_AGENTS, isDeprecatedAcpRuntimeId } from '#runtime/runtimes/acp-agents.js'
+import { WORKER_RUNTIMES } from '#runtime/runtimes/catalog.js'
+import type { PluginView } from './api.js'
 
 export interface RuntimeRequirementView {
   label: string
@@ -32,6 +33,8 @@ export interface RuntimeExtensionView {
 /** 服务端 /api/config 与 /api/runtimes 下发的运行时探测结果。 */
 export interface RuntimeChoiceView {
   id: string
+  /** 产品名；缺省时从 label 推断。 */
+  name?: string
   label: string
   hint: string
   status: 'ready' | 'not-installed' | 'incompatible' | 'needs-auth' | 'unverified' | 'pending' | string
@@ -44,10 +47,14 @@ export interface RuntimeChoiceView {
   loginHint?: string
   loadSession?: boolean
   verifyRequired?: boolean
+  /** 已有原生运行时替代品：面板不再把它列为可选项。 */
+  deprecated?: boolean
   command?: string
   requires?: RuntimeRequirementView[]
   cli?: RuntimeCliView
   extension?: RuntimeExtensionView
+  /** 插件来源：内置 / 用户配置 / 已加载；服务端插件列表有同名项时为 true。 */
+  plugin?: PluginView
 }
 
 export const RUNTIME_STATUS_LABEL: Record<string, string> = {
@@ -72,9 +79,45 @@ export function runtimeSourceLabel(source?: string): string {
   return ''
 }
 
-/** 卡片标题只用 label 的第一段，例如 `orca · Orca worktree...` → `orca`。 */
+/** 运行时产品名：优先用目录里的 name，其次取 label 的第一段。 */
+function runtimeName(choice: RuntimeChoiceView): string {
+  return choice.name?.trim() || choice.label.split(' · ')[0]?.trim() || choice.id
+}
+
+/**
+ * 卡片标题：运行时名按「单词首字母大写」展示。
+ *
+ * 优先用目录里的 `name`（`Orca` / `Claude Code` / `Codex App`），
+ * 取不到时把 id 形式的第一段（`claude-code`）转成 `Claude Code`。
+ */
 export function runtimeDisplayName(choice: RuntimeChoiceView): string {
-  return choice.label.split(' · ')[0]?.trim() || choice.id
+  return titleCase(runtimeName(choice))
+}
+
+/** 把 `claude-code` / `codex app` 这类机器名转成 `Claude Code` 形式；已是正常大小写的不动。 */
+function titleCase(value: string): string {
+  return value
+    .split(/([\s-]+)/)
+    .map(part => (/^[\s-]+$/.test(part) ? ' ' : part.charAt(0).toUpperCase() + part.slice(1)))
+    .join('')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** 下拉选项文案：名称 + 内置运行时的说明段（`Orca · Orca worktree + 终端`）。 */
+export function runtimeOptionLabel(choice: RuntimeChoiceView): string {
+  const name = runtimeDisplayName(choice)
+  const desc = choice.label.split(' · ').slice(1).join(' · ').trim()
+  return desc ? `${name} · ${desc}` : name
+}
+
+/**
+ * 是否是已有原生运行时替代品的运行时（Claude Code / Codex 的 ACP 版本）。
+ *
+ * 这类运行时只是不再作为可选项展示，配置与已装扩展照旧可用。
+ */
+export function isDeprecatedRuntime(choice: RuntimeChoiceView): boolean {
+  return choice.deprecated === true || isDeprecatedAcpRuntimeId(choice.id)
 }
 
 export function isAcpAgentRuntime(id: string): boolean {
@@ -83,6 +126,11 @@ export function isAcpAgentRuntime(id: string): boolean {
 
 export function isBuiltinRuntime(id: string): boolean {
   return WORKER_RUNTIMES.some(runtime => runtime.id === id)
+}
+
+/** 用户通过 runtime.plugins / channels 配置的插件（含覆盖内置包的情况）。 */
+export function isCustomRuntime(choice: RuntimeChoiceView): boolean {
+  return choice.plugin !== undefined && !isBuiltinRuntime(choice.id) && !isAcpAgentRuntime(choice.id)
 }
 
 /** 只有能真正派工的运行时才允许选中；pending 表示还没探测，先允许。 */
@@ -95,11 +143,12 @@ export function isRuntimeSelectable(choice?: RuntimeChoiceView): boolean {
  * 合并静态目录与服务端快照：服务端结果覆盖静态占位，缺项补 pending。
  * 顺序保持稳定（内置运行时 → ACP Agent 目录），避免卡片每次刷新乱跳。
  */
-export function mergeRuntimeChoices(choices?: RuntimeChoiceView[]): RuntimeChoiceView[] {
+export function mergeRuntimeChoices(choices?: RuntimeChoiceView[], plugins?: PluginView[]): RuntimeChoiceView[] {
   const merged = new Map<string, RuntimeChoiceView>()
   for (const runtime of WORKER_RUNTIMES) {
     merged.set(runtime.id, {
       id: runtime.id,
+      name: runtime.name,
       label: runtime.label,
       hint: runtime.hint,
       status: 'pending',
@@ -110,6 +159,7 @@ export function mergeRuntimeChoices(choices?: RuntimeChoiceView[]): RuntimeChoic
   for (const agent of ACP_AGENTS) {
     merged.set(agent.runtimeId, {
       id: agent.runtimeId,
+      name: agent.name,
       label: agent.label,
       hint: agent.hint,
       status: 'pending',
@@ -119,14 +169,33 @@ export function mergeRuntimeChoices(choices?: RuntimeChoiceView[]): RuntimeChoic
       ...(agent.login ? { loginHint: agent.login.hint } : {}),
       ...(agent.loadSession !== undefined ? { loadSession: agent.loadSession } : {}),
       ...(agent.verifyRequired ? { verifyRequired: true } : {}),
+      ...(agent.deprecated ? { deprecated: true } : {}),
     })
   }
-  for (const choice of choices ?? []) merged.set(choice.id, choice)
+  for (const plugin of plugins ?? []) {
+    if (plugin.kind !== 'runtime') continue
+    merged.set(plugin.id, {
+      ...(merged.get(plugin.id) ?? {}),
+      id: plugin.id,
+      ...(plugin.name ? { name: plugin.name } : {}),
+      label: plugin.label ?? plugin.name ?? plugin.id,
+      hint: plugin.hint ?? '用户配置的运行时插件',
+      status: plugin.status === 'failed' ? 'incompatible' : 'pending',
+      plugin,
+      ...(plugin.packageName ? { packageName: plugin.packageName } : {}),
+      ...(plugin.error ? { reason: plugin.error } : {}),
+    })
+  }
+  // 服务端快照优先，静态目录补齐它没带上的字段（如 name / deprecated）。
+  for (const choice of choices ?? []) {
+    merged.set(choice.id, { ...merged.get(choice.id), ...choice })
+  }
 
   const result: RuntimeChoiceView[] = []
   const order = [
     ...WORKER_RUNTIMES.map(runtime => runtime.id),
     ...ACP_AGENTS.map(agent => agent.runtimeId),
+    ...(plugins ?? []).filter(plugin => plugin.kind === 'runtime').map(plugin => plugin.id),
   ]
   for (const id of order) {
     const choice = merged.get(id)

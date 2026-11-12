@@ -38,6 +38,12 @@ describe('发布计划', () => {
     expect(isShippableChange(['package.json'])).toBe(true)
     expect(isShippableChange(['scripts/build-web.mjs'])).toBe(true)
     expect(isShippableChange(['bin/ra.js'])).toBe(true)
+    // monorepo：适配器包源码会进 dist/packages，属于产物；包内测试 / 清单不算。
+    expect(isShippableChange(['packages/runtime/src/port.ts'])).toBe(true)
+    expect(isShippableChange(['packages/channel/src/feishu/index.ts'])).toBe(true)
+    expect(isShippableChange(['pnpm-workspace.yaml'])).toBe(false)
+    expect(isShippableChange(['packages/runtime/tests/port.test.ts'])).toBe(false)
+    expect(isShippableChange(['packages/runtime/package.json'])).toBe(false)
   })
 
   it('main 推送有产物改动时自动升 patch', () => {

@@ -106,7 +106,7 @@ ra tickets --stage blocked
 
 ## 7. 受影响的代码与界面
 
-- 状态推导：`src/core/stage.ts`
+- 状态推导：`packages/core/src/stage.ts`
 - 工单存储与读时兼容：`src/store/db.ts`
 - 工单生命周期：`src/core/engine.ts`、`src/service.ts`
 - CLI：`ra tickets --stage todo|running|review|blocked|done`

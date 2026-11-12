@@ -11,6 +11,7 @@ import {
   policyOf,
   projectsForRuntime,
   publicConfig,
+  publicPlugins,
   setConfigValue,
   setProjectsForRuntime,
   writeConfig,
@@ -38,6 +39,8 @@ describe('全局状态目录与配置', () => {
     expect(cfg.policy.maxAutoRecover).toBe(1)
     expect(cfg.feishu.reaction).toBe('Typing')
     expect(cfg.worker.evidence.ui).toBe('warn')
+    // 需求分析助手默认关闭：不改变存量群的回复行为；追问轮次默认 10 轮。
+    expect(cfg.feishu.chats).toEqual([])
     expect(cfg.runtime.default).toBe('orca')
   })
 
@@ -418,6 +421,114 @@ describe('Pi 研判层配置', () => {
     expect(loaded.router.timeoutMs).toBe(45000)
     expect(loaded.router.tokenBudget).toBe(16000)
   })
+
+  it('需求分析助手是群级配置：可写回并读回，patch 做类型与范围校验', () => {
+    const dir = home()
+    const cfg = loadConfig(dir)
+    const patch = applyConfigPatch(cfg, {
+      'feishu.chats': [{
+        chat: 'oc_dev',
+        mode: 'all',
+        repo: '',
+        branch: '',
+        allowed: [],
+        intake: { enabled: true, maxQuestions: 2, codeAccess: false, approvers: ['admin@example.com'] },
+      }],
+    })
+    expect(patch.errors).toEqual([])
+    writeConfig(dir, cfg)
+
+    const loaded = loadConfig(dir)
+    expect(loaded.feishu.chats[0]?.intake).toEqual({
+      enabled: true,
+      maxQuestions: 2,
+      codeAccess: false,
+      approvers: ['admin@example.com'],
+    })
+
+    // 轮次越界：0–50 的整数。
+    expect(applyConfigPatch(loadConfig(home()), {
+      'feishu.chats': [{ chat: 'oc_dev', mode: 'all', repo: '', branch: '', allowed: [], intake: { enabled: true, maxQuestions: 51, codeAccess: true, approvers: [] } }],
+    }).errors).toHaveLength(1)
+    // 全局路径已经下沉到群级，不再是合法的配置项。
+    expect(applyConfigPatch(loadConfig(home()), { 'intake.enabled': true }).errors).toHaveLength(1)
+  })
+
+  it('新建群默认带需求分析助手配置：关闭、10 轮、允许只读代码', () => {
+    const cfg = loadConfig(home())
+    expect(chatEntry('oc_new').intake).toEqual({ enabled: false, maxQuestions: 10, codeAccess: true, approvers: [] })
+    expect(cfg.feishu.chats).toEqual([])
+  })
+
+  it('旧版全局 intake 段迁移到群级配置，并写回时不再输出全局段', () => {
+    const dir = home()
+    writeFileSync(join(dir, 'config.yaml'), [
+      'feishu:',
+      '  chats:',
+      '    - chat: oc_dev',
+      '      mode: all',
+      '    - chat: oc_ops',
+      '      mode: mention',
+      'intake:',
+      '  enabled: true',
+      '  chats: [oc_dev]',
+      '  maxQuestions: 6',
+      '  codeAccess: false',
+      '  approvers: [admin@example.com]',
+      '',
+    ].join('\n'))
+    const cfg = loadConfig(dir)
+    expect(cfg.feishu.chats.find(chat => chat.chat === 'oc_dev')?.intake).toEqual({
+      enabled: true,
+      maxQuestions: 6,
+      codeAccess: false,
+      approvers: ['admin@example.com'],
+    })
+    // 不在旧白名单里的群保持关闭。
+    expect(cfg.feishu.chats.find(chat => chat.chat === 'oc_ops')?.intake?.enabled).toBe(false)
+    // 写回后全局段消失，只剩群级配置。
+    writeConfig(dir, cfg)
+    const text = readFileSync(join(dir, 'config.yaml'), 'utf8')
+    expect(text).not.toContain('\nintake:')
+    expect(text).toContain('intake:')
+  })
+
+  it('旧版全局 intake 段没写生效群时迁移到所有已监控的群', () => {
+    const dir = home()
+    writeFileSync(join(dir, 'config.yaml'), [
+      'feishu:',
+      '  chats:',
+      '    - chat: oc_dev',
+      '    - chat: oc_ops',
+      'intake:',
+      '  enabled: true',
+      '  maxQuestions: 4',
+      '',
+    ].join('\n'))
+    const cfg = loadConfig(dir)
+    for (const chat of cfg.feishu.chats) {
+      expect(chat.intake.enabled).toBe(true)
+      expect(chat.intake.maxQuestions).toBe(4)
+    }
+  })
+
+  it('群上已经写了需求分析配置时，旧全局段不再覆盖它', () => {
+    const dir = home()
+    writeFileSync(join(dir, 'config.yaml'), [
+      'feishu:',
+      '  chats:',
+      '    - chat: oc_dev',
+      '      intake:',
+      '        enabled: true',
+      '        maxQuestions: 7',
+      'intake:',
+      '  enabled: true',
+      '  maxQuestions: 2',
+      '',
+    ].join('\n'))
+    const cfg = loadConfig(dir)
+    expect(cfg.feishu.chats[0]?.intake).toMatchObject({ enabled: true, maxQuestions: 7 })
+  })
 })
 
 describe('会话复用与人格配置', () => {
@@ -497,6 +608,45 @@ describe('Worker 运行时配置', () => {
     expect(setConfigValue(cfg, 'runtime.default', 'acp-claude')).toBe(true)
     expect(setConfigValue(cfg, 'runtime.default', 'acp-nope')).toBe(false)
     expect(applyConfigPatch(cfg, { 'runtime.default': 'acp-nope' }).errors).toHaveLength(1)
+  })
+
+  it('同一次保存里声明插件并选为默认运行时不会被拒绝', () => {
+    const cfg = defaultConfig()
+    const result = applyConfigPatch(cfg, {
+      'runtime.plugins.my-runtime': './my-runtime',
+      'runtime.default': 'my-runtime',
+    })
+    expect(result.errors).toEqual([])
+    expect(cfg.runtime.default).toBe('my-runtime')
+    expect(cfg.runtime.plugins?.['my-runtime']).toBe('./my-runtime')
+  })
+
+  it('同一次保存里新增 channel 插件不会因未知 id 被拒绝', () => {
+    const cfg = defaultConfig()
+    const result = applyConfigPatch(cfg, { 'channels.slack': '@scope/channel-slack' })
+    expect(result.errors).toEqual([])
+    expect(cfg.channels?.slack).toBe('@scope/channel-slack')
+  })
+
+  it('插件 createAll 注册的实例 id 可作为默认运行时', () => {
+    const cfg = defaultConfig()
+    cfg.runtime.plugins = { multi: './multi-runtime' }
+    cfg.runtime.loadedIds = ['multi-a', 'multi-b']
+    expect(applyConfigPatch(cfg, { 'runtime.default': 'multi-a' }).errors).toEqual([])
+    expect(cfg.runtime.default).toBe('multi-a')
+  })
+
+  it('多实例插件只出面板一行，实例 id 收进 loadedIds', () => {
+    const cfg = defaultConfig()
+    cfg.runtime.plugins = { multi: './multi-runtime' }
+    const views = publicPlugins(cfg, {
+      runtimes: [{ id: 'multi', name: 'Multi', label: 'multi', hint: '多实例', loadedIds: ['multi-a', 'multi-b'] }],
+    })
+    const multi = views.filter(view => view.kind === 'runtime' && view.id === 'multi')
+    expect(multi).toHaveLength(1)
+    expect(multi[0]?.loadedIds).toEqual(['multi-a', 'multi-b'])
+    // createAll 的实例 id 不该各自再占一行。
+    expect(views.some(view => view.id === 'multi-a')).toBe(false)
   })
 
   it('runtime.projects.acp-codex 写回后重读不丢', () => {

@@ -5,10 +5,13 @@
 ## 一次性准备
 
 1. **确认包名可用**：`npm view router-agent version` 返回 404 即未占用（2026-11-06 已验证）。
+   现在发布的不止根包：`@router-agent/core` / `infra` / `runtime` / `channel` 与内置
+   runtime / channel 插件也会一起发布，见「发布内容」。
 2. **创建 npm Token**：npmjs.com → Access Tokens → Generate New Token → **Granular Access Token**
    - Permissions: **`Read and write (publish and stage)`**
      （npm 有三个档位；选成 `stage only` 不会报错，而是把版本写进暂存区，流水线照样绿，但包不会上线，npm 上只显示占位版本 `0.0.0-stage`）
-   - Packages: 选择 `All packages`（首次发布时该包还不存在，只有 All 才能在创建时生效）
+   - Packages: 选择 `All packages`。必须同时覆盖**已存在的** `router-agent` 和**首次发布的**
+     `@router-agent/*` 作用域；只勾选其中一类，另一类会返回 E404。
    - **勾选 Bypass two-factor authentication**（CI 无交互，不勾选会 403）
 3. **写入仓库 Secret**：GitHub 仓库 → Settings → Secrets and variables → Actions → New repository secret
    - Name: `NPM_TOKEN`
@@ -67,19 +70,34 @@ Actions → 发布 npm 包 → Run workflow。发布的是所选分支 `package.
 
 ## 工作流做了什么
 
+0. 仓库是 pnpm workspace，会按依赖顺序发布 10 个包：
+   1. SDK：`@router-agent/core` → `infra` → `runtime` → `channel`
+   2. 内置插件：`runtime-codex` / `runtime-herdr` / `runtime-claude-code` / `runtime-orca` / `runtime-acp` / `channel-feishu`
+   3. 根包 `router-agent` 最后发
+
+   顺序由 `scripts/publish-packages.mjs` 的 `PUBLISH_ORDER` 决定。根包的 `pnpm build` 会把
+   `packages/*/src` 编进 `dist/packages/`，再把 `dist/src/*` 拍平回 `dist/*`，所以根包对外结构不变；
+   同时 `scripts/build-packages.mjs` 为每个包生成独立的 `packages/<name>/dist`（入口 `dist/index.js`
+   + `dist/index.d.ts`），插件包才能单独被用户安装。**改了 `packages/*/src` 后必须 `pnpm build`**，
+   否则 CLI 与独立包用的还是旧产物。
 1. **生成发布计划**（`scripts/release-plan.mjs`）：读取 `package.json` 的 `name`/`version`，
    结合触发方式、推送前的版本、本次改动的文件与提交信息，决定「发不发、发哪个版本」：
    - tag / 手动触发：按当前版本发布，npm 上已有则跳过（tag 触发时会先校验 tag 与版本一致）；
    - main 推送：命中跳过条件就跳过，否则自动升 patch（会跳过 npm 上已占用的版本）；
 2. 校验 `NPM_TOKEN` 是否存在；
 3. `pnpm install --frozen-lockfile`；
-4. 自动升版时把 `package.json` 版本改成计划里的版本；
-5. `pnpm check`（类型检查 + 全量测试）；
-6. `pnpm build`（tsc + esbuild，产物在 `dist/`）；
-7. `npm publish --provenance --json`，带构建来源证明（`id-token: write`）；
-8. 依据 `npm publish` 的退出码与 JSON 输出判定发布是否成功（`scripts/publish-result.mjs`），
+4. 自动升版时把 `package.json` 版本改成计划里的版本，并用 `--sync` 把所有 `@router-agent/*` 的版本与依赖同步到同一版本；
+5. `node scripts/publish-packages.mjs --check-publisher`：用 `npm whoami` + `npm view router-agent maintainers --json`
+   确认 token 用户是根包维护者。无权限时 npm 对已存在的包返回 **E404（伪装成不存在）**，不是 E403；
+6. `pnpm check`（类型检查 + 全量测试）；
+7. `pnpm build`（tsc + esbuild + 各包独立产物）；
+8. `node scripts/publish-packages.mjs --check-versions`：10 个包的目标版本必须都未占用，
+   避免「插件已发、根包 E404」的半发布状态；
+9. `node scripts/publish-packages.mjs` 按顺序发布 SDK / 插件，最后 `npm publish --provenance --json`
+   发布根包；任一包失败立即中止，并打印失败包名与 npm 原始输出末 10 行。
+10. 依据 `npm publish` 的退出码与 JSON 输出判定发布是否成功（`scripts/publish-result.mjs`），
    判定结果写进 step outputs 传给后续步骤，不再回查 npm registry；
-9. 自动升版时把版本号提交回 `main`，让仓库与 npm 保持一致。
+11. 自动升版时把版本号提交回 `main`，让仓库与 npm 保持一致。
 
 ### 怎么判定发布成功
 

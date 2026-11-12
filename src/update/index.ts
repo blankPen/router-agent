@@ -7,9 +7,9 @@
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { sep } from 'node:path'
-import { realRunner, type CommandRunner } from '../infra/process.js'
-import { errorMessage, noopLogger, type Logger } from '../infra/logger.js'
-import { preview } from '../core/events.js'
+import { realRunner, type CommandRunner } from '#infra/process.js'
+import { errorMessage, noopLogger, type Logger } from '#infra/logger.js'
+import { preview } from '#core/events.js'
 import { isNewer } from './version.js'
 
 export { compareVersions, isNewer, parseVersion } from './version.js'
@@ -52,6 +52,12 @@ export interface UpgradeResult {
   code: number
   stdout: string
   stderr: string
+  /** 被信号终止时的信号名；超时被打死时是 SIGKILL。 */
+  signal?: string | null
+  /** 是否是超时被 kill，而不是 npm 自身报错退出。 */
+  timedOut?: boolean
+  /** 本次安装的超时上限；超时日志里要写清楚。 */
+  timeoutMs?: number
 }
 
 export interface FetchLatestOptions {
@@ -110,6 +116,9 @@ export interface UpgradeOptions {
   packageName?: string
 }
 
+/** npm 全局安装默认超时；装依赖多的包 180s 不够用。 */
+export const DEFAULT_UPGRADE_TIMEOUT_MS = 300_000
+
 /** 执行 `npm install -g <pkg>@latest`；失败也返回结果，由调用方决定如何提示。 */
 export async function runNpmUpgrade(options: UpgradeOptions = {}): Promise<UpgradeResult> {
   const name = options.packageName ?? PACKAGE_NAME
@@ -118,7 +127,7 @@ export async function runNpmUpgrade(options: UpgradeOptions = {}): Promise<Upgra
   const runner = options.runner ?? realRunner(npmBin())
   const result = await runner.run(argv, {
     env: options.env,
-    timeoutMs: options.timeoutMs ?? 180_000,
+    timeoutMs: options.timeoutMs ?? DEFAULT_UPGRADE_TIMEOUT_MS,
   })
   return {
     ok: result.code === 0,
@@ -126,6 +135,9 @@ export async function runNpmUpgrade(options: UpgradeOptions = {}): Promise<Upgra
     code: result.code,
     stdout: result.stdout,
     stderr: result.stderr,
+    signal: result.signal ?? null,
+    timedOut: result.timedOut === true,
+    timeoutMs: options.timeoutMs ?? DEFAULT_UPGRADE_TIMEOUT_MS,
   }
 }
 
@@ -271,20 +283,36 @@ export class UpdateService {
 
     this.upgrading = true
     this.state = { ...this.state, phase: 'upgrading', error: null, message: `正在安装 v${target}…` }
-    this.logger.info('update:upgrade-started', { from, to: target })
+    this.logger.info('update:upgrade-started', { from, to: target, root: PACKAGE_ROOT })
     const startedAt = this.now()
     try {
       const result = await this.runUpgrade({ version: target })
       if (!result.ok) {
-        // npm 的报错集中在 stderr，截断后进日志；面板直接看 message。
-        const detail = preview(result.stderr || result.stdout || `npm 退出码 ${result.code}`, 240)
+        // 超时被 kill 时 npm 什么都没输出，必须单独标出来，否则日志里只剩「退出码 1」。
+        const timedOut = result.timedOut === true
+        const seconds = result.timeoutMs ? Math.round(result.timeoutMs / 1000) : 0
+        const detail = timedOut
+          ? `安装超时：${seconds ? `${seconds}s ` : ''}被 ${result.signal ?? 'SIGKILL'} 中断（npm 未输出错误）`
+          : preview(result.stderr || result.stdout || `npm 退出码 ${result.code}`, 240)
         this.state = {
           ...this.state,
           phase: 'failed',
-          error: 'install-failed',
-          message: `安装失败：${detail}`,
+          error: timedOut ? 'install-timeout' : 'install-failed',
+          message: timedOut
+            ? `${detail}。当前版本仍是 v${from}；若安装中途被覆盖，npm 全局目录可能处于半更新状态，请检查 ${PACKAGE_ROOT}。`
+            : `安装失败：${detail}`,
         }
-        this.logger.error('update:upgrade-failed', { from, to: target, code: result.code, message: preview(detail, 240) })
+        this.logger.error('update:upgrade-failed', {
+          from,
+          to: target,
+          code: result.code,
+          timedOut,
+          signal: result.signal ?? null,
+          timeoutMs: result.timeoutMs ?? null,
+          durationMs: this.now() - startedAt,
+          root: PACKAGE_ROOT,
+          message: preview(detail, 240),
+        })
         return this.snapshot()
       }
       this.state = {

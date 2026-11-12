@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- **日志规范**（`CLAUDE.md`）：一行一个 JSON；`message` 用 `域:动作` kebab-case；错误详情一律进 `detail`；业务字段平铺；禁止空 catch（要么重抛要么写 warn/error 且带 `errorMessage(error)`）；不打印堆栈；**邮箱必须掩码后入日志**（形如 `p***@dewu.com`）；新增事件必须同步 `docs/OPERATIONS.md` 的日志事件表。
+- **日志规范**（`AGENTS.md`）：一行一个 JSON；`message` 用 `域:动作` kebab-case；错误详情一律进 `detail`；业务字段平铺；禁止空 catch（要么重抛要么写 warn/error 且带 `errorMessage(error)`）；不打印堆栈；**邮箱必须掩码后入日志**（形如 `p***@dewu.com`）；新增事件必须同步 `docs/OPERATIONS.md` 的日志事件表。
 - **语言**：代码注释、提交信息、文档一律中文。
 - **提交前**：`pnpm typecheck` 与 `pnpm test` 全绿；交付前 `pnpm build` 通过。
 - **不直接写数据库**：状态写入一律走 `src/core/engine.ts`；新增的表只由 Store 的方法写入。

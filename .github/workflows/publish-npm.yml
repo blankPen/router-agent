@@ -5,6 +5,7 @@ name: 发布 npm 包
 #      · 本次推送手动改过 package.json 的 version：按该版本发布（minor / major 发版）；
 #      · 否则自动升 patch（跳过 npm 上已占用的版本），发布成功后把版本号回写到 main；
 #      · 只改文档 / 测试 / CI，或提交信息含 [skip release] 时跳过，避免刷无意义的版本号。
+#      发布时会按依赖顺序发布 @router-agent/* SDK、内置 runtime/channel 插件，最后发布根包。
 #   2. 推送形如 v0.1.1 的 tag（tag 必须与 package.json 的 version 一致），兼容原有发版方式。
 #   3. 在 Actions 页面手动 Run workflow（发布当前分支 package.json 里的版本）。
 #
@@ -150,8 +151,21 @@ jobs:
         env:
           VERSION: ${{ needs.check.outputs.release_version }}
         run: |
-          npm version "$VERSION" --no-git-tag-version --force >/dev/null
+          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.version=process.env.VERSION;fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
+          node scripts/publish-packages.mjs --sync
           echo "package.json 版本已改为 ${VERSION}"
+
+      # 手动改版本号的 PR 不会走 auto_bump，这里也要把所有包同步到根版本。
+      - name: 同步所有包的版本号
+        if: needs.check.outputs.auto_bump != 'true'
+        run: node scripts/publish-packages.mjs --sync
+
+      # E404 通常不是包不存在，而是 token 用户没有根包发布权限。必须在发布
+      # 任何插件之前失败，避免出现「插件已发、根包没发」的半发布状态。
+      - name: 校验 NPM_TOKEN 的发布权限
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: node scripts/publish-packages.mjs --check-publisher
 
       - name: 类型检查与测试
         run: pnpm check
@@ -159,32 +173,30 @@ jobs:
       - name: 构建
         run: pnpm build
 
-      # 直接依据 npm publish 的退出码与输出判定发布成功，不再回查 npm registry。
-      # npm publish --json 成功时 stdout 是发布结果 JSON，失败时是 { "error": { ... } }；
-      # 脚本据此判定，并把结果写进 step outputs 传给后续步骤。
-      - name: 发布到 npm
+      # 先发 SDK 与插件，最后发根包；任一包已存在于同版本时视为失败并中止。
+      # 根包 NPM_TOKEN 还必须能发布 @router-agent/* 作用域（首次发布尤甚）。
+      - name: 检查待发布版本是否已被占用
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: node scripts/publish-packages.mjs --check-versions
+
+      # SDK 与内置插件必须按依赖顺序先发；根包最后发。任一包失败即中止，
+      # 避免根包依赖到 npm 上不存在的插件版本。
+      - name: 发布 SDK / 插件 / 根包到 npm
         id: publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
-
-          out="${RUNNER_TEMP}/npm-publish-stdout.json"
-          err="${RUNNER_TEMP}/npm-publish-stderr.log"
-          code=0
-          npm publish --provenance --json >"$out" 2>"$err" || code=$?
-
-          echo "npm publish 退出码：${code}"
-          echo "--- npm publish stdout ---"
-          cat "$out"
-          echo "--- npm publish stderr ---"
-          cat "$err"
-
+          # 每个包失败时打印可直接定位的包名与 npm 原始错误；失败即中止，
+          # 避免根包已经存在、插件却已发出去的半发布状态。
+          node scripts/publish-packages.mjs
+          npm publish --provenance --json >"${RUNNER_TEMP}/npm-publish-stdout.json" 2>"${RUNNER_TEMP}/npm-publish-stderr.log"
           node scripts/publish-result.mjs \
-            --stdout "$out" \
-            --stderr "$err" \
-            --exit-code "$code" \
-            --name "$(node -p "require('./package.json').name")" \
+            --stdout "${RUNNER_TEMP}/npm-publish-stdout.json" \
+            --stderr "${RUNNER_TEMP}/npm-publish-stderr.log" \
+            --exit-code 0 \
+            --name "router-agent" \
             --version "$(node -p "require('./package.json').version")"
 
       # 回写版本号只是让仓库与 npm 对齐。即使被分支保护拦下，本次发布也已成功；
@@ -212,8 +224,9 @@ jobs:
           # 以远端 main 为基准重放版本号，避免并发合并导致非快进推送失败。
           # 此时包已发布，本地未提交的版本改动可以安全丢弃。
           git reset --hard --quiet origin/main
-          npm version "$VERSION" --no-git-tag-version --force >/dev/null
-          git add package.json
+          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.version=process.env.VERSION;fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
+          node scripts/publish-packages.mjs --sync
+          git add package.json packages/*/package.json
           git commit -m "chore: 发布 v${VERSION} [skip release]" >/dev/null
 
           if git push origin HEAD:main; then
