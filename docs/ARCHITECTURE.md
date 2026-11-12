@@ -48,7 +48,7 @@ PiIntakeEngine（只读项目代码：code_ls / code_read / code_grep）
 1. **听**：常驻消费飞书群 / 私聊消息，按名单与 `@` 规则做确定性准入。
 2. **判**：未被直接指派的候选交给 Pi 研判（可批量），输出 `accept / stop / ignore / unavailable` 四类决定。
 3. **派**：接单后创建工单与授权（Mandate），先确认「项目 + 起始分支」，再按 `runtime.default` 选择运行时：Orca 用 `orca worktree create --repo ... --base-branch ...` 开 worktree + Agent 终端（默认 Claude Code，可用 `runtime.options.orca.agent` 指定）；Claude Code 用 `git worktree` + `claude --bg` 后台会话；ACP 用 `AcpRuntime` 拉起对应的 ACP Agent。缺项目或分支时不开单，先在会话里追问（群配置里可固定项目和分支，免问答）。
-4. **跟**：Worker 用 `ra report` 上报（失败自动落盘 `state.json`），Router 刷新工单阶段；PR 合并 / 关闭后闭环并通知发起人。
+4. **跟**：Worker 用 `ra report` 上报（失败自动落盘 `state.json`），Router 刷新工单阶段；PR 合并 / 关闭后通知发起人，工单保持开放、可继续追问。
 
 ## 关键约束
 
@@ -221,7 +221,7 @@ ra report \
 | `running` 进行中 | 已派工，worker 正在执行 |
 | `review` 审核中 | worker 已交付，等待发起人验收 |
 | `blocked` 已阻塞 | 等待人工回答、worker 失败/退出，或需要人工推动 |
-| `done` 已完成 | 工单闭环（PR 合并/关闭或人工结束） |
+| `done` 已完成 | 工单闭环（巡查判定无进展自动关闭，或人工结束） |
 
 `done` 是终态；其余四种阶段之间可以互相流转。PR 仍处于 open 时禁止结束工单。
 旧版本八阶段（`draft/accepted/assigned/running/review/person/idle/closed`）的历史数据迁移见 [TICKET-STAGE-MIGRATION.md](TICKET-STAGE-MIGRATION.md)。
@@ -231,5 +231,6 @@ ra report \
 - 派工成功后 Router 跟踪该分支的 PR / MR 状态（`pr:linked` / `pr:state`）。
 - 平台按 worktree 的 `git remote` 自动识别：`github.com` 走 `gh`，其它主机按 GitLab 走 `glab`（需本机安装并完成登录）；GitLab MR 不会交给 `gh`。
 - PR / MR 仍处于 open 时禁止结束工单。
-- PR / MR 合并或关闭后，工单变 `closed`，飞书收到一次闭环通知。
+- PR / MR 合并或关闭后，工单**不**关闭：飞书收到一次进展通知，话题继续开着，用户追问会再次派给 worker。
+- 会话只在两种情况下结束：巡查判定长期无进展（先提醒再自动关闭），或用户主动关闭 / 停止工单。
 - 不做自动合并：合并与否由人决定。

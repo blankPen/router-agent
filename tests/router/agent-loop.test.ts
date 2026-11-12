@@ -705,9 +705,24 @@ describe('已关闭工单话题', () => {
     const reply = outbox.find(item => item.key.startsWith('closed-thread:'))
     expect(reply?.text).toContain('已于')
     expect(reply?.text).toContain('重新开工')
+    expect(reply?.text).not.toContain('新开工单')
     expect(reply?.threadId).toBe('om_1')
     expect(store.getDecision(store.listTriggers().find(t => t.id === 't2')!.decisionId!)?.reason).toBe('thread:closed')
     expect(closedId).toBe('tk-1')
+  })
+
+  it('workspace 已回收时提示可以新开工单', async () => {
+    const { engine, loop, llm, store } = setup([])
+    const closedId = seedClosed(engine)
+    store.markWorkspaceRemoved(closedId, '2026-11-06T10:00:00.000Z')
+
+    engine.ingest(trigger({ id: 't2', externalId: 'om_2', text: '在吗' }))
+    await loop.tick()
+
+    expect(llm.requests).toHaveLength(0)
+    const outbox = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)
+    const reply = outbox.find(item => item.key.startsWith('closed-thread:'))
+    expect(reply?.text).toContain('需要的话，我可以帮你新开工单进行处理。')
   })
 
   it('回复「重新开工」时基于原工单 repo / 起始分支创建新工单，并带上之前描述的需求', async () => {

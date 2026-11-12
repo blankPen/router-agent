@@ -120,7 +120,7 @@ Router 不做对话，只在必要时说话：
 | `retention:pr-urge` | Service | `ticketId` `pr` | 有未合并 PR 的闲置工单已催办 |
 | `retention:closed` | Service | `ticketId` `reason` | 闲置超时自动关单 |
 | `retention:sweep-failed` | Service | `ticketId` `detail` | 单个工单的闲置治理检查失败 |
-| `pr:linked` / `pr:state` | Service | — | PR / MR 跟踪 |
+| `pr:linked` / `pr:state` | Service | — | PR / MR 跟踪；PR 进入 `merged` / `closed` 只更新状态并通知发起人，工单保持开放，可继续追问 |
 | `pr:track-failed` | Service | `ticketId` `prNumber` `repo` `detail` | PR / MR 状态查询无结果；同一工单 + PR 只记一次 |
 | `recover:*` | Service | — | 重启对账 |
 | `recover:interrupted` | Service | `ticketId` `turnId` `mode` `autoRecovered` | 发现 worker 上一轮被服务重启打断，按 `policy.interruptedRecovery` 处置 |
@@ -217,7 +217,7 @@ Router 不做对话，只在必要时说话：
 | `ticket:closed` | Engine | `ticketId` `by` `reason` `stage` | 工单被关闭（人工停止 / 自动关单） |
 | `effect:done` / `effect:failed` | Effects | `kind` `key` / `error` | 派工、停止、清理等内部动作的执行结果 |
 | `cleanup:stop-failed` | Service | `ticketId` `handle` `detail` | 回收工作区前停 worker 失败 |
-| `worker:stop-queued` | Service | `ticketId` `source` | 自动关单（`idle` / `pr:merged` / `pr:closed`）后排队停 worker，workspace 保留给定时任务回收；同 key 已存在时不重复记录 |
+| `worker:stop-queued` | Service | `ticketId` `source` | 自动关单（`idle`）后排队停 worker，workspace 保留给定时任务回收；同 key 已存在时不重复记录 |
 | `cleanup:queued` | Service | `ticketId` `source` | 排队回收 workspace：人工停止（`stop`）与派工半成功（`launch-failed`）；同 key 已存在时不重复记录 |
 | `workspace:sweep` / `workspace:sweep-failed` | Service | `due` `removed` `skipped` `keepHours` / `message` | 定时任务回收已关闭工单残留工作区的汇总；扫描失败只记一次，不影响主流程 |
 | `cleanup:worktree-removed` / `cleanup:worktree-skipped` / `cleanup:no-remove-capability` | Service | `ticketId` `workdir` / `reason` `attempts` | 自动回收 workspace 的结果；脏目录或不可重试的失败只记录一次并通知发起人 |
