@@ -250,9 +250,6 @@ export class AgentLoop {
         if (delivered.length > 0) {
           await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}`)
           result.fannedOut += delivered.length
-          // 未 @ 但被放行的消息（tk-59）：Router 自己也要在话题里回一句。
-          // 否则这条消息既没有确认表情、也没有任何回应，用户只看到「消息被吞了」。
-          if (trigger.unaddressedAdmitted) this.replyAdmitted(trigger, delivered, result)
           return
         }
       }
@@ -663,48 +660,11 @@ export class AgentLoop {
     return this.replyAlwaysChats.has(trigger.chatId)
   }
 
-  /**
-   * 未 @ 但被放行的消息：在话题里回一句「已转给工单的 worker」。
-   *
-   * 按【工单】去重，不是按【消息】：一张工单的话题里只回一次。
-   * 否则用户在话题里每追问一次，就会收到一条一模一样的「已转给工单…」，
-   * 看起来像消息被反复转发（tk-59 的回执收敛）。
-   *
-   * 只发一条、尽量短：worker 的进展与结论会挂在同一条话题里，
-   * Router 不重复展开，避免同一条消息收到两条回执。
-   */
-  private replyAdmitted(trigger: Trigger, delivered: Ticket[], result: TickResult): void {
-    const ticket = delivered[0]
-    if (!ticket) return
-    const queued = this.reply(
-      trigger,
-      `收到，已转给工单「${ticket.title}」（${ticket.id}）的 worker，后续进展会在这个话题里更新。`,
-      `admitted:${ticket.id}`,
-      { thread: true },
-    )
-    if (!queued) {
-      // 这张工单已经回过执了：追问不再重复刷屏，靠确认表情 + worker 在话题里的进展。
-      this.logger.info('loop:admitted-suppressed', {
-        triggerId: trigger.id,
-        chat: trigger.chatId,
-        ticketId: ticket.id,
-      })
-      return
-    }
-    result.replied += 1
-    this.logger.info('loop:admitted-replied', {
-      triggerId: trigger.id,
-      chat: trigger.chatId,
-      ticketId: ticket.id,
-      tickets: delivered.length,
-    })
-  }
-
   /** 回一句到原会话；key 保证同一件事只发一次。 */
   /** thread=true 时用话题回复（挂到原消息下）；否则发普通消息。 */
-  private reply(trigger: Trigger, text: string, key: string, opts: { thread?: boolean } = {}): boolean {
+  private reply(trigger: Trigger, text: string, key: string, opts: { thread?: boolean } = {}): void {
     const rootId = opts.thread ? (trigger.threadKeys?.[0] ?? trigger.threadId.split(':').at(-1) ?? '') : ''
-    return this.store.enqueueOutbox({
+    this.store.enqueueOutbox({
       id: `ob_${key.replace(/[^a-zA-Z0-9:_-]/g, '_')}`,
       key,
       channelKind: trigger.channelId ?? DEFAULT_CHANNEL_ID,
