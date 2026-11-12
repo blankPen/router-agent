@@ -1510,7 +1510,15 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
         )
       }
       if (block.render === 'plugins') {
-        return <PluginSettings plugins={plugins} draft={draft} onChange={setField} />
+        return (
+          <PluginSettings
+            plugins={plugins}
+            draft={draft}
+            onChange={setField}
+            onNotice={setNotice}
+            onPendingRestart={() => setPendingRestart(true)}
+          />
+        )
       }
       if (block.render === 'projects') {
         return (
@@ -1552,7 +1560,7 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
         effect={effect}
         dirty={blockDirty(block)}
         open={open}
-        onToggle={() => setCollapsed(current => ({ ...current, [block.id]: open }))}
+        onToggle={() => setCollapsed(current => ({ ...current, [block.id]: !open }))}
       >
         {open ? body() : null}
       </ConfigBlockView>

@@ -244,7 +244,8 @@ Every field, the `ra config set` allowlist, runtime options, environment variabl
 | `ra logs [--follow]` | Last 50 log lines; `--follow` keeps tailing |
 | `ra update [--check]` | Check and upgrade to the latest npm version: runs `npm install -g router-agent@latest` and restarts the running service; `--no-restart` installs only, `--registry` picks a registry, `--force` installs globally even from a source / linked checkout, `--json` for machines |
 | `ra runtime [list]` | Probe local ACP agents: status / version / source (`--json` for machines) |
-| `ra runtime install <id>` | Install an ACP adapter into `~/.router-agent/runtimes/<agent>` |
+| `ra runtime add <id> <npm-package | path>` | Declare a custom runtime plugin (`runtime.plugins.<id>`); npm packages are downloaded into `~/.router-agent/node_modules` |
+| `ra runtime install <id>` | Install an ACP adapter into `~/.router-agent/runtimes/<agent>`, or download a declared npm plugin package |
 | `ra runtime uninstall <id>` | Remove an ra-managed ACP adapter |
 | `ra runtime check <id>` | Full ACP handshake (`initialize` + `session/new`) |
 | `ra runtime login <id>` | Interactive login (provided by the agent: `acp-claude` runs `claude`, `acp-codex` runs `codex-acp login`) |

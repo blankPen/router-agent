@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 import { runCli, type CliIo } from '../src/cli/index.js'
 import { Store } from '../src/store/db.js'
 import { Engine } from '../src/core/engine.js'
-import { defaultConfig, policyOf } from '../src/config.js'
+import { defaultConfig, loadConfig, policyOf } from '../src/config.js'
 
 function io(homeDir?: string): CliIo & { out: string[]; err: string[] } {
   const out: string[] = []
@@ -212,5 +212,43 @@ describe('ra CLI', () => {
     const output = io()
     expect(await runCli([], output)).toBe(2)
     expect(output.err.join('\n')).toContain('Usage')
+  })
+})
+
+describe('ra runtime add / uninstall 插件运行时', () => {
+  it('本地路径入口写入 runtime.plugins 并提示重启', async () => {
+    const dir = home()
+    await initHome(dir)
+    const output = io(dir)
+    expect(await runCli(['runtime', 'add', 'demo-runtime', './demo-runtime', '--home', dir], output)).toBe(0)
+    expect(loadConfig(dir).runtime.plugins?.['demo-runtime']).toBe('./demo-runtime')
+    expect(output.out.join('\n')).toContain('本地路径插件不需要下载')
+  })
+
+  it('拒绝非法 id、内置 id 与不是包名/路径的入口', async () => {
+    const dir = home()
+    await initHome(dir)
+
+    const badId = io(dir)
+    expect(await runCli(['runtime', 'add', 'Demo_Runtime', './x', '--home', dir], badId)).toBe(2)
+    expect(badId.err.join('\n')).toContain('小写字母、数字与连字符')
+    expect(loadConfig(dir).runtime.plugins?.['Demo_Runtime']).toBeUndefined()
+
+    const builtin = io(dir)
+    expect(await runCli(['runtime', 'add', 'orca', '@acme/runtime-x', '--home', dir], builtin)).toBe(1)
+    expect(builtin.err.join('\n')).toContain('内置运行时')
+
+    const badEntry = io(dir)
+    expect(await runCli(['runtime', 'add', 'demo-runtime', 'not a package', '--home', dir], badEntry)).toBe(2)
+    expect(badEntry.err.join('\n')).toContain('入口只能是 npm 包名')
+  })
+
+  it('uninstall 自定义插件时说明改配置移除', async () => {
+    const dir = home()
+    await initHome(dir)
+    expect(await runCli(['runtime', 'add', 'demo-runtime', './demo-runtime', '--home', dir], io(dir))).toBe(0)
+    const output = io(dir)
+    expect(await runCli(['runtime', 'uninstall', 'demo-runtime', '--home', dir], output)).toBe(0)
+    expect(output.out.join('\n')).toContain("ra config set runtime.plugins.demo-runtime ''")
   })
 })

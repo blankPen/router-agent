@@ -115,6 +115,9 @@ Router 不做对话，只在必要时说话：
 | `plugin:load-failed` | Plugin loader | `kind` `id` `package` `detail` | 插件包无法解析或导入（路径错、缺依赖、未安装）；服务继续启动，面板与 `/api/config` 会显示失败原因 |
 | `plugin:create-failed` | Runtime / Channel loader | `kind` `id` `detail` | 插件入口已导入，但 `create()` / `createAll()` 抛错；该实例不注册，其它插件不受影响 |
 | `plugin:id-mismatch` | Runtime / Channel loader | `kind` `id` `declared` `detail` | 配置里的插件 id 与插件声明的 `meta.id` 不一致；面板按配置 id 回链，提示用户统一命名 |
+| `plugin:install-started` | Plugin installer | `home` `package` `version` | 开始把配置里的 npm 插件包装到 `<RA_HOME>/node_modules` |
+| `plugin:install-succeeded` | Plugin installer | `home` `package` `version` | npm 安装完成，且加载器按 RA_HOME 能解析到该包；重启后才会加载 |
+| `plugin:install-failed` | Plugin installer | `home` `package` `version` `detail` | npm 退出码非零、超时、包没落盘或加载器解析不到；`detail` 是截断后的 npm 输出 |
 | `channel:consumer-started` / `channel:consumer-start-failed` | CLI | `channel` / `channel` `detail` | 已加载通道的入站消费启动结果；自定义通道启动失败不会阻塞其它通道 |
 | `channel:feishu-missing` | CLI | `detail` | 配置里没有可用的飞书通道；服务继续启动，但飞书消息不会入站 |
 | `channel:unreact-failed` | CLI | `channel` `messageId` `detail` | 回复发送后撤销回执失败；不影响已发出的回复 |

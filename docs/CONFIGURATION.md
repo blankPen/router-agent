@@ -124,6 +124,11 @@ runtime:
   #   claude-code:
   #     - name: router-agent
   #       repo: /Users/me/router-agent   # Claude Code 需要本地仓库绝对路径
+  # 自定义运行时插件：npm 包名或本地路径；npm 包要先下载到 <RA_HOME>/node_modules
+  # （用 ra runtime add / ra runtime install，或面板「安装依赖」）
+  # plugins:
+  #   my-runtime: '@acme/router-agent-runtime'
+  #   local-runtime: ./local-runtime
 
 # orca 项目清单：开单前必须确认「哪个项目 + 哪个起始分支」
 projects: []
@@ -160,8 +165,9 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 | `retention.enabled` / `idleHours` / `closeGraceHours` / `zombieHours` / `sweepMinutes` | 见「闲置工单治理」 |
 | `workspace.enabled` / `keepHours` / `sweepMinutes` | 见「关单后的工作区回收」 |
 | `worker.evidence.ui` | `off` / `warn` / `enforce`；UI 证据门禁档位（保存后需重启） |
-| `runtime.default` | `orca` / `claude-code` / `acp` / `acp-*` |
+| `runtime.default` | `orca` / `claude-code` / `acp` / `acp-*` / `runtime.plugins` 里声明的插件 id |
 | `runtime.options.<运行时>.<键>` | 运行时自己的选项；键由该运行时声明，见「运行时选项」 |
+| `runtime.plugins.<插件 id>` | npm 包名、`./path`，或 `{ package / path / plugin, entry?, enabled? }`；自定义运行时插件，见 [RUNTIME.md](RUNTIME.md) |
 | `server.port` | 1–65535 |
 | `feishu.appId` / `reaction` / `directMessages` / `allowed` / `bots` / `botOpenIds` / `botNames` | 字符串、布尔或逗号分隔列表 |
 | `feishu.chats` | 逗号分隔 chat_id；已有条目的 mode / 绑定 / sync 保留，新条目默认 `all` |
@@ -177,6 +183,7 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 | `chatSync.<chatId>` | `ra config set chatSync.oc_xxx true` | 启动时补拉该群历史 |
 | `chatAllow.<chatId>` | `ra config set chatAllow.oc_xxx ou_a,ou_b` | 空值 = 沿用全局 `feishu.allowed` |
 | `runtime.options.<运行时>.<键>` | `ra config set runtime.options.orca.agent codex` | 运行时专属选项；按该运行时的声明校验 |
+| `runtime.plugins.<插件 id>` | `ra config set runtime.plugins.my-runtime '@acme/router-agent-runtime'` | 声明自定义运行时插件；npm 包还要用 `ra runtime install my-runtime` 下载 |
 
 `router.session.*`、`router.persona.*`、`feishu.images.*` 不在 `config set` 的白名单里，用 `ra config edit` 或 Web 面板改；`worker.tools.*` 面板不提供，只能 `ra config edit` 直接改文件。
 

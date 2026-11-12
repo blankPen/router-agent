@@ -19,6 +19,7 @@ import type { IdentityStatusView } from '@router-agent/channel-feishu'
 import type { WorkerStateFile } from '#runtime/report-poller.js'
 import type { ResumeHint } from '#runtime/port.js'
 import type { WorkspaceAdminPort } from '#runtime/workspaces/overview.js'
+import { PluginInstallStartError, type PluginPackageAdmin } from './plugin-admin.js'
 import { readLogs } from './log-tail.js'
 import type { LogAssistantQuestion, LogDiagnosis, LogSuggestion } from './log-assistant.js'
 import { buildIssueBody, type IssueReporter } from './issue-report.js'
@@ -107,6 +108,8 @@ export interface ApiServerOptions {
   resumeHint?: (ticketId: string) => Promise<ResumeHint | null> | ResumeHint | null
   /** ACP 运行时探测与安装；缺省时新端点返回 404。 */
   runtimeAdmin?: AcpRuntimeAdmin
+  /** 插件 npm 包安装任务；缺省时 `/api/plugins/install` 返回 404。 */
+  pluginAdmin?: PluginPackageAdmin
   /** 通道管理能力（飞书实现由 FeishuBotAdmin 提供）；缺省时相关端点返回 404。 */
   feishuBot?: ChannelAdmin
   /** 已注册的消息通道；面板据此渲染「渠道配置」的渠道列表。缺省时返回空列表。 */
@@ -880,6 +883,36 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
     if (installJobPath && req.method === 'GET') {
       if (!opts.runtimeAdmin) return respond(res, 404, { error: 'runtime-admin-not-available' })
       const job = opts.runtimeAdmin.installJob(installJobPath[1]!)
+      if (!job) return respond(res, 404, { error: 'job-not-found' })
+      return respond(res, 200, job)
+    }
+
+    if (path === '/api/plugins/install' && req.method === 'POST') {
+      if (!opts.pluginAdmin) return respond(res, 404, { error: 'plugin-admin-not-available' })
+      const body = await readJson(req)
+      const kind = body.kind === undefined || body.kind === 'runtime'
+        ? 'runtime' as const
+        : body.kind === 'channel' ? 'channel' as const : null
+      if (!kind) return respond(res, 400, { error: 'invalid-kind', message: 'kind 只能是 runtime / channel' })
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      if (!id) return respond(res, 400, { error: 'id-required' })
+      try {
+        const job = opts.pluginAdmin.startInstall(kind, id, typeof body.version === 'string' ? { version: body.version } : {})
+        onEvent({ event: 'api:plugin-install', kind, id, package: job.packageName, version: job.version })
+        // jobId 与 ACP 安装端点保持同一字段名，面板轮询写同一套逻辑。
+        return respond(res, 202, { ok: true, jobId: job.id, ...job })
+      } catch (error) {
+        if (error instanceof PluginInstallStartError) {
+          return respond(res, error.code === 'busy' ? 409 : 400, { error: error.code, message: error.message })
+        }
+        throw error
+      }
+    }
+
+    const pluginJobPath = /^\/api\/plugins\/install\/([^/]+)$/.exec(path)
+    if (pluginJobPath && req.method === 'GET') {
+      if (!opts.pluginAdmin) return respond(res, 404, { error: 'plugin-admin-not-available' })
+      const job = opts.pluginAdmin.installJob(pluginJobPath[1]!)
       if (!job) return respond(res, 404, { error: 'job-not-found' })
       return respond(res, 200, job)
     }
