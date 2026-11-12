@@ -226,6 +226,43 @@ describe('需求识别（intake）', () => {
     expect(engine.store.listTickets()).toHaveLength(0)
   })
 
+  it('管理员自己提的需求自己终审：「确认派单」直接开单，不重新分析', async () => {
+    const llm = new FakeIntake([
+      QUESTIONS,
+      {
+        action: 'report',
+        reply: '整理好了',
+        report: { title: '登录 500', problem: '点击登录返回 500', background: '日常使用', steps: '登录页点登录' },
+      },
+    ])
+    // 发起人 Bob 同时是本群终审管理员。
+    const { engine, loop, store, advance } = setup(llm, { approvers: ['ou_bob'], policy: { allowed: ['ou_bob'] } })
+    engine.ingest(trigger())
+    await loop.tick()
+    expect(store.latestIntakeByThread('feishu:oc_dev:om_1')?.status).toBe('ready')
+    const analyzeCalls = llm.requests.length
+
+    advance('2026-11-12T10:03:10.000Z')
+    engine.ingest(trigger({
+      id: 't_self_approve',
+      externalId: 'om_self_approve',
+      threadId: 'feishu:oc_dev:om_1',
+      actorId: 'ou_bob',
+      actorName: 'Bob',
+      text: '确认派单',
+      addressed: 'none',
+      receivedAt: '2026-11-12T10:03:00.000Z',
+    }))
+    await loop.tick()
+
+    const tickets = engine.store.listTickets()
+    expect(tickets).toHaveLength(1)
+    expect(tickets[0]?.title).toBe('登录 500')
+    expect(store.latestIntakeByThread('feishu:oc_dev:om_1')?.status).toBe('approved')
+    // 终审不能再触发一轮分析：否则确认完只会重新整理需求单，永远不派单。
+    expect(llm.requests).toHaveLength(analyzeCalls)
+  })
+
   it('管理员驳回后需求单结束，不派单', async () => {
     const llm = new FakeIntake([
       QUESTIONS,

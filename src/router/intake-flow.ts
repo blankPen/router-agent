@@ -174,6 +174,13 @@ export class IntakeCoordinator {
         this.decideIgnore(trigger, 'intake:dismissed', 'inferred')
         return 'handled'
       }
+      // 管理员自己提的需求、自己再终审时，「确认派单 / 驳回」必须按终审处理。
+      // 需求单一旦 ready，下面「发起人补充信息」的分支会把它当成新一轮回答，
+      // 重新分析一遍再让人确认 —— 表现为确认完永远不进派单，一直在群里来回弹。
+      if (active.status === 'ready' && this.canApprove(trigger) && (isApprovalCommand(trigger.text) || isRejectionCommand(trigger.text))) {
+        await this.handleApproval(active, trigger)
+        return 'handled'
+      }
       // 群白名单是硬边界：名单外的人不能借「继续追问」绕过准入。
       if (!this.canRequest(trigger)) {
         this.logger.warn('intake:requester-not-allowed', { triggerId: trigger.id, chat: trigger.chatId, actor: trigger.actorId })
