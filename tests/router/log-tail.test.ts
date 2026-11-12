@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { MAX_LOG_LINES, readLogs } from '../../src/router/log-tail.js'
+import { MAX_LOG_LINES, readLogTail, readLogs } from '../../src/router/log-tail.js'
 
 function jsonLine(payload: Record<string, unknown>): string {
   return `${JSON.stringify(payload)}\n`
@@ -119,5 +119,45 @@ describe('日志增量读取', () => {
     appendFileSync(path, jsonLine({ level: 'info', message: '第二行中文日志' }))
     const next = readLogs(path, { cursor: first.cursor })
     expect(next.entries[0]?.message).toBe('第二行中文日志')
+  })
+})
+
+describe('排查助手回看日志', () => {
+  let dir: string
+  let path: string
+
+  function setup(content: string): void {
+    dir = mkdtempSync(join(tmpdir(), 'ra-log-tail-assistant-'))
+    path = join(dir, 'router-agent.log')
+    writeFileSync(path, content, 'utf8')
+  }
+
+  afterEach(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('文件不存在时返回空数组', () => {
+    setup('')
+    expect(readLogTail(join(dir, 'missing.log'))).toEqual([])
+  })
+
+  it('能回看超过面板上限的行数，错误日志不被挤掉', () => {
+    // 先写一条错误，再写 3000 条 info：错误落在面板 1000 行窗口之外。
+    const content = [
+      jsonLine({ at: '2026-11-09T10:00:00.000Z', level: 'error', message: 'effect:failed', error: 'boom' }),
+      ...Array.from({ length: 3000 }, (_, index) =>
+        jsonLine({ at: '2026-11-09T10:01:00.000Z', level: 'info', message: `m-${index}` })),
+    ].join('')
+    setup(content)
+
+    expect(readLogs(path).entries.some(entry => entry.level === 'error')).toBe(false)
+    const entries = readLogTail(path, { lines: 5000 })
+    expect(entries.some(entry => entry.level === 'error')).toBe(true)
+    expect(entries[0]?.message).toBe('effect:failed')
+  })
+
+  it('按行数上限截断', () => {
+    setup(Array.from({ length: 100 }, (_, index) => jsonLine({ level: 'info', message: `m-${index}` })).join(''))
+    expect(readLogTail(path, { lines: 10 })).toHaveLength(10)
   })
 })

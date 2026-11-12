@@ -5,6 +5,7 @@ import {
   ACP_RUNTIME_ID,
   CLAUDE_CODE_RUNTIME_ID,
   CODEX_APP_RUNTIME_ID,
+  HERDR_RUNTIME_ID,
   ORCA_RUNTIME_ID,
   WORKER_RUNTIMES,
   normalizeRuntimeId,
@@ -12,6 +13,7 @@ import {
 } from '../catalog.js'
 import { acpAgentOf } from './agents.js'
 import { detectCodexBinary, probeCodexHandshake } from '../codex/detect.js'
+import { ensureHerdrServer } from '../herdr/server.js'
 import {
   checkAcpAgent,
   detectAcpAgent,
@@ -58,6 +60,8 @@ export interface AcpRuntimeAdminOptions {
   env: NodeJS.ProcessEnv
   config: AppConfig
   runner?: (bin: string) => CommandRunner
+  /** 探测时拉起 Herdr 服务端最多等多久（毫秒）。 */
+  herdrServerTimeoutMs?: number
 }
 
 interface BuiltinProbe {
@@ -132,15 +136,17 @@ export class AcpRuntimeAdmin {
    * 不代表已经登录；登录状态只有带 login.check 的 ACP Agent 才会判定。
    */
   private async builtinChoices(): Promise<RuntimeChoice[]> {
-    const [orca, claude, codex] = await Promise.all([
+    const [orca, claude, codex, herdr] = await Promise.all([
       this.probeBuiltin('orca', ORCA_RUNTIME_ID),
       this.probeBuiltin('claude', CLAUDE_CODE_RUNTIME_ID),
       this.probeCodex(),
+      this.probeHerdr(),
     ])
     const probes = new Map<string, BuiltinProbe>([
       [ORCA_RUNTIME_ID, orca],
       [CLAUDE_CODE_RUNTIME_ID, claude],
       [CODEX_APP_RUNTIME_ID, codex],
+      [HERDR_RUNTIME_ID, herdr],
     ])
     return WORKER_RUNTIMES.map(meta => {
       if (meta.id === ACP_RUNTIME_ID) return this.genericAcpChoice(meta)
@@ -157,12 +163,16 @@ export class AcpRuntimeAdmin {
             ? 'claude'
             : meta.id === CODEX_APP_RUNTIME_ID
               ? (probe.command ?? 'codex')
-              : 'orca',
+              : meta.id === HERDR_RUNTIME_ID
+                ? (probe.command ?? 'herdr')
+                : 'orca',
           label: meta.id === CLAUDE_CODE_RUNTIME_ID
             ? 'Claude Code CLI'
             : meta.id === CODEX_APP_RUNTIME_ID
               ? 'Codex CLI'
-              : 'Orca CLI',
+              : meta.id === HERDR_RUNTIME_ID
+                ? 'Herdr CLI'
+                : 'Orca CLI',
           installed: Boolean(probe.command),
           ...(probe.version ? { version: probe.version } : {}),
           ...(meta.installUrl ? { installUrl: meta.installUrl } : {}),
@@ -274,6 +284,48 @@ export class AcpRuntimeAdmin {
       ...(version ? { version } : {}),
       ...(failure ? { reason: failure } : {}),
       ...(requirements.length > 0 ? { requires: requirements } : {}),
+    }
+  }
+
+  /**
+   * Herdr：CLI 能跑之外，还要看服务端在不在。
+   *
+   * Herdr 的所有命令都走本地 socket 服务端；服务端没起时每条命令都返回
+   * `server_not_running`，派工必然失败。
+   *
+   * 所以这里顺手把服务端拉起来（detached 启动，脱离当前进程），
+   * 拉不起来才给 unverified —— 卡片仍可选，但明确提示缺什么。
+   */
+  private async probeHerdr(): Promise<BuiltinProbe> {
+    const resolved = resolveExecutable('herdr', this.env)
+    if (!resolved) return { status: 'not-installed', reason: '未找到 herdr CLI' }
+    const versionResult = await this.runProbe(resolved, ['--version'])
+    const version = parseVersion(versionResult.stdout) ?? parseVersion(versionResult.stderr)
+    if (versionResult.code !== 0) {
+      return {
+        status: 'incompatible',
+        command: resolved,
+        ...(version ? { version } : {}),
+        reason: `herdr --version 退出码 ${versionResult.code}`,
+      }
+    }
+    const server = await ensureHerdrServer({
+      runner: this.runner(resolved),
+      bin: resolved,
+      timeoutMs: this.opts.herdrServerTimeoutMs ?? 8_000,
+    })
+    if (!server.running) {
+      return {
+        status: 'unverified',
+        command: resolved,
+        ...(version ? { version } : {}),
+        reason: server.reason ?? '未找到运行中的 Herdr 服务端；派工前请先运行 herdr server',
+      }
+    }
+    return {
+      status: 'ready',
+      command: resolved,
+      ...(version ? { version } : {}),
     }
   }
 

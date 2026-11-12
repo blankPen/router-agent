@@ -145,7 +145,9 @@ export function LogAssistantFab({ onOpenConfig }: { onOpenConfig: (section?: str
       const data = await sendJson<{ issue: { number: number; url: string } }>(
         '/api/logs/assistant/issue',
         'POST',
-        { question, diagnosis: result },
+        { question, diagnosis: result, ...(result.next?.find(step => step.kind === 'issue')?.issueTitle
+          ? { title: result.next.find(step => step.kind === 'issue')?.issueTitle }
+          : {}) },
       )
       setIssue(data.issue)
     } catch (err) {
@@ -161,6 +163,15 @@ export function LogAssistantFab({ onOpenConfig }: { onOpenConfig: (section?: str
     void analyze(text)
   }, [analyze])
 
+  /**
+   * 「上报 GitHub issue」快捷入口：先分析，看完结论再决定要不要报。
+   *
+   * 这里只负责打开面板并跑分析，不代替用户提交：
+   * 自动建 issue 会在用户还没看结论时就往仓库里写东西，
+   * 结论若是「配置没生效」，用户根本不想报。所以真正的上报入口是
+   * 弹窗底部那个按钮——分析完、用户看过结论，由用户点一下才发出。
+   * 快捷菜单只是把用户送到「结论 + 上报按钮」这一步。
+   */
   useEffect(() => {
     if (!open) return
     const onKey = (event: globalThis.KeyboardEvent): void => {
@@ -198,8 +209,7 @@ export function LogAssistantFab({ onOpenConfig }: { onOpenConfig: (section?: str
           <button
             type="button"
             role="menuitem"
-            disabled={!status?.llmConfigured}
-            title={status?.llmConfigured ? '先分析，再把结论与日志贴成 issue' : '需要先配置模型才能分析'}
+            title="先分析最近的错误日志，看完结论再决定要不要上报"
             onClick={() => openWithAnalysis('最近的错误日志是什么问题？帮我排查一下。')}
           >
             <Icon name="external" size={14} />

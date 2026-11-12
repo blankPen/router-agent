@@ -48,7 +48,7 @@ export function createIssueReporter(opts: IssueReporterOptions): IssueReporter {
       if (result.code !== 0) {
         const reason = (result.stderr || result.stdout || '').trim().slice(0, 300)
         logger.error('issue:create-failed', { repo, code: result.code, detail: reason })
-        throw new Error(`issue:create-failed: ${reason || `gh 退出码 ${result.code}`}`)
+        throw new Error(`issue:create-failed: ${explainFailure(result.code, reason)}`)
       }
       const url = result.stdout.trim().split('\n').filter(Boolean).pop() ?? ''
       const number = Number(url.match(/\/(\d+)\s*$/)?.[1] ?? 0)
@@ -56,6 +56,35 @@ export function createIssueReporter(opts: IssueReporterOptions): IssueReporter {
       return { number, url }
     },
   }
+}
+
+/**
+ * 把 `gh` 的失败翻译成人能直接照做的中文提示。
+ *
+ * 裸的英文报错（`spawn gh ENOENT` / `HTTP 401: Bad credentials`）用户看不懂，
+ * 也不知道下一步该干什么。这里按失败类型给出具体动作，
+ * 认不出来的就把原始报错带出来，不吞信息。
+ */
+export function explainFailure(code: number, reason: string): string {
+  const text = reason.trim()
+  // 没装 gh：spawn 直接 ENOENT，退出码 127。
+  if (code === 127 || /ENOENT|command not found|not found/i.test(text)) {
+    return `未找到 gh 命令，请先安装 GitHub CLI（brew install gh）后重试${text ? `：${text}` : ''}`
+  }
+  // 凭据无效要先判：它的提示里也带 gh auth login，混进「未登录」会看不出是 token 过期。
+  if (/HTTP 401|Bad credentials/i.test(text)) {
+    return `GitHub 凭据无效，请重新执行 gh auth login 登录${text ? `：${text}` : ''}`
+  }
+  if (/not logged in|gh auth login/i.test(text)) {
+    return `gh 未登录，请先执行 gh auth login 登录 GitHub${text ? `：${text}` : ''}`
+  }
+  if (/HTTP 403|Resource not accessible|Permission denied/i.test(text)) {
+    return `当前账号没有该仓库的创建权限，请换用有权限的账号或改 RA_ISSUE_REPO 指向可用仓库${text ? `：${text}` : ''}`
+  }
+  if (/Could not resolve to a Repository|not found/i.test(text)) {
+    return `仓库不存在或无权访问，请检查 RA_ISSUE_REPO 配置${text ? `：${text}` : ''}`
+  }
+  return text || `gh 退出码 ${code}`
 }
 
 /**
@@ -97,6 +126,17 @@ export function buildIssueBody(input: {
   lines.push('## 证据日志')
   lines.push('')
   if (diagnosis.evidence.length > 0) {
+    // 错误日志单独提到最前面：用户上报 issue 就是冲着错误来的，
+    // 混在几十条 info 里等于没有。
+    const errors = diagnosis.evidence.filter(item => item.level === 'error')
+    if (errors.length > 0) {
+      lines.push('### 错误日志')
+      lines.push('')
+      lines.push('```text')
+      for (const item of errors) lines.push(formatEvidenceLine(item))
+      lines.push('```')
+      lines.push('')
+    }
     lines.push('```text')
     for (const item of diagnosis.evidence) lines.push(formatEvidenceLine(item))
     lines.push('```')

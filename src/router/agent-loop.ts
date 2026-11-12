@@ -212,6 +212,9 @@ export class AgentLoop {
         if (delivered.length > 0) {
           await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}`)
           result.fannedOut += delivered.length
+          // 未 @ 但被放行的消息（tk-59）：Router 自己也要在话题里回一句。
+          // 否则这条消息既没有确认表情、也没有任何回应，用户只看到「消息被吞了」。
+          if (trigger.unaddressedAdmitted) this.replyAdmitted(trigger, delivered, result)
           return
         }
       }
@@ -592,12 +595,39 @@ export class AgentLoop {
    * 这条消息要不要回。
    *
    * - 私聊、@机器人：一定回；
+   * - 群里没 @ 但话题已绑定在办工单、被放行处理（tk-59）：也回，
+   *   否则用户既看不到确认表情，也等不到任何回应；
    * - 群里没 @：只有配置为 `mode: all` 的会话才回。
    *   全量接收意味着「所有消息都当对话听」，不能只听不回。
    */
   private shouldReply(trigger: Trigger): boolean {
     if (trigger.addressed !== 'none') return true
+    if (trigger.unaddressedAdmitted) return true
     return this.replyAlwaysChats.has(trigger.chatId)
+  }
+
+  /**
+   * 未 @ 但被放行的消息：在话题里回一句「已转给工单的 worker」。
+   *
+   * 只发一条、尽量短：worker 的进展与结论会挂在同一条话题里，
+   * Router 不重复展开，避免同一条消息收到两条回执。
+   */
+  private replyAdmitted(trigger: Trigger, delivered: Ticket[], result: TickResult): void {
+    const ticket = delivered[0]
+    if (!ticket) return
+    this.reply(
+      trigger,
+      `收到，已转给工单「${ticket.title}」（${ticket.id}）的 worker，后续进展会在这个话题里更新。`,
+      `admitted:${trigger.id}`,
+      { thread: true },
+    )
+    result.replied += 1
+    this.logger.info('loop:admitted-replied', {
+      triggerId: trigger.id,
+      chat: trigger.chatId,
+      ticketId: ticket.id,
+      tickets: delivered.length,
+    })
   }
 
   /** 回一句到原会话；key 保证同一件事只发一次。 */

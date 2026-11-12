@@ -98,6 +98,15 @@ describe('Store', () => {
     s.close()
   })
 
+  it('未 @ 放行标记随 Trigger 落库，取回来还在', () => {
+    const s = store()
+    s.insertTrigger(trigger({ id: 't1', externalId: 'om_1', addressed: 'none', unaddressedAdmitted: true }))
+    s.insertTrigger(trigger({ id: 't2', externalId: 'om_2', addressed: 'none' }))
+    expect(s.getTrigger('t1')?.unaddressedAdmitted).toBe(true)
+    expect(s.getTrigger('t2')?.unaddressedAdmitted).toBeUndefined()
+    s.close()
+  })
+
   it('工单可按阶段查询，并保留 PR 字段', () => {
     const s = store()
     s.insertTicket(ticket)

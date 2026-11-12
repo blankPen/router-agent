@@ -117,10 +117,12 @@ export function normalizeFeishuEventDetailed(raw: Record<string, unknown>, cfg: 
   const mentionIds = (event.mentions ?? []).map(m => m.id ?? '').filter(Boolean)
   const mentionNames = (event.mentions ?? []).map(m => m.name ?? '').filter(Boolean)
   const mentionedBot = mentionIds.some(id => cfg.botOpenIds.includes(id)) || mentionNames.some(name => cfg.botNames.includes(name))
+  // 未 @ 机器人的消息是否放行：已绑定工单的话题内，名单内成员不 @ 也要触发回复（tk-59）。
+  // 放行结果记在 Trigger 上，后续的表情（shouldAcknowledge）与回执（agent-loop）都靠它判断。
+  let unaddressedAdmitted = false
   if (!isP2p && chat?.mode === 'mention' && !mentionedBot) {
-    // 已绑定工单的话题内，名单内成员不 @ 也要触发回复（tk-59）：由装配层注入的判定决定。
-    const admitted = allowUnaddressed?.({ chatId, actorId: senderId, threadKeys }) ?? false
-    if (!admitted) return { dropped: 'mention:required', chatId, actorId: senderId }
+    unaddressedAdmitted = allowUnaddressed?.({ chatId, actorId: senderId, threadKeys }) ?? false
+    if (!unaddressedAdmitted) return { dropped: 'mention:required', chatId, actorId: senderId }
   }
 
   const text = (event.content ?? '').trim()
@@ -153,6 +155,7 @@ export function normalizeFeishuEventDetailed(raw: Record<string, unknown>, cfg: 
     isBot: senderIsBot,
     text: text || '[附件]',
     addressed: isP2p ? 'direct' : mentionedBot ? 'mention' : 'none',
+    ...(unaddressedAdmitted ? { unaddressedAdmitted: true } : {}),
     mediaOnly,
     receivedAt: toIso(event.create_time),
     disposition: 'pending',

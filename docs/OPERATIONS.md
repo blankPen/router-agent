@@ -9,6 +9,7 @@ Router 不做对话，只在必要时说话：
 | 场景 | 行为 |
 |-|-|
 | **会被处理的已寻址消息**（@ / 私聊 / 全量接收群） | 收到后**立即**加一个确认表情（默认 `Typing` ⌨️），回复发出后自动取消；被准入拦截的消息不加 |
+| **未 @ 但话题已绑定在办工单的消息**（名单内成员，tk-59） | 照样加确认表情，并在话题里回一句「收到，已转给工单…（id）的 worker」；消息直接投给该工单的 worker，不新开工单 |
 | 群里 @机器人，但只是寒暄 / 试探 | **Pi 生成**一句礼貌回复，作为**普通消息**发出；不建单 |
 | 群里 @机器人，是真需求 | 只发一条**话题**消息：「工单「标题」（id）已开始执行。后续进展会在这个话题里更新。」，不再额外回「我帮你创建了工单」之类的普通消息 ack |
 | 未 @ 的群消息 | 走 Pi 研判；判为闲聊则**完全静默**（不刷屏） |
@@ -23,7 +24,7 @@ Router 不做对话，只在必要时说话：
 | worker 交付结论 | 简单单行回复走**纯文本**；带 Markdown 的以**飞书卡片**渲染（卡片内 Markdown 先归一化）回话题；有文档 / PR 链接一并展示 |
 | worker 进展（`--state progress` 或 Router 主动巡检） | 上报的进展**不逐条发送**：按 `progress.syncMs` 合并成一条话题消息（追问的回答除外）；worker 静默时 Router 按 `progress.probeMs` 主动取进展（优先会话记录，其次终端屏幕），整理成语义摘要（助手文本 + 一行动作概要，过滤工具调用噪音）发到话题，同一静默期按 `progress.repeatMs` 限流 |
 
-- 确认表情是 best-effort：失败只记 `feishu:reaction-failed`，不影响研判；只对首次入库、且是在跟它说话（@ / 私聊 / 全量接收群）的消息加；被准入拦截（群白名单外、`admission: ignore`）的消息不加，避免「有表情、永远没回复」；重放不会重复加；回复发出后自动撤销（`feishu:unreact-failed` 是撤销失败的日志）。`ra config set feishu.reaction ""` 可关闭。
+- 确认表情是 best-effort：失败只记 `feishu:reaction-failed`，不影响研判；只对首次入库、且是在跟它说话（@ / 私聊 / 全量接收群 / 未 @ 但话题已绑定在办工单）的消息加；被准入拦截（群白名单外、`admission: ignore`）的消息不加，避免「有表情、永远没回复」；重放不会重复加；回复发出后自动撤销（`feishu:unreact-failed` 是撤销失败的日志）。`ra config set feishu.reaction ""` 可关闭。
 - 全部 emoji_type 见飞书文档「表情文案」，注意**大小写敏感**（`Typing` 不是 `TYPING`）。
 - 出站按内容分流：**单行、≤200 字、不含 Markdown 语法**的回复直接用 `text` 消息；其余用飞书**互动卡片**渲染 Markdown，卡片失败自动降级为 post 富文本。分流规则：`threadId` 为空 = 普通消息，有值 = 话题回复。
 - 卡片内的 Markdown 会先归一化（`normalizeCardMarkdown`），把 Card 1.0 不支持的语法降级掉：`#` 标题 → 加粗行、`>` 引用 → `▍`、表格 → 加粗表头 + 列表行、`- [x]` → ☑ / ☐、`<br>` → 换行、`![图片](http...)` → 可点击链接；代码块内原样保留。
@@ -51,7 +52,7 @@ Router 不做对话，只在必要时说话：
 | 事件 | 来源 | 关键字段 | 说明 |
 |-|-|-|-|
 | `feishu:ready` | 事件消费者 | — | 事件流已连上 |
-| `trigger:ingested` | Source | `id` `chat` `addressed` `threadKeys` `topic` | 用户消息进入系统；`topic=true` 表示事件带了话题 ID（omt_） |
+| `trigger:ingested` | Source | `id` `chat` `addressed` `admitted` `threadKeys` `topic` | 用户消息进入系统；`topic=true` 表示事件带了话题 ID（omt_）；`admitted=true` 表示没 @ 但因话题已绑定在办工单被放行（tk-59） |
 | `trigger:dropped` | Source | `reason` `chat` `actor` | 收到但被过滤 |
 | `trigger:admitted-unaddressed` | CLI | `chat` `actor` `keys` | 已绑定工单的话题里，名单内成员没 @ 机器人也放行处理（tk-59） |
 | `thread:created` | Engine | `threadId` `source` `chat` | 首次见到某条线程，登记规范 ID |
@@ -114,6 +115,7 @@ Router 不做对话，只在必要时说话：
 | `feishu:bot-identity-failed` | Identity | `detail` | 机器人身份识别失败，`mode: mention` 的群会丢消息，需人工确认 |
 | `feishu:chat-allowlist-empty` | Identity | `chat` `name` `count` | 群级允许名单配了却一个都解析不出来，该群按「拒绝所有人」处理 |
 | `loop:trigger-failed` | Agent Loop | `triggerId` `chat` `detail` | 单条消息处理异常，同批其它消息不受影响 |
+| `loop:admitted-replied` | Agent Loop | `triggerId` `chat` `ticketId` `tickets` | 未 @ 放行的消息已投给工单 worker，Router 在话题里回了一句「已转给工单」 |
 | `decision:engine-failed` | Agent Loop | `triggerId` `detail` | 研判引擎调用失败，按 unavailable 处理并留下原因 |
 | `chat:reply-failed` | Agent Loop | `triggerId` `chat` `reason` `detail` | 回复模型失败，已退回固定话术 |
 | `session:transcript-failed` / `session:reset-failed` | Agent Loop | `key` `detail` | 会话转录 / `/new` 重置失败，不影响当轮回复 |
@@ -188,7 +190,7 @@ grep '"message":"trigger:' ~/.router-agent/logs/router-agent.log
 面板右下角常驻一个**智能排查助手悬浮按钮**，不用切到「日志」页也能用：
 
 1. 服务日志里出现 `error` 时，按钮变成红色并带上错误条数，同时弹一条「检测到 N 条新的错误日志」的提示；没有错误时是普通状态。
-2. 鼠标移到按钮上会展开快捷菜单：**智能分析异常**（直接分析最近的错误）、**上报 GitHub issue**、**打开排查面板**。
+2. 鼠标移到按钮上会展开快捷菜单：**智能分析异常**（直接分析最近的错误）、**上报 GitHub issue**（打开面板并分析，看完结论再决定要不要报）、**打开排查面板**。
 3. 点开后是弹窗：描述问题（也可以点常见问题快捷入口）→ 给出结论、可能原因、建议的下一步、证据日志；结论属于配置类时给「去配置页修改」的入口，属于缺陷 / 体验类时给「一键上报 GitHub issue」的按钮。
 
 - 有配置模型时由模型总结，结论里会标注「模型总结」；没配模型或模型调用失败时自动退回**规则式排查**（内置「事件名 → 症状」知识库），结论标注「规则排查」，降级原因写在结论下方。
@@ -213,6 +215,29 @@ grep '"message":"trigger:' ~/.router-agent/logs/router-agent.log
 #### 一键上报 GitHub issue
 
 判定为缺陷 / 体验问题时，点「一键上报 GitHub issue」会把**问题描述 + 排查结论 + 可能原因 + 建议 + 证据日志**拼成一条 issue 发到 `blankPen/router-agent`（仓库可用环境变量 `RA_ISSUE_REPO` 覆盖）。走 `gh` CLI，与 PR 跟踪共用同一套登录态，用户不用额外配置。issue 正文里的日志就是面板上看到的那批证据。
+
+上报入口有两处，任意一处都会真的建出 issue：
+
+- **悬浮菜单的「上报 GitHub issue」**：打开面板并分析，**不会自动提交**——分析完、用户看过结论后，弹窗底部才出现「一键上报 GitHub issue」，由用户点一下才发出。结论若是「配置没生效」，用户可以不上报。
+- **弹窗底部的「一键上报 GitHub issue」**：结论里命中缺陷 / 体验类问题时出现。配置类与缺陷类同时命中时，**两个入口都给出**——只给「去配置页修改」的话，缺陷就报不上去。
+
+issue 正文分四段：**问题描述**、**排查结论**（可能原因 + 建议的下一步）、**错误日志**、**证据日志**。其中「错误日志」段把 `error` 级的条目单独提到最前面——用户上报 issue 就是冲着错误来的，混在几十条 `info` 里等于没有。助手回看日志的窗口也比面板大（5000 行 / 4MB），避免服务一忙、错误被后来的 `info` 挤出窗口。
+
+> 排查助手判断「配置类 / 缺陷类」时，只有真正的失败事件才算症状。消息进线（`trigger:ingested`）、建单（`thread:created`）、研判（`router:decision`）、派工（`launch`）、保存配置（`api:config`）这些**正常事件不算命中**，否则服务正常运行时也会被判成问题、进而挡住上报入口。
+
+#### 上报失败会看到什么
+
+`gh` 没装、没登录、没权限时，面板会显示具体原因和下一步动作（不是裸的英文报错）：
+
+| 情况 | 面板提示 |
+|-|-|
+| 没装 `gh` | 未找到 gh 命令，请先安装 GitHub CLI（brew install gh）后重试 |
+| 没登录 | gh 未登录，请先执行 gh auth login 登录 GitHub |
+| 凭据失效 | GitHub 凭据无效，请重新执行 gh auth login 登录 |
+| 对仓库无权限 | 当前账号没有该仓库的创建权限，请换用有权限的账号或改 `RA_ISSUE_REPO` |
+| 仓库不存在 | 仓库不存在或无权访问，请检查 `RA_ISSUE_REPO` 配置 |
+
+失败同时会记到服务日志：`issue:create-failed`（带 `code` 与 `detail`）与 `api:issue-create-failed`。
 
 > **同一机器人只能有一个事件总线在跑。** 如果 `ra logs` 出现 `another event bus is already connected`，先停掉其它占用该应用的消费者；建议给 router-agent 使用独立的自建应用，避免与其它 agent 抢同一个机器人。
 

@@ -279,6 +279,20 @@ describe('回执表情', () => {
     expect(shouldAcknowledge(trigger({ addressed: 'none' }), policy, new Set())).toBe(false)
   })
 
+  it('未 @ 但话题已绑定工单被放行的消息：加表情（否则用户看不到回应）', () => {
+    expect(shouldAcknowledge(trigger({ addressed: 'none', unaddressedAdmitted: true }), policy, new Set())).toBe(true)
+  })
+
+  it('未 @ 放行的消息即使准入表要求忽略未寻址消息，也照样加表情：它一定会被处理', () => {
+    const strict: Policy = { ...policy, admission: { ...policy.admission, listedNotAddressed: 'ignore' } }
+    expect(shouldAcknowledge(trigger({ addressed: 'none', unaddressedAdmitted: true }), strict, new Set())).toBe(true)
+  })
+
+  it('未 @ 放行的消息若被群白名单拦下：仍然不加表情', () => {
+    const scoped: Policy = { ...policy, allowedByChat: { oc_chat: ['ou_bob'] } }
+    expect(shouldAcknowledge(trigger({ actorId: 'ou_alice', addressed: 'none', unaddressedAdmitted: true }), scoped, new Set())).toBe(false)
+  })
+
   it('名单外但准入允许研判的 @ 消息：仍加表情', () => {
     expect(shouldAcknowledge(trigger({ actorId: 'ou_bob' }), policy, new Set())).toBe(true)
   })

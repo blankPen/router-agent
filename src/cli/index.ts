@@ -70,6 +70,8 @@ export interface CliIo {
   orca?: CommandRunner
   claude?: CommandRunner
   git?: CommandRunner
+  /** Herdr CLI；默认用真实 herdr。 */
+  herdr?: CommandRunner
   /** 已绑定固定 lark-cli profile 的 runner（测试注入点）。 */
   lark?: CommandRunner
   /** npm 命令（测试注入点）；默认用系统 npm。 */
@@ -328,6 +330,7 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
       orca: output.orca ?? realRunner('orca'),
       claude: output.claude ?? realRunner('claude'),
       git: output.git ?? realRunner('git'),
+      herdr: output.herdr ?? realRunner('herdr'),
       logger: createLogger(home, output, false),
     }).default()
   } catch (error) {
@@ -1251,6 +1254,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   const orcaRunner = realRunner('orca')
   const claudeRunner = output.claude ?? realRunner('claude')
   const gitRunner = output.git ?? realRunner('git')
+  const herdrRunner = output.herdr ?? realRunner('herdr')
   const larkRunner = output.lark ?? createLarkRunner()
   const ghRunner = realRunner('gh')
   const glabRunner = realRunner('glab')
@@ -1302,6 +1306,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     orca: orcaRunner,
     claude: claudeRunner,
     git: gitRunner,
+    herdr: herdrRunner,
     logger,
   })
   const runtime = runtimes.default()

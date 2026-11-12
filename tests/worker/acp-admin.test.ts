@@ -37,6 +37,58 @@ describe('内置运行时探测', () => {
     expect(byId.has('acp-claude')).toBe(true)
   })
 
+  it('herdr：CLI 装好且服务端在跑时判 ready', async () => {
+    const dir = home()
+    const bin = join(dir, 'bin')
+    fakeBin(bin, 'herdr', 'case "$1" in --version) echo "herdr 0.9.5";; status) echo "status: running";; esac')
+    const admin = new AcpRuntimeAdmin({ home: dir, env: { ...process.env, PATH: bin }, config: config() })
+    const snapshot = await admin.detect()
+    const herdr = snapshot.choices.find(choice => choice.id === 'herdr')
+    expect(herdr).toMatchObject({ status: 'ready', version: '0.9.5' })
+    expect(herdr?.cli?.label).toBe('Herdr CLI')
+  })
+
+  it('herdr：服务端没跑时自动拉起来并判 ready', async () => {
+    const dir = home()
+    const bin = join(dir, 'bin')
+    const marker = join(dir, 'herdr-server.pid')
+    // 模拟真 Herdr：`herdr server` 起来之后，`status server` 才会报 running。
+    fakeBin(bin, 'herdr', [
+      'case "$1" in',
+      '  --version) echo "herdr 0.9.5";;',
+      `  server) echo $$ > "${marker}";;`,
+      `  status) if [ -f "${marker}" ]; then echo "status: running"; else echo "status: not running"; fi;;`,
+      'esac',
+    ].join('\n'))
+    const admin = new AcpRuntimeAdmin({ home: dir, env: { ...process.env, PATH: bin }, config: config() })
+    const snapshot = await admin.detect()
+    const herdr = snapshot.choices.find(choice => choice.id === 'herdr')
+    expect(herdr).toMatchObject({ status: 'ready', version: '0.9.5' })
+  })
+
+  it('herdr：服务端拉不起来时判 unverified 并说明原因', async () => {
+    const dir = home()
+    const bin = join(dir, 'bin')
+    fakeBin(bin, 'herdr', 'case "$1" in --version) echo "herdr 0.9.5";; status) echo "status: not running";; esac')
+    const admin = new AcpRuntimeAdmin({
+      home: dir,
+      env: { ...process.env, PATH: bin },
+      config: config(),
+      herdrServerTimeoutMs: 60,
+    })
+    const snapshot = await admin.detect()
+    const herdr = snapshot.choices.find(choice => choice.id === 'herdr')
+    expect(herdr?.status).toBe('unverified')
+    expect(herdr?.reason).toContain('herdr server')
+  })
+
+  it('herdr：没装 CLI 时判 not-installed', async () => {
+    const dir = home()
+    const admin = new AcpRuntimeAdmin({ home: dir, env: { ...process.env, PATH: join(dir, 'empty') }, config: config() })
+    const snapshot = await admin.detect()
+    expect(snapshot.choices.find(choice => choice.id === 'herdr')).toMatchObject({ status: 'not-installed' })
+  })
+
   it('claude-code 缺少 git 时判 incompatible 并给出依赖项', async () => {
     const dir = home()
     const bin = join(dir, 'bin')

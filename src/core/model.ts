@@ -58,6 +58,13 @@ export interface Trigger {
   isBot: boolean
   text: string
   addressed: AddressMode
+  /**
+   * 这条消息没有 @ 机器人，但因「话题已绑定在办工单 + 发送者在允许名单」而被放行（tk-59）。
+   *
+   * 放行不等于会被回复：准入 Gate 仍然可以把它拦掉。但一旦真的处理了，
+   * Router 就要加确认表情并给一句回执，否则用户只看到消息被吞掉。
+   */
+  unaddressedAdmitted?: boolean
   /** 纯附件消息（图片 / 文件 / 语音等）：正文只是占位文本，不能据此开工。 */
   mediaOnly?: boolean
   receivedAt: string

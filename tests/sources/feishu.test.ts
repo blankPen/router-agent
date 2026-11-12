@@ -533,6 +533,16 @@ describe('未寻址消息放行（tk-59：已绑定工单话题内名单内成�
     expect(result.trigger?.addressed).toBe('none')
   })
 
+  it('放行的消息标记 unaddressedAdmitted，后面加表情与回执都靠它', () => {
+    const result = normalizeFeishuEventDetailed(evt({ chat_id: 'oc_only_at', thread_id: 'omt_topic_1' }), mentionCfg, '', () => true)
+    expect(result.trigger?.unaddressedAdmitted).toBe(true)
+  })
+
+  it('正常 @ 的消息不带放行标记', () => {
+    const result = normalizeFeishuEventDetailed(evt({ chat_id: 'oc_only_at', mentions: [{ id: 'ou_bot' }] }), mentionCfg, '', () => true)
+    expect(result.trigger?.unaddressedAdmitted).toBeUndefined()
+  })
+
   it('放行判定拿得到群、发送者与线程标识', () => {
     const seen: UnaddressedContext[] = []
     normalizeFeishuEventDetailed(evt({ chat_id: 'oc_only_at', thread_id: 'omt_topic_1' }), mentionCfg, '', ctx => {
