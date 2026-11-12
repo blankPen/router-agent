@@ -268,7 +268,7 @@ export function RuntimeCards({
   return (
     <div className="runtime-status">
       {(showHead || onAddRuntime) && (
-        <div className="runtime-status-head">
+        <div className={`runtime-status-head ${showHead ? '' : 'compact'}`}>
           {showHead && (
             <div>
               <h3 className="editor-subtitle">运行时</h3>
@@ -281,12 +281,10 @@ export function RuntimeCards({
                 <Icon name="plus" size={12} />添加运行时
               </button>
             )}
-            {showHead && (
-              <button className="btn tiny" onClick={() => void refresh()} disabled={detecting || anyBusy}>
-                <Icon name="refresh" size={12} className={detecting ? 'spin' : undefined} />
-                {detecting ? '检测中…' : '重新检测'}
-              </button>
-            )}
+            <button className="btn tiny" onClick={() => void refresh()} disabled={detecting || anyBusy}>
+              <Icon name="refresh" size={12} className={detecting ? 'spin' : undefined} />
+              {detecting ? '检测中…' : '重新检测'}
+            </button>
           </div>
         </div>
       )}

@@ -1500,6 +1500,7 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 .runtime-status-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .runtime-status-head .editor-subtitle { margin: 0; }
 .runtime-status-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+.runtime-status-head.compact { justify-content: flex-end; }
 .runtime-badge {
   display: inline-flex;
   align-items: center;

@@ -94,7 +94,7 @@ ra runtime install my-runtime                          # 已声明但还没下�
 ra runtime list                                        # 「插件运行时」一节标出已安装 / 未安装
 ```
 
-面板路径是「配置 → 其他设置 → 插件」（搜索「插件」可直接展开）：添加后先保存配置，再点该行的「安装依赖」。安装完成需要重启 ra 才会加载插件；`runtime.default` 填插件创建的运行时 id，插件 `meta.id` 建议与配置 id 保持一致（不一致会记 `plugin:id-mismatch`，运行时 id 以插件声明为准）。
+面板路径是运行时卡片右上角的「添加运行时」（初始化页与「配置 → 运行时配置」都有）：填 id 与 npm 包名（或本地路径）后添加，npm 包可在弹窗里直接点「安装依赖」。保存配置并重启 ra 后，插件会作为一张卡片出现在「自定义插件」分组，和 demo runtime 并排。`runtime.default` 填插件创建的运行时 id，插件 `meta.id` 建议与配置 id 保持一致（不一致会记 `plugin:id-mismatch`，运行时 id 以插件声明为准）。
 
 本地路径插件（`./my-runtime`、`/abs/path`）不需要下载，重启后按路径加载。安装过程看 `plugin:install-started` / `plugin:install-succeeded` / `plugin:install-failed`；重启后加载失败看 `plugin:load-failed`（常见原因：包没装上、装到了别的 node_modules、导出对象不是 `kind: 'runtime'`）。
 
