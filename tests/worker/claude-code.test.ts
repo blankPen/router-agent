@@ -159,7 +159,7 @@ describe('ClaudeCodeRuntime', () => {
     expect(resume?.argv).not.toContain('--permission-mode')
   })
 
-  it('resume 产生副本时接管新会话，而不是反复抛错重试', async () => {
+  it('出现副本时停掉副本并保留原会话，不接管新会话', async () => {
     const home = mkdtempSync(join(tmpdir(), 'ra-claude-'))
     const git = gitRunner()
     const agents = [
@@ -185,16 +185,17 @@ describe('ClaudeCodeRuntime', () => {
       workBranch: 'ra/tk-1-demo', sessionId: 's1', status: 'running',
     }))
     const receipt = await runtime.deliver(ref(home), [{ id: 'in_3', kind: 'followup', text: '继续' }])
-    expect(receipt).toMatchObject({ status: 'accepted', handle: '95c4c910', sessionId: 's2' })
+    // 一个话题 = 一个会话：副本不能接管工单，只能停掉后把输入重投回原会话。
+    expect(receipt).toMatchObject({ status: 'rejected', reason: 'claude:resume-forked', retryable: true })
     const meta = JSON.parse(readFileSync(join(home, 'workers', 'tk-1', 'meta.json'), 'utf8')) as {
       handle: string
       sessionId: string
     }
-    expect(meta.handle).toBe('95c4c910')
-    expect(meta.sessionId).toBe('s2')
+    expect(meta.handle).toBe('e46aaf7e')
+    expect(meta.sessionId).toBe('s1')
   })
 
-  it('接管副本后停掉原会话，不留孤儿', async () => {
+  it('出现副本时停掉副本，不让它和原会话并发改同一 worktree', async () => {
     const home = mkdtempSync(join(tmpdir(), 'ra-claude-'))
     const git = gitRunner()
     const agents = [
@@ -223,9 +224,46 @@ describe('ClaudeCodeRuntime', () => {
     await runtime.deliver(ref(home), [{ id: 'in_stop', kind: 'followup', text: '继续' }])
 
     const stops = claude.calls.filter(call => call.argv[0] === 'stop')
-    expect(stops.map(call => call.argv[1])).toContain('e46aaf7e')
+    expect(stops.map(call => call.argv[1])).toContain('95c4c910')
     // 不能用 claude rm：部分版本会连带删掉工单的 worktree。
     expect(claude.calls.some(call => call.argv[0] === 'rm')).toBe(false)
+  })
+
+  it('追问前先停掉后台 worker，再 resume 同一个会话', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-claude-'))
+    const git = gitRunner()
+    const agents = [
+      { id: 'e46aaf7e', kind: 'background', state: 'done', status: 'idle', sessionId: 'e46aaf7e-3008-4c2e-99e5-fe312f3bff32' },
+    ]
+    const claude = scripted(argv => {
+      if (argv[0] === 'agents') return { code: 0, stdout: JSON.stringify(agents), stderr: '' }
+      if (argv[0] === 'stop') return { code: 0, stdout: 'stopped e46aaf7e\n', stderr: '' }
+      if (argv[0] === '--bg') {
+        return {
+          code: 0,
+          stdout: 'backgrounded · e46aaf7e · ra-tk-1-demo\n',
+          stderr: 'note: woke session e46aaf7e with its saved options (--dangerously-skip-permissions, --model).\n',
+        }
+      }
+      return { code: 0, stdout: '', stderr: '' }
+    })
+    const runtime = new ClaudeCodeRuntime({ claude, git, home, workersDir: join(home, 'workers') })
+    mkdirSync(join(home, 'workers', 'tk-1'), { recursive: true })
+    writeFileSync(join(home, 'workers', 'tk-1', 'meta.json'), JSON.stringify({
+      ticketId: 'tk-1', assignmentId: 'as-1', runtime: 'claude-code', handle: 'e46aaf7e',
+      workdir: join(home, 'worktrees', 'ra-tk-1-demo'), repo: '/tmp/repo', branch: 'main',
+      workBranch: 'ra/tk-1-demo', sessionId: 'e46aaf7e-3008-4c2e-99e5-fe312f3bff32', status: 'running',
+    }))
+
+    const receipt = await runtime.deliver(ref(home), [{ id: 'in_wake', kind: 'followup', text: '继续' }])
+    expect(receipt.status).toBe('accepted')
+
+    // 后台 worker 还活着时 CLI 会复制出副本；必须先 stop 再 resume 同一会话。
+    const stop = claude.calls.find(call => call.argv[0] === 'stop')
+    expect(stop?.argv).toEqual(['stop', 'e46aaf7e'])
+    const resume = claude.calls.find(call => call.argv.includes('--resume'))
+    expect(resume?.argv).toEqual(['--bg', '--resume', 'e46aaf7e-3008-4c2e-99e5-fe312f3bff32', expect.stringContaining('input-')])
+    expect(claude.calls.indexOf(stop!)).toBeLessThan(claude.calls.indexOf(resume!))
   })
 
   it('兼容新版 Claude 的副本文案 started a copy of that conversation as', async () => {
@@ -253,10 +291,10 @@ describe('ClaudeCodeRuntime', () => {
       workBranch: 'ra/tk-1-demo', sessionId: 's1', status: 'running',
     }))
     const receipt = await runtime.deliver(ref(home), [{ id: 'in_4', kind: 'followup', text: '继续' }])
-    expect(receipt).toMatchObject({ status: 'accepted', handle: '95c4c910' })
+    expect(receipt).toMatchObject({ status: 'rejected', reason: 'claude:resume-forked' })
   })
 
-  it('fork 时即使退出码非 0，也接管副本而不是抛可重试错误', async () => {
+  it('fork 时即使退出码非 0，也不抛错而是停副本后退避重投', async () => {
     const home = mkdtempSync(join(tmpdir(), 'ra-claude-'))
     const agents = [
       { id: 'e46aaf7e', kind: 'background', state: 'done', status: 'idle', sessionId: 's1' },
@@ -281,7 +319,7 @@ describe('ClaudeCodeRuntime', () => {
       workBranch: 'ra/tk-1-demo', sessionId: 's1', status: 'running',
     }))
     const receipt = await runtime.deliver(ref(home), [{ id: 'in_5', kind: 'followup', text: '继续' }])
-    expect(receipt).toMatchObject({ status: 'accepted', handle: '95c4c910' })
+    expect(receipt).toMatchObject({ status: 'rejected', reason: 'claude:resume-forked', retryable: true })
   })
 
   it('agents 查询失败时 queued，不盲目 resume', async () => {

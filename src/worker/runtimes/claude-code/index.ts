@@ -80,7 +80,8 @@ interface ClaudeMeta {
  *
  * - 首轮：claude --bg --dangerously-skip-permissions "<brief 文件路径>"；
  * - 状态：claude agents --json --all；
- * - 追问：会话 done/stopped 后 claude --bg --resume <sessionId>，**不能带新 flags**；
+ * - 追问：会话 done/stopped 后，先 `claude stop <id>` 停掉后台 worker（会话保留），
+ *   再 claude --bg --resume <完整 sessionId>，**不能带新 flags**——CLI 才会原地续跑同一会话；
  * - 停止：claude stop <id>（保留会话）。
  */
 export class ClaudeCodeRuntime implements WorkerRuntime {
@@ -222,7 +223,9 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
     if (!record) {
       return { status: 'rejected', inputIds, reason: 'claude:session-not-found', retryable: false }
     }
-    const sessionId = ref.sessionId ?? meta?.sessionId ?? record.sessionId
+    // 用 agents 里查到的完整 session id（UUID）：CLI 只有拿到完整 id 才会原地续跑，
+    // 传 short id 会被判成「另开一个会话」。
+    const sessionId = record.sessionId ?? meta?.sessionId ?? ref.sessionId
     if (!sessionId) {
       return { status: 'rejected', inputIds, reason: 'claude:session-id-missing', retryable: true, retryAfterMs: 30_000 }
     }
@@ -248,45 +251,35 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
     writeFileSync(inputPath, inputs.map(input => `【Router 输入 ${input.id}】\n${input.text}`).join('\n\n'), 'utf8')
     const prompt = `Read ${inputPath} and continue the ticket. This is a Router follow-up; report via ra report.`
     const cwd = meta?.workdir ?? ref.workdir ?? process.cwd()
-    // resume 不能带任何新 flags（包括 `--` 分隔符），否则 Claude 会 fork 副本。
-    // prompt 以 "Read " 开头，不会与 flag 解析冲突。
+    // Claude 的后台 worker 在本轮结束后仍然存活（agents 里 state=done 但 pid 还在）。
+    // 此时 --bg --resume 会被 CLI 判成「already running in the background」，
+    // 于是复制出一个新会话——一个话题就变成两个 session。
+    // 先 stop 掉后台 worker（会话与对话都保留），CLI 才会原地续跑同一个会话。
+    await this.stopBackgroundSession(ref.handle, cwd)
+    // resume 不带任何新 flag，沿用会话自己保存的选项；prompt 以 "Read " 开头，不会与 flag 解析冲突。
     const argv = ['--bg', '--resume', sessionId, prompt]
     const res = await this.runClaudeAllowFailure(argv, cwd)
     // Claude 把副本提示写到 stderr，正常 id 写到 stdout；两边都要看。
     // 输出可能带 ANSI 颜色码，先清洗再匹配。
     const notice = stripAnsi(`${res.stdout}\n${res.stderr}`)
     const forked = isResumeFork(notice)
-    // fork 即使返回非 0，也要先把副本接过来；只有普通失败才抛错。
     if (res.code !== 0 && !forked) throw launchError(argv, res)
     const nextHandle = forked
       ? (parseForkId(notice) ?? parseBackgroundId(res.stdout))
       : parseBackgroundId(res.stdout)
-    if (forked && !nextHandle) {
-      // 没有拿到副本 id，无法接管或清理；明确不可重试，避免 Router 盲目再次 resume。
-      return { status: 'rejected', inputIds, reason: 'claude:resume-forked-without-id', retryable: false }
-    }
-    if (nextHandle && nextHandle !== ref.handle) {
-      // 接管副本：会话内容完整，直接把它作为工单的新 handle，避免遗留孤儿会话。
-      const record = await this.waitForAgent(nextHandle)
-      // 原会话不再被跟踪，若它还在跑就成了孤儿（会继续改代码、可能重复提交）。
-      // 这里停掉它；stop 失败不影响接管（本来就幂等）。
-      await this.stopBackgroundSession(ref.handle, cwd)
-      if (meta) {
-        meta.handle = nextHandle
-        // 副本是新的会话：拿不到新 sessionId 时要清掉旧的，否则下次 resume 会指回原会话又 fork 一次。
-        meta.sessionId = record?.sessionId
-        if (record?.pid) meta.pid = record.pid
-        meta.lastHandedOffInputId = inputs.at(-1)?.id
-        meta.lastHandedOffAttempt = opts.attempt ?? 1
-        meta.status = 'running'
-        this.writeMeta(ref.ticketId, meta)
-      }
-      return {
-        status: 'accepted',
-        inputIds,
-        handle: nextHandle,
-        ...(record?.sessionId ? { sessionId: record.sessionId } : {}),
-      }
+    if (forked) {
+      // 原则是「一个话题 = 一个会话」：出现副本说明 CLI 没能原地续跑
+      // （会话还在跑 / 被别的进程打开 / 状态读不到）。
+      // 停掉副本，避免它和原会话在同一 worktree 上并发改代码；原会话保持不变，
+      // 本轮输入稍后重投回原会话。拿不到副本 id 时无法清理，只能退避重试。
+      if (nextHandle) await this.stopBackgroundSession(nextHandle, cwd)
+      this.logger.warn('claude:resume-forked', {
+        handle: ref.handle,
+        sessionId,
+        copy: nextHandle ?? null,
+        message: notice.slice(0, 200),
+      })
+      return { status: 'rejected', inputIds, reason: 'claude:resume-forked', retryable: true, retryAfterMs: 30_000 }
     }
     if (meta) {
       meta.lastHandedOffInputId = inputs.at(-1)?.id

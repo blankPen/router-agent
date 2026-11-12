@@ -222,7 +222,7 @@ describe('运行时机制', () => {
 
   it('deliver 抛错也计入重投次数并遵守退避，不会每秒拉起新会话', async () => {
     const { ticketId } = await launchOne()
-    runtime.deliverError = 'claude:resume-forked-without-id'
+    runtime.deliverError = 'claude:resume-forked'
     engine.deliverInput(ticketId, { kind: 'followup', text: '继续' })
 
     // 第一轮发起投递并失败。
@@ -246,7 +246,7 @@ describe('运行时机制', () => {
 
   it('连续失败达到上限后转人工，不再无限重投', async () => {
     const { ticketId } = await launchOne()
-    runtime.deliverError = 'claude:resume-forked-without-id'
+    runtime.deliverError = 'claude:resume-forked'
     engine.deliverInput(ticketId, { kind: 'followup', text: '继续' })
 
     for (let i = 0; i < 6; i++) {

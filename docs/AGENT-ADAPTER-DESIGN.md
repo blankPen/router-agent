@@ -553,7 +553,7 @@ export interface ProcessSpawner {
 | 仓库发现 | `orca repo list` | 配置文件 / `git` 目录 | 配置文件 / `git` 目录 |
 | 工具策略 | Agent 规范 + Orca 启动参数 | `--allowedTools` / `--permission-mode` | `-s workspace-write` / 配置覆盖 |
 
-> Claude / Codex 的 CLI 事实已在本机实测：Claude Code `2.1.318` 的 `claude --bg`、`claude agents --json --all`、`claude --bg --resume <session-id>`、`claude stop/attach/logs` 均可用于后台会话管理；`--bg --resume` 不带新 flags 且会话处于 `done/stopped` 时继续同一 id，否则 fork 新 id。Codex `0.166.0` 支持 `codex exec --json`、`-C <dir>`、`--output-last-message`、`codex exec resume <session-id> <prompt>`。完整实测记录见附录 C。
+> Claude / Codex 的 CLI 事实已在本机实测：Claude Code `2.1.322` 的 `claude --bg`、`claude agents --json --all`、`claude --bg --resume <session-id>`、`claude stop/attach/logs` 均可用于后台会话管理；`--bg --resume` 要继续同一 id，必须「先 `claude stop` 停掉后台 worker」+「传完整 session id」+「不带新 flags」，否则 CLI 会复制出一个副本。Codex `0.166.0` 支持 `codex exec --json`、`-C <dir>`、`--output-last-message`、`codex exec resume <session-id> <prompt>`。完整实测记录见附录 C。
 
 ### 6.2 降级规则（Router 侧）
 
@@ -866,9 +866,9 @@ claude --bg --name <ticketId>-<slug> \
 
 **追问投递**：
 - `working` / `blocked`：`deliver` 返回 `queued`，输入留在 `inputs` 表；`blocked` 额外置 attention（权限/人工），等状态变成 `done/stopped` 再投；
-- `done/stopped`：`claude --bg --resume <sessionId> "<short input>"`，**不带任何 flags**；输入正文写临时文件，prompt 只指向文件；
-- 需要打断当前轮：先 `claude stop <id>`（会话保留），再按上一步 resume；会丢弃当前轮进行中的输出，需在话题里说明；
-- 同一 `sessionId` 单飞；按 `(input.id, attempt)` 去重；如果 `--resume` 意外产生新 id（fork），adapter 必须报错并记日志，禁止静默切换 handle。
+- `done/stopped`：先 `claude stop <id>` 停掉后台 worker（会话与对话都保留），再 `claude --bg --resume <完整 sessionId> "<short input>"`，**不带任何新 flags**；输入正文写临时文件，prompt 只指向文件；
+- 必须传完整 session id（`claude agents --json` 打印的 UUID）：传 short id 会被 CLI 判成另开一个会话；
+- 同一 `sessionId` 单飞；按 `(input.id, attempt)` 去重；如果 `--resume` 仍产生新 id（fork），adapter 必须停掉副本、保留原会话并退避重投，禁止静默切换 handle。
 
 **活动**：`ClaudeSessionActivity` 按 `sessionId` 精确匹配 `~/.claude/projects/<slug>/<sessionId>.jsonl`；找不到返回 `null`，不退化成「最新文件」，避免串工单。
 
@@ -879,7 +879,7 @@ claude --bg --name <ticketId>-<slug> \
 
 **风险**：
 - `state=blocked` 是权限/人工输入卡点；headless 场景默认用 `acceptEdits` + 命令级 `allowedTools` 尽量不触发，但无法完全避免；
-- `--bg --resume` 在不满足条件时会 fork 副本；adapter 必须把“新 id”当错误而不是成功；
+- `--bg --resume` 在不满足条件时会 fork 副本（会话还在跑 / 被别的进程打开 / 状态读不到）；adapter 必须把“新 id”当错误而不是成功；
 - `cli` 版本升级可能改变 `agents --json` 字段；解析器要按版本容错，失败返回 `null`；
 - Claude 没有 OS 级文件沙箱：`fileAccess` 只是约定；需要强制隔离时用 macOS `sandbox-exec` 或容器，一期不做，但必须在 doctor 里提示风险。
 
@@ -1456,6 +1456,23 @@ Orca 运行时用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.t
 - `deliver()` 在 `working/blocked` 只排队，绝不 resume；`blocked` 置 attention；
 - `stop()` 用 `claude stop`；清理 worktree 用 GitWorktreeProvider，不用 `claude rm`；
 - 不需要 `ProcessSpawner`；Claude 自己的后台管理承担进程生命周期。
+
+### C.4 复核（2.1.322，2026-11-12）
+
+2.1.318 的结论「`done` + 不带新 flags → 继续同一 id」已经不成立，本机复测矩阵如下（`claude agents --json --all` 观察 id 是否变化）：
+
+| 场景 | CLI 输出 | 结果 |
+|-|-|-|
+| `state=done`（后台 worker 仍存活）→ `--bg --resume <完整 id>` | `note: session X is already running in the background, so this started a copy as Y` | **复制** |
+| 先 `claude stop X` → `--bg --resume <完整 id>` | `note: woke session X with its saved options (--dangerously-skip-permissions, --model)` | **同一会话原地续跑** |
+| 先 `claude stop X` → `--bg --resume <完整 id> -- "<prompt>"` | 同上 | 同一会话（`--` 不是 flag） |
+| 先 `claude stop X` → `--bg --resume <short id>` | `note: started a copy of that conversation as Y. To continue a session under its own id, pass its full session id ...` | **复制** |
+
+要点：
+- 后台 worker 在本轮结束后**仍然存活**（`state=done`、`status=idle`，但 `pid` 还在），这才是 `done` 状态下依然 fork 的根因；`--` 分隔符无害；
+- 「新 flag」指会改变会话自身配置的参数（`--model` / `--permission-mode` / `--allowedTools` / `--add-dir` 等）。会话已经保存了自己的选项，resume 时再传新选项无法合并，CLI 只能复制：`background session X keeps its own saved options, so the flags you passed started a copy as Y`；
+- `claude stop` 停的是后台 worker 进程，**对话记录完整保留**（`claude stop` 自带说明：`Its conversation is kept`），`claude --resume works once it is stopped`；因此 stop → resume 是同一会话继续下一轮，不会丢上下文；
+- 结论：一个话题 = 一个会话是可达成的，前提是「等本轮结束 → stop 后台 worker → 用完整 session id 且不带新 flag resume」。
 ## 附录 D · ACP Runtime 实现（2026-11-09）
 
 `AcpRuntime`（`src/worker/runtimes/acp/`）是协议层实现：一个客户端同时适配所有实现 ACP 的 Agent。
