@@ -21,6 +21,25 @@ export interface FeishuBotAdminOptions {
  */
 export const FEISHU_AUTH_DOMAINS = ['im', 'docs', 'drive', 'contact'] as const
 
+/**
+ * 业务域之外必须显式申请的 scope。
+ *
+ * lark-cli 的 `contact` 域只映射到 `contact:user.basic_profile:readonly` 与
+ * `contact:user:search`，**不含** `contact:user.id:readonly`。而 router-agent 要用
+ * `contact/v3/users/batch_get_id` 把允许名单里的邮箱解析成 open_id，这个接口要的正是
+ * `contact:user.id:readonly`：域映射不覆盖它 → 用户授权成功、token 里却没有这个权限，
+ * 表现成「用户已经授权好飞书，但没有该权限」。
+ *
+ * lark-cli 的 `--scope` 与 `--domain` 是叠加关系，所以在这里补一个显式 scope：
+ * 用户在授权页会看到这一项，授权后应用侧也一并开通。
+ */
+export const FEISHU_AUTH_SCOPES = ['contact:user.id:readonly'] as const
+
+/** 授权参数：业务域 + 显式 scope（lark-cli 两者叠加）。 */
+export function feishuAuthScopeArgs(): string[] {
+  return ['--domain', FEISHU_AUTH_DOMAINS.join(','), '--scope', FEISHU_AUTH_SCOPES.join(',')]
+}
+
 export interface FeishuBotActionResult {
   ok: boolean
   message: string
@@ -89,7 +108,7 @@ export class FeishuBotAdmin {
   /** 发起 Device Flow 授权，返回验证链接与 device code。 */
   async startLogin(): Promise<FeishuDeviceLogin> {
     const res = await this.lark.run(
-      ['auth', 'login', '--no-wait', '--json', '--domain', FEISHU_AUTH_DOMAINS.join(',')],
+      ['auth', 'login', '--no-wait', '--json', ...feishuAuthScopeArgs()],
       { timeoutMs: 30_000 },
     )
     if (res.code !== 0) {

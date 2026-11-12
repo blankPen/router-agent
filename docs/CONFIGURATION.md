@@ -262,6 +262,10 @@ router-agent 固定使用 `~/.router-agent-lark` 作为 lark-cli profile，**不
 
 之后如果需要用户身份（按名字搜索群 / 成员、创建文档），在 Web 配置页点「开始授权」完成授权，或由 `ra init` 询问后执行 `lark-cli auth login`。授权只申请 **IM（消息 / 群 / 成员）、云文档、云空间、通讯录** 四个业务域，不再请求日历、邮箱、审批等无关权限。
 
+四个业务域之外还会**显式追加一个 scope：`contact:user.id:readonly`**。原因是 lark-cli 的 `contact` 域只映射到 `contact:user.basic_profile:readonly` 与 `contact:user:search`，不含这一条；而 router-agent 要用 `contact/v3/users/batch_get_id` 把允许名单里的**邮箱解析成 open_id**（`src/sources/feishu-identity.ts`），这个接口依赖的正是 `contact:user.id:readonly`。域映射不覆盖 → 用户授权页看不到这一项 → 授权 100% 成功、token 里却没有该权限，表现成「用户已经授权好飞书，却没有这个权限」。`lark-cli` 的 `--scope` 与 `--domain` 是叠加关系，所以 router-agent 在授权参数里显式带上它（`src/sources/feishu-bot-admin.ts` 的 `FEISHU_AUTH_SCOPES`）。
+
+> 应用侧（机器人身份 / tenant_access_token）同样需要这一条权限。若 `batch_get_id` 报 `99991672 app_scope_not_applied`，说明应用后台尚未开通，按报错里的 `console_url`（开放平台 scope-apply 链接）补开通即可；用户身份是否授权与它无关。
+
 机器人凭据由 lark-cli 的加密存储管理，`router-agent` 只在 `config.yaml` 保存 `appId`。运行期所有 lark-cli 子进程（事件消费、发消息、群名刷新、凭据与授权）都会带上 `HOME=~/.router-agent-lark`，与其它 agent 的 lark-cli profile 完全隔离。
 
 ## 项目与仓库选择

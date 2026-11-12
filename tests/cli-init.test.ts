@@ -192,7 +192,12 @@ describe('交互式 ra init', () => {
     await runInitWizard(deps)
     const authCall = streamCalls.find(call => call.argv[0] === 'auth' && call.argv[1] === 'login')
     expect(authCall).toBeTruthy()
-    expect(authCall?.argv).toEqual(['auth', 'login', '--domain', 'im,docs,drive,contact'])
+    expect(authCall?.argv).toEqual([
+      'auth', 'login',
+      '--domain', 'im,docs,drive,contact',
+      // contact 域映射不含 contact:user.id:readonly，邮箱→open_id 依赖它，必须显式申请。
+      '--scope', 'contact:user.id:readonly',
+    ])
     expect(authCall?.env.HOME).toBe(LARK_PROFILE_HOME)
   })
 

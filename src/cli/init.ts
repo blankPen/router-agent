@@ -2,7 +2,7 @@ import { join } from 'node:path'
 import { chatEntry, loadConfig, projectNameOf, projectsForRuntime, setProjectsForRuntime, writeConfig, type AppConfig, type ProjectConfig } from '../config.js'
 import { ORCA_RUNTIME_ID, normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
 import type { CommandRunner } from '#infra/process.js'
-import { FeishuBotAdmin, FEISHU_AUTH_DOMAINS } from '#channel/sources/feishu-bot-admin.js'
+import { FeishuBotAdmin, feishuAuthScopeArgs } from '#channel/sources/feishu-bot-admin.js'
 import {
   larkEnv,
   parseAppId,
@@ -288,7 +288,7 @@ async function ensureUserAuth(
     out('请手动执行：HOME=~/.router-agent-lark lark-cli auth login')
     return
   }
-  const code = await deps.stream(['auth', 'login', '--domain', FEISHU_AUTH_DOMAINS.join(',')], larkEnv())
+  const code = await deps.stream(['auth', 'login', ...feishuAuthScopeArgs()], larkEnv())
   out(code === 0 ? '用户授权完成。' : '⚠ 用户授权未完成，可稍后重试。')
 }
 
