@@ -13,6 +13,9 @@ Router 不做对话，只在必要时说话：
 | 群里 @机器人，但只是寒暄 / 试探 | **Pi 生成**一句礼貌回复，作为**普通消息**发出；不建单 |
 | 群里 @机器人，是真需求 | 只发一条**话题**消息：「工单「标题」（id）已开始执行。后续进展会在这个话题里更新。」，不再额外回「我帮你创建了工单」之类的普通消息 ack |
 | 未 @ 的群消息 | 走 Pi 研判；判为闲聊则**完全静默**（不刷屏） |
+| 需求识别开启的群里，普通成员反馈问题（可不 @） | 先轻量初筛：`chat` 静默；`question` / `issue` 由分析子 Agent 追问或直接答疑，信息收敛后 @管理员终审，确认后才派单 |
+| 分析子 Agent 追问 / 需求单整理完成 | 回复挂在该话题：追问直接发；需求单完成后先告知发起人「已提交管理员确认」，再 @管理员给出结构化需求单与操作口令 |
+| 管理员终审 | 回复「确认派单」生成正式工单；「驳回」结束；直接补充要求则重新分析一版 |
 | 私聊 | 走 Pi 研判；判为闲聊时用 Pi 礼貌回复（普通消息） |
 | 只发了图片 | 下载原图落盘并透传给 Worker，同时转成文字走研判；识别失败也保留原图，不再回「看不到附件内容」 |
 | 只发了文件 / 语音等其它附件 | **不开单**：@ 或私聊时回一句「看不到附件内容，请用文字说明」 |
@@ -55,6 +58,22 @@ Router 不做对话，只在必要时说话：
 | `trigger:ingested` | Source | `id` `chat` `addressed` `admitted` `threadKeys` `topic` | 用户消息进入系统；`topic=true` 表示事件带了话题 ID（omt_）；`admitted=true` 表示没 @ 但因话题已绑定在办工单被放行（tk-59） |
 | `trigger:dropped` | Source | `reason` `chat` `actor` | 收到但被过滤 |
 | `trigger:admitted-unaddressed` | CLI | `chat` `actor` `keys` | 已绑定工单的话题里，名单内成员没 @ 机器人也放行处理（tk-59） |
+| `intake:screen` | AgentLoop | `triggerId` `chat` `kind` `reason` | 需求识别初筛结论：chat / question / issue（`reason` 已截断到 120 字） |
+| `intake:screen-failed` / `intake:screen-invalid` | AgentLoop | `triggerId` `detail` / `triggerId` | 初筛模型失败或输出不合法；消息按原准入规则继续处理 |
+| `intake:opened` | AgentLoop | `intakeId` `chat` `actor` `kind` `project` | 为一条疑似问题创建需求识别会话 |
+| `intake:clarify` | AgentLoop | `intakeId` `questions` | 分析 Agent 发起追问 |
+| `intake:answered` | AgentLoop | `intakeId` `chat` | 分析 Agent 直接给出结论，会话结束，不产出需求单 |
+| `intake:ready` | AgentLoop | `intakeId` `chat` `title` `approvers` | 需求单整理完成，已 @管理员终审 |
+| `intake:approved` | AgentLoop | `intakeId` `ticketId` `actor` `reused` | 管理员确认派单，已生成正式工单；`reused=true` 表示复用了上次已建的工单 |
+| `intake:rejected` | AgentLoop | `intakeId` `actor` | 管理员驳回需求单 |
+| `intake:expired` | AgentLoop | `intakeId` | 需求识别会话超过 72 小时无消息，自动放弃 |
+| `intake:analysis-failed` / `intake:analysis-invalid` | AgentLoop | `intakeId` `detail` / `intakeId` `triggerId` | 分析模型失败或输出不合法；已给用户兜底回复 |
+| `intake:approve-failed` | AgentLoop | `intakeId` `detail` | 终审通过后开单失败；需求单仍可再次终审 |
+| `intake:requester-not-allowed` | AgentLoop | `triggerId` `chat` `actor` | 发起人不在该群白名单里，不再继续澄清（群名单是硬边界） |
+| `intake:project-unbound` | AgentLoop | `chat` `triggerId` | 群没绑定项目，intake 不接管，按原准入规则处理 |
+| `intake:decision-failed` | AgentLoop | `triggerId` `detail` | 落决策失败（例如同一轮已落过决定） |
+| `intake:abort-failed` / `intake:dispose-failed` | IntakeEngine | `stage` `detail` | 分析会话超时中断或释放失败；已拿到的结果不受影响 |
+| `intake:tool-failed` | IntakeEngine | `stage` `detail` | 只读代码工具读写失败（code_read / code_ls / code_grep）；读不到不等于没有匹配 |
 | `thread:created` | Engine | `threadId` `source` `chat` | 首次见到某条线程，登记规范 ID |
 | `thread:resolved` | Engine | `threadId` `rawThreadId` `triggerId` `source` | 消息自带线程标识没对上，靠别名收敛到了已有线程（排查「消息没进工单」先看这条） |
 | `thread:backfilled` / `thread:backfill-failed` | CLI | `filled` `failed` / `batch` `code` `detail` | `ra migrate threads --apply` 的回填结果 |
@@ -114,6 +133,7 @@ Router 不做对话，只在必要时说话：
 | `feishu:bot-identity-resolved` | Identity | `bot` `name` | 机器人身份自动识别成功（按 `app_id` 匹配群成员），或使用了手动填写的身份 |
 | `feishu:bot-identity-failed` | Identity | `detail` | 机器人身份识别失败，`mode: mention` 的群会丢消息，需人工确认 |
 | `feishu:chat-allowlist-empty` | Identity | `chat` `name` `count` | 群级允许名单配了却一个都解析不出来，该群按「拒绝所有人」处理 |
+| `feishu:intake-approver-empty` | Identity | `chat` `name` `count` | 需求分析助手的终审管理员配了却一个都解析不出来，该群没有人能终审（不会退回全局名单） |
 | `loop:trigger-failed` | Agent Loop | `triggerId` `chat` `detail` | 单条消息处理异常，同批其它消息不受影响 |
 | `loop:admitted-replied` | Agent Loop | `triggerId` `chat` `ticketId` `tickets` | 未 @ 放行的消息已投给工单 worker，Router 在话题里回了一句「已转给工单」 |
 | `decision:engine-failed` | Agent Loop | `triggerId` `detail` | 研判引擎调用失败，按 unavailable 处理并留下原因 |
@@ -122,6 +142,7 @@ Router 不做对话，只在必要时说话：
 | `config:created` | Config | `path` | 首次启动写入了默认 `config.yaml` |
 | `config:parse-failed` | Config | `path` `detail` | YAML 解析失败，已降级为默认配置启动 |
 | `config:legacy-backend` | Config | `path` | 旧版 `backend` 段已兼容映射到 `runtime` |
+| `config:intake-migrated` | Config | `chats` `enabled` `maxQuestions` | 旧版全局 `intake:` 段已迁移到群级配置（`chats` 是被迁移的群） |
 | `config:invalid-security-override` | Config | `runtime` `keys` | `runtime.options` 试图覆盖安全参数，启动被拒绝 |
 | `config:patch-rejected` / `config:write-failed` | HTTP API | `errors` / `detail` | 面板保存的配置校验失败或落盘失败 |
 | `api:config` | HTTP API | `changed` `policyChanged` `restartRequired` `identityEffective` | 配置保存成功、是否需要重启、允许名单是否已即时生效 |

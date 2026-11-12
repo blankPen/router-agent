@@ -33,6 +33,8 @@ const assets = [
   'src/router/prompts/orchestrator.md',
   'src/router/prompts/admission.md',
   'src/router/prompts/conversation.md',
+  'src/router/prompts/intake-screener.md',
+  'src/router/prompts/intake-analyst.md',
   'src/router/prompts/soul.md',
 ]
 for (const asset of assets) {

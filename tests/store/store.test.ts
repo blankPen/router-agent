@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Store } from '../../src/store/db.js'
-import type { Assignment, Input, Report, Ticket, Trigger } from '../../src/core/model.js'
+import type { Assignment, Input, Intake, Report, Ticket, Trigger } from '../../src/core/model.js'
 import { DEFAULT_ADMISSION, type Policy } from '../../src/core/policy.js'
 
 function store(): Store {
@@ -476,6 +476,71 @@ describe('会话复用存储', () => {
     db.clearDispatchDraft('oc_chat', 'ou_alice')
     expect(db.getDispatchDraft('oc_chat', 'ou_alice')).toBeNull()
     expect(db.getDispatchDraft('oc_chat', 'ou_bob')?.task).toBe('改支付回调')
+  })
+})
+
+describe('需求识别存储', () => {
+  const intake: Intake = {
+    id: 'it_1',
+    threadId: 'feishu:oc_chat:om_root',
+    chatId: 'oc_chat',
+    actorId: 'ou_bob',
+    actorName: 'Bob',
+    project: 'router-agent',
+    repo: 'name:dsh/router-agent',
+    branch: 'main',
+    status: 'clarifying',
+    kind: 'issue',
+    rawText: '登录报错',
+    turns: [{ role: 'user', text: '登录报错', at: '2026-11-12T10:00:00.000Z', actorId: 'ou_bob' }],
+    questions: 1,
+    createdAt: '2026-11-12T10:00:00.000Z',
+    updatedAt: '2026-11-12T10:00:00.000Z',
+  }
+
+  it('读写 intake，turns 与 report 序列化后保持原样', () => {
+    const db = store()
+    db.insertIntake(intake)
+    db.updateIntake({
+      ...intake,
+      turns: [...intake.turns, { role: 'router', text: '请补充报错原文', at: '2026-11-12T10:01:00.000Z' }],
+      report: {
+        title: '登录报错',
+        problem: '500',
+        background: '',
+        steps: '点登录',
+        environment: '',
+        impact: '',
+        expected: '',
+        assessment: '疑似 BUG',
+      },
+    })
+
+    const loaded = db.getIntake('it_1')
+    expect(loaded?.turns.map(turn => turn.role)).toEqual(['user', 'router'])
+    expect(loaded?.report?.title).toBe('登录报错')
+    expect(loaded?.report?.steps).toBe('点登录')
+    db.close()
+  })
+
+  it('activeIntake 只返回 clarifying / ready，且按人隔离', () => {
+    const db = store()
+    db.insertIntake(intake)
+    expect(db.activeIntake(intake.threadId, 'ou_bob')?.id).toBe('it_1')
+    expect(db.activeIntake(intake.threadId, 'ou_alice')).toBeNull()
+
+    db.updateIntake({ ...intake, status: 'approved' })
+    expect(db.activeIntake(intake.threadId, 'ou_bob')).toBeNull()
+    expect(db.latestIntakeByThread(intake.threadId)?.status).toBe('approved')
+    db.close()
+  })
+
+  it('按工单号反查 intake', () => {
+    const db = store()
+    db.insertIntake({ ...intake, status: 'approved', ticketId: 'tk-7' })
+    expect(db.intakeByTicket('tk-7')?.id).toBe('it_1')
+    expect(db.intakeByTicket('tk-8')).toBeNull()
+    db.close()
   })
 })
 

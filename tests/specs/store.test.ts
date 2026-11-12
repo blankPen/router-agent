@@ -52,6 +52,8 @@ describe('规范 markdown 内置存储', () => {
       'router.orchestrator',
       'router.admission',
       'router.conversation',
+      'router.intake-screener',
+      'router.intake-analyst',
       'worker.prompt-mode',
       'worker.contract',
     ])

@@ -5,6 +5,9 @@ import type {
   DecisionRecord,
   DispatchDraft,
   Input,
+  Intake,
+  IntakeReport,
+  IntakeTurn,
   Mandate,
   Report,
   SourceKind,
@@ -236,6 +239,30 @@ CREATE TABLE IF NOT EXISTS dispatch_drafts (
   updated_at TEXT NOT NULL,
   PRIMARY KEY (chat_id, actor_id)
 );
+
+-- 需求识别（intake）：初筛后的疑似问题由分析引擎在这里沉淀多轮对话与结构化报告。
+-- 只有管理员终审通过后才会走原有 Engine.decide() 生成正式工单。
+CREATE TABLE IF NOT EXISTS intakes (
+  id           TEXT PRIMARY KEY,
+  thread_id    TEXT NOT NULL,
+  chat_id      TEXT NOT NULL,
+  actor_id     TEXT NOT NULL,
+  actor_name   TEXT NOT NULL DEFAULT '',
+  project      TEXT NOT NULL DEFAULT '',
+  repo         TEXT NOT NULL DEFAULT '',
+  branch       TEXT NOT NULL DEFAULT '',
+  status       TEXT NOT NULL,
+  kind         TEXT NOT NULL,
+  raw_text     TEXT NOT NULL,
+  turns        TEXT NOT NULL DEFAULT '[]',
+  report       TEXT,
+  questions    INTEGER NOT NULL DEFAULT 0,
+  ticket_id    TEXT,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_intakes_thread ON intakes (thread_id, actor_id, status);
+CREATE INDEX IF NOT EXISTS idx_intakes_status ON intakes (status, updated_at);
 
 -- 会话复用：一个 session_key（群/话题 + 人）对应一个落盘的 Pi session。
 -- 一个 key 会随着 /new 留下多行历史：active 是当前，superseded 等清理，purged 是已删文件。
@@ -756,6 +783,98 @@ export class Store {
 
   clearDispatchDraft(chatId: string, actorId: string): void {
     this.db.prepare('DELETE FROM dispatch_drafts WHERE chat_id = ? AND actor_id = ?').run(chatId, actorId)
+  }
+
+  // ---------- 需求识别（intake） ----------
+
+  insertIntake(intake: Intake): void {
+    this.db.prepare(`INSERT INTO intakes (id, thread_id, chat_id, actor_id, actor_name, project, repo, branch, status, kind, raw_text, turns, report, questions, ticket_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(
+        intake.id,
+        intake.threadId,
+        intake.chatId,
+        intake.actorId,
+        intake.actorName,
+        intake.project,
+        intake.repo,
+        intake.branch,
+        intake.status,
+        intake.kind,
+        intake.rawText,
+        JSON.stringify(intake.turns),
+        intake.report ? JSON.stringify(intake.report) : null,
+        intake.questions,
+        intake.ticketId ?? null,
+        intake.createdAt,
+        intake.updatedAt,
+      )
+  }
+
+  updateIntake(intake: Intake): void {
+    this.db.prepare(`UPDATE intakes SET project = ?, repo = ?, branch = ?, status = ?, kind = ?, raw_text = ?, turns = ?, report = ?, questions = ?, ticket_id = ?, updated_at = ? WHERE id = ?`)
+      .run(
+        intake.project,
+        intake.repo,
+        intake.branch,
+        intake.status,
+        intake.kind,
+        intake.rawText,
+        JSON.stringify(intake.turns),
+        intake.report ? JSON.stringify(intake.report) : null,
+        intake.questions,
+        intake.ticketId ?? null,
+        intake.updatedAt,
+        intake.id,
+      )
+  }
+
+  getIntake(id: string): Intake | null {
+    const row = this.db.prepare('SELECT * FROM intakes WHERE id = ?').get(id) as Row | undefined
+    return row ? intakeFromRow(row) : null
+  }
+
+  /** 找一条仍在进行（clarifying / ready）的 intake：同群 + 同人 + 同话题只允许一条。 */
+  activeIntake(threadId: string, actorId: string): Intake | null {
+    const row = this.db.prepare("SELECT * FROM intakes WHERE thread_id = ? AND actor_id = ? AND status IN ('clarifying', 'ready') ORDER BY updated_at DESC LIMIT 1")
+      .get(threadId, actorId) as Row | undefined
+    return row ? intakeFromRow(row) : null
+  }
+
+  /** 按群 + 人查最近一条 intake，不限制状态；用于「管理员终审通过后查原单」。 */
+  latestIntakeByThread(threadId: string, actorId?: string): Intake | null {
+    const row = actorId
+      ? this.db.prepare('SELECT * FROM intakes WHERE thread_id = ? AND actor_id = ? ORDER BY updated_at DESC LIMIT 1').get(threadId, actorId) as Row | undefined
+      : this.db.prepare('SELECT * FROM intakes WHERE thread_id = ? ORDER BY updated_at DESC LIMIT 1').get(threadId) as Row | undefined
+    return row ? intakeFromRow(row) : null
+  }
+
+  /** 按话题取待终审（ready）的那条 intake；没有就返回 null。 */
+  readyIntakeByThread(threadId: string): Intake | null {
+    const row = this.db.prepare("SELECT * FROM intakes WHERE thread_id = ? AND status = 'ready' ORDER BY updated_at DESC LIMIT 1")
+      .get(threadId) as Row | undefined
+    return row ? intakeFromRow(row) : null
+  }
+
+  /**
+   * 按需求单号反查已生成的工单。
+   *
+   * 终审流程里「建工单」和「回写需求单」是两步，中间崩溃会留下已建单但没回写的需求单；
+   * 重试时按需求单号找到那张工单并复用，避免建出第二张重复工单。
+   */
+  ticketByIntakeRef(intakeId: string): Ticket | null {
+    const marker = `需求单：${intakeId}`
+    for (const ticket of this.listTickets()) {
+      const mandate = this.getMandate(ticket.mandateId)
+      if (mandate?.scope.includes(marker)) return ticket
+    }
+    return null
+  }
+
+  /** 按工单号反查 intake：终审通过后用于把工单与原需求单关联。 */
+  intakeByTicket(ticketId: string): Intake | null {
+    const row = this.db.prepare('SELECT * FROM intakes WHERE ticket_id = ? ORDER BY updated_at DESC LIMIT 1').get(ticketId) as Row | undefined
+    return row ? intakeFromRow(row) : null
   }
 
   // ---------- 会话 key 迁移（只由 ra migrate sessions 手动触发） ----------
@@ -1286,6 +1405,74 @@ function ticketFromRow(row: Row): Ticket {
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     ...(row.closed_at ? { closedAt: String(row.closed_at) } : {}),
+  }
+}
+
+function intakeFromRow(row: Row): Intake {
+  return {
+    id: String(row.id),
+    threadId: String(row.thread_id),
+    chatId: String(row.chat_id),
+    actorId: String(row.actor_id),
+    actorName: String(row.actor_name ?? ''),
+    project: String(row.project ?? ''),
+    repo: String(row.repo ?? ''),
+    branch: String(row.branch ?? ''),
+    status: row.status as Intake['status'],
+    kind: row.kind as Intake['kind'],
+    rawText: String(row.raw_text),
+    turns: parseIntakeTurns(row.turns),
+    ...(row.report ? { report: parseIntakeReport(row.report) } : {}),
+    questions: Number(row.questions ?? 0),
+    ...(row.ticket_id ? { ticketId: String(row.ticket_id) } : {}),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  }
+}
+
+/** intakes.turns 是 JSON 数组；旧库/脏数据一律退回空数组。 */
+function parseIntakeTurns(value: unknown): IntakeTurn[] {
+  if (!value) return []
+  try {
+    const doc = JSON.parse(String(value)) as unknown
+    if (!Array.isArray(doc)) return []
+    const out: IntakeTurn[] = []
+    for (const item of doc) {
+      if (!item || typeof item !== 'object') continue
+      const record = item as Record<string, unknown>
+      const text = typeof record.text === 'string' ? record.text : ''
+      if (!text) continue
+      out.push({
+        role: record.role === 'router' ? 'router' : 'user',
+        text,
+        at: typeof record.at === 'string' ? record.at : '',
+        ...(typeof record.actorId === 'string' && record.actorId ? { actorId: record.actorId } : {}),
+      })
+    }
+    return out
+  } catch {
+    return []
+  }
+}
+
+/** intakes.report 是结构化需求单；字段缺失时按空字符串兜底，避免旧数据把整条 intake 读挂。 */
+function parseIntakeReport(value: unknown): IntakeReport | undefined {
+  try {
+    const doc = JSON.parse(String(value)) as Record<string, unknown>
+    if (!doc || typeof doc !== 'object') return undefined
+    const text = (key: string): string => (typeof doc[key] === 'string' ? String(doc[key]) : '')
+    return {
+      title: text('title'),
+      problem: text('problem'),
+      background: text('background'),
+      steps: text('steps'),
+      environment: text('environment'),
+      impact: text('impact'),
+      expected: text('expected'),
+      assessment: text('assessment'),
+    }
+  } catch {
+    return undefined
   }
 }
 

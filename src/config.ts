@@ -38,10 +38,45 @@ export interface ChatSettings {
   branch: string
   /** 本群只允许这些 open_id 操作；空表示沿用全局 feishu.allowed。 */
   allowed: string[]
+  /** 本群的「需求分析助手」配置；默认关闭。 */
+  intake: ChatIntakeSettings
 }
 
 export function chatEntry(chat: string, over: Partial<Omit<ChatSettings, 'chat'>> = {}): ChatSettings {
-  return { chat, mode: 'all', repo: '', branch: '', allowed: [], ...over }
+  const { intake, ...rest } = over
+  return { chat, mode: 'all', repo: '', branch: '', allowed: [], ...rest, intake: defaultChatIntake(intake ?? {}) }
+}
+
+/**
+ * 「需求分析助手」的群级配置。
+ *
+ * 默认关闭：开启后，群里的普通成员不 @ 机器人也能触发初筛；
+ * 初筛判为故障 / 需求的消息进入多轮澄清，结构化结果必须经管理员终审才派单。
+ */
+export interface ChatIntakeSettings {
+  /** 是否在这个群开启需求分析助手。 */
+  enabled: boolean
+  /** 最多主动追问几轮；达到上限后直接整理现有信息交给管理员终审。 */
+  maxQuestions: number
+  /**
+   * 分析引擎是否读取当前群绑定项目的本地代码。
+   * 关闭后只依据对话与业务知识作答，不碰文件系统。
+   */
+  codeAccess: boolean
+  /** 终审管理员：邮箱（推荐）或 open_id；为空时回退到全局 allowed 名单。 */
+  approvers: string[]
+}
+
+/** 需求分析助手的默认配置：关闭、最多追问 10 轮、允许只读项目代码。 */
+export const DEFAULT_CHAT_INTAKE: ChatIntakeSettings = {
+  enabled: false,
+  maxQuestions: 10,
+  codeAccess: true,
+  approvers: [],
+}
+
+export function defaultChatIntake(over: Partial<ChatIntakeSettings> = {}): ChatIntakeSettings {
+  return { ...DEFAULT_CHAT_INTAKE, ...over }
 }
 
 export interface FeishuSettings {
@@ -273,6 +308,11 @@ export function setRuntimeOption(config: AppConfig, runtimeId: string, key: stri
  */
 export function replyAlwaysChatsOf(config: AppConfig): string[] {
   return config.feishu.chats.filter(chat => chat.mode === 'all').map(chat => chat.chat)
+}
+
+/** 开启了「需求分析助手」的群；一个都没开时不装配需求识别链路。 */
+export function intakeEnabledChats(config: AppConfig): string[] {
+  return config.feishu.chats.filter(chat => chat.intake?.enabled).map(chat => chat.chat)
 }
 
 export function defaultConfig(): AppConfig {
@@ -548,13 +588,17 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
     }
   }
 
+  // 群配置先解析出来：旧版全局 intake 段要迁移到群条目上。
+  const chats = parseChats(doc)
+  migrateLegacyIntake(doc, chats, logger)
+
   const config: AppConfig = {
     home,
     projects: projectLists.orca ?? parseProjects(doc.projects),
     feishu: {
       appId: stringOr(doc.feishu?.appId, base.feishu.appId),
       reaction: stringOr(doc.feishu?.reaction, base.feishu.reaction),
-      chats: parseChats(doc),
+      chats,
       directMessages: booleanOr(doc.feishu?.directMessages, base.feishu.directMessages),
       allowed: stringArray(doc.feishu?.allowed, base.feishu.allowed),
       bots: stringArray(doc.feishu?.bots, base.feishu.bots),
@@ -843,6 +887,7 @@ function parseChats(doc: Record<string, any>): ChatSettings[] {
     if (typeof entry.repo === 'string') settings.repo = entry.repo.trim()
     if (typeof entry.branch === 'string') settings.branch = entry.branch.trim()
     settings.allowed = stringArray(entry.allowed, settings.allowed).map(id => id.trim()).filter(Boolean)
+    settings.intake = parseChatIntake(entry.intake, settings.intake)
     explicit.add(chat)
   }
 
@@ -857,6 +902,59 @@ function parseChats(doc: Record<string, any>): ChatSettings[] {
   }
 
   return [...byChat.values()]
+}
+
+/** 最多追问轮数的上限：再大就会让群里一直追问下去，反而收不敛。 */
+const MAX_INTAKE_QUESTIONS = 50
+
+/** 解析群级的需求分析配置；缺字段时沿用默认值。 */
+function parseChatIntake(value: unknown, fallback: ChatIntakeSettings): ChatIntakeSettings {
+  if (!isRecord(value)) return fallback
+  return {
+    enabled: booleanOr(value.enabled, fallback.enabled),
+    maxQuestions: positiveIntOr(value.maxQuestions, fallback.maxQuestions, 0, MAX_INTAKE_QUESTIONS),
+    codeAccess: booleanOr(value.codeAccess, fallback.codeAccess),
+    approvers: stringArray(value.approvers, fallback.approvers).map(item => item.trim()).filter(Boolean),
+  }
+}
+
+/**
+ * 旧版全局 `intake:` 段迁移到群级配置。
+ *
+ * 旧配置是「一个总开关 + 生效群白名单」；新配置把开关与参数下沉到每个群。
+ * 迁移规则：
+ * - `intake.chats` 非空：只迁移到这些群；
+ * - `intake.chats` 为空：迁移到所有已监控的群。
+ *
+ * 迁移只改内存里的配置，写回时全局段不再输出（见 `writeConfig`），
+ * 所以用户下次保存配置就自动完成升级，不需要手工改 YAML。
+ */
+function migrateLegacyIntake(doc: Record<string, any>, chats: ChatSettings[], logger: Logger): void {
+  const legacy = doc.intake
+  if (!isRecord(legacy)) return
+  const targets = new Set(stringArray(legacy.chats, []).map(chat => chat.trim()).filter(Boolean))
+  const enabled = booleanOr(legacy.enabled, false)
+  const approvers = stringArray(legacy.approvers, []).map(item => item.trim()).filter(Boolean)
+  // 旧段里没有任何有效内容：直接按新默认值走，不必打扰用户。
+  if (!enabled && approvers.length === 0 && targets.size === 0) return
+  const maxQuestions = positiveIntOr(legacy.maxQuestions, DEFAULT_CHAT_INTAKE.maxQuestions, 0, MAX_INTAKE_QUESTIONS)
+  const codeAccess = booleanOr(legacy.codeAccess, DEFAULT_CHAT_INTAKE.codeAccess)
+  const scope = targets.size > 0 ? targets : new Set(chats.map(chat => chat.chat))
+  // 已经写过群级配置的群不动：用户手写的比旧全局段更具体。
+  const explicit = new Set<string>()
+  for (const item of Array.isArray(doc.feishu?.chats) ? doc.feishu.chats : []) {
+    if (item && typeof item === 'object' && isRecord((item as Record<string, unknown>).intake)) {
+      const chat = typeof (item as Record<string, any>).chat === 'string' ? String((item as Record<string, any>).chat).trim() : ''
+      if (chat) explicit.add(chat)
+    }
+  }
+  const migrated: string[] = []
+  for (const chat of chats) {
+    if (!scope.has(chat.chat) || explicit.has(chat.chat)) continue
+    chat.intake = { enabled, maxQuestions, codeAccess, approvers: [...approvers] }
+    migrated.push(chat.chat)
+  }
+  logger.info('config:intake-migrated', { chats: migrated, enabled, maxQuestions })
 }
 
 /** 旧版顶层 chatBindings：数组或 `oc_xxx: { repo, branch }` 映射。 */
@@ -892,6 +990,25 @@ export function projectNameOf(repo: string): string {
   return raw
 }
 
+/**
+ * 群级需求分析配置的落盘形态。
+ *
+ * 与默认值完全一致时不写这一段：配置文件里只留下用户真正改过的项。
+ */
+function intakeDocOf(intake: ChatIntakeSettings): Record<string, unknown> | undefined {
+  const same = intake.enabled === DEFAULT_CHAT_INTAKE.enabled
+    && intake.maxQuestions === DEFAULT_CHAT_INTAKE.maxQuestions
+    && intake.codeAccess === DEFAULT_CHAT_INTAKE.codeAccess
+    && intake.approvers.length === 0
+  if (same) return undefined
+  return {
+    enabled: intake.enabled,
+    maxQuestions: intake.maxQuestions,
+    codeAccess: intake.codeAccess,
+    ...(intake.approvers.length > 0 ? { approvers: intake.approvers } : {}),
+  }
+}
+
 /** 把配置写回 config.yaml；保留所有可选字段当前值，方便用 `ra config` 继续调。 */
 export function writeConfig(home: string, config: AppConfig): void {
   mkdirSync(home, { recursive: true })
@@ -899,13 +1016,17 @@ export function writeConfig(home: string, config: AppConfig): void {
     feishu: {
       appId: config.feishu.appId,
       reaction: config.feishu.reaction,
-      chats: config.feishu.chats.map(chat => ({
-        chat: chat.chat,
-        mode: chat.mode,
-        ...(chat.repo ? { repo: chat.repo } : {}),
-        ...(chat.branch ? { branch: chat.branch } : {}),
-        ...(chat.allowed.length > 0 ? { allowed: chat.allowed } : {}),
-      })),
+      chats: config.feishu.chats.map(chat => {
+        const intake = intakeDocOf(chat.intake)
+        return {
+          chat: chat.chat,
+          mode: chat.mode,
+          ...(chat.repo ? { repo: chat.repo } : {}),
+          ...(chat.branch ? { branch: chat.branch } : {}),
+          ...(chat.allowed.length > 0 ? { allowed: chat.allowed } : {}),
+          ...(intake ? { intake } : {}),
+        }
+      }),
       directMessages: config.feishu.directMessages,
       allowed: config.feishu.allowed,
       bots: config.feishu.bots,
@@ -1254,14 +1375,47 @@ function validateChats(value: unknown): { error: string | null; value: ChatSetti
     seen.add(chat)
     const mode = item.mode === 'mention' ? 'mention' : 'all'
     const allowed = Array.isArray(item.allowed) ? item.allowed.map(String).map(id => id.trim()).filter(Boolean) : []
+    const intake = validateChatIntake(item.intake)
+    if (intake.error) return { error: `第 ${index + 1} 项：${intake.error}`, value: [] }
     chats.push(chatEntry(chat, {
       mode,
       repo: typeof item.repo === 'string' ? item.repo.trim() : '',
       branch: typeof item.branch === 'string' ? item.branch.trim() : '',
       allowed,
+      intake: intake.value,
     }))
   }
   return { error: null, value: chats }
+}
+
+/** 群级需求分析配置校验：轮数必须是 0–50 的整数，管理员按逗号分隔的条目列表存。 */
+function validateChatIntake(value: unknown): { error: string | null; value: ChatIntakeSettings } {
+  if (value === undefined || value === null) return { error: null, value: defaultChatIntake() }
+  if (!isRecord(value)) return { error: '需求分析助手配置必须是对象', value: defaultChatIntake() }
+  if (value.enabled !== undefined && typeof value.enabled !== 'boolean') {
+    return { error: '需求分析助手的启用开关必须是布尔值', value: defaultChatIntake() }
+  }
+  if (value.codeAccess !== undefined && typeof value.codeAccess !== 'boolean') {
+    return { error: '需求分析助手的代码读取开关必须是布尔值', value: defaultChatIntake() }
+  }
+  const maxQuestions = value.maxQuestions === undefined
+    ? DEFAULT_CHAT_INTAKE.maxQuestions
+    : Number(value.maxQuestions)
+  if (!Number.isInteger(maxQuestions) || maxQuestions < 0 || maxQuestions > MAX_INTAKE_QUESTIONS) {
+    return { error: `最大对话轮次必须是 0–${MAX_INTAKE_QUESTIONS} 的整数`, value: defaultChatIntake() }
+  }
+  const approvers = value.approvers === undefined
+    ? []
+    : (Array.isArray(value.approvers) ? value.approvers : String(value.approvers).split(','))
+  return {
+    error: null,
+    value: {
+      enabled: booleanOr(value.enabled, DEFAULT_CHAT_INTAKE.enabled),
+      maxQuestions,
+      codeAccess: booleanOr(value.codeAccess, DEFAULT_CHAT_INTAKE.codeAccess),
+      approvers: approvers.map(item => String(item).trim()).filter(Boolean),
+    },
+  }
 }
 
 /**

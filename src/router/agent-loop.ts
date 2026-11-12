@@ -6,6 +6,8 @@ import { DEFAULT_CHANNEL_ID } from '../channels/port.js'
 import { noopLogger, errorMessage, type Logger } from '../infra/logger.js'
 import { activeDraft, resolveDispatch, type DispatchMissing, type DispatchSettings } from './dispatch.js'
 import { readRouterPrompt } from '../specs/index.js'
+import { IntakeCoordinator, type IntakeSettingsView } from './intake-flow.js'
+import type { IntakeEngine } from './intake-engine.js'
 import type { SessionKeyParts } from './session-registry.js'
 import type {
   DecisionAudit,
@@ -44,6 +46,16 @@ export interface AgentLoopOptions {
   onAudit?: (audit: DecisionAudit) => void
   /** 关键链路日志：消息处理失败、模型不可用、会话读写失败都会在这里留痕。 */
   logger?: Logger
+  /**
+   * 需求识别（intake）：普通成员在群里反馈问题时由它初筛、澄清并整理需求单。
+   * 不传时保持原有行为：群里未 @ 的消息只在 mode=all 时回复，普通成员不能自助提需。
+   */
+  intake?: {
+    llm: IntakeEngine
+    settings: IntakeSettingsView
+    /** 项目选择器 → 本地目录；返回空表示这一轮不读代码。 */
+    resolveProjectPath?: (project: { name: string; repo: string }) => Promise<string | undefined>
+  }
 }
 
 export interface ClarifyInfo {
@@ -78,6 +90,16 @@ const THREAD_INTRO = (title: string, id: string) => `工单「${title}」已开�
 
 /** 已关闭话题里，用户明确要求继续的关键词。 */
 const REOPEN_PATTERN = /重新开工|重新开单|重开|继续做|继续干|接着做|接着干|继续|reopen|retry|continue/i
+
+/**
+ * 被群级白名单拒绝的 Gate 原因：intake 不得绕过。
+ * 「配了白名单但一个都没解析出来」是安全边界，也不允许普通成员自助触发。
+ */
+const BLOCKED_BY_CHAT_ALLOWLIST = new Set(['admission:chat-allowlist-empty', 'admission:not-in-chat-allowlist'])
+
+function isAllowlistBlocked(verdict: ReturnType<typeof gate>): boolean {
+  return 'reason' in verdict && BLOCKED_BY_CHAT_ALLOWLIST.has(verdict.reason)
+}
 
 export function isReopenRequest(text: string): boolean {
   const normalized = text.trim()
@@ -143,6 +165,7 @@ export class AgentLoop {
   decisionEngine: DecisionEngine
   private onAudit?: (audit: DecisionAudit) => void
   private logger: Logger
+  private intake?: IntakeCoordinator
 
   constructor(opts: AgentLoopOptions) {
     this.engine = opts.engine
@@ -163,6 +186,21 @@ export class AgentLoop {
     this.decisionEngine = opts.decisionEngine
     this.onAudit = opts.onAudit
     this.logger = opts.logger ?? noopLogger
+    this.intake = opts.intake
+      ? new IntakeCoordinator({
+          store: this.store,
+          engine: this.engine,
+          llm: opts.intake.llm,
+          clock: this.clock,
+          logger: this.logger,
+          settings: opts.intake.settings,
+          dispatch: this.dispatch ?? { projects: [], bindings: [] },
+          ...(opts.intake.resolveProjectPath ? { resolveProjectPath: opts.intake.resolveProjectPath } : {}),
+          reply: (trigger, text, key, opts) => this.reply(trigger, text, key, opts),
+          fallbackApprovers: () => effectiveAllowed(this.engine.policy()),
+          ...(this.home ? { home: this.home } : {}),
+        })
+      : undefined
   }
 
   setPolicy(policy: Policy): void {
@@ -219,6 +257,15 @@ export class AgentLoop {
         }
       }
 
+      // 需求识别：进行中的澄清会话、待终审的需求单优先处理，不进入研判/派工。
+      if (this.intake) {
+        const intakeAction = await this.intake.handleBeforeGate(trigger)
+        if (intakeAction === 'handled') {
+          await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}`)
+          return
+        }
+      }
+
       // 已关闭工单的话题：确定性回复，不再交给模型，也不自动开单。
       const closed = this.closedTicketForThread(trigger.threadId, trigger.actorId)
       if (closed) {
@@ -227,6 +274,16 @@ export class AgentLoop {
       }
 
       const verdict = gate(trigger, this.engine.policy())
+      // 需求识别：群里未 @ 的消息统一先过轻量初筛，名单内外的普通反馈一视同仁。
+      // 群级白名单（含「配了但一个都没解析出来」）是硬边界，不允许 intake 绕过。
+      if (this.intake && trigger.addressed === 'none' && !trigger.mediaOnly && !isAllowlistBlocked(verdict)) {
+        const handled = await this.intake.handleUnaddressed(trigger)
+        if (handled) {
+          await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}`)
+          result.ignored += 1
+          return
+        }
+      }
       if (verdict.action === 'ignore') {
         await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}`)
         this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'inferred', reason: verdict.reason })

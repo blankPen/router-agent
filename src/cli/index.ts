@@ -5,7 +5,7 @@ import { dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { Command, CommanderError } from 'commander'
-import { ensureHome, loadConfig, policyOf, projectsForRuntime, publicConfig, replyAlwaysChatsOf, setConfigValue, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
+import { ensureHome, intakeEnabledChats, loadConfig, policyOf, projectsForRuntime, publicConfig, replyAlwaysChatsOf, setConfigValue, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
 import { Store, type SessionMigrationState } from '../store/db.js'
 import { Engine } from '../core/engine.js'
 import { effectiveAllowed, effectiveAllowedByChat, shouldAcknowledge } from '../core/policy.js'
@@ -35,7 +35,7 @@ import type { Prompter } from './prompts.js'
 import { realRunner, type CommandRunner } from '../infra/process.js'
 import { errorMessage } from '../infra/logger.js'
 import { resolveImageModelConfig, resolvePiModelConfig, type PiModelConfig } from '../router/model-config.js'
-import { createDecisionEngine } from '../router/engine-factory.js'
+import { createDecisionEngine, createIntakeEngine } from '../router/engine-factory.js'
 import type { DecisionAudit } from '../router/decision-engine.js'
 import type { WorkerStateFile } from '../worker/report-poller.js'
 import { RouterService, type Logger } from '../service.js'
@@ -1349,6 +1349,15 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
         scheduleRestart: scheduleUpdateRestart,
       })
     : null
+  // 需求分析助手：只在有群开启时装配，避免默认改变存量群的回复行为。
+  // 没绑定项目的群不纳入：分析 Agent 定位不到代码，也生成不了可派单的需求单。
+  const intakeChats = new Set(intakeEnabledChats(config).filter(chatId => {
+    const chat = config.feishu.chats.find(item => item.chat === chatId)
+    return Boolean(chat?.repo)
+  }))
+  const intakeEngine = model && intakeChats.size > 0
+    ? createIntakeEngine({ config, store, model, logger })
+    : undefined
   const auditPath = join(home, 'logs', 'decisions.jsonl')
   const onDecisionAudit = (audit: DecisionAudit): void => {
     try {
@@ -1382,10 +1391,18 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     // 配了群名单但一个都没解析出来：该群谁都不许进，不能退回全局名单（与 gate() 同口径）。
     if (scoped && scoped.length === 0) return false
     const allowed = scoped ?? effectiveAllowed(policy)
-    if (!allowed.includes(actorId)) return false
-    if (!store.hasLiveTicketForThreadKeys('feishu', threadKeys)) return false
-    logger.info('trigger:admitted-unaddressed', { chat: chatId, actor: actorId, keys: threadKeys.length })
-    return true
+    // 已绑定工单的话题：名单内成员不 @ 也要触发回复（tk-59）。
+    if (allowed.includes(actorId) && store.hasLiveTicketForThreadKeys('feishu', threadKeys)) {
+      logger.info('trigger:admitted-unaddressed', { chat: chatId, actor: actorId, keys: threadKeys.length, reason: 'live-ticket' })
+      return true
+    }
+    // 需求识别：开启 intake 的群里，不在群级白名单之外的人都可以直接反馈问题。
+    // 群级白名单仍是硬边界（scoped 非空时只有名单内成员可以说话），不会被 intake 放宽。
+    if (intakeChats.has(chatId) && (!scoped || scoped.includes(actorId))) {
+      logger.info('trigger:admitted-unaddressed', { chat: chatId, actor: actorId, keys: threadKeys.length, reason: 'intake' })
+      return true
+    }
+    return false
   }
   // 通道适配器：飞书的消费、归一化、富化、渲染、回执、文档与凭据全部收口到这里。
   const feishuChannel = createFeishuChannel({
@@ -1456,6 +1473,10 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       effects,
       sender: feishuOutbox,
       decisionEngine,
+      ...(intakeEngine ? { intakeEngine } : {}),
+      // 终审管理员：配置里写邮箱，这里传解析后的 open_id。
+      ...(identity?.approverOpenIdsByChat ? { intakeApprovers: identity.approverOpenIdsByChat } : {}),
+      orca: orcaRunner,
       onDecisionAudit,
     })
     : null
