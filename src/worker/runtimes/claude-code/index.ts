@@ -243,13 +243,42 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
     const inputPath = join(dir, `input-${safeSegment(inputs[0]!.id)}.md`)
     writeFileSync(inputPath, inputs.map(input => `【Router 输入 ${input.id}】\n${input.text}`).join('\n\n'), 'utf8')
     const prompt = `Read ${inputPath} and continue the ticket. This is a Router follow-up; report via ra report.`
-    const res = await this.runClaude(['--bg', '--resume', sessionId, '--', prompt], meta?.workdir ?? ref.workdir ?? process.cwd())
-    if (/started a copy as/i.test(res.stdout)) {
-      throw new WorkerRuntimeError('agent:launch-failed', `claude --resume 产生了副本，拒绝切换会话: ${res.stdout.slice(0, 200)}`)
+    const cwd = meta?.workdir ?? ref.workdir ?? process.cwd()
+    // resume 不能带任何新 flags（包括 `--` 分隔符），否则 Claude 会 fork 副本。
+    // prompt 以 "Read " 开头，不会与 flag 解析冲突。
+    const argv = ['--bg', '--resume', sessionId, prompt]
+    const res = await this.runClaudeAllowFailure(argv, cwd)
+    // Claude 把副本提示写到 stderr，正常 id 写到 stdout；两边都要看。
+    // 输出可能带 ANSI 颜色码，先清洗再匹配。
+    const notice = stripAnsi(`${res.stdout}\n${res.stderr}`)
+    const forked = isResumeFork(notice)
+    // fork 即使返回非 0，也要先把副本接过来；只有普通失败才抛错。
+    if (res.code !== 0 && !forked) throw launchError(argv, res)
+    const nextHandle = forked
+      ? (parseForkId(notice) ?? parseBackgroundId(res.stdout))
+      : parseBackgroundId(res.stdout)
+    if (forked && !nextHandle) {
+      // 没有拿到副本 id，无法接管或清理；明确不可重试，避免 Router 盲目再次 resume。
+      return { status: 'rejected', inputIds, reason: 'claude:resume-forked-without-id', retryable: false }
     }
-    const newId = parseBackgroundId(res.stdout)
-    if (newId && newId !== ref.handle) {
-      throw new WorkerRuntimeError('agent:launch-failed', `claude --resume 返回了新会话 ${newId}，原会话 ${ref.handle} 未被继续`)
+    if (nextHandle && nextHandle !== ref.handle) {
+      // 接管副本：会话内容完整，直接把它作为工单的新 handle，避免遗留孤儿会话。
+      const record = await this.waitForAgent(nextHandle)
+      if (meta) {
+        meta.handle = nextHandle
+        if (record?.sessionId) meta.sessionId = record.sessionId
+        if (record?.pid) meta.pid = record.pid
+        meta.lastHandedOffInputId = inputs.at(-1)?.id
+        meta.lastHandedOffAttempt = opts.attempt ?? 1
+        meta.status = 'running'
+        this.writeMeta(ref.ticketId, meta)
+      }
+      return {
+        status: 'accepted',
+        inputIds,
+        handle: nextHandle,
+        ...(record?.sessionId ? { sessionId: record.sessionId } : {}),
+      }
     }
     if (meta) {
       meta.lastHandedOffInputId = inputs.at(-1)?.id
@@ -423,14 +452,13 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
   }
 
   private async runClaude(argv: string[], cwd: string) {
-    const res = await this.claude.run(argv, { cwd, env: this.env })
-    if (res.code !== 0) {
-      throw new WorkerRuntimeError('agent:launch-failed', `claude 命令失败: ${res.stderr || res.stdout}`, {
-        cause: res.stderr || res.stdout,
-        detail: { argv: argv.map(arg => (arg.length > 120 ? `<${arg.length} chars>` : arg)) },
-      })
-    }
+    const res = await this.runClaudeAllowFailure(argv, cwd)
+    if (res.code !== 0) throw launchError(argv, res)
     return res
+  }
+
+  private async runClaudeAllowFailure(argv: string[], cwd: string) {
+    return this.claude.run(argv, { cwd, env: this.env })
   }
 
   private async bestEffortRollback(workdir: string, branch: string, repo: string): Promise<void> {
@@ -461,7 +489,26 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
 }
 
 function parseBackgroundId(stdout: string): string | null {
-  const match = stdout.match(/backgrounded\s*·\s*([0-9a-zA-Z_-]+)/i) ?? stdout.match(/backgrounded[\s\S]*?\b([0-9a-f]{8})\b/i)
+  const plain = stripAnsi(stdout)
+  const match = plain.match(/backgrounded\s*·\s*([0-9a-zA-Z_-]+)/i) ?? plain.match(/backgrounded[\s\S]*?\b([0-9a-f]{8})\b/i)
+  return match?.[1] ?? null
+}
+
+function launchError(argv: string[], res: { stdout: string; stderr: string }): WorkerRuntimeError {
+  return new WorkerRuntimeError('agent:launch-failed', `claude 命令失败: ${res.stderr || res.stdout}`, {
+    cause: res.stderr || res.stdout,
+    detail: { argv: argv.map(arg => (arg.length > 120 ? `<${arg.length} chars>` : arg)) },
+  })
+}
+
+/** Claude resume 产生副本时的固定文案（含 restricted / of that conversation 等变体）。 */
+export function isResumeFork(stdout: string): boolean {
+  return /\bstarted\b[^\n]*?\bcopy\b/i.test(stdout)
+}
+
+/** 从副本提示里取出新会话 id。 */
+export function parseForkId(stdout: string): string | null {
+  const match = stdout.match(/\bcopy\b[^\n]*?\bas\s+([0-9a-zA-Z_-]+)/i)
   return match?.[1] ?? null
 }
 

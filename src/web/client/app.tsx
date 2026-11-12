@@ -2635,7 +2635,7 @@ function ChatsEditor({ chats, projects, error, onChange }: {
           <span>chat_id</span>
           <span>接收</span>
           <span>绑定项目</span>
-          <span>本群名单（推荐邮箱）</span>
+          <span>授权名单</span>
           <span>需求分析助手</span>
           <span />
         </div>

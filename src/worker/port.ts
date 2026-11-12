@@ -111,7 +111,16 @@ export interface ActivityQuery {
 
 /** 投递回执：Router 据此决定是否重投；accepted 不等于 ack。 */
 export type DeliveryReceipt =
-  | { status: 'accepted'; inputIds: string[] }
+  | {
+      status: 'accepted'
+      inputIds: string[]
+      /**
+       * 运行时在投递过程中切换了会话（例如 Claude 的 resume 产生副本）。
+       * Router 必须把 Assignment 的 handle 换成新值，后续 status/stop 才能命中同一会话。
+       */
+      handle?: string
+      sessionId?: string
+    }
   | { status: 'queued'; inputIds: string[]; reason?: string }
   | { status: 'rejected'; inputIds: string[]; reason: string; retryable?: boolean; retryAfterMs?: number }
 

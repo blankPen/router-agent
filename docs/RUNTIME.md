@@ -9,7 +9,7 @@ Worker 不在 Router 进程里跑。每张工单开工时，Router 按 `runtime.
 | runtime id | 拉起方式 | workspace | 状态读取 | 追问 / 恢复 | 适用场景 |
 |-|-|-|-|-|-|
 | `orca`（默认） | Orca 创建 worktree + Agent 终端（默认 Claude Code，也可指定 codex 等） | `orca worktree create --repo … --base-branch …` | Orca `AgentStatus`（`connected` / `orphaned` / `lastOutputAt`） | 终端常驻，追问直接投递；巡检优先读 Agent 自己的会话记录 | 本机已用 Orca 管仓库，想同时看到终端 |
-| `claude-code` | `git worktree` + `claude --bg` 后台会话 | 本地 git 仓库绝对路径 | `claude agents --json --all` | 会话结束后用 `claude --bg --resume <sessionId>` 追问；进程退出不自动 resume | 不用 Orca，直接跑 Claude Code |
+| `claude-code` | `git worktree` + `claude --bg` 后台会话 | 本地 git 仓库绝对路径 | `claude agents --json --all` | 会话结束后用 `claude --bg --resume <sessionId> <prompt>` 追问（不带任何新参数）；fork 出的副本会被接管；进程退出不自动 resume | 不用 Orca，直接跑 Claude Code |
 | `codex-app` | `git worktree` + `codex app-server --stdio` | 本地 git 仓库绝对路径 | Codex `thread/status/changed`、`turn/*`、`item/*` 事件 | `thread/resume` 接回；执行中 `turn/steer`；停止用 `turn/interrupt` | 想用 Codex，且希望 Router 创建的 thread 能在 Codex 桌面端看到 |
 | `herdr` | ra 用 git worktree 建检出，Herdr 开终端窗口跑 Agent | `git worktree add` + `herdr workspace create --cwd …` | Herdr `agent get`（`idle` / `working` / `done` / `blocked` / `unknown`） | 终端常驻，追问直接投递；巡检优先读 Agent 自己的会话记录 | 本机已用 Herdr 管终端，想在 Herdr 侧栏里看到工单 |
 | `acp` / `acp-*` | ACP 子进程：`initialize` → `session/new` → `session/prompt` | `git worktree`（本地绝对路径） | ACP `session/update` | Agent 声明 `loadSession` 时用 `session/load` 恢复 | 想接 Codex / Gemini / OpenCode 等 |

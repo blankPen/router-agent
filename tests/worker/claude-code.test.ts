@@ -1,11 +1,11 @@
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { CommandResult, CommandRunner } from '../../src/infra/process.js'
 import { ClaudeCodeRuntime, allowedToolsFrom } from '../../src/worker/runtimes/claude-code/index.js'
-import { WorkerRuntimeError, type WorkerContext, type WorkerRef } from '../../src/worker/port.js'
+import type { WorkerContext, WorkerRef } from '../../src/worker/port.js'
 import { claudeProjectSlug } from '../../src/worker/agents/claude.js'
 import { parseGitHubRepo } from '../../src/worker/workspaces/git-worktree.js'
 
@@ -106,6 +106,19 @@ describe('ClaudeCodeRuntime', () => {
     expect(bg?.argv).not.toContain('--resume')
   })
 
+  it('parseBackgroundId 兼容带 ANSI 颜色的 backgrounded 输出', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-claude-'))
+    const agents = [{ id: 'e46aaf7e', kind: 'background', state: 'working', status: 'busy', sessionId: 's1' }]
+    const claude = scripted(argv => {
+      if (argv[0] === '--bg') return { code: 0, stdout: `backgrounded · \u001b[36me46aaf7e\u001b[39m · ra-tk-1-demo\n`, stderr: '' }
+      if (argv[0] === 'agents') return { code: 0, stdout: JSON.stringify(agents), stderr: '' }
+      return { code: 0, stdout: '', stderr: '' }
+    })
+    const runtime = new ClaudeCodeRuntime({ claude, git: gitRunner(), home, workersDir: join(home, 'workers') })
+    const started = await runtime.start(context(home))
+    expect(started.handle).toBe('e46aaf7e')
+  })
+
   it('working 时 deliver 返回 queued，不触发 --resume', async () => {
     const home = mkdtempSync(join(tmpdir(), 'ra-claude-'))
     const git = gitRunner()
@@ -120,7 +133,7 @@ describe('ClaudeCodeRuntime', () => {
     expect(claude.calls.some(call => call.argv.includes('--resume'))).toBe(false)
   })
 
-  it('done 时 deliver 用同一 session resume，且不带新 flags', async () => {
+  it('done 时 deliver 用同一 session resume，且不带任何新 flags', async () => {
     const home = mkdtempSync(join(tmpdir(), 'ra-claude-'))
     const git = gitRunner()
     const agents = [{ id: 'e46aaf7e', kind: 'background', state: 'done', status: 'idle', sessionId: 's1' }]
@@ -140,18 +153,28 @@ describe('ClaudeCodeRuntime', () => {
     const receipt = await runtime.deliver(ref(home), [{ id: 'in_2', kind: 'followup', text: '补测试' }], { attempt: 1 })
     expect(receipt.status).toBe('accepted')
     const resume = claude.calls.find(call => call.argv.includes('--resume'))
-    expect(resume?.argv.slice(0, 5)).toEqual(['--bg', '--resume', 's1', '--', expect.stringContaining('input-')])
+    expect(resume?.argv).toEqual(['--bg', '--resume', 's1', expect.stringContaining('input-')])
+    expect(resume?.argv).not.toContain('--')
     expect(resume?.argv).not.toContain('--model')
     expect(resume?.argv).not.toContain('--permission-mode')
   })
 
-  it('resume 产生副本时抛错，不静默切换', async () => {
+  it('resume 产生副本时接管新会话，而不是反复抛错重试', async () => {
     const home = mkdtempSync(join(tmpdir(), 'ra-claude-'))
     const git = gitRunner()
-    const agents = [{ id: 'e46aaf7e', kind: 'background', state: 'done', status: 'idle', sessionId: 's1' }]
+    const agents = [
+      { id: 'e46aaf7e', kind: 'background', state: 'done', status: 'idle', sessionId: 's1' },
+      { id: '95c4c910', kind: 'background', state: 'working', status: 'busy', sessionId: 's2' },
+    ]
     const claude = scripted(argv => {
       if (argv[0] === 'agents') return { code: 0, stdout: JSON.stringify(agents), stderr: '' }
-      if (argv[0] === '--bg') return { code: 0, stdout: 'note: started a copy as 95c4c910\n', stderr: '' }
+      if (argv[0] === '--bg') {
+        return {
+          code: 0,
+          stdout: 'backgrounded · 95c4c910 · ra-tk-1-demo\n',
+          stderr: 'note: session e46aaf7e is already running in the background, so this started a copy as 95c4c910. `claude attach e46aaf7e` opens the original.\n',
+        }
+      }
       return { code: 0, stdout: '', stderr: '' }
     })
     const runtime = new ClaudeCodeRuntime({ claude, git, home, workersDir: join(home, 'workers') })
@@ -161,7 +184,70 @@ describe('ClaudeCodeRuntime', () => {
       workdir: join(home, 'worktrees', 'ra-tk-1-demo'), repo: '/tmp/repo', branch: 'main',
       workBranch: 'ra/tk-1-demo', sessionId: 's1', status: 'running',
     }))
-    await expect(runtime.deliver(ref(home), [{ id: 'in_3', kind: 'followup', text: '继续' }])).rejects.toBeInstanceOf(WorkerRuntimeError)
+    const receipt = await runtime.deliver(ref(home), [{ id: 'in_3', kind: 'followup', text: '继续' }])
+    expect(receipt).toMatchObject({ status: 'accepted', handle: '95c4c910', sessionId: 's2' })
+    const meta = JSON.parse(readFileSync(join(home, 'workers', 'tk-1', 'meta.json'), 'utf8')) as {
+      handle: string
+      sessionId: string
+    }
+    expect(meta.handle).toBe('95c4c910')
+    expect(meta.sessionId).toBe('s2')
+  })
+
+  it('兼容新版 Claude 的副本文案 started a copy of that conversation as', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-claude-'))
+    const agents = [
+      { id: 'e46aaf7e', kind: 'background', state: 'done', status: 'idle', sessionId: 's1' },
+      { id: '95c4c910', kind: 'background', state: 'working', status: 'busy', sessionId: 's2' },
+    ]
+    const claude = scripted(argv => {
+      if (argv[0] === 'agents') return { code: 0, stdout: JSON.stringify(agents), stderr: '' }
+      if (argv[0] === '--bg') {
+        return {
+          code: 0,
+          stdout: 'backgrounded · 95c4c910 · ra-tk-1-demo\n',
+          stderr: 'note: started a copy of that conversation as 95c4c910. To continue a session under its own id, pass its full session id to --resume.\n',
+        }
+      }
+      return { code: 0, stdout: '', stderr: '' }
+    })
+    const runtime = new ClaudeCodeRuntime({ claude, git: gitRunner(), home, workersDir: join(home, 'workers') })
+    mkdirSync(join(home, 'workers', 'tk-1'), { recursive: true })
+    writeFileSync(join(home, 'workers', 'tk-1', 'meta.json'), JSON.stringify({
+      ticketId: 'tk-1', assignmentId: 'as-1', runtime: 'claude-code', handle: 'e46aaf7e',
+      workdir: join(home, 'worktrees', 'ra-tk-1-demo'), repo: '/tmp/repo', branch: 'main',
+      workBranch: 'ra/tk-1-demo', sessionId: 's1', status: 'running',
+    }))
+    const receipt = await runtime.deliver(ref(home), [{ id: 'in_4', kind: 'followup', text: '继续' }])
+    expect(receipt).toMatchObject({ status: 'accepted', handle: '95c4c910' })
+  })
+
+  it('fork 时即使退出码非 0，也接管副本而不是抛可重试错误', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-claude-'))
+    const agents = [
+      { id: 'e46aaf7e', kind: 'background', state: 'done', status: 'idle', sessionId: 's1' },
+      { id: '95c4c910', kind: 'background', state: 'working', status: 'busy', sessionId: 's2' },
+    ]
+    const claude = scripted(argv => {
+      if (argv[0] === 'agents') return { code: 0, stdout: JSON.stringify(agents), stderr: '' }
+      if (argv[0] === '--bg') {
+        return {
+          code: 1,
+          stdout: 'backgrounded · 95c4c910 · ra-tk-1-demo\n',
+          stderr: 'note: session e46aaf7e is already running in the background, so this started a copy as 95c4c910.\n',
+        }
+      }
+      return { code: 0, stdout: '', stderr: '' }
+    })
+    const runtime = new ClaudeCodeRuntime({ claude, git: gitRunner(), home, workersDir: join(home, 'workers') })
+    mkdirSync(join(home, 'workers', 'tk-1'), { recursive: true })
+    writeFileSync(join(home, 'workers', 'tk-1', 'meta.json'), JSON.stringify({
+      ticketId: 'tk-1', assignmentId: 'as-1', runtime: 'claude-code', handle: 'e46aaf7e',
+      workdir: join(home, 'worktrees', 'ra-tk-1-demo'), repo: '/tmp/repo', branch: 'main',
+      workBranch: 'ra/tk-1-demo', sessionId: 's1', status: 'running',
+    }))
+    const receipt = await runtime.deliver(ref(home), [{ id: 'in_5', kind: 'followup', text: '继续' }])
+    expect(receipt).toMatchObject({ status: 'accepted', handle: '95c4c910' })
   })
 
   it('agents 查询失败时 queued，不盲目 resume', async () => {

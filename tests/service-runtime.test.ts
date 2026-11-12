@@ -68,6 +68,10 @@ class FakeRuntime implements WorkerRuntime {
   interruptedCalls: string[] = []
   /** 模拟 ACP 回合未结束：始终返回 queued。 */
   deliverQueue = false
+  /** 模拟投递抛错（例如 Claude resume fork 但没有拿到新 id）。 */
+  deliverError = ''
+  /** 模拟运行时在投递时切换了会话。 */
+  deliverHandle = ''
   handles = new Map<string, { lastOutputAt: string }>()
   linkedPr: Record<string, unknown> | null = null
   /** 主动巡检读取的终端渲染屏幕。 */
@@ -84,9 +88,14 @@ class FakeRuntime implements WorkerRuntime {
   }
   async deliver(ref: WorkerRef | string, inputs: { text: string; id: string }[]): Promise<DeliveryReceipt> {
     if (this.deliverQueue) return { status: 'queued', inputIds: inputs.map(input => input.id), reason: 'acp:busy' }
+    if (this.deliverError) throw new Error(this.deliverError)
     const handle = typeof ref === 'string' ? ref : ref.handle
     for (const input of inputs) this.delivered.push({ handle, text: input.text })
-    return { status: 'accepted', inputIds: inputs.map(input => input.id) }
+    return {
+      status: 'accepted',
+      inputIds: inputs.map(input => input.id),
+      ...(this.deliverHandle ? { handle: this.deliverHandle, sessionId: 's-new' } : {}),
+    }
   }
   async reattach(ref: WorkerRef | string) {
     this.reattachCalls.push(typeof ref === 'string' ? ref : ref.handle)
@@ -209,6 +218,58 @@ describe('运行时机制', () => {
     const afterFirst = runtime.delivered.length
     await service.runOnce()
     expect(runtime.delivered.length).toBe(afterFirst)
+  })
+
+  it('deliver 抛错也计入重投次数并遵守退避，不会每秒拉起新会话', async () => {
+    const { ticketId } = await launchOne()
+    runtime.deliverError = 'claude:resume-forked-without-id'
+    engine.deliverInput(ticketId, { kind: 'followup', text: '继续' })
+
+    // 第一轮发起投递并失败。
+    await service.runOnce()
+    const failed = logs.filter(item => item.message === 'input:deliver-failed')
+    expect(failed).toHaveLength(1)
+    expect(failed[0]?.extra).toMatchObject({ ticketId, attempt: 1 })
+
+    // cooldown 内每个 tick 都不应再次投递。
+    now += 1_000
+    await service.runOnce()
+    now += 5_000
+    await service.runOnce()
+    expect(logs.filter(item => item.message === 'input:deliver-failed')).toHaveLength(1)
+
+    // 退避结束后才进行第 2 次尝试。
+    now += 31_000
+    await service.runOnce()
+    expect(logs.filter(item => item.message === 'input:deliver-failed').at(-1)?.extra).toMatchObject({ attempt: 2 })
+  })
+
+  it('连续失败达到上限后转人工，不再无限重投', async () => {
+    const { ticketId } = await launchOne()
+    runtime.deliverError = 'claude:resume-forked-without-id'
+    engine.deliverInput(ticketId, { kind: 'followup', text: '继续' })
+
+    for (let i = 0; i < 6; i++) {
+      await service.deliverPendingInputs()
+      now += 10 * 60_000
+    }
+    expect(logs.some(item => item.message === 'input:redeliver-giveup')).toBe(true)
+    expect(store.getAttention(ticketId)?.question ?? '').toContain('5 次')
+  })
+
+  it('运行时投递时接管了新会话，Assignment 的 handle 同步更新', async () => {
+    const { ticketId, handle } = await launchOne()
+    runtime.deliverHandle = 'term-new'
+    runtime.handles.set('term-new', { lastOutputAt: new Date(now).toISOString() })
+    engine.deliverInput(ticketId, { kind: 'followup', text: '继续' })
+    await service.runOnce()
+
+    expect(store.latestAssignment(ticketId)?.handle).toBe('term-new')
+    expect(store.latestAssignment(ticketId)?.handle).not.toBe(handle)
+    expect(logs.find(item => item.message === 'input:adopted-handle')?.extra).toMatchObject({
+      from: handle,
+      to: 'term-new',
+    })
   })
 
   it('worker 忙时 queued 不累计重投次数，长回合不会被误判为未 ack', async () => {
