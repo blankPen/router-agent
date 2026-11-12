@@ -1,23 +1,43 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
-  FIELD_PATHS,
   LLM_FIELDS,
-  SECTIONS,
   allRuntimeOptionFields,
+  blockEffect,
+  blockPaths,
   fieldError,
   fieldValue,
   getByPath,
+  groupEffect,
+  groupsFor,
   humanizeTime,
   runtimeOptionDefaults,
-  sectionsFor,
   setByPath,
+  type ConfigBlock,
+  type ConfigGroup,
   type FieldDef,
   type RuntimeChoiceView,
-  type SectionDef,
 } from './fields.js'
 import { FieldRow } from './field-row.js'
 import { runtimeOptionPaths } from '#runtime/runtimes/options.js'
+import {
+  channelSetupBlocks,
+  channelSetupExtraFields,
+  channelSetupFields,
+  channelSetupPaths,
+  mergeChannels,
+  type ChannelDescriptor,
+  type ChannelPanelProps,
+} from './channels.js'
+import { ChannelPicker } from './channel-picker.js'
+import {
+  chatsIssue,
+  projectIssue,
+  projectPatchPath,
+  projectsOf,
+  type ChatDraft,
+  type ProjectDraft,
+} from './config-shared.js'
 import {
   importLocalProvider,
   listLocalProviders,
@@ -33,25 +53,12 @@ import {
   type PluginView,
 } from './api.js'
 import { Icon, LogoMark } from './icons.js'
-import {
-  describeEntry,
-  problemEntries,
-  summarizeBot,
-  summarizeIdentity,
-  type IdentityStatusView,
-} from './identity-status.js'
+import type { IdentityStatusView } from './identity-status.js'
 import { RuntimeCards, type RuntimeNotice } from './runtime-cards.js'
 import { PluginSettings } from './plugin-settings.js'
 import { FeishuBotPanel } from './feishu-panel.js'
 import { LogAssistantFab } from './log-assistant.js'
 import { SpecsEditor } from './specs-editor.js'
-import {
-  DEFAULT_CHAT_INTAKE,
-  MAX_INTAKE_QUESTIONS,
-  chatIntakeIssue,
-  normalizeChatIntake,
-  type ChatIntakeDraft,
-} from './chat-intake.js'
 import {
   mergeRuntimeChoices,
   runtimeDisplayName,
@@ -136,38 +143,6 @@ interface TicketDetail {
   inputs: TicketInput[]
   attention: { question: string; createdAt?: string } | null
   resume?: ResumeInfo | null
-}
-
-interface ProjectDraft {
-  name: string
-  repo: string
-  defaultBranch: string
-}
-
-/** 项目清单按运行时隔离：orca 用顶层 projects，其它运行时用 runtime.projects.<id>。 */
-function projectPatchPath(runtimeId: string): string {
-  return runtimeId === ORCA_RUNTIME_ID ? 'projects' : `runtime.projects.${runtimeId}`
-}
-
-function projectsOf(doc: ConfigDoc, runtimeId: string): ProjectDraft[] {
-  const list = runtimeId === ORCA_RUNTIME_ID
-    ? doc.projects
-    : doc.runtime?.projects?.[runtimeId]
-  return Array.isArray(list) ? list as ProjectDraft[] : []
-}
-
-function isLocalRepoPath(repo: string): boolean {
-  return repo.trim().replace(/^path:/, '').startsWith('/')
-}
-
-interface ChatDraft {
-  chat: string
-  mode: string
-  repo: string
-  branch: string
-  allowed: string[]
-  /** 群级「需求分析助手」配置；没有这一段表示按默认值（关闭）。 */
-  intake?: ChatIntakeDraft
 }
 
 interface ServiceStatus {
@@ -1191,30 +1166,10 @@ function MetaItem({ label, value, href, mono, wide, title }: {
 // 配置
 // ---------------------------------------------------------------------------
 
-const CUSTOM_SECTIONS: SectionDef[] = [
-  {
-    id: 'specs',
-    title: '规范文件',
-    description: 'Router 与 Worker 的提示词规范统一存放在内置存储里，可直接查看、编辑、保存或恢复默认；不再需要指定外部文件路径。',
-    fields: [],
-  },
-  {
-    id: 'projects',
-    title: '项目与群绑定',
-    description: '维护可派工的项目，以及每个群绑定到哪个项目 / 分支。项目清单按 Worker 后端隔离；支持添加本地项目或从 Git 地址 clone。',
-    fields: [],
-  },
-]
-
-/** 项目清单校验：repo 必填；非 orca 运行时必须是本地绝对路径。 */
-function projectIssue(runtimeId: string, projects: ProjectDraft[]): string | null {
-  for (const project of projects) {
-    if (!String(project.repo || '').trim()) return '每个项目都需要填写 repo'
-    if (runtimeId !== ORCA_RUNTIME_ID && !isLocalRepoPath(project.repo)) {
-      return 'repo 必须是本地仓库绝对路径（例如 /Users/me/project 或 path:/Users/me/project）'
-    }
-  }
-  return null
+/** 筛选框匹配：空查询时全部命中。 */
+function matchesText(query: string, ...parts: (string | undefined)[]): boolean {
+  if (!query) return true
+  return parts.some(part => String(part ?? '').toLowerCase().includes(query))
 }
 
 /** 插件入口改动：runtime.plugins.<id> / channels.<id>，保存时按点路径提交。 */
@@ -1233,16 +1188,13 @@ function changedPluginPaths(draft: ConfigDoc, original: ConfigDoc): string[] {
   return paths
 }
 
-function chatsIssue(chats: unknown): string | null {
-  if (!Array.isArray(chats)) return null
-  for (const chat of chats as ChatDraft[]) {
-    if (!String(chat.chat || '').trim()) return '每行都需要填写 chat_id'
-    const issue = chatIntakeIssue(chat.intake)
-    if (issue) return issue
-  }
-  return null
-}
-
+/**
+ * 配置页。
+ *
+ * 层次：分组 → 配置块（可折叠）→ 字段。
+ * 渠道分组的内容来自渠道注册表（channels.ts），页面本身不认识任何具体渠道：
+ * 新增渠道只要再加一份描述与表单。
+ */
 function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocusHandled }: {
   restarting: boolean
   onRestart: () => void
@@ -1259,7 +1211,11 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
   const [plugins, setPlugins] = useState<PluginView[]>([])
   const [detecting, setDetecting] = useState(false)
   const [identity, setIdentity] = useState<IdentityStatusView | undefined>(undefined)
-  const [active, setActive] = useState<string>('policy')
+  const [hotPaths, setHotPaths] = useState<string[]>([])
+  const [registered, setRegistered] = useState<{ id: string; kind: string }[]>([])
+  const [channelId, setChannelId] = useState('')
+  const [active, setActive] = useState<string>('channels')
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [filter, setFilter] = useState('')
   const [saving, setSaving] = useState(false)
   const [notice, setNotice] = useState<RuntimeNotice | null>(null)
@@ -1282,9 +1238,14 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
         setPlugins(data.plugins ?? [])
         setDetecting(Boolean(data.detecting))
         setIdentity(data.identity)
+        setHotPaths(Array.isArray(data.hotPaths) ? data.hotPaths : [])
         setLoadError(null)
       })
       .catch(error => setLoadError(error instanceof Error ? error.message : String(error)))
+    // 已注册的消息渠道由内核给出；拿不到（旧版服务）就退回前端的描述表。
+    void getJson<{ channels?: { id: string; kind: string }[] }>('/api/channels')
+      .then(data => setRegistered(data.channels ?? []))
+      .catch(() => undefined)
   }, [])
 
   // 探测轮询由 RuntimeCards 负责；这里只保留静态目录兜底 + 服务端快照合并。
@@ -1295,21 +1256,26 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
     draft && typeof draft.runtime?.default === 'string' ? draft.runtime.default : ORCA_RUNTIME_ID,
   )
 
-  const sections = useMemo(
-    () => [...sectionsFor(runtimeChoices, selectedRuntimeId, runtimeCatalog), ...CUSTOM_SECTIONS],
-    [runtimeChoices, selectedRuntimeId, runtimeCatalog],
-  )
+  const groups = useMemo(() => groupsFor(runtimeChoices, selectedRuntimeId, runtimeCatalog), [runtimeChoices, selectedRuntimeId, runtimeCatalog])
+  const channels = useMemo(() => mergeChannels(registered), [registered])
+  const activeChannel = channels.find(channel => channel.id === channelId) ?? channels[0]
 
   const optionSpecs = useMemo(
     () => plugins.flatMap(plugin => (plugin.kind === 'runtime' && plugin.options ? [plugin.options] : [])),
     [plugins],
   )
-  const optionDefaults = useMemo(() => runtimeOptionDefaults(allRuntimeOptionFields(optionSpecs)), [optionSpecs])
+  const optionFields = useMemo(() => allRuntimeOptionFields(optionSpecs), [optionSpecs])
+  const optionDefaults = useMemo(() => runtimeOptionDefaults(optionFields), [optionFields])
+
+  const groupBlocks = useMemo(() => groups.flatMap(group => group.blocks), [groups])
+  const channelBlocks = useMemo(() => channels.flatMap(channel => channel.blocks), [channels])
+  const allBlocks = useMemo(() => [...groupBlocks, ...channelBlocks], [groupBlocks, channelBlocks])
+  const trackedPaths = useMemo(() => allBlocks.flatMap(block => blockPaths(block)), [allBlocks])
 
   const changed = useMemo(() => {
     if (!draft || !original) return []
-    // 运行时的专属选项是动态字段，路径来自各运行时的声明，不在静态 FIELD_PATHS 里。
-    const paths = [...FIELD_PATHS, ...runtimeOptionPaths(), ...allRuntimeOptionFields(optionSpecs).map(field => field.path)]
+    // 运行时专属选项是动态字段，路径来自各运行时的声明，不在静态块字段里。
+    const paths = [...trackedPaths, ...runtimeOptionPaths(), ...optionFields.map(field => field.path)]
       .filter(path => JSON.stringify(fieldValue(draft, path)) !== JSON.stringify(fieldValue(original, path)))
     paths.push(...changedPluginPaths(draft, original))
     for (const runtime of runtimeCatalog) {
@@ -1317,9 +1283,8 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
         paths.push(projectPatchPath(runtime.id))
       }
     }
-    if (JSON.stringify(draft.feishu?.chats) !== JSON.stringify(original.feishu?.chats)) paths.push('feishu.chats')
     return paths
-  }, [draft, original, runtimeCatalog, optionSpecs])
+  }, [draft, original, runtimeCatalog, trackedPaths, optionFields])
 
   useEffect(() => {
     onDirtyChange?.(changed.length > 0)
@@ -1358,20 +1323,27 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
   const errors = useMemo(() => {
     if (!draft) return new Map<string, string>()
     const map = new Map<string, string>()
-    for (const section of sections) {
-      for (const field of section.fields) {
-        const message = fieldError(field, fieldValue(draft, field.path, optionDefaults))
-        if (message) map.set(field.path, message)
+    for (const field of allBlocks.flatMap(block => block.fields)) {
+      const message = fieldError(field, fieldValue(draft, field.path, optionDefaults))
+      if (message) map.set(field.path, message)
+    }
+    // 运行时专属选项是动态字段，默认值来自各运行时的声明。
+    for (const field of optionFields) {
+      const message = fieldError(field, fieldValue(draft, field.path, optionDefaults))
+      if (message) map.set(field.path, message)
+    }
+    // 渠道自己的校验（群列表之类），由渠道描述提供。
+    for (const channel of channels) {
+      for (const [path, message] of Object.entries(channel.validate?.(draft) ?? {})) {
+        if (message) map.set(path, message)
       }
     }
-    const chatMessage = chatsIssue(draft.feishu?.chats)
-    if (chatMessage) map.set('feishu.chats', chatMessage)
     for (const runtime of runtimeCatalog) {
       const issue = projectIssue(runtime.id, projectsOf(draft, runtime.id))
       if (issue) map.set(projectPatchPath(runtime.id), `${runtimeDisplayName(runtime)}：${issue}`)
     }
     return map
-  }, [draft, sections, runtimeCatalog, optionDefaults])
+  }, [draft, allBlocks, channels, runtimeCatalog, optionFields, optionDefaults])
 
   const setField = (path: string, value: unknown): void => {
     setDraft(current => (current ? setByPath(current, path, value) : current))
@@ -1438,31 +1410,162 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
     if (await save()) onRestart()
   }
 
+  const query = filter.trim().toLowerCase()
+
+  const visibleGroups = useMemo(() => groups.filter(group => {
+    if (matchesText(query, group.title, group.description)) return true
+    const list = group.kind === 'channels' ? channelBlocks : group.blocks
+    return list.some(block =>
+      matchesText(query, block.title, block.description) ||
+      block.fields.some(field => matchesText(query, field.label, field.path, field.hint)))
+  }), [groups, channelBlocks, query])
+
+  // 滚动到哪个分组，左侧导航就高亮哪个：避免长页面上「点了才知道自己在哪」。
+  useEffect(() => {
+    const nodes = visibleGroups
+      .map(group => document.getElementById(`sec-${group.id}`))
+      .filter((node): node is HTMLElement => Boolean(node))
+    if (nodes.length === 0) return
+    const observer = new IntersectionObserver(entries => {
+      const visible = entries
+        .filter(entry => entry.isIntersecting)
+        .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)
+      const first = visible[0]?.target.id.replace(/^sec-/, '')
+      if (first) setActive(first)
+    }, { rootMargin: '-80px 0px -55% 0px', threshold: 0 })
+    nodes.forEach(node => observer.observe(node))
+    return () => observer.disconnect()
+  }, [visibleGroups])
+
   if (loadError) return <div className="banner danger"><Icon name="alert" />读取配置失败：{loadError}</div>
   if (!draft || !original) return <div className="empty-state tall"><p>正在读取配置…</p></div>
 
-  const query = filter.trim().toLowerCase()
   const runtimeId = selectedRuntimeId
   const selectedRuntime = runtimeCatalog.find(runtime => runtime.id === runtimeId)
   const runtimeLabel = selectedRuntime ? runtimeDisplayName(selectedRuntime) : runtimeId
   const activeProjectsPath = projectPatchPath(runtimeId)
   const activeProjects = projectsOf(draft, runtimeId)
-  const projectErrors = runtimeCatalog
-    .map(runtime => errors.get(projectPatchPath(runtime.id)))
-    .filter((message): message is string => Boolean(message))
-    .join('；')
-  const visible = sections.filter(section =>
-    !query ||
-    section.title.toLowerCase().includes(query) ||
-    section.id.includes(query) ||
-    section.fields.some(field => `${field.label} ${field.path} ${field.hint ?? ''}`.toLowerCase().includes(query)),
-  )
+
+  const matches = (...parts: (string | undefined)[]): boolean => matchesText(query, ...parts)
+
+  /** 块的「已修改」：字段路径 + 块自己声明的路径（如群列表）。 */
+  const blockDirty = (block: ConfigBlock): boolean => {
+    if (block.render === 'projects') return changed.includes(projectPatchPath(runtimeId))
+    return blockPaths(block).some(path => changed.includes(path))
+  }
+
+  const blocksOfGroup = (group: ConfigGroup): ConfigBlock[] =>
+    group.kind === 'channels' ? channelBlocks : group.blocks
+
+  /** 筛选时，块标题或块内任一字段命中才保留；没命中的块整块隐藏。 */
+  const blockVisible = (block: ConfigBlock): boolean => {
+    if (!query) return true
+    return matches(block.title, block.description)
+      || block.fields.some(field => matches(field.label, field.path, field.hint))
+  }
+
+  const panelProps: ChannelPanelProps = {
+    draft,
+    defaults,
+    setField,
+    errors,
+    identity,
+    staleIdentity: activeChannel?.identityPaths?.some(path => changed.includes(path)) ?? false,
+    projects: activeProjects,
+    runtimeLabel,
+    onConfigSaved: config => {
+      const nextAppId = String(config.feishu?.appId ?? '')
+      setOriginal(current => (current ? setByPath(current, 'feishu.appId', nextAppId) : current))
+      setDraft(current => (current ? setByPath(current, 'feishu.appId', nextAppId) : current))
+    },
+  }
+
+  const renderBlock = (block: ConfigBlock, channel?: ChannelDescriptor): JSX.Element => {
+    const effect = blockEffect(block, hotPaths)
+    // 筛选时命中的折叠块自动展开，否则用户只看到标题、看不到内容。
+    const blockHit = matches(block.title, block.description)
+    const open = collapsed[block.id] ?? (!block.folded || (Boolean(query) && blockHit))
+    const body = (): JSX.Element => {
+      if (block.render === 'custom') {
+        const custom = channel?.custom?.[block.id]
+        return custom ? custom({ ...panelProps, block }) : <p className="editor-empty">该渠道暂无可配置的项。</p>
+      }
+      if (block.render === 'runtime') {
+        return (
+          <RuntimeCards
+            choices={runtimeChoices}
+            plugins={plugins}
+            detecting={detecting}
+            selected={runtimeId}
+            showHead={false}
+            draft={draft}
+            defaults={defaults}
+            onOptionChange={(path, value) => setField(path, value)}
+            onSelect={id => setField('runtime.default', id)}
+            onChoices={setRuntimeChoices}
+            onDetecting={setDetecting}
+            onNotice={setNotice}
+            onPendingRestart={() => setPendingRestart(true)}
+          />
+        )
+      }
+      if (block.render === 'plugins') {
+        return <PluginSettings plugins={plugins} draft={draft} onChange={setField} />
+      }
+      if (block.render === 'projects') {
+        return (
+          <>
+            <p className="editor-hint">
+              当前编辑：<strong>{runtimeLabel}</strong> 的项目清单。项目按运行时隔离，切换上方「Worker 运行时」即可编辑另一套。
+            </p>
+            <ProjectsEditor
+              runtimeId={runtimeId}
+              projects={activeProjects}
+              error={errors.get(projectPatchPath(runtimeId))}
+              onChange={value => setField(projectPatchPath(runtimeId), value)}
+            />
+          </>
+        )
+      }
+      if (block.render === 'specs') return <SpecsEditor />
+      // 块标题命中时整块保留，否则只留下命中的字段。
+      const fields = blockHit ? block.fields : block.fields.filter(field => matches(field.label, field.path, field.hint))
+      if (fields.length === 0) return <p className="editor-empty">没有匹配的配置项。</p>
+      return (
+        <div className="settings-rows">
+          {fields.map(field => (
+            <FieldRow
+              key={field.path}
+              field={field}
+              value={getByPath(draft, field.path)}
+              defaultValue={getByPath(defaults, field.path)}
+              error={errors.get(field.path)}
+              onChange={value => setField(field.path, value)}
+            />
+          ))}
+        </div>
+      )
+    }
+    return (
+      <ConfigBlockView
+        block={block}
+        effect={effect}
+        dirty={blockDirty(block)}
+        open={open}
+        onToggle={() => setCollapsed(current => ({ ...current, [block.id]: open }))}
+      >
+        {open ? body() : null}
+      </ConfigBlockView>
+    )
+  }
+
+  const connectedChannels = channels.filter(channel => channel.status(draft, identity).tone === 'ok').length
 
   return (
     <>
       <PageHead
         title="配置"
-        subtitle="修改 config.yaml。策略项立即生效，其余配置在重启服务后生效。"
+        subtitle="按「LLM Provider → 运行时 → 渠道 → 项目 → 消息准入 → 其他设置」分层配置。策略项立即生效，其余配置在重启服务后生效。"
         actions={
           <>
             <button className="btn tiny" onClick={requestRestart} disabled={restarting} title="重启 ra 服务，当前页面不会刷新">
@@ -1494,29 +1597,21 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
             <input value={filter} onChange={event => setFilter(event.target.value)} placeholder="筛选配置项" />
           </div>
           <div className="config-nav-list">
-            {sections.map(section => {
-              const hasFields = section.fields.length > 0
-              const projectSection = section.id === 'projects'
-              const dirty = hasFields
-                ? section.fields.some(field => changed.includes(field.path))
-                : projectSection
-                  ? runtimeCatalog.some(runtime => changed.includes(projectPatchPath(runtime.id))) || changed.includes('feishu.chats')
-                  : changed.includes(section.id)
-              const invalid = hasFields
-                ? section.fields.some(field => errors.has(field.path))
-                : projectSection
-                  ? runtimeCatalog.some(runtime => errors.has(projectPatchPath(runtime.id))) || errors.has('feishu.chats')
-                  : errors.has(section.id)
+            {visibleGroups.map(group => {
+              const invalid = blocksOfGroup(group).some(block =>
+                block.fields.some(field => errors.has(field.path)) ||
+                blockPaths(block).some(path => errors.has(path)))
+              const dirty = blocksOfGroup(group).some(blockDirty)
               return (
                 <button
-                  key={section.id}
-                  className={`config-nav-item ${active === section.id ? 'active' : ''}`}
+                  key={group.id}
+                  className={`config-nav-item ${active === group.id ? 'active' : ''}`}
                   onClick={() => {
-                    setActive(section.id)
-                    document.getElementById(`sec-${section.id}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+                    setActive(group.id)
+                    document.getElementById(`sec-${group.id}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })
                   }}
                 >
-                  <span>{section.title}</span>
+                  <span>{group.title}</span>
                   {invalid ? <span className="dot invalid" title="有字段不合法" /> : dirty ? <span className="dot" title="有未保存修改" /> : null}
                 </button>
               )
@@ -1529,111 +1624,46 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
         </aside>
 
         <div className="config-body">
-          {visible.length === 0 && <div className="empty-state"><p>没有匹配的配置项</p></div>}
-          {visible.map(section => {
-            const dirty = section.fields.length > 0
-              ? section.fields.some(field => changed.includes(field.path))
-              : section.id === 'projects'
-                ? runtimeCatalog.some(runtime => changed.includes(projectPatchPath(runtime.id))) || changed.includes('feishu.chats')
-                : changed.includes(section.id)
+          {visibleGroups.length === 0 && <div className="empty-state"><p>没有匹配的配置项</p></div>}
+          {visibleGroups.map(group => {
+            const dirty = blocksOfGroup(group).some(blockDirty)
             return (
-              <section key={section.id} id={`sec-${section.id}`} className="settings-card">
+              <section key={group.id} id={`sec-${group.id}`} className="settings-card config-group">
                 <header className="settings-head">
                   <div>
-                    <h2>{section.title}</h2>
-                    <p>{section.description}</p>
+                    <h2>{group.title}</h2>
+                    <p>{group.description}</p>
                   </div>
                   <div className="settings-badges">
-                    {section.id === 'specs'
-                      ? <span className="badge cold">保存后按项生效</span>
-                      : section.hot
-                        ? <span className="badge hot">立即生效</span>
-                        : <span className="badge cold">重启生效</span>}
+                    {group.kind === 'channels'
+                      ? <span className="badge cold">{connectedChannels} / {channels.length} 个渠道已接入</span>
+                      : <span className={`badge ${groupEffect(group, hotPaths).tone}`}>{groupEffect(group, hotPaths).label}</span>}
                     {dirty && <span className="badge dirty">已修改</span>}
                   </div>
                 </header>
 
-                {section.id === 'specs' && <SpecsEditor />}
-
-                {section.id === 'projects' && (
-                  <>
-                    <div className="editor-block">
-                      <h3 className="editor-subtitle">项目清单</h3>
-                      <p className="editor-hint">
-                        当前编辑：<strong>{runtimeLabel}</strong> 的项目清单。项目按运行时隔离，切换上方「Worker 运行时」即可编辑另一套。
-                      </p>
-                      <ProjectsEditor
-                        runtimeId={runtimeId}
-                        projects={activeProjects}
-                        error={projectErrors || undefined}
-                        onChange={value => setField(activeProjectsPath, value)}
-                      />
-                    </div>
-                    <div className="editor-block">
-                      <h3 className="editor-subtitle">群与绑定</h3>
-                      <p className="editor-hint">配置监控哪些群、收全部消息还是只收 @；绑定项目只能从当前后端的项目清单里选，分支自动跟随项目的默认分支。群级名单推荐填邮箱（兼容 ou_xxx）：配了却解析不到人时，该群会拒绝所有人，不会退回全局名单。</p>
-                      <ChatsEditor
-                        chats={draft.feishu?.chats ?? []}
-                        projects={activeProjects}
-                        error={errors.get('feishu.chats')}
-                        onChange={value => setField('feishu.chats', value)}
-                      />
-                    </div>
-                  </>
-                )}
-
-                {section.id === 'feishu' && (
-                  <>
-                    <IdentityNotices
-                      identity={identity}
-                      stale={changed.includes('feishu.allowed') || changed.includes('feishu.chats')}
-                    />
-                    <FeishuBotPanel
-                      appId={String(draft.feishu?.appId ?? '')}
-                      onConfigSaved={config => {
-                        const nextAppId = String(config.feishu?.appId ?? '')
-                        setOriginal(current => (current ? setByPath(current, 'feishu.appId', nextAppId) : current))
-                        setDraft(current => (current ? setByPath(current, 'feishu.appId', nextAppId) : current))
-                      }}
-                    />
-                  </>
-                )}
-
-                {section.id === 'delivery' && (
-                  <>
-                    <RuntimeCards
-                      choices={runtimeChoices}
-                      plugins={plugins}
-                      detecting={detecting}
-                      selected={runtimeId}
-                      onSelect={id => setField('runtime.default', id)}
-                      onChoices={setRuntimeChoices}
-                      onDetecting={setDetecting}
-                      onNotice={setNotice}
-                      onPendingRestart={() => setPendingRestart(true)}
+                {group.kind === 'channels' && (
+                  <div className="channel-area">
+                    <ChannelPicker
+                      channels={channels}
+                      activeId={activeChannel?.id}
+                      onSelect={setChannelId}
                       draft={draft}
-                      defaults={defaults}
-                      onOptionChange={(path, value) => setField(path, value)}
+                      identity={identity}
                     />
-                    <PluginSettings plugins={plugins} draft={draft} onChange={setField} />
-                  </>
+                    {channels.length === 0
+                      ? <p className="editor-empty">当前没有可用的消息渠道。</p>
+                      : activeChannel && activeChannel.blocks.length > 0
+                        ? <div className="channel-detail">
+                            {activeChannel.blocks.filter(blockVisible).map(block => renderBlock(block, activeChannel))}
+                          </div>
+                        : <p className="editor-empty">该渠道已在内核注册，但面板还没有对应的配置表单。</p>}
+                  </div>
                 )}
 
-                {section.fields.length > 0 && (
-                  <div className="settings-rows">
-                    {section.fields
-                      .filter(field => field.path !== 'runtime.default')
-                      .filter(field => !query || `${field.label} ${field.path} ${field.hint ?? ''}`.toLowerCase().includes(query))
-                      .map(field => (
-                        <FieldRow
-                          key={field.path}
-                          field={field}
-                          value={getByPath(draft, field.path)}
-                          defaultValue={getByPath(defaults, field.path)}
-                          error={errors.get(field.path)}
-                          onChange={value => setField(field.path, value)}
-                        />
-                      ))}
+                {group.kind !== 'channels' && (
+                  <div className="config-blocks">
+                    {group.blocks.filter(blockVisible).map(block => renderBlock(block))}
                   </div>
                 )}
               </section>
@@ -1656,54 +1686,34 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
   )
 }
 
-/**
- * 允许名单与机器人身份的解析状态提示。
- *
- * 解析失败**不阻断保存**，所以这里只说明「这些人的消息收不到」，
- * 不能写成「保存失败」的口气。
- */
-function IdentityNotices({ identity, stale }: {
-  identity?: IdentityStatusView
-  stale?: boolean
-}): JSX.Element | null {
-  if (!identity) return null
-  const summary = summarizeIdentity(identity)
-  const bot = summarizeBot(identity)
-  const problems = problemEntries(identity)
+/** 配置块：标题 + 生效方式 + 内容；低频块默认折叠。 */
+function ConfigBlockView({ block, effect, dirty, open, onToggle, children }: {
+  block: ConfigBlock
+  effect: { label: string; tone: string }
+  dirty: boolean
+  open: boolean
+  onToggle: () => void
+  children: ReactNode
+}): JSX.Element {
   return (
-    <>
-      {stale && (
-        <div className="banner warn compact">
-          <Icon name="alert" size={13} />
-          <span>允许名单有未保存的修改，下面的解析状态还是上一次保存后的结果。</span>
+    <section className={`config-block ${open ? 'open' : 'folded'} ${dirty ? 'dirty' : ''}`}>
+      <header className="config-block-head">
+        <button type="button" className="config-block-toggle" onClick={onToggle} aria-expanded={open}>
+          <Icon name="chevron" size={12} className="fold-chevron" />
+          <span className="config-block-title">{block.title}</span>
+        </button>
+        <div className="settings-badges">
+          <span className={`badge ${effect.tone}`}>{effect.label}</span>
+          {dirty && <span className="badge dirty">已修改</span>}
+        </div>
+      </header>
+      {open && (
+        <div className="config-block-body">
+          {block.description && <p className="config-block-desc">{block.description}</p>}
+          {children}
         </div>
       )}
-      {/* 正常状态不占一条横幅：只在确实有问题（解析失败 / 待重试）时提示。 */}
-      {summary.kind !== 'ok' && (
-        <div className={`banner ${summary.kind === 'error' ? 'danger' : 'warn'} compact`}>
-          <Icon name="alert" size={13} />
-          <span>{summary.text}</span>
-        </div>
-      )}
-      {bot.kind !== 'ok' && (
-        <div className={`banner ${bot.kind === 'error' ? 'danger' : 'warn'} compact`}>
-          <Icon name="alert" size={13} />
-          <span>{bot.text}</span>
-        </div>
-      )}
-      {problems.length > 0 && (
-        <ul className="identity-entries">
-          {problems.map((entry, index) => (
-            <li key={`${entry.entry}-${index}`}>{describeEntry(entry)}</li>
-          ))}
-        </ul>
-      )}
-      {summary.kind === 'error' && (
-        <p className="editor-hint identity-hint">
-          名单条目没解析到就等于没有这个人：他们的消息收不到；如果某个群的名单配了却解析不到，该群会直接拒绝所有人（不会退回全局名单）。
-        </p>
-      )}
-    </>
+    </section>
   )
 }
 
@@ -1751,12 +1761,20 @@ function secretDropNotice(patch: Record<string, unknown>, result: ConfigSaveResu
   return { kind: 'error', text: 'API Key 没有写入 config.yaml：服务可能还在运行旧版本，请重启服务后再保存一次。' }
 }
 
-const SETUP_FEISHU_FIELDS: FieldDef[] = (() => {
-  const all = SECTIONS.flatMap(section => section.fields)
-  return ['feishu.appId', 'feishu.directMessages']
-    .map(path => all.find(field => field.path === path))
-    .filter((field): field is FieldDef => Boolean(field))
-})()
+/**
+ * 把服务端返回配置里的指定路径合并进本地草稿。
+ *
+ * 渠道面板保存凭据后会回传一份完整配置；只回填渠道自己的路径，
+ * 免得把用户其它还没保存的修改冲掉。
+ */
+function mergeConfigPaths(target: ConfigDoc, source: ConfigDoc, paths: string[]): ConfigDoc {
+  let next = target
+  for (const path of paths) {
+    const value = getByPath(source, path)
+    if (value !== undefined) next = setByPath(next, path, value)
+  }
+  return next
+}
 
 /**
  * 初始化页 · 本地 Provider 选择弹窗。
@@ -1910,7 +1928,10 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
   const [runtimeChoices, setRuntimeChoices] = useState<RuntimeChoiceView[]>([])
   const [plugins, setPlugins] = useState<PluginView[]>([])
   const [detecting, setDetecting] = useState(false)
-  const [feishuReady, setFeishuReady] = useState(false)
+  const [channelReady, setChannelReady] = useState(false)
+  const [registered, setRegistered] = useState<{ id: string; kind: string }[]>([])
+  const [channelId, setChannelId] = useState('')
+  const [identity, setIdentity] = useState<IdentityStatusView | undefined>(undefined)
   const [saving, setSaving] = useState(false)
   const [notice, setNotice] = useState<RuntimeNotice | null>(null)
   const [pendingRestart, setPendingRestart] = useState(false)
@@ -1932,9 +1953,14 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
         setRuntimeChoices(data.runtimeChoices ?? [])
         setPlugins(data.plugins ?? [])
         setDetecting(Boolean(data.detecting))
+        setIdentity(data.identity)
         setLoadError(null)
       })
       .catch(error => setLoadError(error instanceof Error ? error.message : String(error)))
+    // 已注册的消息渠道由内核给出；拿不到（旧版服务）就退回前端的描述表。
+    void getJson<{ channels?: { id: string; kind: string }[] }>('/api/channels')
+      .then(data => setRegistered(data.channels ?? []))
+      .catch(() => undefined)
   }, [])
 
   const runtimeCatalog = useMemo(() => mergeRuntimeChoices(runtimeChoices, plugins), [runtimeChoices, plugins])
@@ -1954,14 +1980,22 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
   const optionFields = useMemo(() => allRuntimeOptionFields(optionSpecs), [optionSpecs])
   const optionDefaults = useMemo(() => runtimeOptionDefaults(optionFields), [optionFields])
 
+  // 渠道与它的接入项都来自渠道注册表；初始化页不再写死飞书。
+  const channels = useMemo(() => mergeChannels(registered), [registered])
+  const activeChannel = channels.find(channel => channel.id === channelId) ?? channels[0]
+  const setupBlocks = useMemo(() => (activeChannel ? channelSetupBlocks(activeChannel) : []), [activeChannel])
+  const setupFields = useMemo(() => (activeChannel ? channelSetupFields(activeChannel) : []), [activeChannel])
+  const setupExtraFields = useMemo(() => (activeChannel ? channelSetupExtraFields(activeChannel) : []), [activeChannel])
+  const setupPaths = useMemo(() => (activeChannel ? channelSetupPaths(activeChannel) : []), [activeChannel])
+
   const changed = useMemo(() => {
     if (!draft || !original) return []
-    const paths = ['llm.baseUrl', 'llm.model', 'llm.apiKey', 'llm.api', 'llm.authHeader', 'runtime.default', 'feishu.appId', 'feishu.directMessages', 'feishu.chats',
+    const paths = ['llm.baseUrl', 'llm.model', 'llm.apiKey', 'llm.api', 'llm.authHeader', 'runtime.default', ...setupPaths,
       ...runtimeOptionPaths(), ...optionFields.map(field => field.path)]
     paths.push(...changedPluginPaths(draft, original))
     for (const runtime of runtimeCatalog) paths.push(projectPatchPath(runtime.id))
     return paths.filter(path => JSON.stringify(fieldValue(draft, path)) !== JSON.stringify(fieldValue(original, path)))
-  }, [draft, original, runtimeCatalog, optionFields])
+  }, [draft, original, runtimeCatalog, setupPaths, optionFields])
 
   useEffect(() => {
     onDirtyChange?.(changed.length > 0)
@@ -1975,18 +2009,18 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       const message = fieldError(field, getByPath(draft, field.path))
       if (message) map.set(field.path, message)
     }
-    for (const field of SETUP_FEISHU_FIELDS) {
+    for (const field of setupFields) {
       const message = fieldError(field, getByPath(draft, field.path))
       if (message) map.set(field.path, message)
+    }
+    // 渠道自己的校验（群列表之类），由渠道描述提供；只校验本次确实要提交的路径。
+    for (const [path, message] of Object.entries(activeChannel?.validate?.(draft) ?? {})) {
+      if (message && changedSet.has(path)) map.set(path, message)
     }
     for (const field of optionFields) {
       // 没配置过的运行时选项取声明默认值，否则会被误判成「请选择一个有效值」。
       const message = fieldError(field, fieldValue(draft, field.path, optionDefaults))
       if (message) map.set(field.path, message)
-    }
-    if (changedSet.has('feishu.chats')) {
-      const chatMessage = chatsIssue(draft.feishu?.chats)
-      if (chatMessage) map.set('feishu.chats', chatMessage)
     }
     for (const runtime of runtimeCatalog) {
       const path = projectPatchPath(runtime.id)
@@ -2001,7 +2035,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       map.set('runtime.default', '自定义 acp 未配置 runtime.options.acp.command，重启后服务会启动失败')
     }
     return map
-  }, [draft, changed, runtimeCatalog, runtimeId, optionFields, optionDefaults])
+  }, [draft, changed, runtimeCatalog, runtimeId, setupFields, activeChannel, optionFields, optionDefaults])
 
   const setField = (path: string, value: unknown): void => {
     setDraft(current => (current ? setByPath(current, path, value) : current))
@@ -2093,16 +2127,64 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
   const llmReady = Boolean(
     String(llmConfig.baseUrl ?? '').trim() && String(llmConfig.model ?? '').trim() && keyConfigured,
   )
+  const channelName = activeChannel?.label ?? '渠道'
   const steps = [
     { label: 'LLM 已配置', hint: llmReady ? '已就绪' : '填写 Base URL / 模型 / API Key', done: llmReady },
     { label: '运行时可用', hint: runtimeReady ? '已就绪' : runtimeChoice ? runtimeStatusLabel(runtimeChoice.status) : '未选择', done: runtimeReady },
     { label: '已登记项目', hint: projectReady ? `${activeProjects.length} 个项目` : '至少一个', done: projectReady },
-    { label: '飞书机器人已就绪', hint: feishuReady ? '已就绪' : '写入 App ID / App Secret', done: feishuReady },
+    { label: `${channelName}已接入`, hint: channelReady ? '已就绪' : `写入${channelName}接入信息`, done: channelReady },
     { label: '监控群已添加', hint: chatReady ? `${chats.length} 个群` : '至少一个', done: chatReady },
   ]
   const completed = steps.filter(step => step.done).length
-  const directMessagesField = SETUP_FEISHU_FIELDS.find(field => field.path === 'feishu.directMessages')
-  const missingBindings = chats.filter(chat => chat.repo && !activeProjects.some(project => project.name === chat.repo))
+
+  // 渠道面板的统一入参：初始化页与配置页给渠道的东西一样，只是渲染的块不同。
+  const channelPanelProps: ChannelPanelProps = {
+    draft,
+    defaults,
+    setField,
+    errors,
+    identity,
+    staleIdentity: false,
+    projects: activeProjects,
+    runtimeLabel,
+    onConfigSaved: config => {
+      // 只回填渠道自己的路径，别把用户其它未保存的修改冲掉。
+      setOriginal(current => (current ? mergeConfigPaths(current, config, setupPaths) : current))
+      setDraft(current => (current ? mergeConfigPaths(current, config, setupPaths) : current))
+    },
+    onStatus: setChannelReady,
+  }
+
+  const renderSetupBlock = (block: ConfigBlock): JSX.Element => {
+    const custom = activeChannel?.custom?.[block.id]
+    const body = block.render === 'custom' && custom
+      ? custom({ ...channelPanelProps, block })
+      : (
+        <div className="settings-rows">
+          {block.fields.map(field => (
+            <FieldRow
+              key={field.path}
+              field={field}
+              value={getByPath(draft, field.path)}
+              defaultValue={getByPath(defaults, field.path)}
+              error={errors.get(field.path)}
+              onChange={value => setField(field.path, value)}
+            />
+          ))}
+        </div>
+      )
+    return (
+      <div className="config-block" key={block.id}>
+        <div className="config-block-head">
+          <div>
+            <span className="config-block-title">{block.title}</span>
+            {block.description && <p className="config-block-desc">{block.description}</p>}
+          </div>
+        </div>
+        <div className="config-block-body">{body}</div>
+      </div>
+    )
+  }
 
   return (
     <>
@@ -2223,72 +2305,51 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
         />
       </section>
 
-      <section className="settings-card" id="setup-feishu">
+      <section className="settings-card" id="setup-channel">
         <header className="settings-head">
           <div>
-            <h2>4. 飞书机器人</h2>
-            <p>写入 App ID / App Secret 后，可在这里检查并完成飞书授权。</p>
+            <h2>4. 渠道配置</h2>
+            <p>消息从哪个渠道进来。先选渠道，再填它的接入信息并完成授权，Router 就能从那儿收消息。</p>
           </div>
           <div className="settings-badges">
-            {feishuReady ? <span className="badge hot">已就绪</span> : <span className="badge cold">未完成</span>}
+            {channelReady ? <span className="badge hot">已就绪</span> : <span className="badge cold">未完成</span>}
           </div>
         </header>
-        <div className="settings-rows">
-          {SETUP_FEISHU_FIELDS.filter(field => field.path !== 'feishu.directMessages').map(field => (
-            <FieldRow
-              key={field.path}
-              field={field}
-              value={getByPath(draft, field.path)}
-              defaultValue={getByPath(defaults, field.path)}
-              error={errors.get(field.path)}
-              onChange={value => setField(field.path, value)}
-            />
-          ))}
+        <div className="channel-area">
+          <ChannelPicker
+            channels={channels}
+            activeId={activeChannel?.id}
+            onSelect={setChannelId}
+            draft={draft}
+            identity={identity}
+            label="选择渠道"
+          />
+          {activeChannel
+            ? (
+              <div className="channel-detail">
+                {setupBlocks.map(block => renderSetupBlock(block))}
+                {setupExtraFields.length > 0 && (
+                  <div className="config-block">
+                    <div className="config-block-body">
+                      <div className="settings-rows">
+                        {setupExtraFields.map(field => (
+                          <FieldRow
+                            key={field.path}
+                            field={field}
+                            value={getByPath(draft, field.path)}
+                            defaultValue={getByPath(defaults, field.path)}
+                            error={errors.get(field.path)}
+                            onChange={value => setField(field.path, value)}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+            : <p className="editor-empty">当前没有可用的消息渠道。</p>}
         </div>
-        <FeishuBotPanel
-          appId={String(draft.feishu?.appId ?? '')}
-          onConfigSaved={config => {
-            const nextAppId = String(config.feishu?.appId ?? '')
-            setOriginal(current => (current ? setByPath(current, 'feishu.appId', nextAppId) : current))
-            setDraft(current => (current ? setByPath(current, 'feishu.appId', nextAppId) : current))
-          }}
-          onStatus={setFeishuReady}
-        />
-        {directMessagesField && (
-          <div className="settings-rows">
-            <FieldRow
-              field={directMessagesField}
-              value={getByPath(draft, directMessagesField.path)}
-              defaultValue={getByPath(defaults, directMessagesField.path)}
-              error={errors.get(directMessagesField.path)}
-              onChange={value => setField(directMessagesField.path, value)}
-            />
-          </div>
-        )}
-      </section>
-
-      <section className="settings-card" id="setup-chats">
-        <header className="settings-head">
-          <div>
-            <h2>5. 群与绑定</h2>
-            <p>至少添加一个监控群；绑定项目后 Router 开工不再追问，分支跟随项目默认分支。</p>
-          </div>
-          <div className="settings-badges">
-            {chatReady ? <span className="badge hot">已完成</span> : <span className="badge cold">未完成</span>}
-          </div>
-        </header>
-        {missingBindings.length > 0 && (
-          <div className="banner warn compact">
-            <Icon name="alert" size={14} />
-            <span>{missingBindings.length} 个群绑定的项目不在当前运行时清单里：{missingBindings.map(chat => chat.repo).join('、')}。请重新选择，或回到「配置」页调整。</span>
-          </div>
-        )}
-        <ChatsEditor
-          chats={chats}
-          projects={activeProjects}
-          error={errors.get('feishu.chats')}
-          onChange={value => setField('feishu.chats', value)}
-        />
       </section>
 
       <p className="editor-foot setup-config-path">配置文件：{configPath || '未知'}。保存后如需生效，请点上方「立即重启」。</p>
@@ -2660,180 +2721,6 @@ function ProjectsEditor({ runtimeId, projects, error, onChange }: {
   )
 }
 
-function ChatsEditor({ chats, projects, error, onChange }: {
-  chats: ChatDraft[]
-  projects: ProjectDraft[]
-  error?: string
-  onChange: (value: ChatDraft[]) => void
-}): JSX.Element {
-  const [intakeIndex, setIntakeIndex] = useState<number | null>(null)
-  const projectOf = (name: string): ProjectDraft | undefined => projects.find(project => project.name === name)
-  const update = (index: number, patch: Partial<ChatDraft>): void => {
-    onChange(chats.map((chat, i) => (i === index ? { ...chat, ...patch } : chat)))
-  }
-  const intakeChat = intakeIndex === null ? undefined : chats[intakeIndex]
-  return (
-    <div className="editor">
-      {chats.length === 0 && <p className="editor-empty">还没有监控群。至少添加一个群，机器人才能收到消息。</p>}
-      {chats.length > 0 && (
-        <div className="editor-head chat-head">
-          <span>chat_id</span>
-          <span>接收</span>
-          <span>绑定项目</span>
-          <span>授权名单</span>
-          <span>需求分析助手</span>
-          <span />
-        </div>
-      )}
-      {chats.map((chat, index) => (
-        <div key={index} className="editor-row chat-row">
-          <input value={chat.chat} placeholder="oc_xxx" onChange={event => update(index, { chat: event.target.value })} />
-          <span className="select-wrap compact">
-            <select value={chat.mode} onChange={event => update(index, { mode: event.target.value })}>
-              <option value="all">全部消息</option>
-              <option value="mention">仅 @</option>
-            </select>
-            <Icon name="chevron" size={12} className="select-chevron" />
-          </span>
-          <span className="select-wrap compact">
-            <select
-              value={chat.repo}
-              onChange={event => {
-                const name = event.target.value
-                update(index, { repo: name, branch: projectOf(name)?.defaultBranch ?? '' })
-              }}
-            >
-              <option value="">不绑定（开工前追问）</option>
-              {projects.map(project => <option key={project.name} value={project.name}>{project.name}</option>)}
-              {chat.repo && !projectOf(chat.repo) && <option value={chat.repo}>{chat.repo}（不在当前清单）</option>}
-            </select>
-            <Icon name="chevron" size={12} className="select-chevron" />
-          </span>
-          <input
-            value={chat.allowed.join(', ')}
-            placeholder="可空，沿用全局；推荐填邮箱"
-            onChange={event => update(index, { allowed: event.target.value.split(',').map(item => item.trim()).filter(Boolean) })}
-          />
-          <button
-            className={`btn tiny ${chat.intake?.enabled ? 'primary' : 'ghost'}`}
-            title="配置需求分析助手"
-            onClick={() => setIntakeIndex(index)}
-          >
-            {chat.intake?.enabled ? '已开启' : '需求分析助手'}
-          </button>
-          <button className="icon-btn danger" title="删除群" onClick={() => onChange(chats.filter((_, i) => i !== index))}>
-            <Icon name="trash" size={14} />
-          </button>
-        </div>
-      ))}
-      {error && <p className="field-error">{error}</p>}
-      <button className="btn add" onClick={() => onChange([...chats, { chat: '', mode: 'all', repo: '', branch: '', allowed: [] }])}>
-        <Icon name="plus" size={13} />添加群
-      </button>
-      {intakeChat && (
-        <IntakeSettingsModal
-          chat={intakeChat}
-          onClose={() => setIntakeIndex(null)}
-          onSave={value => {
-            update(intakeIndex as number, { intake: value })
-            setIntakeIndex(null)
-          }}
-        />
-      )}
-    </div>
-  )
-}
-
-/**
- * 需求分析助手的群级配置弹窗。
- *
- * 开关、轮数、终审管理员、是否读代码都跟着群走：多群互不影响，
- * 改完随群配置一起保存（保存后重启服务生效）。
- */
-function IntakeSettingsModal({ chat, onClose, onSave }: {
-  chat: ChatDraft
-  onClose: () => void
-  onSave: (value: ChatIntakeDraft) => void
-}): JSX.Element {
-  const current = chat.intake ?? DEFAULT_CHAT_INTAKE
-  const [enabled, setEnabled] = useState(current.enabled)
-  const [maxQuestions, setMaxQuestions] = useState(String(current.maxQuestions))
-  const [approvers, setApprovers] = useState(current.approvers.join(', '))
-  const [codeAccess, setCodeAccess] = useState(current.codeAccess)
-  const rounds = Number(maxQuestions)
-  const issue = chatIntakeIssue({ ...current, maxQuestions: rounds })
-  return (
-    <div className="modal-layer">
-      <button className="modal-backdrop" aria-label="关闭" onClick={onClose} />
-      <div className="modal" role="dialog" aria-modal="true" aria-label="需求分析助手">
-        <header className="modal-head">
-          <div>
-            <h3>需求分析助手</h3>
-            <p>
-              群 {chat.chat || '（未填写 chat_id）'}：普通成员不 @ 机器人也能直接反馈问题，助手先初筛再追问，最后整理成结构化需求单，必须经管理员终审才派单。
-            </p>
-          </div>
-          <button className="icon-btn" title="关闭" onClick={onClose}>
-            <Icon name="close" size={14} />
-          </button>
-        </header>
-        <div className="modal-body">
-          <button type="button" role="switch" aria-checked={enabled} className={`toggle ${enabled ? 'on' : ''}`} onClick={() => setEnabled(!enabled)}>
-            <span className="toggle-track"><span className="toggle-knob" /></span>
-            <span className="toggle-label">{enabled ? '已开启' : '已关闭'}</span>
-          </button>
-          <label className="modal-field">
-            <span>最大对话轮次</span>
-            <span className="input-box">
-              <input
-                type="number"
-                min={0}
-                max={MAX_INTAKE_QUESTIONS}
-                value={maxQuestions}
-                onChange={event => setMaxQuestions(event.target.value)}
-              />
-              <span className="input-unit">轮</span>
-            </span>
-            <small>助手最多追问几轮；默认 {DEFAULT_CHAT_INTAKE.maxQuestions} 轮，到顶后按现有信息整理成需求单。</small>
-          </label>
-          <label className="modal-field">
-            <span>终审管理员（推荐填邮箱，逗号分隔）</span>
-            <input
-              value={approvers}
-              placeholder="admin@example.com, ou_xxx"
-              onChange={event => setApprovers(event.target.value)}
-            />
-            <small>只有这些管理员能确认派单或驳回；留空则沿用全局允许名单。邮箱会在启动时解析成对应的人。</small>
-          </label>
-          <button type="button" role="switch" aria-checked={codeAccess} className={`toggle ${codeAccess ? 'on' : ''}`} onClick={() => setCodeAccess(!codeAccess)}>
-            <span className="toggle-track"><span className="toggle-knob" /></span>
-            <span className="toggle-label">{codeAccess ? '允许只读项目代码' : '不读项目代码'}</span>
-          </button>
-          <p className="modal-hint">
-            <Icon name="alert" size={13} />
-            关闭「允许只读项目代码」后，助手只依据对话与通用业务知识判断，不会读取本群绑定项目的任何文件。
-          </p>
-          {issue && <p className="modal-error">{issue}</p>}
-        </div>
-        <footer className="modal-foot">
-          <button className="btn ghost" onClick={onClose}>取消</button>
-          <button
-            className="btn primary"
-            disabled={Boolean(issue)}
-            onClick={() => onSave(normalizeChatIntake({
-              enabled,
-              maxQuestions: rounds,
-              approvers: approvers.split(','),
-              codeAccess,
-            }))}
-          >
-            保存
-          </button>
-        </footer>
-      </div>
-    </div>
-  )
-}
 
 // ---------------------------------------------------------------------------
 // 来源

@@ -21,6 +21,13 @@ export interface ConfigBundle {
   plugins?: PluginView[]
   /** 允许名单与机器人身份的解析状态；旧版服务端可能没有这个字段。 */
   identity?: IdentityStatusView
+  /** 保存后立即生效的配置路径前缀；旧版服务端可能没有这个字段。 */
+  hotPaths?: string[]
+}
+
+/** 服务端已注册的消息渠道。 */
+export interface ChannelRegistryView {
+  channels?: { id: string; kind: string }[]
 }
 
 export type PluginKind = 'runtime' | 'channel'
