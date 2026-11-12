@@ -311,6 +311,11 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         })
         return respond(res, 200, result)
       } catch (error) {
+        logger.warn('api:workspace-cleanup-failed', {
+          requested: ticketIds.length,
+          ...(runtimeId ? { runtimeId } : {}),
+          message: errorMessage(error),
+        })
         return respond(res, 400, {
           error: 'workspace-cleanup-failed',
           message: error instanceof Error ? error.message : String(error),
@@ -561,6 +566,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         try {
           writeConfig(config.home, config)
         } catch (error) {
+          logger.error('config:write-failed', { home: config.home, message: errorMessage(error) })
           return respond(res, 500, {
             error: 'config-write-failed',
             message: error instanceof Error ? error.message : String(error),
