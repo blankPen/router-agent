@@ -11,6 +11,7 @@ import {
   groupEffect,
   groupsFor,
   humanizeTime,
+  applyRuntimePluginDraft,
   runtimeOptionDefaults,
   setByPath,
   type ConfigBlock,
@@ -55,7 +56,6 @@ import {
 import { Icon, LogoMark } from './icons.js'
 import type { IdentityStatusView } from './identity-status.js'
 import { RuntimeCards, type RuntimeNotice } from './runtime-cards.js'
-import { PluginSettings } from './plugin-settings.js'
 import { FeishuBotPanel } from './feishu-panel.js'
 import { LogAssistantFab } from './log-assistant.js'
 import { SpecsEditor } from './specs-editor.js'
@@ -1506,17 +1506,7 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
             onDetecting={setDetecting}
             onNotice={setNotice}
             onPendingRestart={() => setPendingRestart(true)}
-          />
-        )
-      }
-      if (block.render === 'plugins') {
-        return (
-          <PluginSettings
-            plugins={plugins}
-            draft={draft}
-            onChange={setField}
-            onNotice={setNotice}
-            onPendingRestart={() => setPendingRestart(true)}
+            onAddRuntime={(id, entry) => setDraft(current => (current ? applyRuntimePluginDraft(current, id, entry) : current))}
           />
         )
       }
@@ -2289,6 +2279,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
           onDetecting={setDetecting}
           onNotice={setNotice}
           onPendingRestart={() => setPendingRestart(true)}
+          onAddRuntime={(id, entry) => setDraft(current => (current ? applyRuntimePluginDraft(current, id, entry) : current))}
           draft={draft}
           defaults={defaults}
           onOptionChange={(path, value) => setField(path, value)}

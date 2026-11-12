@@ -80,32 +80,45 @@ export class PluginPackageAdmin {
   /**
    * 启动一次安装任务。
    *
-   * 只接受配置里声明为 npm 包名的条目；本地路径插件重启即可生效，
-   * 不存在「下载」这一步，直接报错让调用方引导用户。
+   * 面板「添加运行时」会在配置还没保存时带着包名来安装，所以允许用
+   * `opts.packageName` 直接指定 npm 包；否则按配置里声明的入口解析。
+   * 本地路径插件重启即可生效，不存在「下载」这一步，直接报错让调用方引导用户。
    */
-  startInstall(kind: PluginKind, id: string, opts: { version?: string } = {}): PluginInstallJob {
+  startInstall(kind: PluginKind, id: string, opts: { version?: string; packageName?: string } = {}): PluginInstallJob {
     const pluginId = id.trim()
     if (!pluginId) throw new PluginInstallStartError('unknown-plugin', '缺少插件 id')
-    const entry = this.entryOf(kind, pluginId)
-    if (entry === undefined) {
-      const builtin = kind === 'runtime' && DEFAULT_RUNTIME_PLUGINS[pluginId]
-      throw new PluginInstallStartError(
-        'unknown-plugin',
-        builtin
-          ? `${pluginId} 使用 ra 自带的内置包；如需换成其它 npm 包，先添加 ${entryPath(kind, pluginId)} 入口`
-          : `配置里没有 ${kind} 插件 ${pluginId} 的入口；先添加 ${entryPath(kind, pluginId)} 再安装`,
-      )
-    }
-    const specifier = pluginSpecifier(entry)
-    if (!specifier) {
-      throw new PluginInstallStartError('unknown-plugin', `${pluginId} 在配置里被禁用（enabled: false）`)
-    }
-    const packageName = npmPackageNameOf(specifier)
-    if (!packageName) {
-      throw new PluginInstallStartError(
-        'not-a-package',
-        `${pluginId} 配置的是本地路径 ${preview(specifier, 120)}，不需要下载；重启服务后按路径加载`,
-      )
+    const requested = opts.packageName?.trim()
+    let packageName: string | undefined
+    if (requested) {
+      packageName = npmPackageNameOf(requested)
+      if (!packageName) {
+        throw new PluginInstallStartError(
+          'not-a-package',
+          `${pluginId} 提供的不是 npm 包名：${preview(requested, 120)}；本地路径不需要下载，重启服务后按路径加载`,
+        )
+      }
+    } else {
+      const entry = this.entryOf(kind, pluginId)
+      if (entry === undefined) {
+        const builtin = kind === 'runtime' && DEFAULT_RUNTIME_PLUGINS[pluginId]
+        throw new PluginInstallStartError(
+          'unknown-plugin',
+          builtin
+            ? `${pluginId} 使用 ra 自带的内置包；如需换成其它 npm 包，先添加 ${entryPath(kind, pluginId)} 入口`
+            : `配置里没有 ${kind} 插件 ${pluginId} 的入口；先添加 ${entryPath(kind, pluginId)} 再安装`,
+        )
+      }
+      const specifier = pluginSpecifier(entry)
+      if (!specifier) {
+        throw new PluginInstallStartError('unknown-plugin', `${pluginId} 在配置里被禁用（enabled: false）`)
+      }
+      packageName = npmPackageNameOf(specifier)
+      if (!packageName) {
+        throw new PluginInstallStartError(
+          'not-a-package',
+          `${pluginId} 配置的是本地路径 ${preview(specifier, 120)}，不需要下载；重启服务后按路径加载`,
+        )
+      }
     }
 
     const key = `${kind}:${pluginId}`

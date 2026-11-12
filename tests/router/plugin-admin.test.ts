@@ -96,6 +96,21 @@ describe('插件包安装任务', () => {
     expect(() => admin.startInstall('runtime', 'orca')).toThrow(/自带的内置包/)
   })
 
+
+  it('配置里没有该插件时，可按请求体里的包名直接安装', async () => {
+    const dir = home()
+    const admin = new PluginPackageAdmin({ home: dir, config: defaultConfig(), env: {}, runNpm: fakeNpm() })
+    const job = admin.startInstall('runtime', 'my-runtime', { packageName: '@acme/runtime-x' })
+    expect(job).toMatchObject({ kind: 'runtime', pluginId: 'my-runtime', packageName: '@acme/runtime-x', status: 'running' })
+    const finished = await waitJob(admin, job.id)
+    expect(finished?.status).toBe('ok')
+  })
+
+  it('请求体里的包名不是 npm 包时拒绝启动', () => {
+    const admin = new PluginPackageAdmin({ home: home(), config: defaultConfig(), env: {}, runNpm: fakeNpm() })
+    expect(() => admin.startInstall('runtime', 'my-runtime', { packageName: './local' })).toThrow(/不是 npm 包/)
+  })
+
   it('同一次安装进行中再次启动会返回忙', async () => {
     const dir = home()
     const config = defaultConfig()
@@ -150,6 +165,21 @@ describe('插件安装 API', () => {
     }
     expect(job.status).toBe(200)
     expect(job.json.status).toBe('ok')
+  })
+
+
+  it('POST 带 packageName 可为未保存的插件启动安装', async () => {
+    const dir = home()
+    const store = new Store(':memory:')
+    const config = defaultConfig()
+    const engine = new Engine({ store, policy: policyOf(config) })
+    const admin = new PluginPackageAdmin({ home: dir, config, env: {}, runNpm: fakeNpm() })
+    const server = await createApiServer({ engine, store, config, pluginAdmin: admin })
+    closers.push(async () => { await server.close(); store.close() })
+
+    const started = await call(server, 'POST', '/api/plugins/install', { kind: 'runtime', id: 'my-runtime', packageName: '@acme/runtime-x' })
+    expect(started.status).toBe(202)
+    expect(started.json).toMatchObject({ ok: true, packageName: '@acme/runtime-x' })
   })
 
   it('未知插件与非法 kind 返回 400', async () => {

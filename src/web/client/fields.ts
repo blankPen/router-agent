@@ -63,7 +63,7 @@ export interface ConfigBlock {
   id: string
   title: string
   description?: string
-  render?: 'fields' | 'runtime' | 'projects' | 'specs' | 'plugins' | 'custom'
+  render?: 'fields' | 'runtime' | 'projects' | 'specs' | 'custom'
   fields: FieldDef[]
   /** 块自己管理的、不是普通字段的配置路径（如群列表）。 */
   paths?: string[]
@@ -375,15 +375,6 @@ export const CONFIG_GROUPS: ConfigGroup[] = [
           },
         ],
       },
-      {
-        id: 'plugins',
-        title: '插件',
-        description: '内置运行时与通道之外，还可以按包名或路径加载自定义插件；保存后重启服务生效。',
-        render: 'plugins',
-        fields: [],
-        folded: true,
-        effectLabel: '保存后重启生效',
-      },
     ],
   },
 ]
@@ -574,6 +565,14 @@ export function fieldValue(doc: unknown, path: string, defaults?: Record<string,
     return fallback ?? ''
   }
   return value
+}
+
+/** 运行时插件草稿写入：id / 入口都非空才写，返回新草稿。 */
+export function applyRuntimePluginDraft(draft: unknown, id: string, entry: string): unknown {
+  const key = id.trim()
+  const value = entry.trim()
+  if (!key || !value) return draft
+  return setByPath(draft, `runtime.plugins.${key}`, value)
 }
 
 /** 不可变地写入点路径，供 React draft 使用。 */
