@@ -17,7 +17,12 @@ Router（AgentLoop + DecisionEngine(Pi) + HTTP API + Web）
 WorkerRuntime 端口 ── OrcaRuntime（默认）/ ClaudeCodeRuntime / AcpRuntime（acp 与 7 个 acp-*）
 ```
 
-源码目录见 [README](../README.md#开发)，运行时的差异与选型见 [RUNTIME.md](RUNTIME.md)。
+仓库是 pnpm workspace：领域内核、基础设施、Worker 运行时与消息通道分别在
+`packages/core`、`packages/infra`、`packages/runtime`、`packages/channel`，宿主应用仍在 `src/`。
+依赖单向向下（`core ← infra ← runtime / channel ← src`），跨包用 `#core/*` / `#infra/*` /
+`#runtime/*` / `#channel/*` 别名。包划分、依赖约束与新增适配器的步骤见 [MONOREPO.md](MONOREPO.md)。
+
+运行时的差异与选型见 [RUNTIME.md](RUNTIME.md)。
 
 某个群开启「需求分析助手」（`feishu.chats[].intake.enabled`）后，Router 与 Worker 之间多一条**并行**的能力链：
 
@@ -161,7 +166,7 @@ Worker **不手写状态文件**，统一用 `ra report` 上报。CLI 会 POST �
 - 终端长时间无输出 → 主动发 `status?`；仍无响应 → 标记 stale 并通知人。
 - 审计事件追加到同目录 `events.log`。
 
-Worker 手册会拼进启动 prompt；非 Orca 运行时使用运行时中立的契约文件。两者都不改项目 `CLAUDE.md`。详见 [RUNTIME.md](RUNTIME.md#worker-规范注入)。
+Worker 手册会拼进启动 prompt；非 Orca 运行时使用运行时中立的契约文件。两者都不改项目 `AGENTS.md`。详见 [RUNTIME.md](RUNTIME.md#worker-规范注入)。
 
 ### 上报协议
 

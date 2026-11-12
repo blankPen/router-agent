@@ -67,18 +67,18 @@
 
 | 层 | 现状 | 位置（证据） | 判定 |
 |-|-|-|-|
-| L0 领域内核 | 只认 `Ticket/Assignment/Report/Stage`，无 Orca | `src/core/*`、`src/store/db.ts` | 已解耦，保持 |
-| L1 工作区创建 | `orca worktree create --repo --name --base-branch --branch --agent claude --surface terminal --prompt` | `src/worker/orca/commands.ts:21-36`，`src/worker/orca/index.ts:188-215` | 强耦合，必须抽象 |
+| L0 领域内核 | 只认 `Ticket/Assignment/Report/Stage`，无 Orca | `packages/core/src/*`、`src/store/db.ts` | 已解耦，保持 |
+| L1 工作区创建 | `orca worktree create --repo --name --base-branch --branch --agent claude --surface terminal --prompt` | `packages/runtime/src/orca/commands.ts:21-36`，`packages/runtime/src/orca/index.ts:188-215` | 强耦合，必须抽象 |
 | L2 Agent 启动 | Agent 与 worktree 在同一条 Orca 命令里创建，Agent 固定 `claude` | `commands.ts:28`、`index.ts:210` | 强耦合，必须抽象 |
 | L3 输入投递 | `orca terminal send --terminal <handle> --text <text> --enter` | `commands.ts:48-50`、`index.ts:217-222` | 强耦合，必须抽象 |
-| L4 活性/状态 | `orca terminal list --json` + `connected/orphaned/writable/lastOutputAt` | `index.ts:235-241`、`src/worker/orca/report-poller.ts:156-176` | 强耦合，必须抽象 |
-| L5 活动读取 | 优先 Claude Code JSONL（`~/.claude/projects/<slug>/*.jsonl`），兜底 Orca 终端屏幕 | `src/worker/orca/session.ts:7-102`、`index.ts:244-263`、`src/service.ts:1373-1396` | 双重耦合，必须抽象 |
+| L4 活性/状态 | `orca terminal list --json` + `connected/orphaned/writable/lastOutputAt` | `index.ts:235-241`、`packages/runtime/src/orca/report-poller.ts:156-176` | 强耦合，必须抽象 |
+| L5 活动读取 | 优先 Claude Code JSONL（`~/.claude/projects/<slug>/*.jsonl`），兜底 Orca 终端屏幕 | `packages/runtime/src/orca/session.ts:7-102`、`index.ts:244-263`、`src/service.ts:1373-1396` | 双重耦合，必须抽象 |
 | L6 工作区回收 | `orca worktree show` / `orca worktree rm --worktree path:<dir>` | `commands.ts:65-77`、`index.ts:265-274`、`src/service.ts:1165-1205` | 强耦合，必须抽象 |
 | L7 PR 线索 | `worktree.linkedPR / linkedGitLabMR` | `src/service.ts:1475-1497` | 中耦合，可降级 |
 | L8 仓库发现/自检 | `orca status`、`orca repo list --json`，解析器放在 `sources/lark.ts` | `src/cli/doctor.ts:59-78`、`src/cli/init.ts:124-147`、`src/sources/lark.ts:117-160` | 中耦合，需要抽象 |
 | L9 服务装配 | `new OrcaRuntime(...)` 硬编码；`runtime.default` 只接受 `'orca'` | `src/cli/index.ts:642-649`、`src/config.ts:158/300-304/899-901`、`src/router/api.ts:118` | 中耦合，需要注册表 |
-| L10 Worker 手册 | 手册直接写「你在一个独立的 Orca worktree 里工作」「Claude Code」；agent 模式写入 `~/.claude/agents/` | `src/worker/spec/prompt-mode.md:3`、`src/worker/spec/index.ts:46-56` | 中耦合，需要拆分「任务契约」与「启动方式」 |
-| L11 报告通道 | `ra report` HTTP + `state.json` 兜底，与运行时无关 | `src/cli/report.ts`、`src/worker/orca/report-poller.ts:1-154` | 已解耦，保留 |
+| L10 Worker 手册 | 手册直接写「你在一个独立的 Orca worktree 里工作」「Claude Code」；agent 模式写入 `~/.claude/agents/` | `packages/runtime/src/spec/prompt-mode.md:3`、`packages/runtime/src/spec/index.ts:46-56` | 中耦合，需要拆分「任务契约」与「启动方式」 |
+| L11 报告通道 | `ra report` HTTP + `state.json` 兜底，与运行时无关 | `src/cli/report.ts`、`packages/runtime/src/orca/report-poller.ts:1-154` | 已解耦，保留 |
 | L12 效果队列 | `launch-worker / stop-worker / cleanup-workspace` 只带 `ticketId` | `src/service.ts:536-552` | 已解耦，保留 |
 
 ### 2.2 关键漏抽象点（必须修）
@@ -95,7 +95,7 @@
 
 - `Engine` 是唯一状态写入口（`src/core/engine.ts`）。
 - `EffectsProcessor` 的 `launch-worker / stop-worker / cleanup-workspace` 只依赖 `ticketId`，运行时无关（`src/core/effects.ts`）。
-- `ReportPoller` 轮询 `~/.router-agent/workers/<ticketId>/state.json`，运行时无关（`src/worker/orca/report-poller.ts:68-110`）。
+- `ReportPoller` 轮询 `~/.router-agent/workers/<ticketId>/state.json`，运行时无关（`packages/runtime/src/orca/report-poller.ts:68-110`）。
 - `ra report` 协议与 CLI（`src/cli/report.ts`）完全运行时无关。
 - `Assignment` 已存 `runtime_id / handle / workdir`（`src/core/model.ts:106-115`、`src/store/db.ts:227`），天然支持多运行时。
 
@@ -103,13 +103,13 @@
 
 ## 3. 设计原则
 
-1. **端口-适配器**：内核只依赖 `src/worker/port.ts` 中的中立模型；运行时实现放 `src/worker/runtimes/<id>/`。
+1. **端口-适配器**：内核只依赖 `packages/runtime/src/port.ts` 中的中立模型；运行时实现放 `packages/runtime/src/runtimes/<id>/`。
 2. **能力协商，不做最低公分母**：运行时声明能力，Router 按能力降级；缺能力时明确降级，不静默假设。
 3. **结构化优先，文本兜底**：活性优先读进程/会话元数据，活动优先读 Agent 会话 JSONL；终端屏幕永远是最后兜底，且只用于给人看的摘要。
 4. **重启可还原**：`handle` 必须是运行时可持久化、重启后仍能还原上下文的标识（Orca=terminal handle，Claude=sessionId，Codex=sessionId）；禁止只存在内存 map。
 5. **报告协议是硬契约**：任何运行时都必须让 Agent 能执行 `ra report`（shell 工具或等价能力），并遵守 `【Router 输入 in_xxx】` 投递格式。
 6. **零行为回归**：Orca 路径的输出、日志、错误文案、阶段流转保持一致；每阶段都有回滚开关。
-7. **参数数组，不拼 shell**：沿用 `CommandRunner` 的 `spawn(bin, argv)` 模式（`src/infra/process.ts:15-45`），新增长驻进程 spawner 同样禁止 shell 拼接。
+7. **参数数组，不拼 shell**：沿用 `CommandRunner` 的 `spawn(bin, argv)` 模式（`packages/infra/src/process.ts:15-45`），新增长驻进程 spawner 同样禁止 shell 拼接。
 8. **安全默认值**：新运行时默认最小权限（工作区可写、网络按需、非交互审批策略显式配置），不默认 `--dangerously-skip-permissions` / `--dangerously-bypass-approvals-and-sandbox`。
 
 ---
@@ -148,7 +148,7 @@
 ### 4.3 目录规划
 
 ```text
-src/worker/
+packages/runtime/src/
   port.ts                      # 端口与中立模型（唯一契约）
   registry.ts                  # RuntimeRegistry / createRuntimes 注册表
   status.ts                    # judgeIdle 的中立版本（从 orca/ 上移）
@@ -168,7 +168,7 @@ src/worker/
     codex-cli/index.ts         # Codex CLI
 ```
 
-> 迁移期保留 `src/worker/orca/*` 的 re-export，避免一次性搬文件导致 review 噪音；P1 完成后再删旧路径。
+> 迁移期保留 `packages/runtime/src/orca/*` 的 re-export，避免一次性搬文件导致 review 噪音；P1 完成后再删旧路径。
 
 ---
 
@@ -1030,7 +1030,7 @@ worker:
 ### 11.2 注册表
 
 ```ts
-// src/worker/registry.ts
+// packages/runtime/src/registry.ts
 export class RuntimeRegistry {
   constructor(
     private runtimes: Map<string, WorkerRuntime>,
@@ -1086,8 +1086,8 @@ export function createRuntimes(config: AppConfig, deps: RuntimeDeps): RuntimeReg
 
 ### P0 · 契约先行（不改行为，可独立合并）
 
-- 新增 `src/worker/port.ts` 的中立模型与 `WorkerRuntime` v2（含 `WorkerRef / StartResult / DeliveryReceipt / AgentStatus | null`）；
-- **同时**把 `report-poller.ts` / `judgeIdle` 上移到 `src/worker/`（旧路径 re-export），否则 `service.ts:13` 的旧 import 会让「去 Orca 化」验收失败；
+- 新增 `packages/runtime/src/port.ts` 的中立模型与 `WorkerRuntime` v2（含 `WorkerRef / StartResult / DeliveryReceipt / AgentStatus | null`）；
+- **同时**把 `report-poller.ts` / `judgeIdle` 上移到 `packages/runtime/src/`（旧路径 re-export），否则 `service.ts:13` 的旧 import 会让「去 Orca 化」验收失败；
 - `OrcaRuntime` 实现新签名（`status` 包装 `inspect`、`output` 包装 `read`、`activity` 包装 `session`、`inspectWorkspace/removeWorkspace` 包装旧方法）；
 - `RouterService` 改成只依赖端口；`describeLaunchError` 改读 `WorkerRuntimeError`；`src/router/api.ts` 的旧路径 import 一并修正；
 - 新增 `buildWorkerContext()` 与 `buildWorkerBrief()`：report 路径由 `workersDir` 推导，tools 来自 `config.worker.tools`；Orca 走 `buildOrcaBrief()`，输出必须与当前 `buildWorkerPrompt()` 逐字节一致；
@@ -1149,7 +1149,7 @@ export function createRuntimes(config: AppConfig, deps: RuntimeDeps): RuntimeReg
 
 - 删除旧 `OrcaRuntime` 兼容层与死代码 `relaunchAgent`；
 - 列出并修正所有旧路径 importer：`src/service.ts`、`src/router/api.ts`、`src/cli/index.ts`、`tests/**`；
-- 同步 `scripts/build-web.mjs` 的 Markdown 资产数组与 `src/worker/spec/index.ts` 的文件名；
+- 同步 `scripts/build-web.mjs` 的 Markdown 资产数组与 `packages/runtime/src/spec/index.ts` 的文件名；
 - README 更新「WorkerRuntime 是唯一扩展点」的能力矩阵；
 - 新增 `docs/AGENT-ADAPTER.md`（本设计定稿版）。
 - **验收**：`pnpm typecheck && pnpm build && pnpm test` 全绿；`ra doctor` 三运行时可切换。
@@ -1193,7 +1193,7 @@ Orca 运行时用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.t
 
 ### 14.4 静态约束
 
-- `tests/architecture.test.ts`（新增）：扫描 `src/service.ts`、`src/router/api.ts`、`src/core/**`，禁止出现 `Orca` / `orca` 类型导入与字段访问（白名单：`worker/runtimes/orca/**`、re-export 层、注释）。
+- `tests/architecture.test.ts`（新增）：扫描 `src/service.ts`、`src/router/api.ts`、`packages/core/src/**`，禁止出现 `Orca` / `orca` 类型导入与字段访问（白名单：`worker/runtimes/orca/**`、re-export 层、注释）。
 - `pnpm typecheck` + `pnpm build`。
 
 ---
@@ -1356,13 +1356,13 @@ Orca 运行时用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.t
 
 已落地：
 
-- `src/worker/port.ts`：`WorkerRuntime` v2、`WorkerRef / StartResult / DeliveryReceipt / AgentStatus / WorkerRuntimeError`；
-- `src/worker/status.ts`：`classifyAgentStatus`，`checkIdle / isZombie / recover / workerGone` 统一消费；
-- `src/worker/registry.ts`：`RuntimeRegistry`，按 `assignment.runtimeId` 取运行时；默认运行时启动期校验；
+- `packages/runtime/src/port.ts`：`WorkerRuntime` v2、`WorkerRef / StartResult / DeliveryReceipt / AgentStatus / WorkerRuntimeError`；
+- `packages/runtime/src/status.ts`：`classifyAgentStatus`，`checkIdle / isZombie / recover / workerGone` 统一消费；
+- `packages/runtime/src/registry.ts`：`RuntimeRegistry`，按 `assignment.runtimeId` 取运行时；默认运行时启动期校验；
 - `src/service.ts`：去 Orca 类型、按 assignment 路由、`buildWorkerContext`、launch 半成功清理、投递 receipt；
-- `src/worker/orca/*`：Orca 适配新契约（status/output/activity/inspectWorkspace/removeWorkspace/nudge）；
-- `src/worker/runtimes/claude-code/*`：`claude --bg` + `claude agents --json --all` + `claude --bg --resume`（无 flags）+ `claude stop`；
-- `src/worker/workspaces/git-worktree.ts`：git worktree、分支/路径校验、失败回滚；
+- `packages/runtime/src/orca/*`：Orca 适配新契约（status/output/activity/inspectWorkspace/removeWorkspace/nudge）；
+- `packages/runtime/src/runtimes/claude-code/*`：`claude --bg` + `claude agents --json --all` + `claude --bg --resume`（无 flags）+ `claude stop`；
+- `packages/runtime/src/workspaces/git-worktree.ts`：git worktree、分支/路径校验、失败回滚；
 - 配置：`worker.tools`、`runtime.default/options` 解析；`ra init` 在 Claude 运行时下问本地路径；
 - `ra report --port` / `RA_PORT`；`ra serve` 单实例锁；doctor 追加当前运行时自检。
 
@@ -1386,11 +1386,11 @@ Orca 运行时用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.t
 
 | 主题 | 文件:行 |
 |-|-|
-| WorkerRuntime 端口 | `src/worker/port.ts:51-62` |
-| OrcaRuntime | `src/worker/orca/index.ts:174-311` |
-| Orca CLI 参数 | `src/worker/orca/commands.ts:21-81` |
-| Claude 会话解析 | `src/worker/orca/session.ts:7-102` |
-| 终端活性判定 | `src/worker/orca/report-poller.ts:156-176` |
+| WorkerRuntime 端口 | `packages/runtime/src/port.ts:51-62` |
+| OrcaRuntime | `packages/runtime/src/orca/index.ts:174-311` |
+| Orca CLI 参数 | `packages/runtime/src/orca/commands.ts:21-81` |
+| Claude 会话解析 | `packages/runtime/src/orca/session.ts:7-102` |
+| 终端活性判定 | `packages/runtime/src/orca/report-poller.ts:156-176` |
 | 服务层 Orca 类型泄漏 | `src/service.ts:14`、`40-44`、`443-447`、`1633-1638` |
 | 空闲/僵尸判定 | `src/service.ts:884-929`、`1023-1040` |
 | 工作区回收 | `src/service.ts:1165-1205` |
@@ -1400,15 +1400,15 @@ Orca 运行时用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.t
 | 配置写死 orca | `src/config.ts:157-158`、`232`、`399`、`899-901` |
 | CLI 装配 | `src/cli/index.ts:642-649` |
 | 手工绑定写死 runtime | `src/router/api.ts:118`、旧路径 import `:9` |
-| 子进程环境继承 | `src/infra/process.ts:19-23` |
+| 子进程环境继承 | `packages/infra/src/process.ts:19-23` |
 | 失败诊断强类型 | `src/service.ts:1686-1719`、`1760`、`1774` |
 | 投递未 ack 重投 | `src/service.ts:819-852`、`src/store/db.ts:729-756` |
 | 单实例 pid 覆盖 | `src/cli/index.ts:619-622` |
 | doctor Orca 检查 | `src/cli/doctor.ts:59-78` |
 | init 仓库选择 | `src/cli/init.ts:124-147` |
 | Orca JSON 解析器放错文件 | `src/sources/lark.ts:117-160` |
-| Worker 手册 | `src/worker/spec/prompt-mode.md:3`、`src/worker/spec/index.ts:46-56` |
-| 报告协议 | `src/cli/report.ts`、`src/worker/orca/report-poller.ts:1-154` |
+| Worker 手册 | `packages/runtime/src/spec/prompt-mode.md:3`、`packages/runtime/src/spec/index.ts:46-56` |
+| 报告协议 | `src/cli/report.ts`、`packages/runtime/src/orca/report-poller.ts:1-154` |
 | 效果队列 | `src/service.ts:536-552`、`src/core/effects.ts` |
 
 ## 附录 B · 新运行时接入 Checklist
@@ -1495,7 +1495,7 @@ Orca 运行时用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.t
 
 ## 附录 D · ACP Runtime 实现（2026-11-09）
 
-`AcpRuntime`（`src/worker/runtimes/acp/`）是协议层实现：一个客户端同时适配所有实现 ACP 的 Agent。
+`AcpRuntime`（`packages/runtime/src/runtimes/acp/`）是协议层实现：一个客户端同时适配所有实现 ACP 的 Agent。
 
 ### D.1 协议与消息
 
@@ -1529,7 +1529,7 @@ Orca 运行时用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.t
 多 ACP Agent 并行接入后，运行时不再只有一个 `acp`：
 
 - **运行时 id**：目录里的每个 Agent 注册为 `acp-<agent>`（`acp-claude` / `acp-codex` / `acp-opencode` / `acp-gemini` / `acp-copilot` / `acp-cursor` / `acp-goose`）。旧的 `acp` 保留为自定义命令入口。
-- **静态目录**：`src/worker/runtimes/acp/agents.ts`，纯常量，Web 可 import。包含启动命令、默认参数、可在线安装的 npm 包、版本探测参数、外部依赖（如 codex app-server）、登录命令与 `loadSession` 能力。
+- **静态目录**：`packages/runtime/src/runtimes/acp/agents.ts`，纯常量，Web 可 import。包含启动命令、默认参数、可在线安装的 npm 包、版本探测参数、外部依赖（如 codex app-server）、登录命令与 `loadSession` 能力。
 - **注册表**：`createRuntimes` 保持同步，注册目录里的全部运行时；命令解析只做文件存在性检查（`runtime.options.<id>.command` → `~/.router-agent/runtimes/<agent>/node_modules/.bin` → PATH），不 spawn。未安装的运行时也注册，`start()` 在创建 worktree 之前抛 `runtime:unavailable`，附原因和 `ra runtime install` 提示。
 - **探测**：`detect.ts` 分三层：
   - L0：命令 + 版本探测（每项 2.5s，缺失项不 spawn）；

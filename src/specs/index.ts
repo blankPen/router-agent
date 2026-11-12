@@ -12,6 +12,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseDocument } from 'yaml'
+import { readWorkerSpec as readRuntimeWorkerSpec } from '#runtime/spec/reader.js'
 
 export type SpecGroup = 'router' | 'worker'
 
@@ -150,8 +151,7 @@ function definitionForFile(group: SpecGroup, file: string): SpecDefinition | und
 }
 
 function builtinPath(group: SpecGroup, file: string): string {
-  const dir = group === 'router' ? 'router/prompts' : 'worker/spec'
-  return fileURLToPath(new URL(`../${dir}/${file}`, import.meta.url))
+  return fileURLToPath(new URL(`../router/prompts/${file}`, import.meta.url))
 }
 
 /** 覆盖文件的固定路径：`<home>/specs/<group>/<file>`。 */
@@ -170,6 +170,8 @@ function stats(path: string): { isCustom: boolean; updatedAt: string | null } {
 }
 
 function builtinContent(def: SpecDefinition): string {
+  // Worker 模板由运行时包自带（并负责 `<home>/specs/worker` 覆盖），这里不重复维护路径。
+  if (def.group === 'worker') return readRuntimeWorkerSpec(undefined, def.file)
   return readFileSync(builtinPath(def.group, def.file), 'utf8')
 }
 

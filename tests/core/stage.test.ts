@@ -8,8 +8,8 @@ import {
   STAGE_LABELS,
   STAGE_VALUES,
   type StageInput,
-} from '../../src/core/stage.js'
-import type { Assignment, Report, Ticket } from '../../src/core/model.js'
+} from '#core/stage.js'
+import type { Assignment, Report, Ticket } from '#core/model.js'
 
 const ticket: Ticket = {
   id: 'tk1',

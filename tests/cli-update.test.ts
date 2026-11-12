@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { runCli, type CliIo } from '../src/cli/index.js'
 import { PACKAGE_VERSION } from '../src/update/index.js'
-import type { CommandResult, CommandRunner } from '../src/infra/process.js'
+import type { CommandResult, CommandRunner } from '#infra/process.js'
 
 function io(): CliIo & { out: string[]; err: string[] } {
   const out: string[] = []

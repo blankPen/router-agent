@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRepoPathResolver } from '../../src/router/repo-paths.js'
-import type { CommandRunner } from '../../src/infra/process.js'
+import type { CommandRunner } from '#infra/process.js'
 
 describe('项目路径解析', () => {
   it('orca 查询带超时，卡住也不能拖死 intake 的串行处理', async () => {

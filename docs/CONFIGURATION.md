@@ -192,7 +192,7 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 
 默认值写在选项声明里（`RuntimeOptionField.default`），后端、面板、文档都从同一处取值。如果某个运行时的选项没有「可省略」的形态（例如 Orca 的 `--prompt` 必须配 `--agent`），就用声明默认值兜底，而不是让调用方猜。
 
-新增运行时只要声明自己的选项即可，内核与面板都不用改；选项声明见 `src/worker/runtimes/options.ts` 与各运行时的 `options.ts`。
+新增运行时只要声明自己的选项即可，内核与面板都不用改；选项声明见 `packages/runtime/src/runtimes/options.ts` 与各运行时的 `options.ts`。
 
 ## 环境变量
 

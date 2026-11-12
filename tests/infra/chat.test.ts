@@ -4,7 +4,7 @@ import {
   chatCompletionsUrl,
   createChatClient,
   parseChatText,
-} from '../../src/infra/chat.js'
+} from '#infra/chat.js'
 
 const model = { baseUrl: 'https://api.example.com/v1', apiKey: 'sk-test', model: 'chat-model' }
 

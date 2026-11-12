@@ -42,7 +42,7 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "build:web": "node scripts/build-web.mjs",
-    "build": "tsc -p tsconfig.build.json && node scripts/build-web.mjs",
+    "build": "tsc -p tsconfig.build.json && node scripts/build-web.mjs && node scripts/flatten-dist.mjs",
     "check": "pnpm typecheck && pnpm test",
     "start": "node dist/cli/main.js start"
   },
@@ -68,5 +68,11 @@
     "react-dom": "18.3.1",
     "typescript": "5.9.3",
     "vitest": "3.2.4"
+  },
+  "imports": {
+    "#core/*": "./dist/packages/core/src/*",
+    "#infra/*": "./dist/packages/infra/src/*",
+    "#runtime/*": "./dist/packages/runtime/src/*",
+    "#channel/*": "./dist/packages/channel/src/*"
   }
 }

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { defaultConfig, type AppConfig } from '../../src/config.js'
-import { AcpRuntimeAdmin, InstallStartError } from '../../src/worker/runtimes/acp/admin.js'
+import { AcpRuntimeAdmin, InstallStartError } from '#runtime/runtimes/acp/admin.js'
 
 function home(): string {
   return mkdtempSync(join(tmpdir(), 'ra-acp-admin-'))

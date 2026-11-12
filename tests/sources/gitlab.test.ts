@@ -8,7 +8,7 @@ import {
   parseGlabMrView,
 } from '../../src/sources/gitlab.js'
 import { isGitlabMergeRequestUrl, parseGitRemote, parseGitlabMergeRequestUrl } from '../../src/sources/forge.js'
-import type { CommandRunner } from '../../src/infra/process.js'
+import type { CommandRunner } from '#infra/process.js'
 
 describe('GitLab MR 状态解析', () => {
   it('opened / locked 归一化为 open，不能误判为关闭', () => {

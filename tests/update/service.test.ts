@@ -4,7 +4,7 @@ import {
   type LatestVersionResult,
   type UpgradeResult,
 } from '../../src/update/index.js'
-import type { Logger } from '../../src/infra/logger.js'
+import type { Logger } from '#infra/logger.js'
 
 function captureLogger(): { logger: Logger; events: { level: string; message: string; extra: Record<string, unknown> }[] } {
   const events: { level: string; message: string; extra: Record<string, unknown> }[] = []

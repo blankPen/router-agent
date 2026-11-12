@@ -2,12 +2,12 @@ import { describe, expect, it } from 'vitest'
 import { mkdtempSync, mkdirSync, readFileSync, existsSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { OrcaRuntime, OrcaCommandError, parseCreateResult, summarizeArgs } from '../../src/worker/orca/index.js'
-import { claudeProjectSlug, describeToolInfo, describeToolUse } from '../../src/worker/agents/claude.js'
-import { worktreeCreate, terminalSend, terminalClose, terminalList, terminalRead, worktreeRemove, agentLaunch } from '../../src/worker/orca/commands.js'
-import type { CommandRunner, CommandResult } from '../../src/worker/orca/commands.js'
-import type { Assignment, Ticket } from '../../src/core/model.js'
-import { buildNeutralContract, buildWorkerPrompt } from '../../src/worker/spec/index.js'
+import { OrcaRuntime, OrcaCommandError, parseCreateResult, summarizeArgs } from '#runtime/orca/index.js'
+import { claudeProjectSlug, describeToolInfo, describeToolUse } from '#runtime/agents/claude.js'
+import { worktreeCreate, terminalSend, terminalClose, terminalList, terminalRead, worktreeRemove, agentLaunch } from '#runtime/orca/commands.js'
+import type { CommandRunner, CommandResult } from '#runtime/orca/commands.js'
+import type { Assignment, Ticket } from '#core/model.js'
+import { buildNeutralContract, buildWorkerPrompt } from '#runtime/spec/index.js'
 
 class FakeRunner implements CommandRunner {
   calls: { argv: string[]; cwd?: string }[] = []

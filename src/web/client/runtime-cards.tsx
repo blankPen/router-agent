@@ -4,7 +4,7 @@
  * 选中状态由父级 draft 控制；探测轮询、检测、安装、日志等临时状态收在组件内部。
  */
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react'
-import { ACP_RUNTIME_ID, normalizeRuntimeId } from '../../worker/runtimes/catalog.js'
+import { ACP_RUNTIME_ID, normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
 import { getJson, sendJson } from './api.js'
 import { Icon } from './icons.js'
 import {

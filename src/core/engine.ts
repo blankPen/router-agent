@@ -1,8 +1,8 @@
 import type { Store } from '../store/db.js'
 import { attachmentsOf, withAttachmentManifest } from './attachments.js'
-import { negotiateAcceptance, type Policy, type Acceptance } from './policy.js'
-import { computeStage } from './stage.js'
-import { noopSink, preview, type EventSink } from './events.js'
+import { negotiateAcceptance, type Policy, type Acceptance } from '#core/policy.js'
+import { computeStage } from '#core/stage.js'
+import { noopSink, preview, type EventSink } from '#core/events.js'
 import type {
   Assignment,
   Decision,
@@ -16,7 +16,7 @@ import type {
   Strength,
   Ticket,
   Trigger,
-} from './model.js'
+} from '#core/model.js'
 
 export interface Clock {
   now(): string

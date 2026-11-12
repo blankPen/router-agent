@@ -3,13 +3,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { defaultConfig } from '../../src/config.js'
-import type { CommandRunner } from '../../src/infra/process.js'
+import type { CommandRunner } from '#infra/process.js'
 import {
   codexAppOptionsOf,
   detectCodexBinary,
   probeCodexHandshake,
   resolveCodexBinary,
-} from '../../src/worker/runtimes/codex/detect.js'
+} from '#runtime/runtimes/codex/detect.js'
 
 function home(): string {
   return mkdtempSync(join(tmpdir(), 'ra-codex-detect-'))

@@ -1,4 +1,4 @@
-import type { CommandRunner } from '../infra/process.js'
+import type { CommandRunner } from '#infra/process.js'
 import { isGithubPullRequestUrl, type GitHubTracker, type PrInfo, type PrViewHint } from './github.js'
 import type { GitLabTracker } from './gitlab.js'
 import { isGitlabMergeRequestUrl, parseGitRemote } from './forge.js'

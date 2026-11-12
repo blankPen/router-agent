@@ -12,9 +12,9 @@ import {
   renderInput,
   shortHash,
   withWorkdir,
-} from '../../src/worker/runtimes/herdr/index.js'
-import { ensureHerdrServer, probeHerdrServer } from '../../src/worker/runtimes/herdr/server.js'
-import { herdrAgentKindOf, HERDR_AGENT_KINDS } from '../../src/worker/runtimes/herdr/agents.js'
+} from '#runtime/runtimes/herdr/index.js'
+import { ensureHerdrServer, probeHerdrServer } from '#runtime/runtimes/herdr/server.js'
+import { herdrAgentKindOf, HERDR_AGENT_KINDS } from '#runtime/runtimes/herdr/agents.js'
 import {
   agentGet,
   agentPrompt,
@@ -27,9 +27,9 @@ import {
   version,
   workspaceClose,
   workspaceCreate,
-} from '../../src/worker/runtimes/herdr/commands.js'
-import type { CommandRunner, CommandResult } from '../../src/worker/runtimes/herdr/commands.js'
-import type { Assignment, Ticket } from '../../src/core/model.js'
+} from '#runtime/runtimes/herdr/commands.js'
+import type { CommandRunner, CommandResult } from '#runtime/runtimes/herdr/commands.js'
+import type { Assignment, Ticket } from '#core/model.js'
 
 /**
  * Herdr 侧的假 runner：按命令分派，而不是按调用顺序 —— 派工流程里命令条数多，

@@ -1,4 +1,4 @@
-import type { Attachment } from './model.js'
+import type { Attachment } from '#core/model.js'
 
 /**
  * 从 Trigger.raw 里读 Router 已落盘的附件。

@@ -4,7 +4,7 @@ import {
   createVisionTranscriber,
   DEFAULT_VISION_PROMPT,
   parseChatCompletionText,
-} from '../../src/infra/vision.js'
+} from '#infra/vision.js'
 
 const model = { baseUrl: 'https://api.example.com/v1', apiKey: 'sk-test', model: 'vision-model' }
 const image = { data: 'aGVsbG8=', mimeType: 'image/png' }

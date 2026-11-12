@@ -12,7 +12,7 @@
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, relative, resolve, sep } from 'node:path'
-import type { ChatToolSpec } from '../infra/chat.js'
+import type { ChatToolSpec } from '#infra/chat.js'
 
 export interface DiagnosisToolContext {
   /** router-agent 本地代码根目录（npm 安装目录或仓库根）。 */

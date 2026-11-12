@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>router-agent · monorepo 与可插拔 runtime / channel 改造</title>
+<style>
+  :root{
+    --bg:#f7f6f3; --panel:#fff; --ink:#17181c; --ink-2:#4a4c55; --ink-3:#7c7f8a;
+    --line:#e3e1da; --line-strong:#cfccc3;
+    --core:#b45309; --infra:#0e7490; --runtime:#15803d; --channel:#2f6bff; --host:#7c3aed;
+    --danger:#b91c1c;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-font-smoothing:antialiased}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.65}
+  .wrap{max-width:1120px;margin:0 auto;padding:0 28px 96px}
+  header{padding:64px 0 40px;border-bottom:1px solid var(--line);margin-bottom:56px;
+    background:radial-gradient(circle at 12% 20%, rgba(21,128,61,.06), transparent 42%),
+               radial-gradient(circle at 88% 10%, rgba(47,107,255,.07), transparent 40%);}
+  .eyebrow{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);font-size:12px;
+    letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3)}
+  .eyebrow::before{content:"";width:22px;height:1px;background:var(--ink-3)}
+  h1{font-size:clamp(30px,4.4vw,46px);line-height:1.15;letter-spacing:-.02em;margin:18px 0 14px;font-weight:750}
+  h1 em{font-style:normal;color:var(--runtime)}
+  .lede{max-width:720px;color:var(--ink-2);font-size:17px;margin:0}
+  .lede code{font-family:var(--mono);font-size:.9em;background:#ecebe6;padding:1px 5px;border-radius:4px}
+  .metrics{display:flex;flex-wrap:wrap;gap:8px;margin-top:26px}
+  .metric{font-family:var(--mono);font-size:12px;color:var(--ink-2);border:1px solid var(--line-strong);
+    background:rgba(255,255,255,.6);border-radius:999px;padding:5px 12px}
+  .metric b{color:var(--ink);font-weight:600}
+  section{margin-bottom:64px}
+  .sec-head{display:flex;align-items:baseline;gap:14px;margin-bottom:8px}
+  .sec-num{font-family:var(--mono);font-size:12px;color:var(--ink-3);letter-spacing:.1em}
+  h2{font-size:23px;letter-spacing:-.01em;margin:0;font-weight:700}
+  .sec-sub{color:var(--ink-2);margin:0 0 26px;max-width:780px}
+  code{font-family:var(--mono);font-size:.88em;background:#efeee9;padding:1px 4px;border-radius:4px;color:#2a2b31}
+  .pre{font-family:var(--mono);font-size:12.6px;line-height:1.75;background:#1b1c21;color:#e6e6e8;
+    border-radius:12px;padding:18px 20px;overflow-x:auto;white-space:pre}
+  .pre .c{color:#8b8d98} .pre .add{color:#7ee2a8} .pre .del{color:#ff9a9a} .pre .k{color:#9ec5fe}
+  .pre .b{color:#ffd479} .pre .g{color:#c5b6ff}
+
+  /* tree diff */
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .tree{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .tree h3{margin:0;padding:11px 16px;font-size:13px;font-weight:650;border-bottom:1px solid var(--line);
+    font-family:var(--mono);letter-spacing:.03em;background:#fbfaf7}
+  .tree h3.old{color:var(--ink-3)} .tree h3.new{color:var(--runtime)}
+  .tree ul{list-style:none;margin:0;padding:14px 16px;font-family:var(--mono);font-size:12.6px;line-height:1.95;color:var(--ink-2)}
+  .tree ul .d{color:#b6b3aa} .tree ul .add{color:var(--runtime)} .tree ul .del{color:var(--danger)}
+  .tree ul .moved{color:var(--core)}
+
+  /* layers */
+  .layers{display:flex;flex-direction:column;gap:10px}
+  .layer{display:grid;grid-template-columns:200px 1fr;gap:0;background:var(--panel);
+    border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .layer .name{padding:16px 18px;border-right:1px solid var(--line);display:flex;flex-direction:column;gap:3px}
+  .layer .name b{font-family:var(--mono);font-size:13px;font-weight:600}
+  .layer .name span{font-size:11.5px;color:var(--ink-3)}
+  .layer .body{padding:15px 18px}
+  .layer .body p{margin:0 0 8px;color:var(--ink-2);font-size:13.6px}
+  .layer .body ul{margin:0;padding-left:17px;color:var(--ink-2);font-size:13.2px}
+  .l-core{border-left:4px solid var(--core)} .l-infra{border-left:4px solid var(--infra)}
+  .l-runtime{border-left:4px solid var(--runtime)} .l-channel{border-left:4px solid var(--channel)}
+  .l-host{border-left:4px solid var(--host)}
+  .l-core .name b{color:var(--core)} .l-infra .name b{color:var(--infra)}
+  .l-runtime .name b{color:var(--runtime)} .l-channel .name b{color:var(--channel)} .l-host .name b{color:var(--host)}
+
+  /* ports */
+  .ports{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .port{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px 20px}
+  .port .tag{font-family:var(--mono);font-size:11px;padding:2px 8px;border-radius:5px;border:1px solid currentColor}
+  .port h3{margin:11px 0 3px;font-size:16px;font-weight:700}
+  .port .path{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);margin-bottom:13px}
+  .port ul{margin:0;padding-left:17px;color:var(--ink-2);font-size:13.4px}
+  .port li + li{margin-top:6px}
+  .port code{font-size:.85em}
+  .p-runtime{border-top:3px solid var(--runtime)} .p-runtime .tag{color:var(--runtime)}
+  .p-channel{border-top:3px solid var(--channel)} .p-channel .tag{color:var(--channel)}
+  .adapters{display:flex;flex-wrap:wrap;gap:6px;margin-top:14px;padding-top:13px;border-top:1px dashed var(--line-strong)}
+  .adapters .a{font-family:var(--mono);font-size:11.5px;padding:3px 9px;border-radius:999px;background:#f4f3ef;border:1px solid var(--line);color:var(--ink-2)}
+
+  table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;font-size:13.4px}
+  th,td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:500;background:#fbfaf7}
+  tr:last-child td{border-bottom:none}
+  td code{background:#f2f1ec}
+  .yes{color:var(--runtime);font-weight:600} .no{color:var(--ink-3)}
+
+  .note{display:flex;gap:12px;background:#fffdf6;border:1px solid #e8dfc2;border-radius:10px;
+    padding:13px 16px;margin-top:14px;color:#5c4a1c;font-size:13.6px}
+  .note .k{font-family:var(--mono);font-size:11px;letter-spacing:.06em;white-space:nowrap;padding-top:2px}
+
+  .flow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;background:var(--panel);
+    border:1px solid var(--line);border-radius:12px;padding:20px}
+  .step{font-family:var(--mono);font-size:12px;padding:7px 13px;border-radius:8px;background:#f4f3ef;border:1px solid var(--line);color:var(--ink-2)}
+  .step.s1{border-color:#cfe0d7;color:var(--runtime);background:#f3f8f5}
+  .step.s2{border-color:#d9c9f8;color:var(--host);background:#f7f4fe}
+  .step.s3{border-color:#e8dfc2;color:#8a6d1f;background:#fffdf6}
+  .sep{color:var(--line-strong);font-family:var(--mono)}
+  footer{margin-top:72px;padding-top:22px;border-top:1px solid var(--line);color:var(--ink-3);font-size:12.5px;font-family:var(--mono)}
+  @media (max-width:900px){
+    .two,.ports{grid-template-columns:1fr}
+    .layer{grid-template-columns:1fr}
+    .layer .name{border-right:none;border-bottom:1px solid var(--line)}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">refactor · tk-68 · PR #82</div>
+  <h1>从「一个大仓库」到<em>可插拔的 monorepo</em></h1>
+  <p class="lede">这次改造把 router-agent 拆成 pnpm workspace：领域内核、基础设施、Worker 运行时、消息通道各自成包，
+    宿主只做装配。对外仍然只发布一个 npm 包 <code>router-agent</code>，CLI 入口和 <code>dist/</code> 结构对用户没有变化。</p>
+  <div class="metrics">
+    <span class="metric">包 <b>4</b>（core / infra / runtime / channel）</span>
+    <span class="metric">依赖方向 <b>单向向下</b></span>
+    <span class="metric">跨包别名 <b>4</b> 个，<b>4</b> 处解析一致</span>
+    <span class="metric">对外 npm 包 <b>仍是 1 个</b></span>
+    <span class="metric">测试 <b>1230 通过 / 4 跳过</b></span>
+  </div>
+</header>
+
+<section>
+  <div class="sec-head"><span class="sec-num">01</span><h2>目录：从混在一处到按职责分包</h2></div>
+  <p class="sec-sub">原来 <code>src/core</code>、<code>src/infra</code>、<code>src/worker</code>、<code>src/channels</code> 平铺在同一个 <code>src/</code> 下，
+    谁都能 import 谁。现在内核与基础设施下沉成包，宿主 <code>src/</code> 只保留装配（<code>src/core/engine.ts</code> 是宿主的 Engine / Store 层，留在 <code>src/</code>）。</p>
+  <div class="two">
+    <div class="tree">
+      <h3 class="old">before · 单包结构</h3>
+      <ul>
+        <li>src/</li>
+        <li><span class="d">├─ core/</span> <span class="d">model · stage · policy · events · engine</span></li>
+        <li><span class="d">├─ infra/</span> <span class="d">logger · process · chat · vision</span></li>
+        <li><span class="d">├─ worker/</span> <span class="d">port · registry · runtimes/ · orca/ · agents/</span></li>
+        <li><span class="d">├─ channels/</span> <span class="d">port · registry · router · ingress · feishu/</span></li>
+        <li><span class="d">├─ router/ · cli/ · web/ · store/</span></li>
+        <li><span class="d">└─ config.ts</span> <span class="d">宿主唯一配置形状</span></li>
+      </ul>
+    </div>
+    <div class="tree">
+      <h3 class="new">after · pnpm workspace</h3>
+      <ul>
+        <li><span class="add">packages/core/</span> <span class="moved">← src/core 的内核部分</span></li>
+        <li><span class="add">packages/infra/</span> <span class="moved">← src/infra</span></li>
+        <li><span class="add">packages/runtime/</span> <span class="moved">← src/worker</span></li>
+        <li><span class="add">packages/channel/</span> <span class="moved">← src/channels</span></li>
+        <li><span class="del">src/infra/ src/worker/ src/channels/</span></li>
+        <li>src/ <span class="d">router · cli · web · store · core/engine · config</span></li>
+      </ul>
+    </div>
+  </div>
+  <div class="note"><span class="k">注意</span><span>不是「搬完就完」：搬完同时补了 <code>packages/core/src/config.ts</code> 的
+    <code>RuntimeConfigView</code> / <code>ChannelConfigView</code>，让适配器不再反向依赖宿主 <code>AppConfig</code>。</span></div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">02</span><h2>依赖方向：单向向下，越界有测试兜底</h2></div>
+  <p class="sec-sub">包之间只允许向下依赖；<code>runtime</code> 与 <code>channel</code> 互不依赖，<code>packages/*</code> 不得 import <code>src/</code>。</p>
+  <div class="layers">
+    <div class="layer l-host"><div class="name"><b>src/</b><span>宿主 · Engine / Store / Router / API / CLI</span></div>
+      <div class="body"><p>装配层：把运行时注册进 <code>RuntimeRegistry</code>，把通道注册进 <code>ChannelRegistry</code>，负责配置与 CLI；
+        状态写入走 <code>src/core/engine.ts</code>，不直接碰数据库。</p></div></div>
+    <div class="layer l-runtime"><div class="name"><b>packages/runtime/</b><span>WorkerRuntime 端口 + 适配器</span></div>
+      <div class="body"><p>定义 Worker 运行时端口与注册表，并实现各运行时适配器与 worker 手册模板。</p></div></div>
+    <div class="layer l-channel"><div class="name"><b>packages/channel/</b><span>ChannelAdapter 端口 + 适配器</span></div>
+      <div class="body"><p>定义消息通道端口与注册表，负责入站管线、飞书 adapter 与 lark-cli 封装。</p></div></div>
+    <div class="layer l-infra"><div class="name"><b>packages/infra/</b><span>基础设施</span></div>
+      <div class="body"><p>Logger、CommandRunner、对话模型、图片识别 —— 不含业务语义，零 Node 依赖方向问题。</p></div></div>
+    <div class="layer l-core"><div class="name"><b>packages/core/</b><span>领域内核</span></div>
+      <div class="body"><p>Ticket / Mandate / Assignment / Stage / Policy / 事件与中立配置视图，零 Node 依赖。</p></div></div>
+  </div>
+  <div class="note"><span class="k">守门</span><span><code>tests/architecture/packages.test.ts</code> 断言禁止的 import 组合，改边界时这个测试必须一起改。</span></div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">03</span><h2>可插拔：两个端口，各带一组适配器</h2></div>
+  <p class="sec-sub">「可插拔」落成两个端口接口：宿主只认端口，适配器在装配层注册；新增一种运行时或通道，不用改核心链路。</p>
+  <div class="ports">
+    <div class="port p-runtime">
+      <span class="tag">port</span>
+      <h3>WorkerRuntime</h3>
+      <div class="path">packages/runtime/src/port.ts</div>
+      <ul>
+        <li>启动 / 恢复 / 状态查询 / 中断的统一契约</li>
+        <li><code>RuntimeRegistry</code> 负责解析与枚举，Web 卡片与配置校验共用 <code>runtimes/catalog.ts</code></li>
+        <li>适配器只依赖 <code>#core</code> / <code>#infra</code> 与同包相对路径</li>
+      </ul>
+      <div class="adapters">
+        <span class="a">orca</span><span class="a">claude-code</span><span class="a">codex</span><span class="a">acp</span><span class="a">herdr</span>
+      </div>
+    </div>
+    <div class="port p-channel">
+      <span class="tag">port</span>
+      <h3>ChannelAdapter</h3>
+      <div class="path">packages/channel/src/port.ts</div>
+      <ul>
+        <li>入站事件 / 出站发送 / 群目录的统一契约</li>
+        <li><code>ChannelIngress</code> 只要求 <code>IngressSink</code> 与 <code>AckStore</code>，不依赖宿主 Engine / Store 的具体类型</li>
+        <li>通道特有配置用 <code>#core/config.js</code> 的中立视图或包内 <code>config.ts</code></li>
+      </ul>
+      <div class="adapters">
+        <span class="a">feishu</span><span class="a">legacy</span><span class="a">sources</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">04</span><h2>别名：四处解析必须一致</h2></div>
+  <p class="sec-sub">跨包引用统一走 <code>#core/*</code>、<code>#infra/*</code>、<code>#runtime/*</code>、<code>#channel/*</code>；
+    编译期、运行时、测试、面板打包各有一套解析，少改一处就会在某个环节炸。</p>
+  <table>
+    <thead><tr><th>别名</th><th>指向</th><th>解析位置（四处保持一致）</th></tr></thead>
+    <tbody>
+      <tr><td><code>#core/*</code></td><td><code>packages/core/src/*</code></td><td rowspan="4">
+        <code>tsconfig.json</code> paths · 根 <code>package.json</code> imports（指向 <code>dist/</code>）·
+        <code>vitest.config.ts</code> alias · <code>scripts/build-web.mjs</code> 的 tsconfig</td></tr>
+      <tr><td><code>#infra/*</code></td><td><code>packages/infra/src/*</code></td></tr>
+      <tr><td><code>#runtime/*</code></td><td><code>packages/runtime/src/*</code></td></tr>
+      <tr><td><code>#channel/*</code></td><td><code>packages/channel/src/*</code></td></tr>
+    </tbody>
+  </table>
+  <div class="note"><span class="k">坑</span><span>根 <code>imports</code> 指向 <code>dist/</code>：改了 <code>packages/*/src</code> 必须 <code>pnpm build</code>，
+    否则 CLI 跑的还是旧产物；测试直接吃源码，所以测试绿了不等于运行时是新的。</span></div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">05</span><h2>构建与发布：用户视角零变化</h2></div>
+  <p class="sec-sub">npm 包仍然只有 <code>router-agent</code> 一个，<code>files</code> 仍只含 <code>bin/</code> 与 <code>dist/</code>，
+    <code>dist/cli/main.js</code> 的对外路径保持原样 —— 拍平这一步就是为了不破坏这个约定。</p>
+  <div class="flow">
+    <span class="step s1">tsc -p tsconfig.build.json</span><span class="sep">→</span>
+    <span class="step s2">node scripts/build-web.mjs</span><span class="sep">→</span>
+    <span class="step s3">node scripts/flatten-dist.mjs</span><span class="sep">→</span>
+    <span class="step">dist/cli/main.js · dist/web · dist/update</span>
+  </div>
+  <div class="note"><span class="k">发版</span><span><code>scripts/release-plan.mjs</code> 把 <code>packages/&lt;name&gt;/src/**</code> 视为产物改动（触发发版），
+    包内 <code>tests/</code>、<code>package.json</code>、<code>pnpm-workspace.yaml</code> 不触发。</span></div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">06</span><h2>收益：新增一种运行时 / 通道的改动面</h2></div>
+  <p class="sec-sub">同样一件事，改动从「动核心 + 改 if/else 分支」变成「实现端口 + 注册一行」。</p>
+  <table>
+    <thead><tr><th>要做的事</th><th>before</th><th>after</th></tr></thead>
+    <tbody>
+      <tr><td>加一种 Worker 运行时</td><td class="no">改核心派工逻辑、加分支、加配置字段</td><td class="yes">实现 <code>WorkerRuntime</code> + catalog 一行 + registry 装配</td></tr>
+      <tr><td>加一种消息通道</td><td class="no">改 Router 与宿主配置</td><td class="yes">实现 <code>ChannelAdapter</code> + 注册进 <code>ChannelRegistry</code></td></tr>
+      <tr><td>适配器要读配置</td><td class="no">import 宿主 <code>AppConfig</code>（反向依赖）</td><td class="yes">用 <code>packages/core/src/config.ts</code> 的中立视图</td></tr>
+      <tr><td>越界 import</td><td class="no">靠自觉，review 才拦得住</td><td class="yes">架构测试直接红</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<footer>
+  router-agent · tk-68 · PR #82 · 分支 ra/tk-68-monorepo-runtime-channel ·
+  架构细节见 docs/MONOREPO.md，开发规范见 AGENTS.md
+</footer>
+
+</div>
+</body>
+</html>

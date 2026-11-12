@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 import { Engine } from '../core/engine.js'
-import type { AddressMode, DecisionRecord, SourceKind, Ticket, Trigger } from '../core/model.js'
+import type { AddressMode, DecisionRecord, SourceKind, Ticket, Trigger } from '#core/model.js'
 import { policyOf, replyAlwaysChatsOf, type AppConfig, type PolicyResolution } from '../config.js'
 import { Store } from '../store/db.js'
 import { AgentLoop } from '../router/agent-loop.js'

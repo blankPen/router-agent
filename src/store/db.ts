@@ -17,9 +17,9 @@ import type {
   Thread,
   Trigger,
   TriggerDisposition,
-} from '../core/model.js'
-import type { Policy } from '../core/policy.js'
-import { normalizeStage, stageAliases } from '../core/stage.js'
+} from '#core/model.js'
+import type { Policy } from '#core/policy.js'
+import { normalizeStage, stageAliases } from '#core/stage.js'
 
 /** sessionKey 迁移记录 ID；与手工执行的 SQL 文件保持一致。 */
 export const SESSION_KEY_MIGRATION_ID = '2026-11-session-key-channel'

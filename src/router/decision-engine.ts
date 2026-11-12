@@ -1,4 +1,4 @@
-import type { Decision, Strength, Trigger } from '../core/model.js'
+import type { Decision, Strength, Trigger } from '#core/model.js'
 import type { SessionKeyParts } from './session-registry.js'
 
 /**

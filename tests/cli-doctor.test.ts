@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { formatChecks, runDoctor, type DoctorDeps } from '../src/cli/doctor.js'
 import { defaultConfig, type AppConfig, chatEntry } from '../src/config.js'
-import type { CommandRunner } from '../src/infra/process.js'
+import type { CommandRunner } from '#infra/process.js'
 
 function healthyConfig(): AppConfig {
   const config = defaultConfig()

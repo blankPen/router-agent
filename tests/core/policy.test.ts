@@ -7,8 +7,8 @@ import {
   revalidateMandate,
   shouldAcknowledge,
   type Policy,
-} from '../../src/core/policy.js'
-import type { Mandate, Trigger } from '../../src/core/model.js'
+} from '#core/policy.js'
+import type { Mandate, Trigger } from '#core/model.js'
 
 const policy: Policy = {
   version: 'p1',

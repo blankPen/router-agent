@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { CommandResult, CommandRunner } from '../../src/infra/process.js'
-import { GitWorktreeProvider, parseGitHubRepo } from '../../src/worker/workspaces/git-worktree.js'
-import { WorkerRuntimeError } from '../../src/worker/port.js'
+import type { CommandResult, CommandRunner } from '#infra/process.js'
+import { GitWorktreeProvider, parseGitHubRepo } from '#runtime/workspaces/git-worktree.js'
+import { WorkerRuntimeError } from '#runtime/port.js'
 
 interface Call {
   argv: string[]

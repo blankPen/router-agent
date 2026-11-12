@@ -2,28 +2,28 @@ import { appendFileSync, existsSync, mkdirSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import type { Clock, Engine } from './core/engine.js'
-import type { Assignment, Report, Ticket, Trigger } from './core/model.js'
+import type { Assignment, Report, Ticket, Trigger } from '#core/model.js'
 import type { Store } from './store/db.js'
 import type { AppConfig, RetentionSettings, WorkspaceSettings } from './config.js'
 import { DEFAULT_CHAT_INTAKE, replyAlwaysChatsOf } from './config.js'
-import { STAGE_LABELS } from './core/stage.js'
-import { WorkerRuntimeError, type WorkerRuntime, type WorkerContext, type SessionEvent, type WorkerRef, type AgentStatus, type ResumeHint } from './worker/port.js'
+import { STAGE_LABELS } from '#core/stage.js'
+import { WorkerRuntimeError, type WorkerRuntime, type WorkerContext, type SessionEvent, type WorkerRef, type AgentStatus, type ResumeHint } from '#runtime/port.js'
 import { AgentLoop } from './router/agent-loop.js'
 import type { DecisionAudit, DecisionEngine } from './router/decision-engine.js'
 import { dispatchSettingsOf } from './router/dispatch.js'
 import type { IntakeEngine } from './router/intake-engine.js'
 import type { IntakeChatSettings } from './router/intake-flow.js'
 import { createRepoPathResolver } from './router/repo-paths.js'
-import { ReportPoller, appendEvent, readWorkerMeta, type WorkerMeta, type WorkerStateFile } from './worker/report-poller.js'
-import { classifyAgentStatus } from './worker/status.js'
-import { RuntimeRegistry } from './worker/registry.js'
-import { normalizeRuntimeId, ORCA_RUNTIME_ID } from './worker/runtimes/catalog.js'
-import { buildNeutralContract, buildWorkerPrompt } from './worker/spec/index.js'
+import { ReportPoller, appendEvent, readWorkerMeta, type WorkerMeta, type WorkerStateFile } from '#runtime/report-poller.js'
+import { classifyAgentStatus } from '#runtime/status.js'
+import { RuntimeRegistry } from '#runtime/registry.js'
+import { normalizeRuntimeId, ORCA_RUNTIME_ID } from '#runtime/runtimes/catalog.js'
+import { buildNeutralContract, buildWorkerPrompt } from '#runtime/spec/index.js'
 import { migrateLegacySoul } from './specs/index.js'
-import { workBranch } from './worker/naming.js'
-import { buildResumeHint } from './worker/resume.js'
-import { resolveSession } from './worker/agents/registry.js'
-import { runtimeOptionString } from './worker/runtimes/options.js'
+import { workBranch } from '#runtime/naming.js'
+import { buildResumeHint } from '#runtime/resume.js'
+import { resolveSession } from '#runtime/agents/registry.js'
+import { runtimeOptionString } from '#runtime/runtimes/options.js'
 import {
   workspaceRuntimeLabel,
   type WorkspaceCleanupRequest,
@@ -31,23 +31,24 @@ import {
   type WorkspaceEntryView,
   type WorkspaceOverviewView,
   type WorkspaceRuntimeGroupView,
-} from './worker/workspaces/overview.js'
+} from '#runtime/workspaces/overview.js'
 import { EffectsProcessor } from './core/effects.js'
-import { preview } from './core/events.js'
-import { DEFAULT_CHANNEL_ID } from './channels/port.js'
-import type { CommandRunner } from './infra/process.js'
-import { realRunner } from './infra/process.js'
-import { errorMessage, noopLogger, type Logger } from './infra/logger.js'
+import { preview } from '#core/events.js'
+import { DEFAULT_CHANNEL_ID } from '#channel/port.js'
+import type { CommandRunner } from '#infra/process.js'
+import { realRunner } from '#infra/process.js'
+import { errorMessage, noopLogger, type Logger } from '#infra/logger.js'
 import type { PrInfo } from './sources/github.js'
 import {
+
   ReportRejectedError,
   decisionLogDetail,
   evaluateUiEvidence,
   evidenceRejectedMessage,
-} from './worker/evidence-gate.js'
+} from '#runtime/evidence-gate.js'
 
 // Logger 的实现放在 infra/logger.ts；这里保留 re-export，兼容既有 import。
-export type { Logger } from './infra/logger.js'
+export type { Logger } from '#infra/logger.js'
 
 export interface PrTracker {
   /** hint 用于把项目名/path 选择器解析成真实仓库：优先 PR/MR 链接，其次 workdir。 */
@@ -2591,7 +2592,7 @@ export interface CreateServiceDeps {
 }
 
 /** 旧版出站兼容层；生产路径已改为 `ChannelRouter`，这里仅保留导出。 */
-export { createEffectsSender, type FeishuOutbound } from './channels/legacy.js'
+export { createEffectsSender, type FeishuOutbound } from '#channel/legacy.js'
 
 /** 按行切成不超过 limit 的消息块，保证长回复不会被截断。 */
 export function splitMessage(text: string, limit = 3500): string[] {

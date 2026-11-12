@@ -3,9 +3,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import type { CommandRunner } from '../../src/infra/process.js'
-import { AcpRuntime } from '../../src/worker/runtimes/acp/index.js'
-import { decidePermission, shellAllowed } from '../../src/worker/runtimes/acp/permissions.js'
+import type { CommandRunner } from '#infra/process.js'
+import { AcpRuntime } from '#runtime/runtimes/acp/index.js'
+import { decidePermission, shellAllowed } from '#runtime/runtimes/acp/permissions.js'
 import type {
   AgentStatus,
   SessionSnapshot,
@@ -14,7 +14,7 @@ import type {
   WorkerRef,
   WorkspaceProvider,
   WorkspaceRequest,
-} from '../../src/worker/port.js'
+} from '#runtime/port.js'
 
 const fixture = fileURLToPath(new URL('../fixtures/fake-acp-agent.mjs', import.meta.url))
 

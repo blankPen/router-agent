@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { scheduleIdentityRetry } from '../../src/cli/index.js'
-import type { IdentityStatusView } from '../../src/sources/feishu-identity.js'
-import type { Logger } from '../../src/infra/logger.js'
+import type { IdentityStatusView } from '#channel/sources/feishu-identity.js'
+import type { Logger } from '#infra/logger.js'
 
 /** 采集日志调用，便于断言事件名与字段。 */
 function captureLogger() {

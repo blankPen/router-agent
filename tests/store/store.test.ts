@@ -4,8 +4,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Store } from '../../src/store/db.js'
-import type { Assignment, Input, Intake, Report, Ticket, Trigger } from '../../src/core/model.js'
-import { DEFAULT_ADMISSION, type Policy } from '../../src/core/policy.js'
+import type { Assignment, Input, Intake, Report, Ticket, Trigger } from '#core/model.js'
+import { DEFAULT_ADMISSION, type Policy } from '#core/policy.js'
 
 function store(): Store {
   return new Store(':memory:')

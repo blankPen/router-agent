@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { ReportPoller, appendEvent, judgeIdle, parseStateFile } from '../../src/worker/orca/report-poller.js'
+import { ReportPoller, appendEvent, judgeIdle, parseStateFile } from '#runtime/orca/report-poller.js'
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), 'ra-poller-'))

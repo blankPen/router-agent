@@ -4,8 +4,8 @@
  * 这里不能依赖任何 Node 内置模块 —— Web 面板会把它打进前端包；
  * 同时保持纯函数，方便用 vitest 的 node 环境直接测试。
  */
-import { ACP_AGENTS, isDeprecatedAcpRuntimeId } from '../../worker/runtimes/acp/agents.js'
-import { WORKER_RUNTIMES } from '../../worker/runtimes/catalog.js'
+import { ACP_AGENTS, isDeprecatedAcpRuntimeId } from '#runtime/runtimes/acp/agents.js'
+import { WORKER_RUNTIMES } from '#runtime/runtimes/catalog.js'
 
 export interface RuntimeRequirementView {
   label: string

@@ -6,7 +6,7 @@ import { Store } from '../src/store/db.js'
 import { Engine } from '../src/core/engine.js'
 import { RouterService } from '../src/service.js'
 import { defaultConfig, policyOf, type AppConfig, chatEntry } from '../src/config.js'
-import { DEFAULT_ADMISSION } from '../src/core/policy.js'
+import { DEFAULT_ADMISSION } from '#core/policy.js'
 import type {
   WorkerRuntime,
   WorkerContext,
@@ -15,9 +15,9 @@ import type {
   DeliveryReceipt,
   AgentStatus,
   WorkspaceInfo,
-} from '../src/worker/port.js'
+} from '#runtime/port.js'
 import type { DecisionEngine, DecisionEngineResult, DecisionRequest } from '../src/router/decision-engine.js'
-import type { Trigger } from '../src/core/model.js'
+import type { Trigger } from '#core/model.js'
 
 class FakeRuntime implements WorkerRuntime {
   readonly id = 'orca'

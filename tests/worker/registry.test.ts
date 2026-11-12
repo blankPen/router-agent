@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { defaultConfig } from '../../src/config.js'
-import type { CommandRunner } from '../../src/infra/process.js'
-import { RuntimeRegistry, createRuntimes } from '../../src/worker/registry.js'
-import { ACP_AGENTS } from '../../src/worker/runtimes/acp/agents.js'
-import { WorkerRuntimeError, type WorkerRuntime } from '../../src/worker/port.js'
+import type { CommandRunner } from '#infra/process.js'
+import { RuntimeRegistry, createRuntimes } from '#runtime/registry.js'
+import { ACP_AGENTS } from '#runtime/runtimes/acp/agents.js'
+import { WorkerRuntimeError, type WorkerRuntime } from '#runtime/port.js'
 
 function runner(): CommandRunner {
   return { async run() { return { code: 0, stdout: '', stderr: '' } } }

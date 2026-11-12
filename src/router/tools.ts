@@ -1,5 +1,5 @@
 import type { Store } from '../store/db.js'
-import type { Decision, Stage, Strength, Ticket } from '../core/model.js'
+import type { Decision, Stage, Strength, Ticket } from '#core/model.js'
 import type { Clock, Engine } from '../core/engine.js'
 import type { DecisionProposal } from './decision-engine.js'
 import type { UpdateSnapshot } from '../update/index.js'

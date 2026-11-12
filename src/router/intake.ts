@@ -1,4 +1,4 @@
-import type { Intake, IntakeKind, IntakeReport, Trigger } from '../core/model.js'
+import type { Intake, IntakeKind, IntakeReport, Trigger } from '#core/model.js'
 import { extractJsonObject } from './model-config.js'
 
 /** 初筛结果。 */

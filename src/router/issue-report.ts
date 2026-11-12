@@ -7,8 +7,8 @@
  *
  * 走 `gh` CLI：跟 PR 跟踪用同一套凭据与登录态，用户不用额外配置。
  */
-import type { CommandRunner } from '../infra/process.js'
-import { noopLogger, errorMessage, type Logger } from '../infra/logger.js'
+import type { CommandRunner } from '#infra/process.js'
+import { noopLogger, errorMessage, type Logger } from '#infra/logger.js'
 import type { LogDiagnosis, LogEvidence } from './log-assistant.js'
 
 /** 默认反馈仓库；可用 RA_ISSUE_REPO 覆盖。 */

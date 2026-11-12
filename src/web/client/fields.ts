@@ -4,15 +4,15 @@
  * 服务端负责最终校验（src/config.ts 的 applyConfigPatch），这里只描述「怎么展示、
  * 默认值怎么取、明显不合法的值提前提示」，避免用户点保存后才被后端打回。
  */
-import { WORKER_RUNTIMES } from '../../worker/runtimes/catalog.js'
-import { ACP_AGENTS } from '../../worker/runtimes/acp/agents.js'
+import { WORKER_RUNTIMES } from '#runtime/runtimes/catalog.js'
+import { ACP_AGENTS } from '#runtime/runtimes/acp/agents.js'
 import {
   RUNTIME_OPTION_SPECS,
   optionSpecOf,
   parseRuntimeOptionPath,
   runtimeOptionDefault,
   runtimeOptionPath,
-} from '../../worker/runtimes/options.js'
+} from '#runtime/runtimes/options.js'
 import { isDeprecatedRuntime, runtimeOptionLabel, runtimeStatusLabel, type RuntimeChoiceView } from './runtime-model.js'
 
 export type { RuntimeChoiceView } from './runtime-model.js'

@@ -7,9 +7,9 @@
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { sep } from 'node:path'
-import { realRunner, type CommandRunner } from '../infra/process.js'
-import { errorMessage, noopLogger, type Logger } from '../infra/logger.js'
-import { preview } from '../core/events.js'
+import { realRunner, type CommandRunner } from '#infra/process.js'
+import { errorMessage, noopLogger, type Logger } from '#infra/logger.js'
+import { preview } from '#core/events.js'
 import { isNewer } from './version.js'
 
 export { compareVersions, isNewer, parseVersion } from './version.js'

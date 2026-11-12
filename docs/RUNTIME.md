@@ -322,6 +322,6 @@ Herdr 的全局仓库表；仓库目录一旦被删（例如临时目录被清�
 
 ## Worker 规范注入
 
-Worker 手册（`worker/spec/prompt-mode.md`）会拼进启动 prompt；非 Orca 运行时使用运行时中立的 `worker/spec/contract.md`。两者都不改项目自己的 `CLAUDE.md`。
+Worker 手册（`packages/runtime/src/spec/prompt-mode.md`）会拼进启动 prompt；非 Orca 运行时使用运行时中立的 `packages/runtime/src/spec/contract.md`。两者都不改项目自己的 `AGENTS.md`。
 
 这些规范 markdown 统一存放在状态目录的 `specs/` 下，可在 Web 面板「配置 → 规范文件」直接编辑或恢复默认；保存后对之后派出的新工单生效。

@@ -5,8 +5,8 @@ import { describe, expect, it } from 'vitest'
 import { runInitWizard, type InitDeps } from '../src/cli/init.js'
 import type { Prompter } from '../src/cli/prompts.js'
 import { loadConfig, writeConfig, chatEntry } from '../src/config.js'
-import type { CommandRunner } from '../src/infra/process.js'
-import { LARK_PROFILE_HOME } from '../src/sources/lark.js'
+import type { CommandRunner } from '#infra/process.js'
+import { LARK_PROFILE_HOME } from '#channel/sources/lark.js'
 
 const ORCA_REPOS = JSON.stringify({ result: { repos: [
   { displayName: 'teamwork-repos', path: '/p', kind: 'git' },

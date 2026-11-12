@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { FeishuBotAdmin, FEISHU_AUTH_DOMAINS, FEISHU_AUTH_SCOPES, feishuAuthScopeArgs } from '../../src/sources/feishu-bot-admin.js'
-import type { CommandRunner } from '../../src/infra/process.js'
+import { FeishuBotAdmin, FEISHU_AUTH_DOMAINS, FEISHU_AUTH_SCOPES, feishuAuthScopeArgs } from '#channel/sources/feishu-bot-admin.js'
+import type { CommandRunner } from '#infra/process.js'
 
 describe('飞书授权参数', () => {
   it('业务域之外显式申请 contact:user.id:readonly', () => {

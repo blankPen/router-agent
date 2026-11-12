@@ -67,6 +67,9 @@ Actions → 发布 npm 包 → Run workflow。发布的是所选分支 `package.
 
 ## 工作流做了什么
 
+0. 仓库是 pnpm workspace，但**只发布根包** `router-agent`（`files` 只含 `bin/` 与 `dist/`）。
+   `pnpm build` 会把 `packages/*/src` 一起编进 `dist/packages/`，再把 `dist/src/*` 拍平回 `dist/*`，
+   所以 npm 包的对外结构与历史版本一致；适配器包本身不单独发布（`private: true`）。
 1. **生成发布计划**（`scripts/release-plan.mjs`）：读取 `package.json` 的 `name`/`version`，
    结合触发方式、推送前的版本、本次改动的文件与提交信息，决定「发不发、发哪个版本」：
    - tag / 手动触发：按当前版本发布，npm 上已有则跳过（tag 触发时会先校验 tag 与版本一致）；

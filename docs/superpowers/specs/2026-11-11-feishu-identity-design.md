@@ -172,7 +172,7 @@ allowedByChatOpenIds: Record<string, string[]>   // 群级名单的解析结果
 
 ## 六、日志事件
 
-新增（遵循 `CLAUDE.md` 日志规范：一行 JSON、`域:动作` kebab-case、错误细节进 `detail`、平铺字段）：
+新增（遵循 `AGENTS.md` 日志规范：一行 JSON、`域:动作` kebab-case、错误细节进 `detail`、平铺字段）：
 
 | 事件 | 级别 | 关键字段 | 含义 |
 |-|-|-|-|
@@ -190,7 +190,7 @@ allowedByChatOpenIds: Record<string, string[]>   // 群级名单的解析结果
 
 ## 七、测试
 
-按 `CLAUDE.md` 第 9 条，失败路径必须有测试：
+按 `AGENTS.md` 日志规范第 11 条，失败路径必须有测试：
 
 - 条目语义：邮箱 / `ou_` / 非法条目三类分别解析正确。
 - 匹配：邮箱条目解析出的 open_id 命中 `gate()`；`ou_` 条目命中；不匹配时不命中。

@@ -20,7 +20,7 @@ import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 
-/** 旧阶段 → 新阶段。与 src/core/stage.ts 的 LEGACY_STAGE_MAP 保持一致（有单测校验）。 */
+/** 旧阶段 → 新阶段。与 packages/core/src/stage.ts 的 LEGACY_STAGE_MAP 保持一致（有单测校验）。 */
 export const STAGE_MAP = Object.freeze({
   draft: 'todo',
   accepted: 'todo',

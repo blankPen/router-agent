@@ -3,9 +3,9 @@ import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import type { Logger } from '../../src/infra/logger.js'
-import type { CommandRunner } from '../../src/infra/process.js'
-import { CodexAppRuntime } from '../../src/worker/runtimes/codex/index.js'
+import type { Logger } from '#infra/logger.js'
+import type { CommandRunner } from '#infra/process.js'
+import { CodexAppRuntime } from '#runtime/runtimes/codex/index.js'
 import type {
   AgentStatus,
   SessionSnapshot,
@@ -14,7 +14,7 @@ import type {
   WorkerRef,
   WorkspaceProvider,
   WorkspaceRequest,
-} from '../../src/worker/port.js'
+} from '#runtime/port.js'
 
 const fixture = fileURLToPath(new URL('../fixtures/fake-codex-app-server.mjs', import.meta.url))
 

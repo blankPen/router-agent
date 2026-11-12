@@ -11,10 +11,10 @@ import type {
 } from '../../src/router/decision-engine.js'
 import { proposalFromJson } from '../../src/router/decision-engine.js'
 import { extractJsonObject } from '../../src/router/model-config.js'
-import type { Trigger } from '../../src/core/model.js'
-import { DEFAULT_ADMISSION, effectiveAllowed, effectiveAllowedByChat, type Policy } from '../../src/core/policy.js'
+import type { Trigger } from '#core/model.js'
+import { DEFAULT_ADMISSION, effectiveAllowed, effectiveAllowedByChat, type Policy } from '#core/policy.js'
 import { chatEntry } from '../../src/config.js'
-import { normalizeFeishuEventDetailed, type FeishuConfig, type UnaddressedContext } from '../../src/sources/feishu.js'
+import { normalizeFeishuEventDetailed, type FeishuConfig, type UnaddressedContext } from '#channel/sources/feishu.js'
 import type { DispatchSettings } from '../../src/router/dispatch.js'
 import type { SessionKeyParts } from '../../src/router/session-registry.js'
 

@@ -1,6 +1,6 @@
 import type { EffectItem, OutboxItem, Store } from '../store/db.js'
 import type { Clock } from './engine.js'
-import { noopSink, preview, type EventSink } from './events.js'
+import { noopSink, preview, type EventSink } from '#core/events.js'
 
 export interface OutboxSender {
   send(item: OutboxItem): Promise<void>

@@ -1,0 +1,12 @@
+{
+  "name": "@router-agent/channel",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "消息通道：端口、注册表与飞书 / lark-cli 适配器",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*.js": "./src/*.ts",
+    "./*": "./src/*"
+  }
+}
