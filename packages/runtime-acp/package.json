@@ -31,10 +31,11 @@
     "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
-    "@router-agent/runtime": "0.3.31",
     "@router-agent/core": "0.3.31",
     "@router-agent/infra": "0.3.31",
+    "@router-agent/runtime": "0.3.31",
     "@router-agent/runtime-codex": "0.3.31",
-    "@router-agent/runtime-herdr": "0.3.31"
+    "@router-agent/runtime-herdr": "0.3.31",
+    "@router-agent/runtime-t3code": "0.3.31"
   }
 }

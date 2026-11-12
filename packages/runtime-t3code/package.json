@@ -1,0 +1,38 @@
+{
+  "name": "@router-agent/runtime-t3code",
+  "version": "0.3.31",
+  "type": "module",
+  "description": "T3 Code 运行时插件：git worktree + T3 Code 线程",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/blankPen/router-agent.git",
+    "directory": "packages/runtime-t3code"
+  },
+  "homepage": "https://github.com/blankPen/router-agent#readme",
+  "bugs": {
+    "url": "https://github.com/blankPen/router-agent/issues"
+  },
+  "main": "./dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./*.js": "./dist/*.js",
+    "./*": "./dist/*"
+  },
+  "files": [
+    "dist"
+  ],
+  "types": "./dist/index.d.ts",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "@router-agent/runtime": "0.3.31",
+    "@router-agent/core": "0.3.31",
+    "@router-agent/infra": "0.3.31"
+  }
+}

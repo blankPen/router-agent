@@ -200,6 +200,14 @@ Router 不做对话，只在必要时说话：
 | `codex:interrupted-turn-check-failed` | Codex runtime | `ticketId` `threadId` `reason` | `thread/turns/list` 读不回轮次状态；判定不了有没有被中断，不触发恢复动作 |
 | `codex:error` | Codex runtime | `ticketId` `threadId` `reason` | Codex 返回的警告/错误事件 |
 | `codex:launch-failed` | Codex runtime | `workdir` `branch` `reason` | 派工启动失败 |
+| `t3code:thread-started` | T3 Code runtime | `ticketId` `threadId` `workdir` `branch` | `t3 thread start` 成功，threadId 写入 Assignment |
+| `t3code:input-delivered` | T3 Code runtime | `ticketId` `threadId` `delivery` | 追问已投进线程（`started`=已开跑，`queued`=线程忙排队中） |
+| `t3code:server-down` | T3 Code runtime | `ticketId` / `threadId` `reason` | T3 服务端没起或中途掉了；追问转排队，巡检读不到状态 |
+| `t3code:server-unavailable` | T3 Code runtime | `reason` | 派工前拉不起 T3 服务端（`t3 serve` 失败或超时）；派工中止 |
+| `t3code:send-failed` | T3 Code runtime | `ticketId` `threadId` `reason` | 追问投递失败；已转排队，下一轮重投 |
+| `t3code:show-failed` | T3 Code runtime | `threadId` `reason` | 读线程状态失败；巡检跳过这一路 |
+| `t3code:stop-no-cancel` | T3 Code runtime | `ticketId` `threadId` `reason` | T3 CLI 没有中止线程的命令；停止只登记本地状态，正在跑的那轮会跑完 |
+| `t3code:project-remove-failed` | T3 Code runtime | `workdir` `reason` | T3 侧项目删除失败；不影响 worktree 回收 |
 
 worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态）；主动巡检优先读 Agent 自己的会话记录（Claude / Codex，见 [RUNTIME.md](RUNTIME.md#运行时选项各运行时自己声明)），其次才把终端里的语义摘要（助手文本 + 动作概要）发到话题，不逐条回放工具调用。要看它做了什么，读 `report` 的 `summary` 与 `~/.router-agent/workers/<ticketId>/events.log`。
 

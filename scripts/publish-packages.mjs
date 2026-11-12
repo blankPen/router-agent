@@ -25,6 +25,7 @@ export const PUBLISH_ORDER = [
   'runtime-herdr',
   'runtime-claude-code',
   'runtime-orca',
+  'runtime-t3code',
   'runtime-acp',
   'channel-feishu',
 ]

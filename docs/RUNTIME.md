@@ -12,6 +12,7 @@ Worker 不在 Router 进程里跑。每张工单开工时，Router 按 `runtime.
 | `claude-code` | `git worktree` + `claude --bg` 后台会话 | 本地 git 仓库绝对路径 | `claude agents --json --all` | 本轮进行中用 `claude attach <id>` 插话（TUI 排队语义）；本轮结束后先 `claude stop <id>` 再 `claude --bg --resume <完整 sessionId> <prompt>`（不带任何新参数），保证一个话题只对应一个会话；进程退出不自动 resume | 不用 Orca，直接跑 Claude Code |
 | `codex-app` | `git worktree` + `codex app-server --stdio` | 本地 git 仓库绝对路径 | Codex `thread/status/changed`、`turn/*`、`item/*` 事件 | `thread/resume` 接回；执行中 `turn/steer`；停止用 `turn/interrupt` | 想用 Codex，且希望 Router 创建的 thread 能在 Codex 桌面端看到 |
 | `herdr` | ra 用 git worktree 建检出，Herdr 开终端窗口跑 Agent | `git worktree add` + `herdr workspace create --cwd …` | Herdr `agent get`（`idle` / `working` / `done` / `blocked` / `unknown`） | 终端常驻，追问直接投递；巡检优先读 Agent 自己的会话记录 | 本机已用 Herdr 管终端，想在 Herdr 侧栏里看到工单 |
+| `t3code` | ra 用 git worktree 建检出，`t3 thread start` 在检出里开线程 | `git worktree add` + `t3 project add` | `t3 thread show`（`running` / `waiting` / `completed` / `failed`） | `t3 thread send`（忙时排队，不打断当前轮）；CLI 没有中止线程的命令，停止只登记本地状态 | 本机已装 T3 Code，想在 T3 手机端 / 桌面端看到同一个线程 |
 | `acp` / `acp-*` | ACP 子进程：`initialize` → `session/new` → `session/prompt` | `git worktree`（本地绝对路径） | ACP `session/update` | Agent 声明 `loadSession` 时用 `session/load` 恢复 | 想接 Codex / Gemini / OpenCode 等 |
 
 `acp` 是自定义命令入口；`acp-*` 是内置 ACP Agent，共用同一套 `AcpRuntime`。
@@ -57,6 +58,10 @@ runtime:
       permissions: full        # full=danger-full-access；workspace=workspace-write
       approvalPolicy: never    # never / on-request / untrusted
       network: true
+    t3code:
+      provider: codex       # T3 的 provider 实例 id；留空用 T3 项目的默认模型
+      model: gpt-5.4        # 模型；ra 建的项目没有默认模型，一般要连 provider 一起填
+      # baseDir: ~/.t3      # T3 数据目录（等价 T3CODE_HOME）
     acp:                    # 自定义 ACP 命令
       command: opencode
       args: [acp]
@@ -269,6 +274,57 @@ Herdr 的全局仓库表；仓库目录一旦被删（例如临时目录被清�
 - PR 关联（`inspectWorkspace` 返回 `linkedPr`）不支持：Herdr 不跟踪 PR，PR 跟踪仍走 GitHub / GitLab 侧。
 - 检出目录不在 `runtime.projects` 里登记，而是跟 `claude-code` 一样放在 `<RA_HOME>/worktrees/` 下。
 - 回收检出**不会删分支**（与其它运行时一致：分支只在启动失败回滚时删）。
+
+## T3 Code 运行时（`t3code`）
+
+[T3 Code](https://github.com/pingdotgg/t3code) 是编码 Agent 的**控制面**：本机跑一个 server，
+手机 / 网页 / 桌面端连它，Agent（Claude Code / Codex / Cursor / OpenCode … 任意 ACP Agent）在 server 里跑。
+`t3code` 运行时用它承载工单 —— ra 负责隔离检出，T3 负责在检出里跑 Agent。
+
+```bash
+ra config set runtime.default t3code
+ra config set runtime.options.t3code.provider codex
+ra config set runtime.options.t3code.model gpt-5.4
+```
+
+### 职责切分：检出归 ra，线程归 T3
+
+| 运行时动作 | 谁来做 | 具体命令 |
+| --- | --- | --- |
+| 建隔离检出 | **ra 自己**（`GitWorktreeProvider`） | `git worktree add -b <workBranch> -- <workdir> <baseBranch>` |
+| 登记项目 | ra（幂等） | `t3 project add <workdir>` |
+| 拉起 Agent | T3 | `t3 thread start <workdir> "<契约正文>" --json` |
+| 投递追问 | T3 | `t3 thread send <threadId> "<正文>" --json` |
+| 读状态 / 输出 | T3 | `t3 thread show <threadId> --json` |
+| 回收检出 | **ra 自己** | `t3 project remove <workdir> --force` + `git worktree remove -- <workdir>` |
+
+工单契约**直接作为线程的第一条消息**发进去（不是「读某个文件」）：T3 的 Agent 只看得到项目目录，
+把正文留在消息里最省事，也不会因为路径权限读不到。
+
+### 五个必须知道的差异
+
+1. **服务端不用手动管**。`t3 thread` 的每条命令都要本机有 T3 server 在跑；服务端没起时统一报
+   `No running T3 Code server`。适配器在派工前会探一次，没在跑就用 detached 方式把 `t3 serve` 拉起来
+   再等它就绪；拉不起来才报 `runtime:unavailable`（可重试）。面板探测只探不拉，避免开面板就起服务。
+2. **派工不阻塞**。`t3 thread start` **立即返回**（Agent 在 server 侧继续跑），所以 Router 不会卡在派工上；
+   进度靠 `t3 thread show` 巡检。
+3. **状态是线程状态**。`thread.status` 取值 `preparing` / `queued` / `starting` / `running` / `waiting` /
+   `completed` / `interrupted` / `failed` / `cancelled` / `rolled_back` / `idle`，映射成中立的
+   `AgentPhase`；`waiting` 且有挂起请求时判 `blocked`（等人批准），线程跑完判 `exited` 且**仍可接收追问**。
+4. **停止不真的中止**。T3 CLI 只有 `thread list/start/send/show`，没有中止线程的命令；
+   `stop` 只登记本地状态并记 `t3code:stop-no-cancel`，正在跑的那一轮会跑完。
+5. **项目要 ra 自己登记**。T3 只认「已登记的项目」；ra 把 worktree 目录 `t3 project add` 进去，
+   线程的工作目录就是它。工单收尾时 `t3 project remove --force` 连线程一起清掉。
+
+### 能力边界
+
+- **provider / model 要显式配**。ra 建的项目没有默认模型，`t3 thread start` 会报
+  `the project has no default model`；所以 `runtime.options.t3code.provider` 与 `model` 一般要一起填。
+  provider 是 T3 的实例 id（`codex` / `claude` / `opencode` 等），不是模型名。
+- **仓库发现（`listRepos`）不支持**：T3 没有仓库清单接口，项目按本地绝对路径登记。
+- **PR 关联不支持**：PR 跟踪仍走 GitHub / GitLab 侧。
+- **回收检出不删分支**（与其它运行时一致：分支只在启动失败回滚时删）。
+- **不接管 T3 自己的权限弹窗**：线程卡在等人批准时状态是 `blocked`，需要人在 T3 端点确认。
 
 ## ACP Agent 目录
 

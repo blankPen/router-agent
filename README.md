@@ -166,6 +166,7 @@ Worker 不在 Router 进程里跑。Router 按 `runtime.default` 选择适配器
 | `claude-code` | `git worktree` + `claude --bg` 后台会话 | 不用 Orca，直接跑 Claude Code |
 | `codex-app` | `git worktree` + `codex app-server`，优先用 Codex App 内置 CLI | 用 Codex，且希望 Router 创建的 thread 在 Codex 桌面端可见 |
 | `herdr` | ra 用 git worktree 建检出，Herdr 开终端窗口跑 Agent | 本机已用 Herdr 管终端，想在 Herdr 侧栏里看到工单 |
+| `t3code` | ra 用 git worktree 建检出，T3 Code 在检出里开线程跑 Agent | 本机已装 T3 Code，想在 T3 手机端 / 桌面端看到工单 |
 | `acp` / `acp-*` | ACP 子进程（Claude / Codex / Gemini / OpenCode / Copilot / Cursor / Goose） | 想接其它 ACP Agent |
 
 换运行时只加一个 adapter，内核与 Router 一行不改。项目清单按运行时分开维护：Orca 用仓库选择器，其它运行时用本地仓库绝对路径；切换默认运行时只影响新工单。完整的运行时对比、ACP Agent 目录、工具策略与规范注入见 [docs/RUNTIME.md](docs/RUNTIME.md)。
@@ -216,7 +217,7 @@ Router（AgentLoop + DecisionEngine(Pi) + HTTP API + Web）
 领域内核（TS 零依赖：Ticket / Mandate / Assignment / Stage / Policy）
         │ Assignment
         ▼
-WorkerRuntime 端口 ── OrcaRuntime（默认）/ ClaudeCodeRuntime / HerdrRuntime / AcpRuntime（acp 与 7 个 acp-*）
+WorkerRuntime 端口 ── OrcaRuntime（默认）/ ClaudeCodeRuntime / HerdrRuntime / T3CodeRuntime / AcpRuntime（acp 与 7 个 acp-*）
 ```
 
 开启需求识别后，`IntakeCoordinator + PiIntakeEngine` 作为并行的前置链路接入同一个 AgentLoop：初筛 → 只读项目代码澄清 → 结构化需求单 → 管理员终审，才回到上面的派工主链路。
@@ -320,6 +321,7 @@ RA_PI_VERIFY=1 npx vitest run tests/verify-pi-live.test.ts   # 真实 Pi + 真�
 packages/core/     领域内核：Ticket / Mandate / Stage / Policy 与共享类型
 packages/infra/    日志、子进程、对话模型、图片识别
 packages/runtime/  WorkerRuntime 端口、RuntimeRegistry、Orca / Claude Code / Codex / ACP / Herdr adapter
+packages/runtime-t3code/  T3 Code 运行时插件（t3 thread 封装 + 服务端探测）
 packages/channel/  ChannelAdapter 端口、ChannelRegistry、飞书 adapter 与 lark-cli 封装
 src/               宿主：Engine / Store、Router、HTTP API、Web 面板、CLI 与装配
 ```

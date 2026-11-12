@@ -7,12 +7,14 @@ import {
   CODEX_APP_RUNTIME_ID,
   HERDR_RUNTIME_ID,
   ORCA_RUNTIME_ID,
+  T3CODE_RUNTIME_ID,
   WORKER_RUNTIMES,
   normalizeRuntimeId,
   type WorkerRuntimeMeta,
 } from '@router-agent/runtime'
 import { detectCodexBinary, probeCodexHandshake } from '@router-agent/runtime-codex'
 import { ensureHerdrServer } from '@router-agent/runtime-herdr'
+import { probeT3Server } from '@router-agent/runtime-t3code'
 import { acpAgentOf } from './agents.js'
 import {
   checkAcpAgent,
@@ -136,17 +138,19 @@ export class AcpRuntimeAdmin {
    * 不代表已经登录；登录状态只有带 login.check 的 ACP Agent 才会判定。
    */
   private async builtinChoices(): Promise<RuntimeChoice[]> {
-    const [orca, claude, codex, herdr] = await Promise.all([
+    const [orca, claude, codex, herdr, t3] = await Promise.all([
       this.probeBuiltin('orca', ORCA_RUNTIME_ID),
       this.probeBuiltin('claude', CLAUDE_CODE_RUNTIME_ID),
       this.probeCodex(),
       this.probeHerdr(),
+      this.probeT3(),
     ])
     const probes = new Map<string, BuiltinProbe>([
       [ORCA_RUNTIME_ID, orca],
       [CLAUDE_CODE_RUNTIME_ID, claude],
       [CODEX_APP_RUNTIME_ID, codex],
       [HERDR_RUNTIME_ID, herdr],
+      [T3CODE_RUNTIME_ID, t3],
     ])
     return WORKER_RUNTIMES.map(meta => {
       if (meta.id === ACP_RUNTIME_ID) return this.genericAcpChoice(meta)
@@ -165,14 +169,18 @@ export class AcpRuntimeAdmin {
               ? (probe.command ?? 'codex')
               : meta.id === HERDR_RUNTIME_ID
                 ? (probe.command ?? 'herdr')
-                : 'orca',
+                : meta.id === T3CODE_RUNTIME_ID
+                  ? (probe.command ?? 't3')
+                  : 'orca',
           label: meta.id === CLAUDE_CODE_RUNTIME_ID
             ? 'Claude Code CLI'
             : meta.id === CODEX_APP_RUNTIME_ID
               ? 'Codex CLI'
               : meta.id === HERDR_RUNTIME_ID
                 ? 'Herdr CLI'
-                : 'Orca CLI',
+                : meta.id === T3CODE_RUNTIME_ID
+                  ? 'T3 Code CLI'
+                  : 'Orca CLI',
           installed: Boolean(probe.command),
           ...(probe.version ? { version: probe.version } : {}),
           ...(meta.installUrl ? { installUrl: meta.installUrl } : {}),
@@ -329,6 +337,42 @@ export class AcpRuntimeAdmin {
     }
   }
 
+  /**
+   * T3 Code：CLI 能跑之外，还要看服务端在不在。
+   *
+   * `t3 thread` 的每条命令都要本机有 server 在跑；服务端没起时派工必然失败。
+   * 面板这里只探测不拉起（起服务端的动作交给派工时），缺服务端时给 unverified。
+   */
+  private async probeT3(): Promise<BuiltinProbe> {
+    const resolved = resolveExecutable('t3', this.env)
+    if (!resolved) return { status: 'not-installed', reason: '未找到 t3 CLI' }
+    const versionResult = await this.runProbe(resolved, ['--version'])
+    const version = parseVersion(versionResult.stdout) ?? parseVersion(versionResult.stderr)
+    if (versionResult.code !== 0) {
+      return {
+        status: 'incompatible',
+        command: resolved,
+        ...(version ? { version } : {}),
+        reason: `t3 --version 退出码 ${versionResult.code}`,
+      }
+    }
+    const baseDir = t3BaseDirOf(this.opts.config)
+    const server = await probeT3Server(this.runner(resolved), baseDir ? { baseDir } : {})
+    if (!server.running) {
+      return {
+        status: 'unverified',
+        command: resolved,
+        ...(version ? { version } : {}),
+        reason: server.reason ?? '未找到运行中的 T3 Code 服务端；派工时 ra 会自动拉起',
+      }
+    }
+    return {
+      status: 'ready',
+      command: resolved,
+      ...(version ? { version } : {}),
+    }
+  }
+
   private async runProbe(bin: string, args: string[], timeoutMs = 2_500): Promise<{ code: number; stdout: string; stderr: string }> {
     try {
       return await this.runner(bin).run(args, {
@@ -354,7 +398,7 @@ export class AcpRuntimeAdmin {
     if (normalized === CODEX_APP_RUNTIME_ID) {
       return this.checkCodexApp()
     }
-    if (normalized === ORCA_RUNTIME_ID || normalized === CLAUDE_CODE_RUNTIME_ID || normalized === ACP_RUNTIME_ID) {
+    if (normalized === ORCA_RUNTIME_ID || normalized === CLAUDE_CODE_RUNTIME_ID || normalized === ACP_RUNTIME_ID || normalized === T3CODE_RUNTIME_ID) {
       return this.checkBuiltin(normalized)
     }
     const result = await checkAcpAgent(idOrRuntimeId, {
@@ -532,4 +576,12 @@ export class AcpRuntimeAdmin {
   installJob(jobId: string): InstallJob | null {
     return this.jobs.get(jobId) ?? null
   }
+}
+
+/** T3 数据目录来自 runtime.options.t3code.baseDir；没配则用 T3 自己的默认目录。 */
+function t3BaseDirOf(config: RuntimeConfigView): string | null {
+  const raw = config.runtime.options?.[T3CODE_RUNTIME_ID]
+  const options = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {}
+  const value = options.baseDir
+  return typeof value === 'string' && value.trim() ? value.trim() : null
 }

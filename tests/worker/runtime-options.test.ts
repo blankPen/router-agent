@@ -116,6 +116,10 @@ describe('运行时选项：面板渲染', () => {
       'runtime.options.orca.agent',
       'runtime.options.herdr.agent',
       'runtime.options.herdr.model',
+      'runtime.options.t3code.command',
+      'runtime.options.t3code.provider',
+      'runtime.options.t3code.model',
+      'runtime.options.t3code.baseDir',
     ])
   })
 })

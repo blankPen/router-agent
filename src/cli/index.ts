@@ -75,6 +75,8 @@ export interface CliIo {
   git?: CommandRunner
   /** Herdr CLI；默认用真实 herdr。 */
   herdr?: CommandRunner
+  /** T3 Code CLI；默认用真实 t3。 */
+  t3?: CommandRunner
   /** 已绑定固定 lark-cli profile 的 runner（测试注入点）。 */
   lark?: CommandRunner
   /** npm 命令（测试注入点）；默认用系统 npm。 */
@@ -335,6 +337,7 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
         claude: output.claude ?? realRunner('claude'),
         git: output.git ?? realRunner('git'),
         herdr: output.herdr ?? realRunner('herdr'),
+        t3: output.t3 ?? realRunner('t3'),
       },
       claudeBin: output.claudeBin ?? 'claude',
       logger: createLogger(home, output, false),
@@ -1261,6 +1264,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   const claudeRunner = output.claude ?? realRunner('claude')
   const gitRunner = output.git ?? realRunner('git')
   const herdrRunner = output.herdr ?? realRunner('herdr')
+  const t3Runner = output.t3 ?? realRunner('t3')
   const larkRunner = output.lark ?? createLarkRunner()
   const ghRunner = realRunner('gh')
   const glabRunner = realRunner('glab')
@@ -1314,6 +1318,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       claude: claudeRunner,
       git: gitRunner,
       herdr: herdrRunner,
+      t3: t3Runner,
     },
     claudeBin: output.claudeBin ?? 'claude',
     logger,
