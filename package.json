@@ -1,6 +1,6 @@
 {
   "name": "router-agent",
-  "version": "0.3.28",
+  "version": "0.3.29",
   "description": "飞书消息 → 常驻 Router 研判 → 派发到 Orca worktree 内 Claude Code 执行 → PR 跟踪闭环的双层 Agent 系统",
   "license": "MIT",
   "type": "module",
