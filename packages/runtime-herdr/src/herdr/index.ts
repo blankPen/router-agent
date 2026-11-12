@@ -48,6 +48,7 @@ import { resolveSession } from '@router-agent/runtime'
 import { GitWorktreeProvider } from '@router-agent/runtime'
 import { runtimeOptionDefault } from '@router-agent/runtime'
 import { HERDR_RUNTIME_ID } from '@router-agent/runtime'
+import { noopLogger, type Logger } from '@router-agent/infra/logger.js'
 import { herdrAgentKindOf, type HerdrAgentKind } from './agents.js'
 import { ensureHerdrServer, type HerdrServerSpawner } from './server.js'
 import {
@@ -83,6 +84,8 @@ export interface HerdrRuntimeOptions {
   worktreesRoot?: string
   /** 拉起 Herdr 服务端用的动作；测试可注入空实现。 */
   spawnServer?: HerdrServerSpawner
+  /** 结构化日志；缺省 noopLogger。 */
+  logger?: Logger
 }
 
 interface HerdrMeta {
@@ -141,6 +144,7 @@ export class HerdrRuntime implements WorkerRuntime {
   private worktreesRoot: string
   private gitProvider: GitWorktreeProvider
   private spawnServer?: HerdrServerSpawner
+  private logger: Logger
 
   constructor(opts: HerdrRuntimeOptions) {
     this.herdr = opts.herdr
@@ -156,6 +160,7 @@ export class HerdrRuntime implements WorkerRuntime {
       worktreesRoot: this.worktreesRoot,
     })
     this.spawnServer = opts.spawnServer
+    this.logger = opts.logger ?? noopLogger
   }
 
   async start(ctx: WorkerContext): Promise<StartResult> {
@@ -239,6 +244,12 @@ export class HerdrRuntime implements WorkerRuntime {
 
     try {
       await this.startAgent(meta, kind)
+      this.logger.info('herdr:agent-launched', {
+        ticketId: ticket.id,
+        paneId,
+        agent: kind.value,
+        ...(this.model ? { model: this.model } : {}),
+      })
       // 契约作为首轮输入投进去；Herdr 的 agent prompt 会补上 Enter。
       await this.run(agentPrompt(paneId, withWorkdir(prompt, workspace.workdir)))
       return {

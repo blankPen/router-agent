@@ -118,6 +118,8 @@ ra config set runtime.options.herdr.model sonnet # 可选；留空用 Agent 自�
 默认值都是 `claude`。Orca 的 `worktree create --prompt` 必须同时给 `--agent`，没有「不传」这种形态，所以 ra 总是显式传一个 Agent；没配置时用选项声明里的默认值。选定的 Agent 会记进工单 meta，人工恢复会话时用它的 CLI 语法（`claude --resume` / `codex resume`）。
 
 Herdr 的 `agent` 取值是 Herdr 自己的 kind（`claude` / `codex` / `opencode`）；每个 kind 的无人值守启动参数由适配器按目录给出，声明里只暴露「选哪个 Agent」与「用哪个模型」。
+派工成功后会写一条 `herdr:agent-launched` 日志，带上实际传给 `herdr agent start --kind` 的 `agent` 与 `model`；
+排查「配了 codex 却在跑 claude」时先看这条。
 
 进展巡检读的是 Agent 自己的结构化会话记录：Claude 读 `~/.claude/projects/<cwd>/`，Codex 读 `~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl`。没指定 Agent 时按默认值 `claude` 读，读不到就退回终端屏幕渲染。
 

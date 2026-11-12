@@ -262,6 +262,7 @@ Router 不做对话，只在必要时说话：
 | `claude:resume-forked` | Claude Code runtime | `handle` `sessionId` `copy` `detail` | 后台 worker 被 resume 成副本，已 stop 副本并把本轮输入退避重投回原会话（5 次后转人工） |
 | `claude:inject-skipped` | Claude Code runtime | `handle` `reason` | 轮内插话未注入成功，退回排队等本轮结束 |
 | `claude:stop-original-failed` | Claude Code runtime | `handle` `code` `detail` | 处理副本前停掉原会话失败 |
+| `herdr:agent-launched` | Herdr runtime | `ticketId` `paneId` `agent` `model`（可选） | Herdr 按 `runtime.options.herdr.agent` 选中并拉起 Agent；日志里的 `agent` 就是实际传给 `--kind` 的值 |
 
 worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态）；主动巡检优先读 Agent 自己的会话记录（Claude / Codex，见 [RUNTIME.md](RUNTIME.md#运行时选项各运行时自己声明)），其次才把终端里的语义摘要（助手文本 + 动作概要）发到话题，不逐条回放工具调用。要看它做了什么，读 `report` 的 `summary` 与 `~/.router-agent/workers/<ticketId>/events.log`。
 
