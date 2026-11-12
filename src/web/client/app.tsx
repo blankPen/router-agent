@@ -1615,7 +1615,13 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
                       defaults={defaults}
                       onOptionChange={(path, value) => setField(path, value)}
                     />
-                    <PluginSettings plugins={plugins} draft={draft} onChange={setField} />
+                    <PluginSettings
+                      plugins={plugins}
+                      draft={draft}
+                      onChange={setField}
+                      onNotice={setNotice}
+                      onPendingRestart={() => setPendingRestart(true)}
+                    />
                   </>
                 )}
 
