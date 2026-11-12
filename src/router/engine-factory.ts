@@ -4,6 +4,7 @@ import type { Store } from '../store/db.js'
 import type { Engine } from '../core/engine.js'
 import type { PiModelConfig } from './model-config.js'
 import { PiDecisionEngine } from './pi-decision-engine.js'
+import { PiIntakeEngine } from './intake-engine.js'
 import { SqliteSessionPersistence } from './session-persistence.js'
 import { RouterToolbox, type RouterToolboxDeps } from './tools.js'
 
@@ -46,5 +47,15 @@ export function createDecisionEngine(opts: DecisionEngineFactoryOptions): PiDeci
           contextWindow: opts.config.llm?.contextWindow ?? 128_000,
         }
       : {}),
+  })
+}
+
+/** 装配需求识别引擎：初筛与分析共用一个 Pi 通道，读代码能力由 intake-flow 逐轮决定。 */
+export function createIntakeEngine(opts: Omit<DecisionEngineFactoryOptions, 'engine' | 'updater' | 'scheduleRestart'>): PiIntakeEngine {
+  return new PiIntakeEngine({
+    model: opts.model,
+    agentDir: opts.config.router.agentDir || join(opts.config.home, 'pi'),
+    cwd: opts.config.home,
+    timeoutMs: opts.config.router.timeoutMs,
   })
 }

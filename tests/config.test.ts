@@ -38,6 +38,12 @@ describe('全局状态目录与配置', () => {
     expect(cfg.policy.maxAutoRecover).toBe(1)
     expect(cfg.feishu.reaction).toBe('Typing')
     expect(cfg.worker.evidence.ui).toBe('warn')
+    // 需求识别默认关闭：不改变存量群的回复行为。
+    expect(cfg.intake.enabled).toBe(false)
+    expect(cfg.intake.chats).toEqual([])
+    expect(cfg.intake.maxQuestions).toBe(3)
+    expect(cfg.intake.codeAccess).toBe(true)
+    expect(cfg.intake.approvers).toEqual([])
     expect(cfg.runtime.default).toBe('orca')
   })
 
@@ -417,6 +423,32 @@ describe('Pi 研判层配置', () => {
     const loaded = loadConfig(dir)
     expect(loaded.router.timeoutMs).toBe(45000)
     expect(loaded.router.tokenBudget).toBe(16000)
+  })
+
+  it('需求识别配置可写回并读回，patch 做类型与范围校验', () => {
+    const dir = home()
+    const cfg = loadConfig(dir)
+    const patch = applyConfigPatch(cfg, {
+      'intake.enabled': true,
+      'intake.chats': ['oc_dev'],
+      'intake.maxQuestions': 2,
+      'intake.codeAccess': false,
+      'intake.approvers': ['ou_admin'],
+    })
+    expect(patch.errors).toEqual([])
+    writeConfig(dir, cfg)
+
+    const loaded = loadConfig(dir)
+    expect(loaded.intake).toEqual({
+      enabled: true,
+      chats: ['oc_dev'],
+      maxQuestions: 2,
+      codeAccess: false,
+      approvers: ['ou_admin'],
+    })
+
+    expect(applyConfigPatch(loadConfig(home()), { 'intake.maxQuestions': 11 }).errors).toHaveLength(1)
+    expect(applyConfigPatch(loadConfig(home()), { 'intake.chats': 'oc_dev' }).errors).toHaveLength(1)
   })
 })
 

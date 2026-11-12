@@ -35,7 +35,7 @@ import type { Prompter } from './prompts.js'
 import { realRunner, type CommandRunner } from '../infra/process.js'
 import { errorMessage } from '../infra/logger.js'
 import { resolveImageModelConfig, resolvePiModelConfig, type PiModelConfig } from '../router/model-config.js'
-import { createDecisionEngine } from '../router/engine-factory.js'
+import { createDecisionEngine, createIntakeEngine } from '../router/engine-factory.js'
 import type { DecisionAudit } from '../router/decision-engine.js'
 import type { WorkerStateFile } from '../worker/report-poller.js'
 import { RouterService, type Logger } from '../service.js'
@@ -1344,6 +1344,10 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
         scheduleRestart: scheduleUpdateRestart,
       })
     : null
+  // 需求识别（intake）：只在开启时装配，避免默认改变存量群的回复行为。
+  const intakeEngine = model && config.intake.enabled
+    ? createIntakeEngine({ config, store, model })
+    : undefined
   const auditPath = join(home, 'logs', 'decisions.jsonl')
   const onDecisionAudit = (audit: DecisionAudit): void => {
     try {
@@ -1371,16 +1375,25 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
    * （allowedOpenIds / allowedByChatOpenIds）——名单改成邮箱后，原始条目里存的是邮箱，
    * 直接拿 allowed 去比 open_id 会永远匹配不上。
    */
+  const intakeChats = new Set(config.intake.enabled ? (config.intake.chats.length > 0 ? config.intake.chats : config.feishu.chats.map(chat => chat.chat)) : [])
   const allowUnaddressed: UnaddressedAdmission = ({ chatId, actorId, threadKeys }) => {
     const policy = engine.policy()
     const scoped = effectiveAllowedByChat(policy, chatId)
     // 配了群名单但一个都没解析出来：该群谁都不许进，不能退回全局名单（与 gate() 同口径）。
     if (scoped && scoped.length === 0) return false
     const allowed = scoped ?? effectiveAllowed(policy)
-    if (!allowed.includes(actorId)) return false
-    if (!store.hasLiveTicketForThreadKeys('feishu', threadKeys)) return false
-    logger.info('trigger:admitted-unaddressed', { chat: chatId, actor: actorId, keys: threadKeys.length })
-    return true
+    // 已绑定工单的话题：名单内成员不 @ 也要触发回复（tk-59）。
+    if (allowed.includes(actorId) && store.hasLiveTicketForThreadKeys('feishu', threadKeys)) {
+      logger.info('trigger:admitted-unaddressed', { chat: chatId, actor: actorId, keys: threadKeys.length, reason: 'live-ticket' })
+      return true
+    }
+    // 需求识别：开启 intake 的群里，不在群级白名单之外的人都可以直接反馈问题。
+    // 群级白名单仍是硬边界（scoped 非空时只有名单内成员可以说话），不会被 intake 放宽。
+    if (intakeChats.has(chatId) && (!scoped || scoped.includes(actorId))) {
+      logger.info('trigger:admitted-unaddressed', { chat: chatId, actor: actorId, keys: threadKeys.length, reason: 'intake' })
+      return true
+    }
+    return false
   }
   // 通道适配器：飞书的消费、归一化、富化、渲染、回执、文档与凭据全部收口到这里。
   const feishuChannel = createFeishuChannel({
@@ -1451,6 +1464,8 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       effects,
       sender: feishuOutbox,
       decisionEngine,
+      ...(intakeEngine ? { intakeEngine } : {}),
+      orca: orcaRunner,
       onDecisionAudit,
     })
     : null

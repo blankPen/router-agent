@@ -198,3 +198,72 @@ export interface Channel {
   /** 飞书 thread / 根消息 ID，用于话题回复。 */
   threadId?: string
 }
+
+/**
+ * 需求识别（intake）的状态。
+ *
+ * Router 只负责调度与流程收尾：初筛、追问、结构化整理全部交给 intake 分析引擎，
+ * 结构化结果必须经管理员终审（approved / rejected）才可能进入原有派单流程。
+ */
+export type IntakeStatus = 'clarifying' | 'ready' | 'approved' | 'rejected' | 'dismissed'
+
+/** 初筛结论：闲聊 / 普通咨询 / 疑似故障或需求。 */
+export type IntakeKind = 'chat' | 'question' | 'issue'
+
+/** 一条 intake 会话里的消息；Router 回复也记进来，供下一轮分析看到上下文。 */
+export interface IntakeTurn {
+  role: 'user' | 'router'
+  text: string
+  at: string
+  actorId?: string
+}
+
+/** 分析引擎整理出的结构化需求单。 */
+export interface IntakeReport {
+  title: string
+  /** 问题描述：用户实际遇到了什么。 */
+  problem: string
+  /** 背景：什么场景下发生、影响谁。 */
+  background: string
+  /** 复现步骤；收集不到时留空字符串，由 Router 标注「未收集到」。 */
+  steps: string
+  /** 设备 / 账号 / 环境等信息。 */
+  environment: string
+  /** 影响范围与严重程度。 */
+  impact: string
+  /** 用户期望的结果。 */
+  expected: string
+  /** 分析引擎判断的类型：操作问题 / 已知问题 / 疑似 BUG / 新需求。 */
+  assessment: string
+}
+
+/**
+ * 一次需求识别会话。
+ *
+ * 与 Ticket 没有直接绑定：只有管理员终审通过后才通过 Engine.decide() 生成正式工单，
+ * 原有权限与派单体系保持不变。
+ */
+export interface Intake {
+  id: string
+  threadId: string
+  chatId: string
+  /** 发起人：只有本人和管理员能推进这条 intake。 */
+  actorId: string
+  actorName: string
+  /** 群绑定项目名与仓库选择器；intake 仅读取这个项目的代码。 */
+  project: string
+  repo: string
+  branch: string
+  status: IntakeStatus
+  kind: IntakeKind
+  /** 最初触发识别的原文。 */
+  rawText: string
+  turns: IntakeTurn[]
+  report?: IntakeReport
+  /** 已经追问过的轮数，用于防止无限对话。 */
+  questions: number
+  /** 终审通过后生成的工单号。 */
+  ticketId?: string
+  createdAt: string
+  updatedAt: string
+}

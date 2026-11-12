@@ -28,4 +28,15 @@ describe('Router 研判提示词', () => {
     expect(orchestrator).toContain('必须标明来源与时效')
     expect(conversation).toContain('必须标明来源与时效')
   })
+
+  it('需求识别提示词约束住「不派单 / 只读 / 项目隔离」', () => {
+    const analyst = prompt('intake-analyst.md')
+    expect(analyst).toContain('没有派单权限')
+    expect(analyst).toContain('code_read')
+    expect(analyst).toContain('只能访问当前群绑定项目的目录')
+
+    const screener = prompt('intake-screener.md')
+    expect(screener).toContain('`issue`')
+    expect(screener).toContain('拿不准是 `question` 还是 `issue` 时，选 `issue`')
+  })
 })

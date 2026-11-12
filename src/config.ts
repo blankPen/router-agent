@@ -167,6 +167,27 @@ export interface ProgressSettings {
 }
 
 /**
+ * 需求识别（intake）配置。
+ *
+ * 默认关闭：开启后，群里的普通成员不 @ 机器人也能触发初筛；
+ * 初筛判为故障 / 需求的消息进入多轮澄清，结构化结果必须经管理员终审才派单。
+ */
+export interface IntakeSettings {
+  enabled: boolean
+  /** 开启需求识别的群；为空表示所有已监控的群。 */
+  chats: string[]
+  /** 最多主动追问几轮；达到上限后直接整理现有信息交给管理员终审。 */
+  maxQuestions: number
+  /**
+   * 分析引擎是否读取当前群绑定项目的本地代码。
+   * 关闭后只依据对话与业务知识作答，不碰文件系统。
+   */
+  codeAccess: boolean
+  /** 终审管理员 open_id 列表；为空时回退到全局 allowed 名单。 */
+  approvers: string[]
+}
+
+/**
  * 闲置工单治理：长时间没有新进展的工单先提醒，再自动关闭。
  * 阈值按小时配置，更贴近日常表述；服务内部换算成毫秒。
  */
@@ -222,6 +243,7 @@ export interface AppConfig {
   feishu: FeishuSettings
   policy: PolicySettings
   router: RouterSettings
+  intake: IntakeSettings
   progress: ProgressSettings
   retention: RetentionSettings
   workspace: WorkspaceSettings
@@ -300,6 +322,13 @@ export function defaultConfig(): AppConfig {
       admission: { ...DEFAULT_ADMISSION },
       interruptedRecovery: 'auto',
       maxAutoRecover: 1,
+    },
+    intake: {
+      enabled: false,
+      chats: [],
+      maxQuestions: 3,
+      codeAccess: true,
+      approvers: [],
     },
     router: {
       timeoutMs: 60_000,
@@ -526,6 +555,7 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
   const progressRepeatMs = Number(progressDoc.repeatMs)
   const retentionDoc = doc.retention ?? {}
   const workspaceDoc = doc.workspace ?? {}
+  const intakeDoc = doc.intake ?? {}
   const projectLists = parseProjectLists(doc.runtime?.projects)
 
   const admissionDoc = doc.policy?.admission ?? {}
@@ -574,6 +604,13 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
       maxAutoRecover: positiveIntOr(doc.policy?.maxAutoRecover, base.policy.maxAutoRecover, 0, 100),
     },
     router: parseRouter(doc.router, base.router),
+    intake: {
+      enabled: booleanOr(intakeDoc.enabled, base.intake.enabled),
+      chats: stringArray(intakeDoc.chats, base.intake.chats),
+      maxQuestions: positiveIntOr(intakeDoc.maxQuestions, base.intake.maxQuestions, 0, 10),
+      codeAccess: booleanOr(intakeDoc.codeAccess, base.intake.codeAccess),
+      approvers: stringArray(intakeDoc.approvers, base.intake.approvers),
+    },
     progress: {
       syncMs: msOr(progressSyncMs, base.progress.syncMs, 0),
       probeMs: msOr(progressProbeMs, base.progress.probeMs, 0),
@@ -938,6 +975,13 @@ export function writeConfig(home: string, config: AppConfig): void {
       silenceMs: config.progress.silenceMs,
       repeatMs: config.progress.repeatMs,
     },
+    intake: {
+      enabled: config.intake.enabled,
+      chats: config.intake.chats,
+      maxQuestions: config.intake.maxQuestions,
+      codeAccess: config.intake.codeAccess,
+      approvers: config.intake.approvers,
+    },
     retention: {
       enabled: config.retention.enabled,
       idleHours: config.retention.idleHours,
@@ -1051,6 +1095,7 @@ export function publicDefaults(): Record<string, unknown> {
     },
     policy: base.policy,
     router: base.router,
+    intake: base.intake,
     progress: base.progress,
     retention: base.retention,
     workspace: base.workspace,
@@ -1184,6 +1229,12 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
   'progress.probeMs': intValue(0, 3_600_000, ' 毫秒'),
   'progress.silenceMs': intValue(1_000, 3_600_000, ' 毫秒'),
   'progress.repeatMs': intValue(1_000, 3_600_000, ' 毫秒'),
+
+  'intake.enabled': boolValue(),
+  'intake.chats': stringListValue(),
+  'intake.maxQuestions': intValue(0, 10, ' 轮'),
+  'intake.codeAccess': boolValue(),
+  'intake.approvers': stringListValue(),
 
   'retention.enabled': boolValue(),
   'retention.idleHours': intValue(1, 8_760, ' 小时'),

@@ -210,6 +210,18 @@ export const SECTIONS: SectionDef[] = [
     ],
   },
   {
+    id: 'intake',
+    title: '需求识别',
+    description: '普通成员在群里直接反馈问题：先轻量初筛，再由分析 Agent 只读项目代码澄清、整理结构化需求单；必须经管理员终审才派单。默认关闭。',
+    fields: [
+      { path: 'intake.enabled', label: '启用需求识别', kind: 'switch', hint: '开启后群里未 @ 机器人的消息也会先经过初筛' },
+      { path: 'intake.chats', label: '生效群（chat_id）', kind: 'list', placeholder: 'oc_xxx, oc_yyy', hint: '留空 = 所有已监控的群' },
+      { path: 'intake.maxQuestions', label: '最多追问轮数', kind: 'number', min: 0, max: 10, unit: '轮', hint: '0 = 不追问，直接按现有信息收口' },
+      { path: 'intake.codeAccess', label: '允许分析 Agent 读项目代码', kind: 'switch', hint: '关闭后只基于对话与通用业务知识判断' },
+      { path: 'intake.approvers', label: '终审管理员 open_id', kind: 'list', placeholder: 'ou_xxx', hint: '留空 = 回退到全局允许名单' },
+    ],
+  },
+  {
     id: 'retention',
     title: '闲置治理',
     description: '长时间没有进展的工单，先提醒、再自动关单。',

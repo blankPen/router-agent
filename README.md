@@ -197,6 +197,12 @@ Worker 不在 Router 进程里跑。Router 按 `runtime.default` 选择适配器
 
 ![一条消息从进群到合并：来源、Router、执行、交付](docs/assets/readme/message-to-pr.png)
 
+### 需求识别：普通成员也能直接反馈问题（可选）
+
+开启 `intake.enabled` 后，群里的成员不用 @ 机器人、也不用找管理员：说一句「登录一直报 500」，机器人会先做轻量初筛，再由分析子 Agent 只读当前项目的代码、主动追问补齐场景与环境，整理成结构化需求单 @管理员确认。管理员回复「确认派单」才进入原有派单流程——权限、项目隔离与工单体系都保持不变。
+
+默认关闭，不影响存量群的回复行为。配置见 [docs/CONFIGURATION.md](docs/CONFIGURATION.md#需求识别intake)。
+
 ## 它怎么工作
 
 ```text
@@ -211,6 +217,8 @@ Router（AgentLoop + DecisionEngine(Pi) + HTTP API + Web）
         ▼
 WorkerRuntime 端口 ── OrcaRuntime（默认）/ ClaudeCodeRuntime / AcpRuntime（acp 与 7 个 acp-*）
 ```
+
+开启需求识别后，`IntakeCoordinator + PiIntakeEngine` 作为并行的前置链路接入同一个 AgentLoop：初筛 → 只读项目代码澄清 → 结构化需求单 → 管理员终审，才回到上面的派工主链路。
 
 三条设计约束：
 

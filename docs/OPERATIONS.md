@@ -12,6 +12,9 @@ Router 不做对话，只在必要时说话：
 | 群里 @机器人，但只是寒暄 / 试探 | **Pi 生成**一句礼貌回复，作为**普通消息**发出；不建单 |
 | 群里 @机器人，是真需求 | 只发一条**话题**消息：「工单「标题」（id）已开始执行。后续进展会在这个话题里更新。」，不再额外回「我帮你创建了工单」之类的普通消息 ack |
 | 未 @ 的群消息 | 走 Pi 研判；判为闲聊则**完全静默**（不刷屏） |
+| 需求识别开启的群里，普通成员反馈问题（可不 @） | 先轻量初筛：`chat` 静默；`question` / `issue` 由分析子 Agent 追问或直接答疑，信息收敛后 @管理员终审，确认后才派单 |
+| 分析子 Agent 追问 / 需求单整理完成 | 回复挂在该话题：追问直接发；需求单完成后先告知发起人「已提交管理员确认」，再 @管理员给出结构化需求单与操作口令 |
+| 管理员终审 | 回复「确认派单」生成正式工单；「驳回」结束；直接补充要求则重新分析一版 |
 | 私聊 | 走 Pi 研判；判为闲聊时用 Pi 礼貌回复（普通消息） |
 | 只发了图片 | 下载原图落盘并透传给 Worker，同时转成文字走研判；识别失败也保留原图，不再回「看不到附件内容」 |
 | 只发了文件 / 语音等其它附件 | **不开单**：@ 或私聊时回一句「看不到附件内容，请用文字说明」 |
@@ -54,6 +57,17 @@ Router 不做对话，只在必要时说话：
 | `trigger:ingested` | Source | `id` `chat` `addressed` `threadKeys` `topic` | 用户消息进入系统；`topic=true` 表示事件带了话题 ID（omt_） |
 | `trigger:dropped` | Source | `reason` `chat` `actor` | 收到但被过滤 |
 | `trigger:admitted-unaddressed` | CLI | `chat` `actor` `keys` | 已绑定工单的话题里，名单内成员没 @ 机器人也放行处理（tk-59） |
+| `intake:screen` | AgentLoop | `triggerId` `chat` `kind` `reason` | 需求识别初筛结论：chat / question / issue |
+| `intake:screen-failed` / `intake:screen-invalid` | AgentLoop | `triggerId` `message` | 初筛模型失败或输出不合法；消息按原准入规则继续处理 |
+| `intake:opened` | AgentLoop | `intakeId` `chat` `actor` `kind` `project` | 为一条疑似问题创建需求识别会话 |
+| `intake:clarify` | AgentLoop | `intakeId` `questions` | 分析 Agent 发起追问 |
+| `intake:ready` | AgentLoop | `intakeId` `chat` `title` `approvers` | 需求单整理完成，已 @管理员终审 |
+| `intake:approved` | AgentLoop | `intakeId` `ticketId` `actor` | 管理员确认派单，已生成正式工单 |
+| `intake:rejected` | AgentLoop | `intakeId` `actor` | 管理员驳回需求单 |
+| `intake:expired` | AgentLoop | `intakeId` | 需求识别会话超过 72 小时无消息，自动放弃 |
+| `intake:analysis-failed` / `intake:analysis-invalid` | AgentLoop | `intakeId` `message` / `triggerId` | 分析模型失败或输出不合法；已给用户兜底回复 |
+| `intake:project-unbound` | AgentLoop | `chat` `triggerId` | 群没绑定项目，intake 不接管，按原准入规则处理 |
+| `intake:decision-failed` | AgentLoop | `triggerId` `message` | 落决策失败（例如同一轮已落过决定） |
 | `thread:created` | Engine | `threadId` `source` `chat` | 首次见到某条线程，登记规范 ID |
 | `thread:resolved` | Engine | `threadId` `rawThreadId` `triggerId` `source` | 消息自带线程标识没对上，靠别名收敛到了已有线程（排查「消息没进工单」先看这条） |
 | `thread:backfilled` / `thread:backfill-failed` | CLI | `filled` `failed` / `batch` `code` `detail` | `ra migrate threads --apply` 的回填结果 |
