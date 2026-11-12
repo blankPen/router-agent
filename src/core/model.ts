@@ -149,7 +149,8 @@ export interface Input {
   seq: number
   kind: InputKind
   text: string
-  status: 'pending' | 'delivered' | 'acked'
+  /** expired：worker 在 ack 前就没了；不再重投，也不代表用户请求被完成。 */
+  status: 'pending' | 'delivered' | 'acked' | 'expired'
   createdAt: string
   deliveredAt?: string
   ackedAt?: string

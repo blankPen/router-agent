@@ -183,6 +183,20 @@ describe('线程归属（话题 ID 参与别名收敛）', () => {
     expect(t.threadKeys).toEqual(['om_100'])
   })
 
+  it('话题内直接发言：飞书自动填的 reply_to=root_id 不算引用（tk-51）', () => {
+    // 实测飞书：在话题里直接发言时，会把 reply_to / parent_id 填成话题根消息。
+    // 这不是用户主动引用，拿它回查正文会让每条回复都拼上根消息。
+    const t = normalizeFeishuEvent(evt({ thread_id: 'omt_topic_1', root_id: 'om_root', reply_to: 'om_root' }), cfg)!
+    expect(t.raw).not.toHaveProperty('parentId')
+    expect(t.raw).toMatchObject({ quoteIgnored: 'om_root' })
+    expect(t.text).toBe('帮我把登录超时改成 30 秒')
+  })
+
+  it('话题内真正引用另一条消息时仍然回查正文', () => {
+    const t = normalizeFeishuEvent(evt({ thread_id: 'omt_topic_1', root_id: 'om_root', reply_to: 'om_quoted' }), cfg)!
+    expect(t.raw).toMatchObject({ parentId: 'om_quoted' })
+  })
+
   it('线程标识去重：root_id 与 message_id 相同时不重复登记', () => {
     const t = normalizeFeishuEvent(evt({ root_id: 'om_100' }), cfg)!
     expect(t.threadKeys).toEqual(['om_100'])

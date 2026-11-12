@@ -1016,9 +1016,22 @@ export class Store {
     return Number(row.m) + 1
   }
 
-  ackInputs(assignmentId: string, ids: string[], at: string): void {
-    const stmt = this.db.prepare("UPDATE inputs SET status = 'acked', acked_at = ? WHERE id = ? AND assignment_id = ?")
-    for (const id of ids) stmt.run(at, id, assignmentId)
+  /**
+   * 按输入 id 标记已 ack。
+   *
+   * 刻意不限定 assignment_id：worker 丢失后 Router 会换一个新的派工接着投递，
+   * 而输入是在旧派工下创建的。带上 assignment_id 会让新 worker 的 ack 匹配 0 行，
+   * 输入永远停在 delivered，Router 于是无限重投（tk-51）。
+   * 返回真正从「未 ack」变成「已 ack」的 id，供调用方清理重投计数。
+   */
+  ackInputs(ticketId: string, ids: string[], at: string): string[] {
+    if (ids.length === 0) return []
+    const update = this.db.prepare("UPDATE inputs SET status = 'acked', acked_at = ? WHERE id = ? AND ticket_id = ? AND status != 'acked'")
+    const acked: string[] = []
+    for (const id of ids) {
+      if (Number(update.run(at, id, ticketId).changes) > 0) acked.push(id)
+    }
+    return acked
   }
 
   /** 把工单上尚未绑定派工的输入挂到新派工上。 */
@@ -1028,6 +1041,14 @@ export class Store {
 
   markInputsDelivered(ticketId: string, at: string): void {
     this.db.prepare("UPDATE inputs SET status = 'delivered', delivered_at = ? WHERE ticket_id = ? AND status = 'pending'").run(at, ticketId)
+  }
+
+  /**
+   * worker 在 ack 之前就丢了：把已投递未确认的输入标记为 expired。
+   * 这些输入确实进过旧终端，但任务没完成；保留记录供审计，不再参与重投与派工判断。
+   */
+  expireUnackedInputs(ticketId: string): number {
+    return Number(this.db.prepare("UPDATE inputs SET status = 'expired' WHERE ticket_id = ? AND status = 'delivered'").run(ticketId).changes)
   }
 
   // ---------- Subscription ----------

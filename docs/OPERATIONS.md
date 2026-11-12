@@ -61,6 +61,9 @@ Router 不做对话，只在必要时说话：
 | `launch` | Service | `ticketId` `handle` `workdir` | 派工到 Orca worktree |
 | `input:queued` | Engine | `ticketId` `seq` `text` | Router 准备发给 worker 的内容 |
 | `input:delivered` | Service | `ticketId` `count` `text` | 实际投递进 worker 终端 |
+| `worker:lost` | Service | `ticketId` `handle` `reason` `lastSeq` `expired` | 执行会话已不存在；已投递未 ack 的输入标为 `expired`，不再参与重投 |
+| `input:relaunch` | Service | `ticketId` `pending` | 因新消息重建 worker；同一批积压输入只触发一次 |
+| `worker:stop-stale` | Service | `ticketId` `handle` | 终端句柄已失效（`terminal_handle_stale`），停止动作不再重试 |
 | `report` | Service | `ticketId` `state` `turn` `summary` `reply` `humanAction` `pr` | worker 的 `ra report` 上报 |
 | `report:evidence-missing` | Service | `ticketId` `mode` `action` `source` `reason` `missing` | UI 工单缺 Before / After 证据；`enforce` 时 action=reject，`warn` 时只记录 |
 | `report:evidence-unverified` | Service | `ticketId` `mode` `unverified` `source` | 无法判断是否有证据（workdir 丢失、git / PR 查询失败），降级放行 |
@@ -167,6 +170,8 @@ Router 不做对话，只在必要时说话：
 | `codex:launch-failed` | Codex runtime | `workdir` `branch` `reason` | 派工启动失败 |
 
 worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态）；主动巡检优先读 Agent 自己的会话记录（Claude / Codex，见 [RUNTIME.md](RUNTIME.md#运行时选项各运行时自己声明)），其次才把终端里的语义摘要（助手文本 + 动作概要）发到话题，不逐条回放工具调用。要看它做了什么，读 `report` 的 `summary` 与 `~/.router-agent/workers/<ticketId>/events.log`。
+
+> 话题内直接发言时，飞书会把 `reply_to` 自动填成话题根消息。Source 只在 `reply_to` 与 `root_id` 不同时才当作用户引用，否则记 `raw.quoteIgnored` 并跳过回查，避免每条话题回复都拼上根消息正文（tk-51）。
 
 ### 查看与排查
 

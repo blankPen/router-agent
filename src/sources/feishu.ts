@@ -128,9 +128,16 @@ export function normalizeFeishuEventDetailed(raw: Record<string, unknown>, cfg: 
 
   // 被引用消息：lark-cli 用 reply_to，飞书原始事件用 parent_id。正文不在 content 里，必须回查。
   const replyTo = event.reply_to || event.parent_id || ''
+  // 话题内直接发言时，飞书会把 reply_to / parent_id 自动填成话题根消息（root_id），
+  // 这不是用户主动引用。若拿它回查，每条话题回复都会被拼上根消息正文（tk-51 的
+  // 「合并」被显示成「[引用 …] 移除 AICoding 页面…」）。只有 reply_to 与 root_id
+  // 不同，才是真正的引用；没有话题 ID 的普通群引用不受此影响。
+  const quotedId = topicId && rootId && replyTo === rootId ? '' : replyTo
   const imageKeys = mediaOnly || messageType === 'post' ? parseImageKeysFromContent(text) : []
   const rawMeta: Record<string, unknown> = {}
-  if (replyTo) rawMeta.parentId = replyTo
+  if (quotedId) rawMeta.parentId = quotedId
+  // 话题根消息被飞书当成 reply_to：记下来便于排查「为什么没显示引用」。
+  else if (replyTo) rawMeta.quoteIgnored = replyTo
   if (messageType !== 'text') rawMeta.messageType = messageType
   if (imageKeys.length > 0) rawMeta.imageKeys = imageKeys
   const trigger: Trigger = {

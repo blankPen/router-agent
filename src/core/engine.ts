@@ -230,8 +230,11 @@ export class Engine {
     return assignment
   }
 
-  /** 记录 worker 上报，并在同一事务语义内刷新阶段、PR 与待答问题。 */
-  report(assignmentId: string, state: WorkerState): Report {
+  /**
+   * 记录 worker 上报，并在同一事务语义内刷新阶段、PR 与待答问题。
+   * 返回这次真正被 ack 的输入 id（旧派工下投递、新派工下 ack 的也算）。
+   */
+  report(assignmentId: string, state: WorkerState): { report: Report; ackedInputs: string[] } {
     const assignment = this.store.getAssignment(assignmentId)
     if (!assignment) throw new Error('assignment:not-found')
     const ticket = this.requireTicket(assignment.ticketId)
@@ -252,7 +255,9 @@ export class Engine {
       at: now,
     }
     this.store.insertReport(report)
-    this.store.ackInputs(assignmentId, report.ackedInputs, now)
+    // ack 按 ticket 收敛，不限定 assignment：worker 丢失后换了新派工，旧派工下创建、
+    // 但实际被新 worker 消费的输入同样要落成 acked，否则会被无限重投（tk-51）。
+    const ackedInputs = this.store.ackInputs(ticket.id, report.ackedInputs, now)
     if (assignment.status === 'pending') {
       this.store.updateAssignment({ ...assignment, status: 'running' })
     }
@@ -270,7 +275,7 @@ export class Engine {
     }
 
     this.refreshStage(ticket.id)
-    return report
+    return { report, ackedInputs }
   }
 
   deliverInput(ticketId: string, opts: { kind: InputKind; text: string; assignmentId?: string }): Input {
@@ -294,9 +299,9 @@ export class Engine {
   }
 
   ackInputs(ticketId: string, ids: string[]): void {
-    const assignment = this.store.latestAssignment(ticketId)
-    if (!assignment) return
-    this.store.ackInputs(assignment.id, ids, this.clock.now())
+    const ticket = this.store.getTicket(ticketId)
+    if (!ticket) return
+    this.store.ackInputs(ticket.id, ids, this.clock.now())
   }
 
   /** 订阅扇出：把某条 Trigger 投给订阅了该 Thread 的所有未关闭工单。 */

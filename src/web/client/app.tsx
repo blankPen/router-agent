@@ -218,6 +218,7 @@ const INPUT_STATUS_LABEL: Record<string, string> = {
   pending: '待投递',
   delivered: '已投递',
   acked: '已确认',
+  expired: '会话丢失',
 }
 
 const PR_STATE_LABEL: Record<string, string> = {

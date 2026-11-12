@@ -203,8 +203,59 @@ describe('Store', () => {
     s.insertReport(report)
     expect(s.latestReport('tk1')?.summary).toBe('已定位')
 
-    s.ackInputs('as1', ['in1'], '2026-11-06T10:04:00.000Z')
+    expect(s.ackInputs('tk1', ['in1'], '2026-11-06T10:04:00.000Z')).toEqual(['in1'])
     expect(s.listInputs('tk1')[0]?.status).toBe('acked')
+    s.close()
+  })
+
+  it('ack 不限定 assignment：换派工后旧派工下投递的输入仍能被新 worker 确认（tk-51）', () => {
+    const s = store()
+    s.insertTicket(ticket)
+    s.insertAssignment(assignment)
+    s.insertAssignment({ ...assignment, id: 'as2', handle: 'term-2', startedAt: '2026-11-06T10:05:00.000Z' })
+    // 输入创建时挂在 as1 上，实际被 as2 消费
+    s.insertInput({
+      id: 'in1',
+      ticketId: 'tk1',
+      assignmentId: 'as1',
+      seq: 1,
+      kind: 'followup',
+      text: '继续',
+      status: 'delivered',
+      createdAt: '2026-11-06T10:03:00.000Z',
+    })
+
+    expect(s.ackInputs('tk1', ['in1'], '2026-11-06T10:06:00.000Z')).toEqual(['in1'])
+    expect(s.listInputs('tk1')[0]).toMatchObject({ status: 'acked', ackedAt: '2026-11-06T10:06:00.000Z' })
+    // 已 acked 的不再重复返回，避免调用方误以为自己清了新的计数
+    expect(s.ackInputs('tk1', ['in1'], '2026-11-06T10:07:00.000Z')).toEqual([])
+    s.close()
+  })
+
+  it('放错工单的 id 不会被 ack；会话丢失时未确认的输入标记 expired', () => {
+    const s = store()
+    s.insertTicket(ticket)
+    s.insertTicket({ ...ticket, id: 'tk2' })
+    s.insertAssignment(assignment)
+    s.insertInput({
+      id: 'in1',
+      ticketId: 'tk1',
+      assignmentId: 'as1',
+      seq: 1,
+      kind: 'followup',
+      text: '继续',
+      status: 'delivered',
+      createdAt: '2026-11-06T10:03:00.000Z',
+    })
+
+    expect(s.ackInputs('tk2', ['in1'], '2026-11-06T10:06:00.000Z')).toEqual([])
+    expect(s.listInputs('tk1')[0]?.status).toBe('delivered')
+
+    expect(s.expireUnackedInputs('tk1')).toBe(1)
+    expect(s.listInputs('tk1')[0]?.status).toBe('expired')
+    // expired 既不算待投递，也不算待确认：巡检时不应再被当成重投任务
+    expect(s.unackedInputs('tk1')).toHaveLength(0)
+    expect(s.pendingInputs('tk1')).toHaveLength(0)
     s.close()
   })
 

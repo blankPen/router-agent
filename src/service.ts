@@ -99,6 +99,14 @@ function launchFailureCursorKey(ticketId: string): string {
 }
 
 /**
+ * 重新派工水位：记录上一次「为积压输入重建 worker」时处理到的最大输入 seq。
+ * 同一条输入只允许触发一次重建，避免新 worker 也投递失败时无限重建（tk-51）。
+ */
+function relaunchCursorKey(ticketId: string): string {
+  return `relaunch:${ticketId}`
+}
+
+/**
  * 中断恢复水位：记录已处理过的「被中断轮次」与自动恢复次数。
  * 持久化到 cursors，保证同一个被中断的轮次不会被反复恢复 / 反复提醒。
  */
@@ -147,6 +155,15 @@ interface ReminderRecord {
 /** 工作区删除里不值得重试的错误：脏工作区、目录已经不存在等。 */
 function isCleanupSkipError(message: string): boolean {
   return /dirty|uncommitted|modified|untracked|not clean|not found|does not exist|no such file|not a git repository/i.test(message)
+}
+
+/**
+ * Orca 终端句柄失效：句柄只在签发它的那个 Orca 服务实例里有效。
+ * 服务重启 / 终端早已关闭后再关，永远会报 terminal_handle_stale。
+ */
+function isStaleHandleError(error: unknown): boolean {
+  const message = errorMessage(error)
+  return /terminal_handle_stale|terminal not found|no such terminal/i.test(message)
 }
 
 interface LaunchFailureRecord {
@@ -587,7 +604,15 @@ export class RouterService {
       const assignment = this.store.latestAssignment(ticketId)
       if (!assignment?.handle) return
       const runtime = this.runtimeFor(assignment)
-      await runtime.stop(this.refOf(assignment), 'ticket-stopped')
+      try {
+        await runtime.stop(this.refOf(assignment), 'ticket-stopped')
+      } catch (error) {
+        // 终端句柄属于当时签发它的 Orca 服务；服务重启 / 终端早已关闭时永远关不掉。
+        // 这种失败重试再多次也不会成功，只会无限刷 effect:failed，所以吞掉并记一次。
+        if (!isStaleHandleError(error)) throw error
+        this.logger.info('worker:stop-stale', { ticketId, handle: assignment.handle })
+        return
+      }
       this.log('worker:stopped', ticketId, { handle: assignment.handle })
     })
     effects.register('launch-worker', async payload => {
@@ -1245,7 +1270,7 @@ export class RouterService {
       // 没有活着的 worker：新输入视为「重试派工」信号。
       // 派工失败后工单会转人工，用户在该话题里回复即可重新拉起 worker。
       if (!assignment || assignment.status === 'ended' || !assignment.handle) {
-        await this.relaunchForInput(ticket, pending)
+        await this.relaunchForInput(ticket)
         continue
       }
       // 下次唤醒时把上次已投递但没 ack 的输入一并重发，靠 id 去重。
@@ -1304,11 +1329,21 @@ export class RouterService {
 
   /**
    * 旧 worker 已结束、但有新输入时重新派工。
-   * 只对「上次失败之后新到的输入」触发，避免同一批积压输入每秒重试打爆 Orca。
+   *
+   * 只对「上次失败 / 丢失之后新到的输入」触发，避免同一批积压输入每秒重试打爆 Orca。
+   * 两个水位任一挡住都不许重建：
+   *   - 派工失败：失败水位记录当时积压的最大 seq，同一批输入不再重试；
+   *   - 重新派工：上一次为积压输入重建 worker 时处理到的 seq，同一批输入只重建一次。
+   * worker 丢失时已投递未 ack 的输入会被标成 expired，不再算作「新输入」（tk-51）。
    */
-  private async relaunchForInput(ticket: Ticket, pending: { seq: number }[]): Promise<void> {
+  private async relaunchForInput(ticket: Ticket): Promise<void> {
+    // 只认 pending：worker 丢失时已投递未 ack 的输入已经标成 expired，
+    // 用户新发的消息才会是 pending 且 seq 更大。
+    const pending = this.store.pendingInputs(ticket.id)
     const failure = this.loadLaunchFailure(ticket.id)
-    if (failure && !pending.some(input => input.seq > failure.lastSeq)) return
+    const relaunchSeq = this.loadRelaunchSeq(ticket.id)
+    const candidates = pending.filter(input => input.seq > relaunchSeq && input.seq > (failure?.lastSeq ?? 0))
+    if (candidates.length === 0) return
     if (this.activeWorkers() >= this.config.policy.maxWorkers) {
       this.logger.info('launch:queued-input', {
         ticketId: ticket.id,
@@ -1320,10 +1355,25 @@ export class RouterService {
     this.engine.clearAttention(ticket.id)
     try {
       await this.launch(ticket)
+      // 记下这次处理到的最大 seq：新 worker 仍投递失败时不会再触发一次重建。
+      const maxSeq = candidates.reduce((max, input) => Math.max(max, input.seq), 0)
+      this.saveRelaunchSeq(ticket.id, maxSeq)
       this.log('input:relaunch', ticket.id, { pending: pending.length })
     } catch {
       // launch() 内部已记录原因、转人工并通知发起人。
     }
+  }
+
+  /** 读取重新派工水位；没有记录时返回 0。 */
+  private loadRelaunchSeq(ticketId: string): number {
+    const raw = this.store.getCursor(relaunchCursorKey(ticketId))
+    if (!raw) return 0
+    const value = Number(raw)
+    return Number.isFinite(value) && value > 0 ? value : 0
+  }
+
+  private saveRelaunchSeq(ticketId: string, seq: number): void {
+    this.store.setCursor(relaunchCursorKey(ticketId), String(seq), this.clock.now())
   }
 
   // ---------- 空闲与失联 ----------
@@ -1839,7 +1889,7 @@ export class RouterService {
       return
     }
     const reply = state.reply?.trim() ?? ''
-    const report = this.engine.report(assignment.id, {
+    const { report, ackedInputs } = this.engine.report(assignment.id, {
       ticketId: ticket.id,
       turn: state.turn,
       state: state.state,
@@ -1850,8 +1900,10 @@ export class RouterService {
       ...(reply ? { reply } : {}),
       ackedInputs: state.ackedInputs,
     })
-    for (const id of state.ackedInputs) this.deliveryAttempts.delete(id)
-    if (state.ackedInputs.length > 0) this.deliveryCooldown.delete(ticket.id)
+    // 只清真正落成 acked 的输入：worker 声称 ack 了但库里没匹配到时，
+    // 清掉计数会让「重投 5 次放弃」永远触发不了（tk-51）。
+    for (const id of ackedInputs) this.deliveryAttempts.delete(id)
+    if (ackedInputs.length > 0) this.deliveryCooldown.delete(ticket.id)
     this.appendEventLog(ticket.id, { kind: 'report', state: state.state, turn: state.turn, at: state.updatedAt })
     this.log('report', ticket.id, {
       state: state.state,
@@ -2373,6 +2425,11 @@ let repo = ticket.repo
    */
   private handleLostWorker(ticket: Ticket, reason: string): void {
     const assignment = this.store.latestAssignment(ticket.id)
+    const lastSeq = this.store.listInputs(ticket.id).reduce((max, input) => Math.max(max, input.seq), 0)
+    // 旧终端已经不在了：已投递但没 ack 的输入不会再有人确认，标记 expired 而不是
+    // 一直停在 delivered——否则「未 ack 输入」会被当成待重投任务反复处理（tk-51）。
+    // 之后只有用户新发的消息（pending、seq 更大）才会触发重新派工。
+    const expired = this.store.expireUnackedInputs(ticket.id)
     if (assignment && assignment.status !== 'ended') {
       this.store.updateAssignment({ ...assignment, status: 'ended', endedAt: this.clock.now() })
     }
@@ -2384,7 +2441,7 @@ let repo = ticket.repo
       `工单「${ticket.title}」的执行会话已不存在（电脑重启、终端关闭或进程退出都会导致），无法继续执行。${workdirNote}如果还需要继续，请在本话题里说明，我会重新开一张工单。`,
       `worker-lost:${ticket.id}`,
     )
-    this.log('worker:lost', ticket.id, { handle: assignment?.handle ?? '', reason })
+    this.log('worker:lost', ticket.id, { handle: assignment?.handle ?? '', reason, lastSeq, expired })
   }
 
   /** 长内容按行切块并顺序进入 outbox，避免超过飞书单条消息长度。 */
