@@ -1,6 +1,8 @@
 import type { Clock, DecideOutcome, Engine } from '../core/engine.js'
-import type { Intake, IntakeReport, Trigger } from '../core/model.js'
+import type { Intake, IntakeReport, Ticket, Trigger } from '../core/model.js'
+import { effectiveAllowedByChat } from '../core/policy.js'
 import { readRouterPrompt } from '../specs/index.js'
+import { preview } from '../core/events.js'
 import { noopLogger, errorMessage, type Logger } from '../infra/logger.js'
 import type { DispatchSettings } from './dispatch.js'
 import { resolveDispatch } from './dispatch.js'
@@ -122,6 +124,35 @@ export class IntakeCoordinator {
   }
 
   /**
+   * 这个人能不能在本群发起需求。
+   *
+   * 只认群级名单：群没配名单时普通成员都能提需（这正是需求分析助手的用途，
+   * 全局 allowed 管的是谁能派单，不是谁能提需）；群配了名单则只认名单内的人，
+   * 配了却一个都解析不出来 = 该群拒绝所有人。
+   *
+   * 与 AgentLoop 的初筛入口同口径：intake 走的是 Gate 之前的分支，所以必须自己再判一次，
+   * 否则名单外的人能借「继续追问」绕过准入。
+   */
+  private canRequest(trigger: Trigger): boolean {
+    const scoped = effectiveAllowedByChat(this.engine.policy(), trigger.chatId)
+    if (scoped === undefined) return true
+    return scoped.includes(trigger.actorId)
+  }
+
+  /**
+   * 能不能给这张需求单终审。
+   *
+   * 必须是终审管理员（群级配置优先，没配回退全局名单），
+   * 且群级白名单是硬边界：配了名单的人不在名单里，也不能终审派单。
+   */
+  private canApprove(trigger: Trigger): boolean {
+    if (!this.isApprover(trigger.chatId, trigger.actorId)) return false
+    const scoped = effectiveAllowedByChat(this.engine.policy(), trigger.chatId)
+    if (scoped === undefined) return true
+    return scoped.includes(trigger.actorId)
+  }
+
+  /**
    * Gate 之前的确定性处理：
    * - 发起人继续补信息 → 走分析；
    * - 管理员在已就绪的需求单下确认 / 驳回 → 派单或结束；
@@ -143,6 +174,21 @@ export class IntakeCoordinator {
         this.decideIgnore(trigger, 'intake:dismissed', 'inferred')
         return 'handled'
       }
+      // 群白名单是硬边界：名单外的人不能借「继续追问」绕过准入。
+      if (!this.canRequest(trigger)) {
+        this.logger.warn('intake:requester-not-allowed', { triggerId: trigger.id, chat: trigger.chatId, actor: trigger.actorId })
+        return 'screen'
+      }
+      // 发起人补充信息时，如果上一版已经整理成待审需求单，这版必须作废重来：
+      // 不能还挂着旧报告让管理员去终审一份已经被推翻的结论。
+      if (active.status === 'ready') {
+        active.status = 'clarifying'
+        active.report = undefined
+      }
+      // 先把这条回答记进会话再分析：即使分析失败，历史里也有用户原话。
+      active.turns.push({ role: 'user', text: trigger.text, at: trigger.receivedAt, actorId: trigger.actorId })
+      active.updatedAt = this.clock.now()
+      this.store.updateIntake(active)
       await this.advance(active, trigger)
       return 'handled'
     }
@@ -151,8 +197,14 @@ export class IntakeCoordinator {
     // 发起人在需求单待审期间补充内容：当作需求单修订，重新分析一版。
     // 同一话题可能还有别人提问，所以必须按人匹配，不能只看线程。
     if (pending && pending.actorId === trigger.actorId && !isApprovalCommand(trigger.text) && !isRejectionCommand(trigger.text)) {
+      if (!this.canRequest(trigger)) {
+        this.logger.warn('intake:requester-not-allowed', { triggerId: trigger.id, chat: trigger.chatId, actor: trigger.actorId })
+        return 'screen'
+      }
       pending.turns.push({ role: 'user', text: trigger.text, at: trigger.receivedAt, actorId: trigger.actorId })
       pending.status = 'clarifying'
+      // 旧报告作废：修订后的需求单不能还挂着上一版的结论去终审。
+      pending.report = undefined
       pending.updatedAt = this.clock.now()
       this.store.updateIntake(pending)
       await this.advance(pending, trigger)
@@ -161,7 +213,7 @@ export class IntakeCoordinator {
     // 管理员 @机器人 说「确认派单 / 驳回」时仍然按终审处理（语义明确）；
     // 其余 @ 是新指令，要走原研判，不能被待审需求单截走。
     const settlesApproval = isApprovalCommand(trigger.text) || isRejectionCommand(trigger.text)
-    if (pending && this.isApprover(trigger.chatId, trigger.actorId) && (trigger.addressed === 'none' || settlesApproval)) {
+    if (pending && this.canApprove(trigger) && (trigger.addressed === 'none' || settlesApproval)) {
       await this.handleApproval(pending, trigger)
       return 'handled'
     }
@@ -192,16 +244,17 @@ export class IntakeCoordinator {
       })
       verdict = parseScreenerVerdict(text)
     } catch (error) {
-      this.logger.warn('intake:screen-failed', { triggerId: trigger.id, message: errorMessage(error) })
+      this.logger.warn('intake:screen-failed', { triggerId: trigger.id, detail: errorMessage(error) })
       return false
     }
     if (!verdict) {
       this.logger.warn('intake:screen-invalid', { triggerId: trigger.id })
       return false
     }
-    this.logger.info('intake:screen', { triggerId: trigger.id, chat: trigger.chatId, kind: verdict.kind, reason: verdict.reason })
+    this.logger.info('intake:screen', { triggerId: trigger.id, chat: trigger.chatId, kind: verdict.kind, reason: preview(verdict.reason, 120) })
     if (verdict.kind === 'chat') {
-      this.decideIgnore(trigger, `intake:chat:${verdict.reason}`, 'inferred')
+      // 模型给的 reason 可能复述用户原话，进决策记录前先截断。
+      this.decideIgnore(trigger, `intake:chat:${preview(verdict.reason, 120)}`, 'inferred')
       return true
     }
 
@@ -260,7 +313,7 @@ export class IntakeCoordinator {
       })
       outcome = parseAnalystOutcome(text)
     } catch (error) {
-      this.logger.warn('intake:analysis-failed', { intakeId: intake.id, message: errorMessage(error) })
+      this.logger.warn('intake:analysis-failed', { intakeId: intake.id, detail: errorMessage(error) })
       this.replyTo(trigger, '这次没分析出来，稍后再把问题描述一遍，或者直接 @管理员 看一下。', `intake:analysis-failed:${trigger.id}`, { thread: true })
       this.decideIgnore(trigger, 'intake:analysis-failed', 'inferred')
       return
@@ -274,6 +327,12 @@ export class IntakeCoordinator {
 
     intake.turns.push({ role: 'router', text: outcome.reply, at: this.clock.now() })
     if (outcome.action === 'reply') {
+      // 追问额度为 0 表示完全不追问：直接按现有信息收口，不发问题。
+      if (settings.maxQuestions <= 0) {
+        intake.report = this.fallbackReport(intake)
+        await this.publishReady(intake, trigger)
+        return
+      }
       intake.questions += 1
       intake.updatedAt = this.clock.now()
       this.store.updateIntake(intake)
@@ -285,6 +344,15 @@ export class IntakeCoordinator {
         intake.report = this.fallbackReport(intake)
         await this.publishReady(intake, trigger)
       }
+      return
+    }
+
+    // 用户问的是「怎么办」而不是「有问题」：直接给结论就结束，不产出需求单。
+    if (outcome.action === 'answer') {
+      this.replyTo(trigger, outcome.reply, `intake:answer:${intake.id}:${intake.turns.length}`, { thread: true })
+      this.closeIntake(intake, 'answered')
+      this.decideIgnore(trigger, 'intake:answered', 'inferred')
+      this.logger.info('intake:answered', { intakeId: intake.id, chat: intake.chatId })
       return
     }
 
@@ -301,8 +369,11 @@ export class IntakeCoordinator {
     this.store.updateIntake(intake)
 
     const approvers = this.approversOf(intake.chatId)
-    this.replyTo(trigger, formatSubmittedToUser(intake), `intake:submitted:${intake.id}`, { thread: true })
-    this.replyTo(trigger, formatReviewMessage(intake, approvers), `intake:review:${intake.id}`, { thread: true })
+    // 出站 key 带修订时间：同一张需求单改了好几版时，每版都要能发出去，
+    // 不能被幂等去重成「同一条消息」吞掉。
+    const revision = intake.updatedAt
+    this.replyTo(trigger, formatSubmittedToUser(intake), `intake:submitted:${intake.id}:${revision}`, { thread: true })
+    this.replyTo(trigger, formatReviewMessage(intake, approvers), `intake:review:${intake.id}:${revision}`, { thread: true })
     this.decideIgnore(trigger, 'intake:ready-for-review', 'inferred')
     this.logger.info('intake:ready', {
       intakeId: intake.id,
@@ -329,6 +400,8 @@ export class IntakeCoordinator {
       // 管理员补充了要求：当作需求单修订，重新分析一版再提交。
       intake.turns.push({ role: 'user', text: trigger.text, at: trigger.receivedAt, actorId: trigger.actorId })
       intake.status = 'clarifying'
+      // 旧报告作废：管理员提了新要求，不能还挂着上一版结论去终审。
+      intake.report = undefined
       intake.updatedAt = this.clock.now()
       this.store.updateIntake(intake)
       await this.advance(intake, trigger)
@@ -350,6 +423,18 @@ export class IntakeCoordinator {
       return
     }
 
+    // 幂等：上一次终审已经建过工单、但回写 intake 前就中断了，这里复用它，不再建第二张。
+    const existing = this.ticketOfIntake(intake)
+    if (existing) {
+      intake.status = 'approved'
+      intake.ticketId = existing.id
+      intake.updatedAt = this.clock.now()
+      this.store.updateIntake(intake)
+      this.replyTo(trigger, `已确认派单：工单「${existing.title}」（${existing.id}）开始执行。`, `intake:approved:${intake.id}`, { thread: true })
+      this.logger.info('intake:approved', { intakeId: intake.id, ticketId: existing.id, actor: trigger.actorId, reused: true })
+      return
+    }
+
     let outcome: DecideOutcome
     try {
       outcome = this.engine.decide({
@@ -362,9 +447,11 @@ export class IntakeCoordinator {
         repo: intake.repo,
         branch: intake.branch,
         rules: ['intake:approved'],
+        // 工单归属提出人，而不是点「确认派单」的管理员。
+        owner: { actorId: intake.actorId, actorName: intake.actorName },
       })
     } catch (error) {
-      this.logger.warn('intake:approve-failed', { intakeId: intake.id, message: errorMessage(error) })
+      this.logger.warn('intake:approve-failed', { intakeId: intake.id, detail: errorMessage(error) })
       this.replyTo(trigger, '派单没有成功，稍后再回复「确认派单」试一次。', `intake:approve-failed:${intake.id}`, { thread: true })
       return
     }
@@ -397,29 +484,54 @@ export class IntakeCoordinator {
     }
   }
 
-  private closeIntake(intake: Intake, status: 'dismissed' | 'rejected'): void {
+  /**
+   * 这张需求单是不是已经建过工单。
+   *
+   * 终审是「建工单 + 回写 intake」两步，中间崩溃会留下已建单但没回写的需求单：
+   * 重试时必须认出它并复用，否则会建出第二张重复工单。
+   * 需求单号写进了工单的授权范围（`需求单：it_xxx`），按它反查即可。
+   */
+  private ticketOfIntake(intake: Intake): Ticket | null {
+    return this.store.ticketByIntakeRef(intake.id)
+  }
+
+  private closeIntake(intake: Intake, status: 'dismissed' | 'rejected' | 'answered'): void {
     intake.status = status
     intake.updatedAt = this.clock.now()
     this.store.updateIntake(intake)
   }
 
   private readyIntakeInThread(threadId: string): Intake | null {
-    const latest = this.store.latestIntakeByThread(threadId)
-    return latest?.status === 'ready' ? latest : null
+    // 按状态取待审的那张：同一个话题里可能还有别的状态的会话，
+ // 直接取「最新一条」会拿到一张还没整理好的需求单。
+    const ready = this.store.readyIntakeByThread(threadId)
+    if (!ready) return null
+    // 过期需求单不再接受终审：按 TTL 置为放弃，让管理员重新描述。
+    if (this.isExpired(ready)) {
+      this.closeIntake(ready, 'dismissed')
+      this.logger.info('intake:expired', { intakeId: ready.id })
+      return null
+    }
+    return ready
   }
 
   /** 只有仍在 TTL 内的 clarifying / ready 会话才继续；过期会话直接置为放弃。 */
   private freshActive(threadId: string, actorId: string): Intake | null {
     const intake = this.store.activeIntake(threadId, actorId)
     if (!intake) return null
-    const updated = Date.parse(intake.updatedAt)
-    const now = Date.parse(this.clock.now())
-    if (Number.isFinite(updated) && Number.isFinite(now) && now - updated > this.ttlMs) {
+    if (this.isExpired(intake)) {
       this.closeIntake(intake, 'dismissed')
       this.logger.info('intake:expired', { intakeId: intake.id })
       return null
     }
     return intake
+  }
+
+  /** 会话是否已超过 TTL（默认 72 小时）。 */
+  private isExpired(intake: Intake): boolean {
+    const updated = Date.parse(intake.updatedAt)
+    const now = Date.parse(this.clock.now())
+    return Number.isFinite(updated) && Number.isFinite(now) && now - updated > this.ttlMs
   }
 
   private hasBoundProject(chatId: string): boolean {
@@ -444,7 +556,7 @@ export class IntakeCoordinator {
       this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength, reason })
     } catch (error) {
       // Trigger 已被处理（例如同一轮已落过决定）时忽略，但留下原因便于排查。
-      this.logger.warn('intake:decision-failed', { triggerId: trigger.id, message: errorMessage(error) })
+      this.logger.warn('intake:decision-failed', { triggerId: trigger.id, detail: errorMessage(error) })
     }
   }
 }

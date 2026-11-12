@@ -47,6 +47,13 @@ export interface DecideInput {
   repo?: string
   /** 派工起始分支。 */
   branch?: string
+  /**
+   * 工单归属人（可选）。
+   *
+   * 默认归属触发消息的人；需求识别终审时归属提出人——管理员只是代为确认，
+   * 工单该算在提出人名下。
+   */
+  owner?: { actorId: string; actorName: string }
 }
 
 export interface DecideOutcome {
@@ -187,8 +194,8 @@ export class Engine {
       strength: input.strength,
       scope: input.scope?.trim() || `完成：${ticket.title}`,
       rules: input.rules ?? [],
-      actorId: trigger.actorId,
-      actorName: trigger.actorName,
+      actorId: input.owner?.actorId ?? trigger.actorId,
+      actorName: input.owner?.actorName ?? trigger.actorName,
       source: trigger.source,
       chatId: trigger.chatId,
       threadId: trigger.threadId,

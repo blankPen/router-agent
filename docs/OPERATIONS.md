@@ -57,17 +57,22 @@ Router 不做对话，只在必要时说话：
 | `trigger:ingested` | Source | `id` `chat` `addressed` `threadKeys` `topic` | 用户消息进入系统；`topic=true` 表示事件带了话题 ID（omt_） |
 | `trigger:dropped` | Source | `reason` `chat` `actor` | 收到但被过滤 |
 | `trigger:admitted-unaddressed` | CLI | `chat` `actor` `keys` | 已绑定工单的话题里，名单内成员没 @ 机器人也放行处理（tk-59） |
-| `intake:screen` | AgentLoop | `triggerId` `chat` `kind` `reason` | 需求识别初筛结论：chat / question / issue |
-| `intake:screen-failed` / `intake:screen-invalid` | AgentLoop | `triggerId` `message` | 初筛模型失败或输出不合法；消息按原准入规则继续处理 |
+| `intake:screen` | AgentLoop | `triggerId` `chat` `kind` `reason` | 需求识别初筛结论：chat / question / issue（`reason` 已截断到 120 字） |
+| `intake:screen-failed` / `intake:screen-invalid` | AgentLoop | `triggerId` `detail` / `triggerId` | 初筛模型失败或输出不合法；消息按原准入规则继续处理 |
 | `intake:opened` | AgentLoop | `intakeId` `chat` `actor` `kind` `project` | 为一条疑似问题创建需求识别会话 |
 | `intake:clarify` | AgentLoop | `intakeId` `questions` | 分析 Agent 发起追问 |
+| `intake:answered` | AgentLoop | `intakeId` `chat` | 分析 Agent 直接给出结论，会话结束，不产出需求单 |
 | `intake:ready` | AgentLoop | `intakeId` `chat` `title` `approvers` | 需求单整理完成，已 @管理员终审 |
-| `intake:approved` | AgentLoop | `intakeId` `ticketId` `actor` | 管理员确认派单，已生成正式工单 |
+| `intake:approved` | AgentLoop | `intakeId` `ticketId` `actor` `reused` | 管理员确认派单，已生成正式工单；`reused=true` 表示复用了上次已建的工单 |
 | `intake:rejected` | AgentLoop | `intakeId` `actor` | 管理员驳回需求单 |
 | `intake:expired` | AgentLoop | `intakeId` | 需求识别会话超过 72 小时无消息，自动放弃 |
-| `intake:analysis-failed` / `intake:analysis-invalid` | AgentLoop | `intakeId` `message` / `triggerId` | 分析模型失败或输出不合法；已给用户兜底回复 |
+| `intake:analysis-failed` / `intake:analysis-invalid` | AgentLoop | `intakeId` `detail` / `intakeId` `triggerId` | 分析模型失败或输出不合法；已给用户兜底回复 |
+| `intake:approve-failed` | AgentLoop | `intakeId` `detail` | 终审通过后开单失败；需求单仍可再次终审 |
+| `intake:requester-not-allowed` | AgentLoop | `triggerId` `chat` `actor` | 发起人不在该群白名单里，不再继续澄清（群名单是硬边界） |
 | `intake:project-unbound` | AgentLoop | `chat` `triggerId` | 群没绑定项目，intake 不接管，按原准入规则处理 |
-| `intake:decision-failed` | AgentLoop | `triggerId` `message` | 落决策失败（例如同一轮已落过决定） |
+| `intake:decision-failed` | AgentLoop | `triggerId` `detail` | 落决策失败（例如同一轮已落过决定） |
+| `intake:abort-failed` / `intake:dispose-failed` | IntakeEngine | `stage` `detail` | 分析会话超时中断或释放失败；已拿到的结果不受影响 |
+| `intake:tool-failed` | IntakeEngine | `stage` `detail` | 只读代码工具读写失败（code_read / code_ls / code_grep）；读不到不等于没有匹配 |
 | `thread:created` | Engine | `threadId` `source` `chat` | 首次见到某条线程，登记规范 ID |
 | `thread:resolved` | Engine | `threadId` `rawThreadId` `triggerId` `source` | 消息自带线程标识没对上，靠别名收敛到了已有线程（排查「消息没进工单」先看这条） |
 | `thread:backfilled` / `thread:backfill-failed` | CLI | `filled` `failed` / `batch` `code` `detail` | `ra migrate threads --apply` 的回填结果 |

@@ -83,11 +83,14 @@ describe('分析结果解析', () => {
 
 describe('终审口令', () => {
   it('确认派单', () => {
-    for (const text of ['确认派单', '确认', '通过', '同意', 'ok', 'approve']) {
+    for (const text of ['确认派单', '确认', '通过', '同意', 'approve']) {
       expect(isApprovalCommand(text)).toBe(true)
     }
     expect(isApprovalCommand('不用确认')).toBe(false)
     expect(isApprovalCommand('这段描述可以更详细一点')).toBe(false)
+    // 「ok」「好」这类随口附和不算拍板：不能因此就把需求单派出去。
+    expect(isApprovalCommand('ok')).toBe(false)
+    expect(isApprovalCommand('好的')).toBe(false)
   })
 
   it('驳回', () => {

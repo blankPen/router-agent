@@ -7,9 +7,10 @@ export interface ScreenerVerdict {
   reason: string
 }
 
-/** 分析 Agent 的两种输出。 */
+/** 分析 Agent 的三种输出。 */
 export type AnalystOutcome =
   | { action: 'reply'; reply: string }
+  | { action: 'answer'; reply: string }
   | { action: 'report'; reply: string; report: IntakeReport }
 
 const KINDS: IntakeKind[] = ['chat', 'question', 'issue']
@@ -34,6 +35,8 @@ export function parseAnalystOutcome(text: string): AnalystOutcome | null {
   const reply = typeof json.reply === 'string' ? json.reply.trim() : ''
   const action = String(json.action ?? '')
   if (action === 'reply') return reply ? { action: 'reply', reply } : null
+  // answer：用户问的是「怎么办」，直接给结论就结束，不产出需求单。
+  if (action === 'answer') return reply ? { action: 'answer', reply } : null
   if (action !== 'report') return null
   const raw = json.report
   if (!raw || typeof raw !== 'object') return null
@@ -58,12 +61,17 @@ export function parseAnalystOutcome(text: string): AnalystOutcome | null {
   }
 }
 
-/** 终审关键词：管理员在需求单话题里回复这些词即视为通过。 */
+/**
+ * 终审关键词：管理员在需求单话题里回复这些词即视为通过。
+ *
+ * 不收「ok」「好」这类通用应答：一句「好」很容易是随口附和，
+ * 把它当成派单确认等于让需求单在没人真正拍板的时候进了排期。
+ */
 export function isApprovalCommand(text: string): boolean {
   const normalized = text.trim().replace(/\s+/g, '')
   if (!normalized || normalized.length > 20) return false
   if (/不(用|需要|要)(派单|开单|处理|确认)|别(派单|开单)|驳回|拒绝|不用了|算了/.test(normalized)) return false
-  return /^(确认派单|确认开单|确认|通过|同意|可以派单|派单|开工|开单|approve|ok)$/i.test(normalized)
+  return /^(确认派单|确认开单|确认|通过|同意|可以派单|派单|开工|开单|approve)$/i.test(normalized)
 }
 
 /** 驳回关键词；只认短句，避免把管理员的一段解释误判成驳回。 */
@@ -151,7 +159,10 @@ export function buildAnalystUserPrompt(input: AnalystPromptInput): string {
     questionsAsked: intake.questions,
     maxQuestions: input.maxQuestions,
     reporter: { id: intake.actorId, name: intake.actorName },
-    history: intake.turns.map(turn => ({ role: turn.role, text: turn.text, at: turn.at })),
+    // 当前这条消息在分析前已经落进 turns，这里去掉重复的那条，只留更早的历史。
+    history: intake.turns
+      .filter(turn => !(turn.role === 'user' && turn.at === trigger.receivedAt && turn.text === trigger.text))
+      .map(turn => ({ role: turn.role, text: turn.text, at: turn.at })),
     message: { text: trigger.text, addressed: trigger.addressed, at: trigger.receivedAt },
   }, null, 2)
 }

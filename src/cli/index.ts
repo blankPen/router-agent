@@ -1345,9 +1345,13 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       })
     : null
   // 需求分析助手：只在有群开启时装配，避免默认改变存量群的回复行为。
-  const intakeChats = new Set(intakeEnabledChats(config))
+  // 没绑定项目的群不纳入：分析 Agent 定位不到代码，也生成不了可派单的需求单。
+  const intakeChats = new Set(intakeEnabledChats(config).filter(chatId => {
+    const chat = config.feishu.chats.find(item => item.chat === chatId)
+    return Boolean(chat?.repo)
+  }))
   const intakeEngine = model && intakeChats.size > 0
-    ? createIntakeEngine({ config, store, model })
+    ? createIntakeEngine({ config, store, model, logger })
     : undefined
   const auditPath = join(home, 'logs', 'decisions.jsonl')
   const onDecisionAudit = (audit: DecisionAudit): void => {

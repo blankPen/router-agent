@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createCodeTools } from '../../src/router/intake-engine.js'
@@ -76,6 +76,62 @@ describe('需求识别只读代码工具', () => {
       expect(secret.matches).toHaveLength(0)
     } finally {
       rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('code_grep 的 path 指向文件时直接搜这个文件', async () => {
+    const root = project()
+    try {
+      const tools = createCodeTools(root)
+      const result = await call(tools, 'code_grep', { pattern: 'timeout', path: 'src/login.ts' })
+      expect(result.matches.join('\n')).toContain('src/login.ts:1')
+      expect(result.matches).toHaveLength(1)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('code_grep 按纯文本匹配：模型给的正则元字符不当正则解释', async () => {
+    const root = project()
+    try {
+      const tools = createCodeTools(root)
+      // 若当成正则，'.*' 会命中所有行；纯文本匹配下只有真的写着 .* 的行才算。
+      const result = await call(tools, 'code_grep', { pattern: '.*' })
+      expect(result.matches).toHaveLength(0)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('code_grep 遇到超大文件时跳过并标记 partial，不当成「没有匹配」', async () => {
+    const root = project()
+    try {
+      writeFileSync(join(root, 'big.log'), `${'x'.repeat(500_000)}\nNEEDLE_HERE\n`)
+      const tools = createCodeTools(root)
+      const result = await call(tools, 'code_grep', { pattern: 'NEEDLE_HERE' })
+      expect(result.partial).toBe(true)
+      expect(result.skippedLargeFiles).toContain('big.log')
+      expect(result.matches).toHaveLength(0)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('软链指向项目外时拒绝读取', async () => {
+    const root = project()
+    const outside = mkdtempSync(join(tmpdir(), 'ra-outside-'))
+    try {
+      writeFileSync(join(outside, 'secret.txt'), 'SECRET_MARKER\n')
+      symlinkSync(join(outside, 'secret.txt'), join(root, 'escape.txt'))
+      symlinkSync(outside, join(root, 'escape-dir'))
+      const tools = createCodeTools(root)
+      // 词法路径在项目内，但真实路径在项目外：一律拒绝。
+      expect(await call(tools, 'code_read', { path: 'escape.txt' })).toEqual({ error: 'path:outside-project' })
+      expect(await call(tools, 'code_ls', { path: 'escape-dir' })).toEqual({ error: 'path:outside-project' })
+      expect(await call(tools, 'code_grep', { pattern: 'SECRET_MARKER', path: 'escape.txt' })).toEqual({ error: 'path:outside-project' })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(outside, { recursive: true, force: true })
     }
   })
 })

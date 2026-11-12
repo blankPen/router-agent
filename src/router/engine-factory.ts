@@ -7,6 +7,7 @@ import { PiDecisionEngine } from './pi-decision-engine.js'
 import { PiIntakeEngine } from './intake-engine.js'
 import { SqliteSessionPersistence } from './session-persistence.js'
 import { RouterToolbox, type RouterToolboxDeps } from './tools.js'
+import type { Logger } from '../infra/logger.js'
 
 export interface DecisionEngineFactoryOptions {
   config: AppConfig
@@ -51,11 +52,14 @@ export function createDecisionEngine(opts: DecisionEngineFactoryOptions): PiDeci
 }
 
 /** 装配需求识别引擎：初筛与分析共用一个 Pi 通道，读代码能力由 intake-flow 逐轮决定。 */
-export function createIntakeEngine(opts: Omit<DecisionEngineFactoryOptions, 'engine' | 'updater' | 'scheduleRestart'>): PiIntakeEngine {
+export function createIntakeEngine(
+  opts: Omit<DecisionEngineFactoryOptions, 'engine' | 'updater' | 'scheduleRestart'> & { logger?: Logger },
+): PiIntakeEngine {
   return new PiIntakeEngine({
     model: opts.model,
     agentDir: opts.config.router.agentDir || join(opts.config.home, 'pi'),
     cwd: opts.config.home,
     timeoutMs: opts.config.router.timeoutMs,
+    ...(opts.logger ? { logger: opts.logger } : {}),
   })
 }

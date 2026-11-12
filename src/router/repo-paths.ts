@@ -3,6 +3,9 @@ import { isAbsolute } from 'node:path'
 import type { CommandRunner } from '../infra/process.js'
 import { parseOrcaRepos } from '../sources/lark.js'
 
+/** orca repo list 的超时：超过就按「拿不到路径」处理，退化为纯对话分析。 */
+const ORCA_LOOKUP_TIMEOUT_MS = 15_000
+
 export interface RepoPathResolverOptions {
   /** Orca 命令；没有 orca 运行时可以不传。 */
   orca?: CommandRunner
@@ -27,7 +30,8 @@ export function createRepoPathResolver(opts: RepoPathResolverOptions = {}): (sel
     orcaPaths = new Map()
     if (!opts.orca) return orcaPaths
     try {
-      const res = await opts.orca.run(['repo', 'list', '--json'])
+      // 超时保护：orca 卡住不能把 intake 的串行 tick 一起拖死。
+      const res = await opts.orca.run(['repo', 'list', '--json'], { timeoutMs: ORCA_LOOKUP_TIMEOUT_MS })
       if (res.code !== 0) return orcaPaths
       for (const repo of parseOrcaRepos(res.stdout)) {
         if (!repo.path) continue

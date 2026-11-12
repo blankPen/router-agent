@@ -205,7 +205,7 @@ export interface Channel {
  * Router 只负责调度与流程收尾：初筛、追问、结构化整理全部交给 intake 分析引擎，
  * 结构化结果必须经管理员终审（approved / rejected）才可能进入原有派单流程。
  */
-export type IntakeStatus = 'clarifying' | 'ready' | 'approved' | 'rejected' | 'dismissed'
+export type IntakeStatus = 'clarifying' | 'ready' | 'approved' | 'rejected' | 'dismissed' | 'answered'
 
 /** 初筛结论：闲聊 / 普通咨询 / 疑似故障或需求。 */
 export type IntakeKind = 'chat' | 'question' | 'issue'

@@ -1,9 +1,9 @@
-import { noopLogger, type Logger } from '../infra/logger.js'
+import { errorMessage, noopLogger, type Logger } from '../infra/logger.js'
 import { createDefaultPiSession } from './pi-decision-engine.js'
 import type { PiModelConfig } from './model-config.js'
 import type { PiToolDefinition } from './tool-spec.js'
 import { Type } from 'typebox'
-import { openSync, readSync, closeSync, readdirSync, statSync } from 'node:fs'
+import { openSync, readSync, closeSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { join, relative, resolve, sep } from 'node:path'
 
 /**
@@ -80,7 +80,7 @@ export class PiIntakeEngine implements IntakeEngine {
     const toolNames = readCode ? [...INTAKE_READ_ONLY_TOOLS] : []
     const cwd = readCode && req.projectPath ? req.projectPath : this.cwd
     const timeoutMs = req.timeoutMs && req.timeoutMs > 0 ? req.timeoutMs : this.timeoutMs
-    const tools = readCode && req.projectPath ? createCodeTools(req.projectPath) : []
+    const tools = readCode && req.projectPath ? createCodeTools(req.projectPath, this.logger) : []
 
     if (this.runSession) return this.runSession({ ...req, cwd, toolNames })
 
@@ -100,7 +100,9 @@ export class PiIntakeEngine implements IntakeEngine {
     let timedOut = false
     const timer = setTimeout(() => {
       timedOut = true
-      void session.abort().catch(() => {})
+      void session.abort().catch((error: unknown) => {
+        this.logger.warn('intake:abort-failed', { stage: 'abort', detail: errorMessage(error) })
+      })
     }, timeoutMs)
     timer.unref?.()
     try {
@@ -109,8 +111,9 @@ export class PiIntakeEngine implements IntakeEngine {
       clearTimeout(timer)
       try {
         session.dispose()
-      } catch {
-        // dispose 失败不影响已拿到的结果。
+      } catch (error) {
+        // dispose 失败不影响已拿到的结果，但要让排查的人知道发生过。
+        this.logger.warn('intake:dispose-failed', { stage: 'dispose', detail: errorMessage(error) })
       }
     }
     if (timedOut) throw new Error(`intake:timeout(${timeoutMs}ms)`)
@@ -141,20 +144,29 @@ export function lastAssistantText(messages: unknown): string {
 const MAX_READ_BYTES = 60_000
 const MAX_LIST_ENTRIES = 200
 const MAX_GREP_MATCHES = 50
+/** grep 单个文件的最大读取量；超出的文件跳过并在结果里说明，不静默当成「没匹配」。 */
+const MAX_GREP_FILE_BYTES = 400_000
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'coverage', 'target', '.cache'])
 
 /**
  * 项目内只读工具。
  *
- * 所有路径都先解析成绝对路径，再校验仍在 `root` 之内：`../`、符号链接、绝对路径
- * 都不能把访问范围带出当前群绑定的项目。项目隔离靠这一层保证，而不是靠模型自觉。
+ * 所有路径都先解析成绝对路径，再校验仍在 `root` 之内：`../`、绝对路径都不能把访问范围
+ * 带出当前群绑定的项目。符号链接同样挡住：路径的**真实路径**也必须在项目真实根目录内，
+ * 否则项目里一个指向外部的软链就能把读取范围带出去。项目隔离靠这一层保证，而不是靠模型自觉。
  */
-export function createCodeTools(root: string): PiToolDefinition[] {
+export function createCodeTools(root: string, logger: Logger = noopLogger): PiToolDefinition[] {
   const base = resolve(root)
+  const realBase = realPath(base) ?? base
+  /** 词法包含判断：绝对路径必须在项目根之下。 */
+  const within = (path: string, root: string): boolean => path === root || path.startsWith(`${root}${sep}`)
   const inside = (target: string): string | null => {
     const abs = resolve(base, target || '.')
-    if (abs === base || abs.startsWith(`${base}${sep}`)) return abs
-    return null
+    if (!within(abs, base)) return null
+    // 真实路径再判一次：软链指向项目外时直接拒绝。
+    const real = realPath(abs)
+    if (!real || !within(real, realBase)) return null
+    return abs
   }
 
   return [
@@ -178,7 +190,8 @@ export function createCodeTools(root: string): PiToolDefinition[] {
             .map(entry => `${entry.isDirectory() ? 'dir' : 'file'} ${entry.name}`)
           return textResult({ path: relative(base, abs) || '.', entries })
         } catch (error) {
-          return textResult({ error: `ls-failed: ${error instanceof Error ? error.message : String(error)}` })
+          logger.warn('intake:tool-failed', { stage: 'code_ls', detail: errorMessage(error) })
+          return textResult({ error: `ls-failed: ${errorMessage(error)}` })
         }
       },
     },
@@ -210,16 +223,17 @@ export function createCodeTools(root: string): PiToolDefinition[] {
             content: text,
           })
         } catch (error) {
-          return textResult({ error: `read-failed: ${error instanceof Error ? error.message : String(error)}` })
+          logger.warn('intake:tool-failed', { stage: 'code_read', detail: errorMessage(error) })
+          return textResult({ error: `read-failed: ${errorMessage(error)}` })
         }
       },
     },
     {
       name: 'code_grep',
       label: 'code_grep',
-      description: '在项目内按纯文本或简单正则搜索，返回文件与行号；不读项目外文件。',
+      description: '在项目内按纯文本搜索（大小写不敏感），返回文件与行号；不读项目外文件。',
       parameters: Type.Object({
-        pattern: Type.String({ description: '要搜索的文本或简单正则' }),
+        pattern: Type.String({ description: '要搜索的文本（按纯文本匹配，大小写不敏感）' }),
         path: Type.Optional(Type.String({ description: '搜索范围（相对项目根目录），默认整个项目' })),
       }),
       async execute(_id, params) {
@@ -227,25 +241,42 @@ export function createCodeTools(root: string): PiToolDefinition[] {
         if (!pattern) return textResult({ error: 'pattern:empty' })
         const abs = inside(String(params.path ?? ''))
         if (!abs) return textResult({ error: 'path:outside-project' })
-        let matcher: RegExp
-        try {
-          matcher = new RegExp(pattern, 'i')
-        } catch {
-          matcher = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
-        }
+        // 纯文本匹配：模型给的 pattern 不可信，直接当正则可能触发灾难性回溯。
+        const needle = pattern.toLowerCase()
+        const matcher = (line: string): boolean => line.toLowerCase().includes(needle)
         const matches: string[] = []
-        walk(abs, matches, matcher)
-        return textResult({ matches, truncated: matches.length >= MAX_GREP_MATCHES })
+        const skipped: string[] = []
+        walk(abs, matches, matcher, skipped)
+        const capped = matches.length >= MAX_GREP_MATCHES
+        return textResult({
+          matches,
+          truncated: capped,
+          ...(skipped.length > 0 ? { skippedLargeFiles: skipped.slice(0, 20), partial: true } : {}),
+        })
       },
     },
   ]
 
-  function walk(dir: string, matches: string[], matcher: RegExp): void {
+  function walk(dir: string, matches: string[], matcher: (line: string) => boolean, skipped: string[]): void {
     if (matches.length >= MAX_GREP_MATCHES) return
+    let stat
+    try {
+      stat = statSync(dir)
+    } catch (error) {
+      logger.warn('intake:tool-failed', { stage: 'code_grep', detail: errorMessage(error) })
+      return
+    }
+    // path 指向文件时直接搜这个文件，不要当目录去 readdir。
+    if (stat.isFile()) {
+      searchFile(dir, matches, matcher, skipped)
+      return
+    }
+    if (!stat.isDirectory()) return
     let entries
     try {
       entries = readdirSync(dir, { withFileTypes: true })
-    } catch {
+    } catch (error) {
+      logger.warn('intake:tool-failed', { stage: 'code_grep', detail: errorMessage(error) })
       return
     }
     for (const entry of entries) {
@@ -253,33 +284,51 @@ export function createCodeTools(root: string): PiToolDefinition[] {
       if (SKIP_DIRS.has(entry.name)) continue
       const next = join(dir, entry.name)
       if (entry.isDirectory()) {
-        walk(next, matches, matcher)
+        walk(next, matches, matcher, skipped)
         continue
       }
       if (!entry.isFile()) continue
-      let text = ''
-      try {
-        const stat = statSync(next)
-        if (stat.size > 400_000) continue
-        const buffer = Buffer.alloc(Math.min(stat.size, MAX_READ_BYTES))
-        const fd = openSync(next, 'r')
-        try {
-          readSync(fd, buffer, 0, buffer.length, 0)
-        } finally {
-          closeSync(fd)
-        }
-        text = buffer.toString('utf8')
-      } catch {
-        continue
-      }
-      if (!text || text.includes('\u0000')) continue
-      const lines = text.split('\n')
-      for (let index = 0; index < lines.length; index += 1) {
-        if (!matcher.test(lines[index]!)) continue
-        matches.push(`${relative(base, next)}:${index + 1}: ${lines[index]!.trim().slice(0, 200)}`)
-        if (matches.length >= MAX_GREP_MATCHES) return
-      }
+      searchFile(next, matches, matcher, skipped)
     }
+  }
+
+  /** 搜一个文件：整文件读取（受大小上限约束），超限的文件跳过并记账。 */
+  function searchFile(file: string, matches: string[], matcher: (line: string) => boolean, skipped: string[]): void {
+    let text = ''
+    try {
+      const stat = statSync(file)
+      if (stat.size > MAX_GREP_FILE_BYTES) {
+        skipped.push(relative(base, file))
+        return
+      }
+      const buffer = Buffer.alloc(stat.size)
+      const fd = openSync(file, 'r')
+      try {
+        readSync(fd, buffer, 0, buffer.length, 0)
+      } finally {
+        closeSync(fd)
+      }
+      text = buffer.toString('utf8')
+    } catch (error) {
+      logger.warn('intake:tool-failed', { stage: 'code_grep', detail: errorMessage(error) })
+      return
+    }
+    if (!text || text.includes('\u0000')) return
+    const lines = text.split('\n')
+    for (let index = 0; index < lines.length; index += 1) {
+      if (!matcher(lines[index]!)) continue
+      matches.push(`${relative(base, file)}:${index + 1}: ${lines[index]!.trim().slice(0, 200)}`)
+      if (matches.length >= MAX_GREP_MATCHES) return
+    }
+  }
+}
+
+/** 真实路径；取不到（路径不存在等）时返回 null。 */
+function realPath(path: string): string | null {
+  try {
+    return realpathSync(path)
+  } catch {
+    return null
   }
 }
 

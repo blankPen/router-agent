@@ -642,8 +642,8 @@ export class RouterService {
   /** intake 用：优先注入的解析器，其次按 Orca 仓库清单解析；两者都没有就只做对话分析。 */
   private intakeProjectPathOf(opts: RouterServiceOptions): (project: { name: string; repo: string }) => Promise<string | undefined> {
     if (opts.resolveIntakeProjectPath) return opts.resolveIntakeProjectPath
-    if (!opts.orca) return async () => undefined
-    const resolve = createRepoPathResolver({ orca: opts.orca })
+    // 没有 orca 也能解析 path:/abs 这类直接选择器；只有 name:/id: 选择器才需要 orca。
+    const resolve = createRepoPathResolver({ ...(opts.orca ? { orca: opts.orca } : {}) })
     return async project => (await resolve(project.repo)) ?? (project.name ? resolve(project.name) : undefined)
   }
 

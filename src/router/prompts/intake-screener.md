@@ -22,6 +22,8 @@
 
 只输出一个 JSON 对象，不要 Markdown 代码块、不要多余文字：
 
+`kind` 必须取下面三个值之一：`chat`、`question`、`issue`。
+
 ```json
-{"kind":"chat|question|issue","reason":"一句话说明判断依据"}
+{"kind":"issue","reason":"一句话说明判断依据"}
 ```

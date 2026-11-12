@@ -55,11 +55,11 @@ function trigger(over: Partial<Trigger> = {}): Trigger {
   }
 }
 
-function setup(llm: IntakeEngine, over: { maxQuestions?: number; approvers?: string[] } = {}) {
+function setup(llm: IntakeEngine, over: { maxQuestions?: number; approvers?: string[]; policy?: Partial<Policy> } = {}) {
   const store = new Store(':memory:')
   const clock = { now: () => now }
   let n = 0
-  const engine = new Engine({ store, policy, clock, ids: { next: p => `${p}_${++n}` } })
+  const engine = new Engine({ store, policy: { ...policy, ...over.policy }, clock, ids: { next: p => `${p}_${++n}` } })
   const loop = new AgentLoop({
     engine,
     decisionEngine: {
@@ -199,6 +199,9 @@ describe('需求识别（intake）', () => {
     expect(tickets[0]?.branch).toBe('main')
     const mandate = engine.store.getMandate(tickets[0]!.mandateId)
     expect(mandate?.scope).toContain('问题描述：点击登录返回 500')
+    // 工单归属提出人，而不是点「确认派单」的管理员。
+    expect(mandate?.actorId).toBe('ou_bob')
+    expect(mandate?.actorName).toBe('Bob')
     expect(store.latestIntakeByThread('feishu:oc_dev:om_1')?.status).toBe('approved')
   })
 
@@ -452,5 +455,212 @@ describe('需求识别（intake）', () => {
     const intake = store.latestIntakeByThread('feishu:oc_dev:om_1')
     expect(intake?.status).toBe('ready')
     expect(intake?.report?.problem).toBe('登录页面一直报 500')
+  })
+
+  it('追问额度为 0 时不追问，直接按现有信息收口', async () => {
+    const llm = new FakeIntake([
+      QUESTIONS,
+      { action: 'reply', reply: '麻烦补充一下报错原文' },
+    ])
+    const { engine, loop, store } = setup(llm, { maxQuestions: 0 })
+    engine.ingest(trigger())
+
+    const result = await loop.tick()
+    const intake = store.latestIntakeByThread('feishu:oc_dev:om_1')
+    expect(intake?.status).toBe('ready')
+    expect(intake?.questions).toBe(0)
+    expect(intake?.report?.problem).toBe('登录页面一直报 500')
+    // 没有追问消息，直接进入待审。
+    expect(store.listOutbox().some(item => item.text.includes('补充一下报错原文'))).toBe(false)
+    expect(result.ignored).toBe(1)
+    expect(store.getTrigger('t1')?.disposition).toBe('evaluated')
+  })
+
+  it('模型直接给结论时结束会话，不产出需求单也不打扰管理员', async () => {
+    const llm = new FakeIntake([
+      QUESTIONS,
+      { action: 'reply', reply: '麻烦补充一下报错原文' },
+      { action: 'answer', reply: '重启一下服务就好了' },
+    ])
+    const { engine, loop, store, advance } = setup(llm)
+    engine.ingest(trigger())
+    await loop.tick()
+    advance('2026-11-12T10:01:10.000Z')
+    engine.ingest(trigger({
+      id: 't2',
+      externalId: 'om_2',
+      threadId: 'feishu:oc_dev:om_1',
+      text: '重启一下服务就好了',
+      receivedAt: '2026-11-12T10:01:00.000Z',
+    }))
+    await loop.tick()
+
+    const intake = store.latestIntakeByThread('feishu:oc_dev:om_1')
+    expect(intake?.status).toBe('answered')
+    expect(intake?.report).toBeUndefined()
+    expect(engine.store.listTickets()).toHaveLength(0)
+    expect(store.listOutbox().some(item => item.text.includes('<at id="ou_admin"></at>'))).toBe(false)
+  })
+
+  it('发起人补充信息时旧报告作废，需求单回到澄清中', async () => {
+    const llm = new FakeIntake([
+      QUESTIONS,
+      { action: 'report', reply: '整理好了', report: { title: '登录 500', problem: '点击登录返回 500' } },
+      { action: 'reply', reply: '还要补充一下设备信息' },
+    ])
+    const { engine, loop, store, advance } = setup(llm)
+    engine.ingest(trigger())
+    await loop.tick()
+    expect(store.latestIntakeByThread('feishu:oc_dev:om_1')?.status).toBe('ready')
+
+    advance('2026-11-12T10:01:10.000Z')
+    engine.ingest(trigger({
+      id: 't2',
+      externalId: 'om_2',
+      threadId: 'feishu:oc_dev:om_1',
+      text: '只有 Safari 会这样',
+      receivedAt: '2026-11-12T10:01:00.000Z',
+    }))
+    await loop.tick()
+
+    const intake = store.latestIntakeByThread('feishu:oc_dev:om_1')
+    expect(intake?.status).toBe('clarifying')
+    // 上一版的结论不能还挂着让管理员去终审。
+    expect(intake?.report).toBeUndefined()
+  })
+
+  it('发起人被移出群级名单后不能再继续澄清：不调用模型也不回复', async () => {
+    const llm = new FakeIntake([QUESTIONS, { action: 'reply', reply: '补充报错原文' }])
+    const { engine, loop, store, advance } = setup(llm, {
+      policy: {
+        allowedByChat: { oc_dev: ['ou_bob'] },
+        allowedByChatOpenIds: { oc_dev: ['ou_bob'] },
+      },
+    })
+    engine.ingest(trigger({ actorId: 'ou_bob' }))
+    await loop.tick()
+    // 第一轮：初筛 + 分析各调一次模型。
+    const requestsBefore = llm.requests.length
+    expect(requestsBefore).toBe(2)
+    const outboxBefore = store.listOutbox().length
+
+    advance('2026-11-12T10:01:10.000Z')
+    engine.updatePolicy({
+      ...policy,
+      allowedByChat: { oc_dev: ['ou_alice'] },
+      allowedByChatOpenIds: { oc_dev: ['ou_alice'] },
+    })
+    engine.ingest(trigger({
+      id: 't2',
+      externalId: 'om_2',
+      threadId: 'feishu:oc_dev:om_1',
+      actorId: 'ou_bob',
+      text: '报错是 internal server error',
+      receivedAt: '2026-11-12T10:01:00.000Z',
+    }))
+    await loop.tick()
+
+    expect(llm.requests).toHaveLength(requestsBefore)
+    expect(store.listOutbox()).toHaveLength(outboxBefore)
+  })
+
+  it('终审管理员不在群级名单里时不能派单', async () => {
+    const llm = new FakeIntake([
+      QUESTIONS,
+      { action: 'report', reply: '整理好了', report: { title: '登录 500', problem: '500' } },
+    ])
+    const { engine, loop, store, advance } = setup(llm, {
+      approvers: ['ou_admin'],
+      policy: {
+        allowedByChat: { oc_dev: ['ou_bob'] },
+        allowedByChatOpenIds: { oc_dev: ['ou_bob'] },
+      },
+    })
+    engine.ingest(trigger())
+    await loop.tick()
+    advance('2026-11-12T10:02:10.000Z')
+    engine.ingest(trigger({
+      id: 't_approve',
+      externalId: 'om_approve',
+      threadId: 'feishu:oc_dev:om_1',
+      actorId: 'ou_admin',
+      actorName: '管理员',
+      text: '确认派单',
+      receivedAt: '2026-11-12T10:02:00.000Z',
+    }))
+    await loop.tick()
+    expect(engine.store.listTickets()).toHaveLength(0)
+    expect(store.latestIntakeByThread('feishu:oc_dev:om_1')?.status).toBe('ready')
+  })
+
+  it('终审重试不重复建单：复用已存在的工单', async () => {
+    const llm = new FakeIntake([
+      QUESTIONS,
+      { action: 'report', reply: '整理好了', report: { title: '登录 500', problem: '500' } },
+    ])
+    const { engine, loop, store, advance } = setup(llm)
+    engine.ingest(trigger())
+    await loop.tick()
+    advance('2026-11-12T10:02:10.000Z')
+    engine.ingest(trigger({
+      id: 't_approve',
+      externalId: 'om_approve',
+      threadId: 'feishu:oc_dev:om_1',
+      actorId: 'ou_admin',
+      actorName: '管理员',
+      text: '确认派单',
+      receivedAt: '2026-11-12T10:02:00.000Z',
+    }))
+    await loop.tick()
+    expect(engine.store.listTickets()).toHaveLength(1)
+
+    // 模拟「工单已建、需求单还没回写就中断」：再拍一次板不能建出第二张。
+    const intake = store.latestIntakeByThread('feishu:oc_dev:om_1')!
+    intake.status = 'ready'
+    store.updateIntake(intake)
+    // 工单已结束，消息不再被扇给 worker，才会回到终审分支。
+    engine.closeTicket('tk-1', 'done')
+    advance('2026-11-12T10:04:10.000Z')
+    engine.ingest(trigger({
+      id: 't_approve_retry',
+      externalId: 'om_approve_retry',
+      threadId: 'feishu:oc_dev:om_1',
+      actorId: 'ou_admin',
+      actorName: '管理员',
+      text: '确认派单',
+      receivedAt: '2026-11-12T10:04:00.000Z',
+    }))
+    await loop.tick()
+
+    expect(engine.store.listTickets()).toHaveLength(1)
+    const after = store.latestIntakeByThread('feishu:oc_dev:om_1')
+    expect(after?.status).toBe('approved')
+    expect(after?.ticketId).toBe('tk-1')
+  })
+
+  it('超过 72 小时的待审需求单不再接受终审', async () => {
+    const llm = new FakeIntake([
+      QUESTIONS,
+      { action: 'report', reply: '整理好了', report: { title: '登录 500', problem: '500' } },
+    ])
+    const { engine, loop, store, advance } = setup(llm)
+    engine.ingest(trigger())
+    await loop.tick()
+    expect(store.latestIntakeByThread('feishu:oc_dev:om_1')?.status).toBe('ready')
+
+    // 需求单挂了三天没人处理，管理员再来拍板。
+    advance('2026-11-15T10:02:10.000Z')
+    engine.ingest(trigger({
+      id: 't_approve',
+      externalId: 'om_approve',
+      threadId: 'feishu:oc_dev:om_1',
+      actorId: 'ou_admin',
+      actorName: '管理员',
+      text: '确认派单',
+      receivedAt: '2026-11-15T10:02:00.000Z',
+    }))
+    await loop.tick()
+    expect(engine.store.listTickets()).toHaveLength(0)
+    expect(store.latestIntakeByThread('feishu:oc_dev:om_1')?.status).toBe('dismissed')
   })
 })

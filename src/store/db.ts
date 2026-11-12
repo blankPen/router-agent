@@ -845,6 +845,28 @@ export class Store {
     return row ? intakeFromRow(row) : null
   }
 
+  /** 按话题取待终审（ready）的那条 intake；没有就返回 null。 */
+  readyIntakeByThread(threadId: string): Intake | null {
+    const row = this.db.prepare("SELECT * FROM intakes WHERE thread_id = ? AND status = 'ready' ORDER BY updated_at DESC LIMIT 1")
+      .get(threadId) as Row | undefined
+    return row ? intakeFromRow(row) : null
+  }
+
+  /**
+   * 按需求单号反查已生成的工单。
+   *
+   * 终审流程里「建工单」和「回写需求单」是两步，中间崩溃会留下已建单但没回写的需求单；
+   * 重试时按需求单号找到那张工单并复用，避免建出第二张重复工单。
+   */
+  ticketByIntakeRef(intakeId: string): Ticket | null {
+    const marker = `需求单：${intakeId}`
+    for (const ticket of this.listTickets()) {
+      const mandate = this.getMandate(ticket.mandateId)
+      if (mandate?.scope.includes(marker)) return ticket
+    }
+    return null
+  }
+
   /** 按工单号反查 intake：终审通过后用于把工单与原需求单关联。 */
   intakeByTicket(ticketId: string): Intake | null {
     const row = this.db.prepare('SELECT * FROM intakes WHERE ticket_id = ? ORDER BY updated_at DESC LIMIT 1').get(ticketId) as Row | undefined
