@@ -336,6 +336,8 @@ export class PiDecisionEngine implements DecisionEngine {
     if (json) {
       const parsed = proposalFromJson(json, req.trigger.id, req.strength)
       if (parsed.kind === 'proposal') return this.finish(audit, { proposal: parsed.proposal })
+      // 模型自己给出了「判断不了」的决定：属于模型结论，不是调用失败。
+      if (parsed.kind === 'unavailable') return this.finish(audit, { unavailableReason: parsed.reason, unavailableSource: 'model' })
       return this.finish(audit, { unavailableReason: parsed.reason })
     }
 
@@ -571,14 +573,14 @@ export class PiDecisionEngine implements DecisionEngine {
 
   private finish(
     audit: DecisionAudit,
-    result: { proposal: DecisionProposal; reply?: string } | { unavailableReason: string },
+    result: { proposal: DecisionProposal; reply?: string } | { unavailableReason: string; unavailableSource?: 'engine' | 'model' },
   ): DecisionEngineResult {
     if ('proposal' in result) {
       audit.proposal = result.proposal
       return { proposal: result.proposal, ...(result.reply ? { reply: result.reply } : {}), audit }
     }
     audit.unavailableReason = result.unavailableReason
-    return { unavailableReason: result.unavailableReason, audit }
+    return { unavailableReason: result.unavailableReason, unavailableSource: result.unavailableSource ?? 'engine', audit }
   }
 }
 

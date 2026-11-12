@@ -879,7 +879,7 @@ describe('关键链路日志', () => {
     expect(entry?.extra?.message).toBe('llm down')
   })
 
-  it('回复模型失败时记 chat:reply-failed，并回固定话术', async () => {
+  it('回复模型失败时记 chat:reply-failed，并把真实原因回给用户', async () => {
     const { logs, logger } = recorder()
     const { engine, loop, llm, store } = setup([], undefined, undefined, false, undefined, logger)
     llm.reply = async () => { throw new Error('reply down') }
@@ -890,7 +890,78 @@ describe('关键链路日志', () => {
     const entry = logs.find(log => log.message === 'chat:reply-failed')
     expect(entry?.level).toBe('warn')
     expect(entry?.extra?.message).toBe('reply down')
-    expect(store.claimOutbox('2026-11-06T10:00:20.000Z', 10)[0]?.text).toBe('收到。我还没看出具体要做什么，能说一下要改哪个模块、期望的结果吗？')
+    const text = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)[0]?.text ?? ''
+    expect(text).toContain('模型')
+    expect(text).toContain('reply down')
+    expect(text).not.toContain('还没看出具体要做什么')
+  })
+
+  it('模型没额度时明确告诉用户没额度，而不是说没看出要做什么', async () => {
+    const { logs, logger } = recorder()
+    const { engine, loop, llm, store } = setup([], undefined, undefined, false, undefined, logger)
+    const quotaError = 'pi:error:429: {"type":"rate_limit_error","message":"已达到 Token Plan 用量上限：请升级 Token Plan 套餐或购买积分补充用量。 (2056)","http_code":"429"}'
+    loop.decisionEngine = {
+      async assess() { throw new Error(quotaError) },
+      async reply() { throw new Error(quotaError) },
+    }
+    engine.ingest(trigger({ text: '帮我排查下 herdr 运行时', addressed: 'mention' }))
+
+    const result = await loop.tick()
+    expect(result.unavailable).toBe(1)
+
+    const text = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)[0]?.text ?? ''
+    expect(text).toContain('额度')
+    expect(text).not.toContain('还没看出具体要做什么')
+
+    // 原因也要留在日志里，方便排查。
+    const entry = logs.find(log => log.message === 'decision:engine-failed')
+    expect(entry?.extra?.message).toContain('Token Plan')
+  })
+
+  it('模型调用失败时不建单，但决策里记的是真实原因', async () => {
+    const { engine, loop } = setup([])
+    loop.decisionEngine = {
+      async assess() { throw new Error('pi:error:429: {"message":"额度不足"}') },
+      async reply() { throw new Error('pi:error:429: {"message":"额度不足"}') },
+    }
+    engine.ingest(trigger({ addressed: 'mention' }))
+
+    await loop.tick()
+
+    expect(engine.store.listOpenTickets()).toHaveLength(0)
+    const decision = engine.store.getDecision(engine.store.listTriggers()[0]!.decisionId!)
+    expect(decision?.decision).toBe('unavailable')
+    expect(decision?.reason).toContain('额度不足')
+  })
+
+  it('模型自己给出 unavailable 决定时按礼貌追问处理，不当成模型故障', async () => {
+    const { engine, loop, store } = setup([SAY('这个我还需要确认一下你想改什么。')])
+    // 第一条响应被当成模型给出的 unavailable 决定。
+    loop.decisionEngine = {
+      async assess() {
+        return {
+          unavailableReason: '信息不足，判断不了',
+          unavailableSource: 'model' as const,
+          audit: {
+            engine: 'pi' as const,
+            triggerId: 't1',
+            durationMs: 1,
+            toolCalls: [],
+            tokens: { input: 0, output: 0, total: 0 },
+            promptChars: { system: 0, user: 0 },
+          },
+        }
+      },
+      async reply() { return '这个我还需要确认一下你想改什么。' },
+    }
+    engine.ingest(trigger({ addressed: 'mention' }))
+
+    const result = await loop.tick()
+    expect(result.unavailable).toBe(1)
+    const text = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)[0]?.text ?? ''
+    expect(text).toBe('这个我还需要确认一下你想改什么。')
+    expect(text).not.toContain('额度')
+    expect(text).not.toContain('模型这次调用失败')
   })
 
   it('会话转录失败记 session:transcript-failed，不影响正常回复', async () => {

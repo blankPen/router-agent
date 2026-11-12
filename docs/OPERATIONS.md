@@ -186,9 +186,9 @@ Router 不做对话，只在必要时说话：
 | `feishu:intake-approver-empty` | Identity | `chat` `name` `count` | 需求分析助手的终审管理员配了却一个都解析不出来，该群没有人能终审（不会退回全局名单） |
 | `loop:trigger-failed` | Agent Loop | `triggerId` `chat` `detail` | 单条消息处理异常，同批其它消息不受影响 |
 | `loop:error` | Service | `detail` | 内部定时任务回调抛出的未预期异常，不影响主循环 |
-| `decision:engine-failed` | Agent Loop | `triggerId` `detail` | 研判引擎调用失败，按 unavailable 处理并留下原因 |
 | `decision:audit` / `decision:audit-write-failed` | CLI | `engine` `triggerId` `durationMs` `tokens` `toolCalls` `decision` / `detail` | 每次研判的审计记录写入 `decisions.jsonl`；写盘失败不影响研判 |
-| `chat:reply-failed` | Agent Loop | `triggerId` `chat` `reason` `detail` | 回复模型失败，已退回固定话术 |
+| `decision:engine-failed` | Agent Loop | `triggerId` `detail` | 研判引擎调用失败（没额度 / 限流 / 超时 / 鉴权失败等），按 unavailable 处理并留下原因；用户侧会收到对应的失败原因文案 |
+| `chat:reply-failed` | Agent Loop | `triggerId` `chat` `reason` `detail` | 回复模型失败（抛错或返回空内容），已按真实原因回话，不再退回「没看出要做什么」这类统一话术 |
 | `session:transcript-failed` / `session:reset-failed` | Agent Loop | `key` `detail` | 会话转录 / `/new` 重置失败，不影响当轮回复 |
 | `config:created` | Config | `path` | 首次启动写入了默认 `config.yaml` |
 | `config:parse-failed` | Config | `path` `detail` | YAML 解析失败，已降级为默认配置启动 |
