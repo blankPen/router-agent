@@ -5,7 +5,7 @@ import {
   chatIntakeIssue,
   normalizeChatIntake,
 } from '../../src/web/client/chat-intake.js'
-import { sectionsFor } from '../../src/web/client/fields.js'
+import { groupFields, groupsFor } from '../../src/web/client/fields.js'
 
 describe('需求分析助手的群级配置', () => {
   it('默认关闭、最多 10 轮、允许只读项目代码', () => {
@@ -34,9 +34,9 @@ describe('需求分析助手的群级配置', () => {
   })
 
   it('配置面板不再有全局「需求识别」分组：配置下沉到群', () => {
-    const sections = sectionsFor()
-    expect(sections.find(section => section.id === 'intake')).toBeUndefined()
-    const paths = sections.flatMap(section => section.fields.map(field => field.path))
+    const groups = groupsFor()
+    expect(groups.find(group => group.id === 'intake')).toBeUndefined()
+    const paths = groupFields(groups).map(field => field.path)
     expect(paths.some(path => path.startsWith('intake.'))).toBe(false)
   })
 })

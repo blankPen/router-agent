@@ -978,6 +978,109 @@ button, input, select {
 
 .config-body { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
 
+/* ---------------------------------------------------------------------------
+   配置页 · 渠道选择 + 配置块
+   一级：分组卡片；二级：可折叠的配置块；渠道块由渠道注册表提供。
+   --------------------------------------------------------------------------- */
+
+/* 渠道选择器 */
+.channel-area { padding-bottom: 4px; }
+.channel-picker { padding: 0 var(--card-pad-x) 20px; }
+.channel-picker-label {
+  display: block;
+  margin-bottom: 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+}
+.channel-picker-list { display: flex; flex-wrap: wrap; gap: 12px; }
+.channel-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  max-width: 560px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.14s, background 0.14s;
+}
+.channel-card:hover { border-color: var(--control); background: var(--raised); }
+.channel-card.active { border-color: var(--accent); background: var(--accent-soft); }
+.channel-icon {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: var(--raised);
+  color: var(--muted);
+}
+.channel-card.active .channel-icon { background: var(--surface); color: var(--accent); }
+.channel-card-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.channel-card-text strong { font-size: 14px; font-weight: 600; color: var(--text); }
+.channel-card-text small { font-size: 12px; line-height: 1.45; color: var(--muted); }
+.channel-status {
+  flex-shrink: 0;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.channel-status.ok { background: var(--pill-positive-bg); color: var(--pill-positive-ink); }
+.channel-status.warn { background: var(--pill-warning-bg); color: var(--pill-warning-ink); }
+.channel-status.muted { background: var(--pill-neutral-bg); color: var(--pill-neutral-ink); }
+
+/* 配置块 */
+.config-blocks, .channel-detail { display: flex; flex-direction: column; }
+.config-block { border-top: 1px solid var(--rule); }
+.config-block:first-child { border-top: 0; }
+.config-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px var(--card-pad-x);
+}
+.config-block-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.config-block-toggle:hover .config-block-title { color: var(--accent); }
+.config-block-title { transition: color 0.14s; }
+.fold-chevron { color: var(--faint); transform: rotate(90deg); transition: transform 0.15s ease; }
+.config-block.folded .fold-chevron { transform: rotate(0deg); }
+.config-block.folded .config-block-title { color: var(--muted); }
+.config-block-body { padding-bottom: 18px; }
+/* 块内所有内容与块标题对齐到同一条左边线。 */
+.config-block-desc {
+  margin: 0 var(--card-pad-x) 12px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--muted);
+  max-width: 720px;
+}
+.config-block-body > .editor-hint,
+.config-block-body > .editor-empty { margin-left: var(--card-pad-x); margin-right: var(--card-pad-x); }
+.config-block-body > .editor { padding: 0 var(--card-pad-x) 20px; }
+.config-block-body > .banner { margin-left: var(--card-pad-x); margin-right: var(--card-pad-x); }
+.config-block-body > .runtime-status { margin: 0 var(--card-pad-x); border-top: 0; padding-top: 0; }
+
 .settings-card {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -1014,6 +1117,7 @@ button, input, select {
 }
 .badge.hot { background: var(--pill-positive-bg); color: var(--pill-positive-ink); }
 .badge.cold { background: var(--pill-neutral-bg); color: var(--pill-neutral-ink); }
+.badge.mixed { background: var(--info-soft); color: var(--info); }
 .badge.dirty { background: var(--pill-warning-bg); color: var(--pill-warning-ink); }
 
 .settings-rows { border-top: 1px solid var(--rule); }

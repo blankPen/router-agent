@@ -1565,6 +1565,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     },
     update: updateService,
     ...(feishuChannel?.admin ? { feishuBot: feishuChannel.admin } : {}),
+    channels,
     identity: identityPort,
     logAssistant,
     issueReporter,
