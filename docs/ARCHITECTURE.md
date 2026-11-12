@@ -166,7 +166,7 @@ Worker **不手写状态文件**，统一用 `ra report` 上报。CLI 会 POST �
 - 终端长时间无输出 → 主动发 `status?`；仍无响应 → 标记 stale 并通知人。
 - 审计事件追加到同目录 `events.log`。
 
-Worker 手册会拼进启动 prompt；非 Orca 运行时使用运行时中立的契约文件。两者都不改项目 `CLAUDE.md`。详见 [RUNTIME.md](RUNTIME.md#worker-规范注入)。
+Worker 手册会拼进启动 prompt；非 Orca 运行时使用运行时中立的契约文件。两者都不改项目 `AGENTS.md`。详见 [RUNTIME.md](RUNTIME.md#worker-规范注入)。
 
 ### 上报协议
 
