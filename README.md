@@ -165,7 +165,7 @@ Worker 不在 Router 进程里跑。Router 按 `runtime.default` 选择适配器
 | `orca`（默认） | Orca 创建 worktree + Agent 终端（默认 Claude Code，可用选项改成 codex 等） | 本机已用 Orca 管仓库，想同时看到终端 |
 | `claude-code` | `git worktree` + `claude --bg` 后台会话 | 不用 Orca，直接跑 Claude Code |
 | `codex-app` | `git worktree` + `codex app-server`，优先用 Codex App 内置 CLI | 用 Codex，且希望 Router 创建的 thread 在 Codex 桌面端可见 |
-| `herdr` | Herdr 创建 worktree + 终端 pane 里的 Agent | 本机已用 Herdr 管终端，想在 Herdr 侧栏里看到工单 |
+| `herdr` | ra 用 git worktree 建检出，Herdr 开终端窗口跑 Agent | 本机已用 Herdr 管终端，想在 Herdr 侧栏里看到工单 |
 | `acp` / `acp-*` | ACP 子进程（Claude / Codex / Gemini / OpenCode / Copilot / Cursor / Goose） | 想接其它 ACP Agent |
 
 换运行时只加一个 adapter，内核与 Router 一行不改。项目清单按运行时分开维护：Orca 用仓库选择器，其它运行时用本地仓库绝对路径；切换默认运行时只影响新工单。完整的运行时对比、ACP Agent 目录、工具策略与规范注入见 [docs/RUNTIME.md](docs/RUNTIME.md)。

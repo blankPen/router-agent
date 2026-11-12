@@ -7,6 +7,9 @@
  * - 结果类命令把 JSON 打到 stdout；
  * - 失败时把 `{"id":…,"error":{"code":…,"message":…}}` 打到 stderr，退出码 1；
  * - `agent read` / `pane read` 例外：它们直接把终端文本打到 stdout，不是 JSON。
+ *
+ * 检出与分支由 ra 自己用 git worktree 管（见 GitWorktreeProvider），
+ * Herdr 只负责「在终端里跑 Agent」这件基础事 —— 所以这里没有 worktree 命令。
  */
 import type { CommandResult, CommandRunner } from '../../../infra/process.js'
 
@@ -15,41 +18,20 @@ export type { CommandResult, CommandRunner }
 /** `agent start` 的启动超时；Herdr 要求大于 3000 且不超过 300000 毫秒。 */
 export const HERDR_AGENT_START_TIMEOUT_MS = 60_000
 
-/** 在指定仓库下新建 worktree 检出，并把它开成一个 Herdr workspace。 */
-export function worktreeCreate(opts: { cwd: string; branch: string; base?: string; label?: string }): string[] {
+/** 在指定目录上开一个 Herdr workspace；它会带出第一个 tab 与根 pane。 */
+export function workspaceCreate(opts: { cwd: string; label?: string }): string[] {
   return [
-    'worktree', 'create',
+    'workspace', 'create',
     '--cwd', opts.cwd,
-    '--branch', opts.branch,
-    ...(opts.base ? ['--base', opts.base] : []),
     ...(opts.label ? ['--label', opts.label] : []),
     // 不抢焦点：Router 不是交互式终端，抢焦点会打断用户正在看的 Herdr 窗口。
     '--no-focus',
   ]
 }
 
-/**
- * 重新打开一个已经存在、但 workspace 已被关闭的 worktree 检出。
- *
- * `pane close` 会连带关掉 workspace，此时 `worktree remove --workspace` 会报
- * `workspace_not_found`；先 open 再 remove 才能真正删掉检出目录。
- */
-export function worktreeOpen(opts: { cwd: string; branch: string; label?: string }): string[] {
-  return [
-    'worktree', 'open',
-    '--cwd', opts.cwd,
-    '--branch', opts.branch,
-    ...(opts.label ? ['--label', opts.label] : []),
-    '--no-focus',
-  ]
-}
-
-export function worktreeRemove(workspaceId: string, opts: { force?: boolean } = {}): string[] {
-  return ['worktree', 'remove', '--workspace', workspaceId, ...(opts.force ? ['--force'] : [])]
-}
-
-export function worktreeList(opts: { cwd?: string } = {}): string[] {
-  return ['worktree', 'list', ...(opts.cwd ? ['--cwd', opts.cwd] : [])]
+/** 关掉 workspace（连带它的 tab 与 pane）。 */
+export function workspaceClose(workspaceId: string): string[] {
+  return ['workspace', 'close', workspaceId]
 }
 
 /** 在指定 pane 里启动 Agent；`args` 原样透传给 Agent 可执行文件。 */
@@ -88,8 +70,23 @@ export function agentRead(target: string, opts: { lines?: number; source?: strin
   ]
 }
 
+// pane 级读取不要求 Agent 已被 Herdr 登记，因此「Agent 卡在启动前的确认弹窗」
+// 这种状态也读得到 —— 判断「是否信任此文件夹」弹窗正需要它。
+export function paneRead(paneId: string, opts: { lines?: number; source?: string } = {}): string[] {
+  return [
+    'pane', 'read', paneId,
+    '--source', opts.source ?? 'visible',
+    '--lines', String(opts.lines ?? 40),
+  ]
+}
+
 export function agentList(): string[] {
   return ['agent', 'list']
+}
+
+/** 给 Agent 的交互界面发按键（enter / esc / down / ctrl+c …）。 */
+export function agentSendKeys(target: string, keys: string[]): string[] {
+  return ['agent', 'send-keys', target, ...keys]
 }
 
 export function paneClose(paneId: string): string[] {

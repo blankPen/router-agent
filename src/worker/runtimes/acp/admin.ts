@@ -13,6 +13,7 @@ import {
 } from '../catalog.js'
 import { acpAgentOf } from './agents.js'
 import { detectCodexBinary, probeCodexHandshake } from '../codex/detect.js'
+import { ensureHerdrServer } from '../herdr/server.js'
 import {
   checkAcpAgent,
   detectAcpAgent,
@@ -59,6 +60,8 @@ export interface AcpRuntimeAdminOptions {
   env: NodeJS.ProcessEnv
   config: AppConfig
   runner?: (bin: string) => CommandRunner
+  /** 探测时拉起 Herdr 服务端最多等多久（毫秒）。 */
+  herdrServerTimeoutMs?: number
 }
 
 interface BuiltinProbe {
@@ -288,8 +291,10 @@ export class AcpRuntimeAdmin {
    * Herdr：CLI 能跑之外，还要看服务端在不在。
    *
    * Herdr 的所有命令都走本地 socket 服务端；服务端没起时每条命令都返回
-   * `server_not_running`，派工必然失败。CLI 装好但服务端没起时给 unverified，
-   * 卡片仍可选（用户可能正准备启动），但明确提示缺什么。
+   * `server_not_running`，派工必然失败。
+   *
+   * 所以这里顺手把服务端拉起来（detached 启动，脱离当前进程），
+   * 拉不起来才给 unverified —— 卡片仍可选，但明确提示缺什么。
    */
   private async probeHerdr(): Promise<BuiltinProbe> {
     const resolved = resolveExecutable('herdr', this.env)
@@ -304,15 +309,23 @@ export class AcpRuntimeAdmin {
         reason: `herdr --version 退出码 ${versionResult.code}`,
       }
     }
-    const serverResult = await this.runProbe(resolved, ['status', 'server'])
-    const serverRunning = serverResult.code === 0 && /^status:\s*running\s*$/m.test(serverResult.stdout)
+    const server = await ensureHerdrServer({
+      runner: this.runner(resolved),
+      bin: resolved,
+      timeoutMs: this.opts.herdrServerTimeoutMs ?? 8_000,
+    })
+    if (!server.running) {
+      return {
+        status: 'unverified',
+        command: resolved,
+        ...(version ? { version } : {}),
+        reason: server.reason ?? '未找到运行中的 Herdr 服务端；派工前请先运行 herdr server',
+      }
+    }
     return {
-      status: serverRunning ? 'ready' : 'unverified',
+      status: 'ready',
       command: resolved,
       ...(version ? { version } : {}),
-      ...(serverRunning
-        ? {}
-        : { reason: '未找到运行中的 Herdr 服务端；派工前请先运行 herdr server' }),
     }
   }
 

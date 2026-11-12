@@ -181,7 +181,7 @@ Workers don't run inside the Router process. The Router picks an adapter from `r
 | `orca` (default) | Orca creates the worktree + agent terminal (Claude Code by default; configurable) | You already manage repos with Orca and want to watch the terminal |
 | `claude-code` | `git worktree` + background `claude --bg` session | You don't use Orca and just want Claude Code |
 | `codex-app` | `git worktree` + `codex app-server`, preferring the CLI bundled with the Codex app | Use Codex and want Router-created threads visible in the Codex desktop app |
-| `herdr` | Herdr creates the worktree and runs the agent in a terminal pane | You already drive terminals with Herdr and want tickets visible in its sidebar |
+| `herdr` | ra creates the worktree with git, Herdr opens a terminal pane for the agent | You already drive terminals with Herdr and want tickets visible in its sidebar |
 | `acp` / `acp-*` | ACP child process (Claude / Codex / Gemini / OpenCode and friends) | You want to plug in another ACP agent |
 
 Project lists are kept per runtime: Orca uses repository selectors, other runtimes need absolute local paths. Switching the default only affects new tickets. The full comparison, ACP agent catalog, tool policy and spec injection are in [docs/RUNTIME.md](docs/RUNTIME.md) (Chinese).

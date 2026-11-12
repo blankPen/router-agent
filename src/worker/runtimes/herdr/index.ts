@@ -1,20 +1,29 @@
 /**
- * Herdr 运行时：用 Herdr 的 worktree + 终端 pane 承载工单。
+ * Herdr 运行时：用 Herdr 的终端 workspace 承载工单。
  *
- * 与 Orca 运行时同构，但控制面换成了 Herdr：
- * - `worktree create` 建检出并开成 workspace；
+ * 职责切得很窄 —— **检出归 ra 自己管**（GitWorktreeProvider），Herdr 只负责
+ * 「在终端里把 Agent 跑起来」这件基础事：
+ * - `workspace create` 在检出目录上开一个终端 workspace；
  * - `agent start` 在 workspace 的 pane 里拉起 Agent；
  * - `agent prompt` 投递工单契约与追问；
  * - `agent get` / `agent read` 读状态与输出；
- * - `worktree remove` 回收检出。
+ * - `pane close` / `workspace close` 关掉窗口。
  *
- * 与 Orca 的两点关键差异：
+ * 为什么不走 Herdr 自带的 `herdr worktree create`：
+ * 那条命令会把仓库登记进 Herdr 的全局仓库表；仓库目录一旦被删，之后**所有**
+ * `herdr worktree *` 命令都会报
+ * `worktree_list_failed: cannot change to '<path>'` —— 一颗老鼠屎坏一锅汤。
+ * 检出与回收交给 git worktree，Herdr 侧就不会再被登记状态拖住。
+ *
+ * 另外两点与 Orca 不同：
  * 1. Herdr 的 Agent 状态是**从屏幕识别的**（idle / working / done / blocked / unknown），
  *    不是结构化会话记录；结构化活动仍从 Agent 自己的会话记录里读（见 activity()）。
  * 2. Herdr 需要一个**在跑的服务端**；没有服务端时所有命令都返回 `server_not_running`。
+ *    服务端由 ensureHerdrServer() 在探测 / 派工时自动拉起。
  */
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import type {
   ActivityQuery,
   AgentOutput,
@@ -34,31 +43,31 @@ import type {
 } from '../../port.js'
 import { WorkerRuntimeError } from '../../port.js'
 import { buildWorkerPrompt } from '../../spec/index.js'
-import { workBranch } from '../../naming.js'
+import { workBranch, worktreeName } from '../../naming.js'
 import { resolveSession } from '../../agents/registry.js'
-import { parseGitHubRepo } from '../../workspaces/git-worktree.js'
+import { GitWorktreeProvider } from '../../workspaces/git-worktree.js'
 import { runtimeOptionDefault } from '../options.js'
 import { HERDR_RUNTIME_ID } from '../catalog.js'
 import { herdrAgentKindOf, type HerdrAgentKind } from './agents.js'
+import { ensureHerdrServer, type HerdrServerSpawner } from './server.js'
 import {
   agentGet,
   agentPrompt,
   agentRead,
+  agentSendKeys,
   agentStart,
   paneClose,
-  serverStatus,
+  paneRead,
   version,
-  worktreeCreate,
-  worktreeList,
-  worktreeOpen,
-  worktreeRemove,
+  workspaceClose,
+  workspaceCreate,
   type CommandResult,
   type CommandRunner,
 } from './commands.js'
 
 export interface HerdrRuntimeOptions {
   herdr: CommandRunner
-  /** git runner；用来从检出解析远端仓库（PR 跟踪需要 owner/repo）。 */
+  /** git runner；用来创建 / 回收检出。 */
   git: CommandRunner
   /** ~/.router-agent/workers */
   workersDir: string
@@ -70,6 +79,10 @@ export interface HerdrRuntimeOptions {
   model?: string
   /** Claude Code 会话记录目录；默认 ~/.claude/projects，测试可注入临时目录。 */
   claudeProjectsDir?: string
+  /** 允许创建检出的根目录；默认 <home>/worktrees。 */
+  worktreesRoot?: string
+  /** 拉起 Herdr 服务端用的动作；测试可注入空实现。 */
+  spawnServer?: HerdrServerSpawner
 }
 
 interface HerdrMeta {
@@ -98,6 +111,18 @@ export interface HerdrCliError {
   message: string
 }
 
+/** Herdr 的 Agent 名字长度上限；Herdr 要求匹配 `[a-z][a-z0-9_-]{0,31}`。 */
+const AGENT_NAME_MAX = 32
+/** 名字里项目名与分支名各自保留的长度。 */
+const REPO_PART_MAX = 12
+const BRANCH_PART_MAX = 10
+
+/**
+ * Claude Code 首次在新目录启动会弹「是否信任此文件夹」；跳过权限确认不会一并跳过它。
+ * 命中就把弹窗当成「可以自动确认」处理。
+ */
+const TRUST_PROMPT_PATTERN = /trust this folder|quick safety check|是否信任|信任此文件夹/i
+
 export class HerdrRuntime implements WorkerRuntime {
   readonly id = HERDR_RUNTIME_ID
   readonly capabilities: RuntimeCapabilities = {
@@ -113,15 +138,24 @@ export class HerdrRuntime implements WorkerRuntime {
   private agent: string
   private model?: string
   private claudeProjectsDir?: string
+  private worktreesRoot: string
+  private gitProvider: GitWorktreeProvider
+  private spawnServer?: HerdrServerSpawner
 
   constructor(opts: HerdrRuntimeOptions) {
     this.herdr = opts.herdr
-   this.git = opts.git
+    this.git = opts.git
     this.workersDir = opts.workersDir
     this.home = opts.home
     this.agent = String(opts.agent || runtimeOptionDefault(HERDR_RUNTIME_ID, 'agent') || '').trim()
     this.model = opts.model?.trim() || undefined
     this.claudeProjectsDir = opts.claudeProjectsDir
+    this.worktreesRoot = opts.worktreesRoot ?? join(opts.home ?? opts.workersDir, 'worktrees')
+    this.gitProvider = new GitWorktreeProvider({
+      git: opts.git,
+      worktreesRoot: this.worktreesRoot,
+    })
+    this.spawnServer = opts.spawnServer
   }
 
   async start(ctx: WorkerContext): Promise<StartResult> {
@@ -141,7 +175,8 @@ export class HerdrRuntime implements WorkerRuntime {
     const statePath = ctx.report?.statePath ?? join(this.workersDir, ticket.id, 'state.json')
     const eventsPath = ctx.report?.eventsPath ?? join(this.workersDir, ticket.id, 'events.log')
     const branch = workBranch(ticket)
-    const label = `ra-${ticket.id}`
+    const name = worktreeName(ticket)
+    const workdir = ctx.workdir || join(this.worktreesRoot, name)
     const prompt = ctx.brief?.contract ?? buildWorkerPrompt({
       ticket,
       mandateScope: ticket.title,
@@ -154,35 +189,48 @@ export class HerdrRuntime implements WorkerRuntime {
       ...(this.home ? { home: this.home } : {}),
     })
 
-    const createRes = await this.run(worktreeCreate({
-      cwd: repo,
-      branch,
-      base: baseBranch,
-      label,
-    }))
-    const created = parseWorktreeResult(createRes.stdout)
-    const workdir = created.path
-    const paneId = created.paneId
-    const workspaceId = created.workspaceId
-    if (!workdir) throw new WorkerRuntimeError('workspace:create-failed', 'herdr worktree create 没有返回检出路径')
-    if (!paneId) throw new WorkerRuntimeError('workspace:create-failed', 'herdr worktree create 没有返回 pane id')
+    // Herdr 的每条命令都走本地 socket 服务端；服务端不在，后面每一步都会失败。
+    await this.ensureServer()
 
-    // Agent 名字带上 pane id：Herdr 的名字在存活期间唯一，重派工时不会撞名。
-    const agentName = agentNameFor(ticket.id, paneId)
+    // 1) 检出归 ra 自己管：纯 git worktree，不碰 Herdr 的仓库登记。
+    const workspace = await this.gitProvider.create({
+      ticketId: ticket.id,
+      repo,
+      baseBranch,
+      workBranch: branch,
+      name,
+      workdir,
+    })
+
+    // 2) Herdr 只做最基础的事：在检出目录上开一个终端窗口。
+    let created: HerdrWorkspaceResult
+    try {
+      created = await this.createWorkspace(workspace.workdir, `ra-${ticket.id}`)
+    } catch (error) {
+      await this.gitProvider.remove(workspace.workdir).catch(() => {})
+      throw error
+    }
+    const paneId = created.paneId
+    if (!paneId) {
+      await this.gitProvider.remove(workspace.workdir).catch(() => {})
+      throw new WorkerRuntimeError('workspace:create-failed', 'herdr workspace create 没有返回 pane id')
+    }
+
     const kind = this.agentKind()
+    const agentName = agentNameFor({ kind: kind.value, repo, branch })
     const meta: HerdrMeta = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       ticketId: ticket.id,
       assignmentId: ctx.assignment.id,
       runtime: this.id,
       handle: paneId,
       agentName,
       paneId,
-      workspaceId,
-      workdir,
+      ...(created.workspaceId ? { workspaceId: created.workspaceId } : {}),
+      workdir: workspace.workdir,
       repo,
       branch: baseBranch,
-      workBranch: created.branch || branch,
+      workBranch: workspace.branch || branch,
       agent: kind.value,
       status: 'starting',
       startedAt: new Date().toISOString(),
@@ -190,24 +238,14 @@ export class HerdrRuntime implements WorkerRuntime {
     this.writeMeta(ticket.id, meta)
 
     try {
-      const startRes = await this.run(agentStart({
-        name: agentName,
-        kind: kind.value,
-        pane: paneId,
-        args: this.launchArgs(kind),
-      }))
-      const started = parseAgent(startRes.stdout)
-      meta.status = 'running'
-      this.writeMeta(ticket.id, meta)
-
+      await this.startAgent(meta, kind)
       // 契约作为首轮输入投进去；Herdr 的 agent prompt 会补上 Enter。
-      await this.run(agentPrompt(paneId, withWorkdir(prompt, workdir)))
+      await this.run(agentPrompt(paneId, withWorkdir(prompt, workspace.workdir)))
       return {
         handle: paneId,
-        workdir,
+        workdir: workspace.workdir,
         branch: meta.workBranch,
-        workspaceRef: workspaceId,
-        ...(started?.sessionId ? { sessionId: started.sessionId } : {}),
+        ...(created.workspaceId ? { workspaceRef: created.workspaceId } : {}),
       }
     } catch (error) {
       await this.rollback(meta).catch(() => {})
@@ -215,12 +253,12 @@ export class HerdrRuntime implements WorkerRuntime {
         throw new WorkerRuntimeError(error.code, error.reason, {
           retryable: error.retryable,
           cause: error.cause,
-          detail: { ...error.detail, workdir, paneId, workspaceId },
+          detail: { ...error.detail, workdir: workspace.workdir, paneId },
         })
       }
       throw new WorkerRuntimeError('agent:launch-failed', error instanceof Error ? error.message : String(error), {
         cause: error instanceof Error ? error.stack : undefined,
-        detail: { workdir, paneId, workspaceId },
+        detail: { workdir: workspace.workdir, paneId },
       })
     }
   }
@@ -229,26 +267,33 @@ export class HerdrRuntime implements WorkerRuntime {
     const accepted: string[] = []
     for (const input of inputs) {
       if (!input.text.trim()) continue
-      const res = await this.herdr.run(agentPrompt(ref.handle, renderInput(input)))
+      let res = await this.herdr.run(agentPrompt(ref.handle, renderInput(input)))
       if (res.code !== 0) {
         const error = parseCliError(res)
-        // Agent 正卡在确认弹窗上：Herdr 拒收输入。让 Router 稍后重投，不要硬写终端。
-        if (error?.code === 'agent_blocked') {
-          return {
-            status: 'rejected',
-            inputIds: accepted,
-            reason: 'herdr:agent-blocked',
-            retryable: true,
-            retryAfterMs: 30_000,
+        // Agent 正卡在确认弹窗上：Herdr 拒收输入。先看看是不是「信任此文件夹」，
+        // 能自动确认就替用户点掉再投一次；否则让 Router 稍后重投。
+        if (error?.code === 'agent_blocked' && await this.acceptTrustPrompt(ref.handle)) {
+          res = await this.herdr.run(agentPrompt(ref.handle, renderInput(input)))
+        }
+        if (res.code !== 0) {
+          const retryError = parseCliError(res)
+          if (retryError?.code === 'agent_blocked') {
+            return {
+              status: 'rejected',
+              inputIds: accepted,
+              reason: 'herdr:agent-blocked',
+              retryable: true,
+              retryAfterMs: 30_000,
+            }
           }
+          if (retryError?.code === 'agent_not_found' || retryError?.code === 'agent_not_running') {
+            return { status: 'rejected', inputIds: accepted, reason: `herdr:${retryError.code}`, retryable: false }
+          }
+          throw new WorkerRuntimeError('agent:not-accepting-input', `herdr agent prompt 失败: ${retryError?.message ?? res.stderr.trim()}`, {
+            cause: retryError?.message ?? res.stderr,
+            detail: { handle: ref.handle },
+          })
         }
-        if (error?.code === 'agent_not_found' || error?.code === 'agent_not_running') {
-          return { status: 'rejected', inputIds: accepted, reason: `herdr:${error.code}`, retryable: false }
-        }
-        throw new WorkerRuntimeError('agent:not-accepting-input', `herdr agent prompt 失败: ${error?.message ?? res.stderr.trim()}`, {
-          cause: error?.message ?? res.stderr,
-          detail: { handle: ref.handle },
-        })
       }
       accepted.push(input.id)
     }
@@ -256,10 +301,10 @@ export class HerdrRuntime implements WorkerRuntime {
   }
 
   /**
-   * 停止：关掉承载 Agent 的 pane。
+   * 停止：关掉承载 Agent 的 pane（连带 workspace）。
    *
- * 副作用要知道：关掉最后一个 pane 会连带关掉 workspace，
- * 此时检出会暂时留在磁盘上，由 removeWorkspace 重新打开后删除。
+   * 回收检出不在这里做 —— 那是 removeWorkspace 的事，拆开是为了让
+   * 「先停 Agent、稍后再回收目录」这种节奏也能成立。
    */
   async stop(ref: WorkerRef, _reason: string): Promise<void> {
     const paneId = ref.handle
@@ -276,6 +321,10 @@ export class HerdrRuntime implements WorkerRuntime {
       }
     }
     const meta = this.readMeta(ref.ticketId)
+    // 关掉最后一个 pane 会连带关掉 workspace；再关一次是幂等的，能收掉残骸。
+    if (meta?.workspaceId) {
+      await this.herdr.run(workspaceClose(meta.workspaceId)).catch(() => ({ code: 1, stdout: '', stderr: '' }))
+    }
     if (meta) {
       meta.status = 'stopped'
       this.writeMeta(ref.ticketId, meta)
@@ -346,89 +395,53 @@ export class HerdrRuntime implements WorkerRuntime {
   }
 
   async inspectWorkspace(ref: WorkspaceRef): Promise<WorkspaceInfo | null> {
-    const res = await this.herdr.run(worktreeList())
-    if (res.code !== 0) return null
-    const found = parseWorktreeList(res.stdout).find(item => item.path === ref.workdir)
-    if (!found) return null
-    return {
-      workdir: found.path,
-      branch: found.branch ?? '',
-      ...(found.dirty !== undefined ? { dirty: found.dirty } : {}),
-    }
+    if (!ref.workdir) return null
+    return this.gitProvider.inspect(ref.workdir)
   }
 
-  /**
-   * 回收检出。
-   *
-   * stop() 关掉最后一个 pane 时会连带关掉 workspace，此时按 workspace id 删会报
-   * `workspace_not_found`、检出目录留在磁盘上；先按分支重新打开再删。
-   */
+  /** 回收检出：先关 Herdr 窗口，再让 git 删掉 worktree。 */
   async removeWorkspace(ref: WorkspaceRef): Promise<void> {
     const meta = this.readMeta(ref.ticketId)
+    const paneId = meta?.paneId
     const workspaceId = meta?.workspaceId ?? ref.workspaceRef
-    if (workspaceId) {
-      const res = await this.herdr.run(worktreeRemove(workspaceId, { force: true }))
-      if (res.code === 0) {
-        this.clearMeta(ref.ticketId)
-        return
-      }
-      const error = parseCliError(res)
-      if (error?.code !== 'workspace_not_found') {
-        throw new WorkerRuntimeError('workspace:remove-failed', `herdr worktree remove 失败: ${error?.message ?? res.stderr.trim()}`, {
-          cause: error?.message ?? res.stderr,
-          detail: { workspaceId, workdir: ref.workdir },
-        })
-      }
-    }
-    // workspace 已经没了：按「仓库 + 分支」把检出来重新打开，再删一次。
-    if (!meta?.repo || !meta.workBranch) {
-      throw new WorkerRuntimeError('workspace:remove-failed', 'herdr 找不到可回收的检出信息（缺少仓库或分支）', {
-        detail: { workdir: ref.workdir },
-      })
-    }
-    const openRes = await this.herdr.run(worktreeOpen({ cwd: meta.repo, branch: meta.workBranch }))
-    if (openRes.code !== 0) {
-      const error = parseCliError(openRes)
-      throw new WorkerRuntimeError('workspace:remove-failed', `herdr worktree open 失败: ${error?.message ?? openRes.stderr.trim()}`, {
-        cause: error?.message ?? openRes.stderr,
-        detail: { workdir: ref.workdir, branch: meta.workBranch },
-      })
-    }
-    const reopened = parseWorktreeResult(openRes.stdout)
-    if (!reopened.workspaceId) {
-      throw new WorkerRuntimeError('workspace:remove-failed', 'herdr worktree open 没有返回 workspace id', {
-        detail: { workdir: ref.workdir, branch: meta.workBranch },
-      })
-    }
-    const removeRes = await this.herdr.run(worktreeRemove(reopened.workspaceId, { force: true }))
-    if (removeRes.code !== 0) {
-      const error = parseCliError(removeRes)
-      throw new WorkerRuntimeError('workspace:remove-failed', `herdr worktree remove 失败: ${error?.message ?? removeRes.stderr.trim()}`, {
-        cause: error?.message ?? removeRes.stderr,
-        detail: { workdir: ref.workdir, branch: meta.workBranch },
-      })
-    }
+    if (paneId) await this.herdr.run(paneClose(paneId)).catch(() => ({ code: 1, stdout: '', stderr: '' }))
+    if (workspaceId) await this.herdr.run(workspaceClose(workspaceId)).catch(() => ({ code: 1, stdout: '', stderr: '' }))
+    const workdir = ref.workdir || meta?.workdir
+    if (workdir) await this.removeWorktree(workdir, meta?.repo)
     this.clearMeta(ref.ticketId)
   }
 
   async doctor(): Promise<DiagnosticCheck[]> {
     const checks: DiagnosticCheck[] = []
     const ver = await this.herdr.run(version())
+    const cliOk = ver.code === 0
     checks.push({
       name: 'Herdr CLI',
-      status: ver.code === 0 ? 'ok' : 'fail',
-      detail: ver.code === 0 ? ver.stdout.trim() : `${ver.stderr || ver.stdout}`.trim().slice(0, 160),
-      ...(ver.code === 0 ? {} : { hint: '安装 Herdr，并确保 herdr 在 PATH 中（https://herdr.dev/docs/install）' }),
+      status: cliOk ? 'ok' : 'fail',
+      detail: cliOk ? ver.stdout.trim() : `${ver.stderr || ver.stdout}`.trim().slice(0, 160),
+      ...(cliOk ? {} : { hint: '安装 Herdr，并确保 herdr 在 PATH 中（https://herdr.dev/docs/install）' }),
     })
-    const server = await this.herdr.run(serverStatus())
-    const running = server.code === 0 && /^status:\s*running\s*$/m.test(server.stdout)
+    if (!cliOk) {
+      checks.push({
+        name: 'Herdr server',
+        status: 'fail',
+        detail: '未检测（Herdr CLI 不可用）',
+        hint: '安装 Herdr，并确保 herdr 在 PATH 中（https://herdr.dev/docs/install）',
+      })
+      return checks
+    }
+    // 检测时顺手把服务端拉起来：没有服务端，herdr 的每条命令都会返回 server_not_running。
+    const server = await ensureHerdrServer({
+      runner: this.herdr,
+      ...(this.spawnServer ? { spawnFn: this.spawnServer } : {}),
+    })
     checks.push({
       name: 'Herdr server',
-      status: running ? 'ok' : 'fail',
-      detail: running
-        ? (server.stdout.match(/^version:\s*(.+)$/m)?.[1]?.trim() ?? 'running')
-        : `${server.stderr || server.stdout}`.trim().slice(0, 160),
-      ...(running ? {} : { hint: '启动 Herdr 服务端（herdr server），否则所有 herdr 命令都会返回 server_not_running' }),
+      status: server.running ? 'ok' : 'fail',
+      detail: server.running
+        ? `${server.version ?? 'running'}${server.started ? '（已自动拉起）' : ''}`
+        : (server.reason ?? '未找到运行中的 Herdr 服务端'),
+      ...(server.running ? {} : { hint: '启动 Herdr 服务端（herdr server），否则所有 herdr 命令都会返回 server_not_running' }),
     })
     return checks
   }
@@ -436,15 +449,114 @@ export class HerdrRuntime implements WorkerRuntime {
   /**
    * 本地路径仓库的 PR 跟踪需要 owner/repo。
    *
-   * Herdr 的检出是源仓库的 linked worktree，origin 与源仓库一致，
+   * 检出是源仓库的 linked worktree，origin 与源仓库一致，
    * 所以直接在检出目录里读 remote 就行。
    */
   async repoSlug(ref: WorkerRef): Promise<string | null> {
     const workdir = ref.workdir
     if (!workdir) return null
-    const res = await this.git.run(['remote', 'get-url', 'origin'], { cwd: workdir })
-    if (res.code !== 0) return null
-    return parseGitHubRepo(res.stdout.trim())
+    return this.gitProvider.remoteRepo(workdir)
+  }
+
+  /** 服务端不在就把它拉起来；拉不起来时给出可重试的 runtime:unavailable。 */
+  private async ensureServer(): Promise<void> {
+    const state = await ensureHerdrServer({
+      runner: this.herdr,
+      ...(this.spawnServer ? { spawnFn: this.spawnServer } : {}),
+    })
+    if (!state.running) {
+      throw new WorkerRuntimeError(
+        'runtime:unavailable',
+        `herdr 服务端不可用：${state.reason ?? '未知原因'}`,
+        { retryable: true, detail: { reason: state.reason } },
+      )
+    }
+  }
+
+  private async createWorkspace(cwd: string, label: string): Promise<HerdrWorkspaceResult> {
+    const res = await this.run(workspaceCreate({ cwd, label }))
+    const created = parseWorkspaceResult(res.stdout)
+    if (!created.paneId) {
+      throw new WorkerRuntimeError('workspace:create-failed', 'herdr workspace create 没有返回 pane id', {
+        detail: { cwd },
+      })
+    }
+    return created
+  }
+
+  /**
+   * 拉起 Agent，并处理两种「起不来」：
+   * - 名字被上一轮残留的 Agent 占了：把那个 pane 关掉再试一次；
+   * - Agent 卡在启动前的确认弹窗（Claude Code 的「信任此文件夹」）：替用户点掉。
+   */
+  private async startAgent(meta: HerdrMeta, kind: HerdrAgentKind): Promise<void> {
+    const paneId = meta.paneId!
+    const name = meta.agentName!
+    const args = this.launchArgs(kind)
+    const res = await this.herdr.run(agentStart({ name, kind: kind.value, pane: paneId, args }))
+    if (res.code === 0) {
+      meta.status = 'running'
+      this.writeMeta(meta.ticketId, meta)
+      return
+    }
+    const error = parseCliError(res)
+    if (error?.code === 'agent_name_taken') {
+      const stalePane = parseStalePaneId(error.message)
+      if (!stalePane || stalePane === paneId) {
+        throw this.startError(error, res, paneId)
+      }
+      await this.herdr.run(paneClose(stalePane)).catch(() => ({ code: 1, stdout: '', stderr: '' }))
+      const retry = await this.herdr.run(agentStart({ name, kind: kind.value, pane: paneId, args }))
+      if (retry.code === 0) {
+        meta.status = 'running'
+        this.writeMeta(meta.ticketId, meta)
+        return
+      }
+      throw this.startError(parseCliError(retry), retry, paneId)
+    }
+    if (error?.code === 'agent_not_ready') {
+      if (!await this.acceptTrustPrompt(paneId)) {
+        throw this.startError(error, res, paneId)
+      }
+      await this.waitForAgentReady(paneId)
+      meta.status = 'running'
+      this.writeMeta(meta.ticketId, meta)
+      return
+    }
+    throw this.startError(error, res, paneId)
+  }
+
+  /**
+   * 自动确认「是否信任此文件夹」。
+   *
+   * 弹窗默认选中「No, exit」，所以往下挪一格选「Yes, I trust this folder」再回车。
+   * 只在文本确实命中时才动手，避免误触别的确认框。
+   */
+  private async acceptTrustPrompt(paneId: string): Promise<boolean> {
+    const res = await this.herdr.run(paneRead(paneId, { lines: 40 }))
+    if (res.code !== 0) return false
+    if (!TRUST_PROMPT_PATTERN.test(res.stdout)) return false
+    const down = await this.herdr.run(agentSendKeys(paneId, ['down']))
+    if (down.code !== 0) return false
+    const enter = await this.herdr.run(agentSendKeys(paneId, ['enter']))
+    return enter.code === 0
+  }
+
+  /** 等 Agent 从 blocked 变成能收输入的状态。 */
+  private async waitForAgentReady(paneId: string, timeoutMs = 30_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const res = await this.herdr.run(agentGet(paneId))
+      if (res.code === 0) {
+        const agent = parseAgent(res.stdout)
+        if (agent && agent.status !== 'blocked' && agent.status !== 'unknown') return
+      }
+      await sleep(300)
+    }
+    throw new WorkerRuntimeError('agent:launch-failed', `herdr Agent 在 ${timeoutMs}ms 内没有就绪`, {
+      retryable: true,
+      detail: { paneId },
+    })
   }
 
   private agentKind(): HerdrAgentKind {
@@ -461,6 +573,27 @@ export class HerdrRuntime implements WorkerRuntime {
     return args
   }
 
+  private startError(error: HerdrCliError | null, res: CommandResult, paneId: string): WorkerRuntimeError {
+    const reason = error?.message ?? res.stderr.trim()
+    if (error?.code === 'server_not_running') {
+      return new WorkerRuntimeError('runtime:unavailable', 'herdr 服务端没有在运行，请先启动 Herdr（herdr server）', {
+        retryable: true,
+        cause: reason,
+        detail: { paneId },
+      })
+    }
+    if (error?.code === 'agent_not_ready') {
+      return new WorkerRuntimeError('agent:launch-failed', `herdr agent start 未就绪（Agent 被阻塞，通常是首次运行的确认弹窗）: ${reason}`, {
+        cause: reason,
+        detail: { paneId },
+      })
+    }
+    return new WorkerRuntimeError('agent:launch-failed', `herdr agent start 失败: ${reason}`, {
+      cause: reason,
+      detail: { paneId },
+    })
+  }
+
   private async run(argv: string[]): Promise<CommandResult> {
     const res = await this.herdr.run(argv)
     if (res.code !== 0) {
@@ -473,13 +606,7 @@ export class HerdrRuntime implements WorkerRuntime {
           detail: { argv: argv.slice(0, 2).join(' ') },
         })
       }
-      if (error?.code === 'agent_not_ready') {
-        throw new WorkerRuntimeError('agent:launch-failed', `herdr agent start 未就绪（Agent 被阻塞，通常是首次运行的确认弹窗）: ${reason}`, {
-          cause: reason,
-          detail: { argv: argv.slice(0, 3).join(' ') },
-        })
-      }
-      throw new WorkerRuntimeError('agent:launch-failed', `herdr ${argv.slice(0, 2).join(' ')} 失败: ${reason}`, {
+      throw new WorkerRuntimeError('workspace:create-failed', `herdr ${argv.slice(0, 2).join(' ')} 失败: ${reason}`, {
         cause: reason,
         detail: { argv: argv.slice(0, 2).join(' ') },
       })
@@ -487,11 +614,34 @@ export class HerdrRuntime implements WorkerRuntime {
     return res
   }
 
-  /** 启动半失败时把这次建出来的检出回收掉，避免重试撞分支。 */
+  /** 启动半失败时把窗口与检出回收掉，避免重试撞分支。 */
   private async rollback(meta: HerdrMeta): Promise<void> {
     if (meta.paneId) await this.herdr.run(paneClose(meta.paneId)).catch(() => ({ code: 1, stdout: '', stderr: '' }))
     if (meta.workspaceId) {
-      await this.herdr.run(worktreeRemove(meta.workspaceId, { force: true })).catch(() => ({ code: 1, stdout: '', stderr: '' }))
+      await this.herdr.run(workspaceClose(meta.workspaceId)).catch(() => ({ code: 1, stdout: '', stderr: '' }))
+    }
+    if (meta.workdir) await this.removeWorktree(meta.workdir, meta.repo).catch(() => {})
+  }
+
+  /**
+   * 删检出。
+   *
+   * `git worktree remove` 必须在仓库上下文里跑，所以 cwd 给源仓库而不是检出目录；
+   * 检出里有改动时先温和地删，失败了再强制删。
+   */
+  private async removeWorktree(workdir: string, repo?: string): Promise<void> {
+    // 先确认它确实是一个受管的检出，避免误删别的路径。
+    const info = await this.gitProvider.inspect(workdir).catch(() => null)
+    if (!info) return
+    const opts = repo && repo.startsWith('/') ? { cwd: repo } : {}
+    const res = await this.git.run(['worktree', 'remove', '--', workdir], opts)
+    if (res.code === 0) return
+    const forced = await this.git.run(['worktree', 'remove', '--force', '--', workdir], opts)
+    if (forced.code !== 0) {
+      throw new WorkerRuntimeError('workspace:remove-failed', `git worktree remove 失败: ${forced.stderr || forced.stdout}`, {
+        cause: forced.stderr || forced.stdout,
+        detail: { workdir, repo },
+      })
     }
   }
 
@@ -545,61 +695,50 @@ export function withWorkdir(text: string, workdir: string): string {
 }
 
 /**
- * Agent 名字：`ra-<工单号>-<pane>`。
+ * Agent 名字：`<项目>-<分支>-<短哈希>`。
  *
- * Herdr 的名字在存活期间唯一，必须匹配 `[a-z][a-z0-9_-]{0,31}`；
- * 带上 pane id 后，重派工不会和上一轮残留的 Agent 撞名。
+ * Herdr 要求名字匹配 `[a-z][a-z0-9_-]{0,31}` 且存活期间唯一。
+ * 末尾的短哈希由「工具 + 项目路径 + 分支」算出：同一个组合永远得到同一个名字，
+ * 换个工具或换个分支立刻不同 —— 比工单号这种递增数字稳定，
+ * 重派工时也能算出同名（撞名就回收旧窗口）。
  */
-export function agentNameFor(ticketId: string, paneId: string): string {
-  const slug = String(ticketId).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
-  const pane = String(paneId).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
-  const name = `ra-${slug}-${pane}`.slice(0, 32).replace(/-+$/, '')
-  return name || 'ra-worker'
+export function agentNameFor(opts: { kind: string; repo: string; branch: string }): string {
+  const hash = shortHash(`${opts.kind}\n${opts.repo}\n${opts.branch}`)
+  const repoPart = slugOf(basename(opts.repo)).slice(0, REPO_PART_MAX)
+  const branchPart = slugOf(opts.branch.split('/').pop() ?? opts.branch).slice(0, BRANCH_PART_MAX)
+  const head = [repoPart, branchPart].filter(Boolean).join('-')
+  const room = AGENT_NAME_MAX - 1 - hash.length
+  const base = `ra-${head}`.slice(0, room).replace(/-+$/, '')
+  return `${base}-${hash}`
 }
 
-export interface HerdrWorktreeResult {
-  path?: string
-  branch?: string
+/** 内容哈希：短、稳定、只做唯一后缀。 */
+export function shortHash(input: string, length = 8): string {
+  return createHash('sha256').update(String(input ?? '')).digest('hex').slice(0, length)
+}
+
+export interface HerdrWorkspaceResult {
   paneId?: string
   workspaceId?: string
+  tabId?: string
 }
 
-/** 解析 `herdr worktree create/open` 的返回。 */
-export function parseWorktreeResult(stdout: string): HerdrWorktreeResult {
+/** 解析 `herdr workspace create` 的返回。 */
+export function parseWorkspaceResult(stdout: string): HerdrWorkspaceResult {
   const root = parseJson(stdout)
   const result = (root?.result ?? {}) as Record<string, any>
-  const worktree = (result.worktree ?? {}) as Record<string, any>
-  const workspace = (result.workspace ?? {}) as Record<string, any>
   const pane = (result.root_pane ?? {}) as Record<string, any>
+  const workspace = (result.workspace ?? {}) as Record<string, any>
   return {
-    ...(worktree.path ? { path: String(worktree.path) } : {}),
-    ...(worktree.branch ? { branch: String(worktree.branch) } : {}),
     ...(pane.pane_id ? { paneId: String(pane.pane_id) } : {}),
     ...(workspace.workspace_id ? { workspaceId: String(workspace.workspace_id) } : {}),
+    ...(pane.tab_id ? { tabId: String(pane.tab_id) } : {}),
   }
 }
 
-export interface HerdrWorktreeEntry {
-  path: string
-  branch?: string
-  workspaceId?: string
-  dirty?: boolean
-}
-
-/** 解析 `herdr worktree list` 的返回。 */
-export function parseWorktreeList(stdout: string): HerdrWorktreeEntry[] {
-  const root = parseJson(stdout)
-  const result = (root?.result ?? {}) as Record<string, any>
-  const list = Array.isArray(result.worktrees) ? result.worktrees : []
-  return list.map(item => {
-    const entry = item as Record<string, any>
-    return {
-      path: String(entry.path ?? ''),
-      ...(entry.branch ? { branch: String(entry.branch) } : {}),
-      ...(entry.open_workspace_id ? { workspaceId: String(entry.open_workspace_id) } : {}),
-      ...(entry.dirty !== undefined ? { dirty: Boolean(entry.dirty) } : {}),
-    }
-  })
+/** 从「名字被占用」的错误里捞出占用者所在的 pane。 */
+export function parseStalePaneId(message: string): string | null {
+  return String(message ?? '').match(/pane_id=([A-Za-z0-9:_-]+)/)?.[1] ?? null
 }
 
 export interface HerdrAgentInfo {
@@ -610,6 +749,7 @@ export interface HerdrAgentInfo {
   stateChangeSeq?: number
   completionSeq?: number
   sessionId?: string
+  interactiveReady?: boolean
 }
 
 /** 解析 `herdr agent get/start/prompt` 里的 Agent 快照。 */
@@ -627,6 +767,7 @@ export function parseAgent(stdout: string): HerdrAgentInfo | null {
     ...(agent.state_change_seq !== undefined ? { stateChangeSeq: Number(agent.state_change_seq) } : {}),
     ...(agent.completion_seq !== undefined ? { completionSeq: Number(agent.completion_seq) } : {}),
     ...(session.value ? { sessionId: String(session.value) } : {}),
+    ...(agent.interactive_ready !== undefined ? { interactiveReady: Boolean(agent.interactive_ready) } : {}),
   }
 }
 
@@ -651,6 +792,13 @@ export function parseCliError(res: CommandResult): HerdrCliError | null {
   return null
 }
 
+function slugOf(text: string): string {
+  return String(text ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
+
 function parseJson(stdout: string): Record<string, any> | null {
   const text = stdout?.trim()
   if (!text) return null
@@ -667,4 +815,8 @@ function splitLines(text: string, limit: number): string[] {
     .split('\n')
     .filter(line => line.trim().length > 0)
     .slice(-limit)
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
 }

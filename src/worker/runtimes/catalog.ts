@@ -58,8 +58,8 @@ export const WORKER_RUNTIMES: readonly WorkerRuntimeMeta[] = [
   {
     id: HERDR_RUNTIME_ID,
     name: 'Herdr',
-    label: 'herdr · Herdr worktree + 终端',
-    hint: '通过 Herdr 创建 worktree 并在终端 pane 里启动 Agent；状态来自 Herdr 的 Agent 检测',
+    label: 'herdr · git worktree + Herdr 终端',
+    hint: '检出由 ra 用 git worktree 建，Herdr 只开终端窗口跑 Agent；状态来自 Herdr 的 Agent 检测',
     installHint: '从 Herdr 官方发布页下载安装，并确保 herdr CLI 在 PATH 中',
     installUrl: 'https://github.com/herdrdev/herdr/releases',
   },

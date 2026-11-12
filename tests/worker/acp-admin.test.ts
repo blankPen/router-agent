@@ -48,11 +48,34 @@ describe('内置运行时探测', () => {
     expect(herdr?.cli?.label).toBe('Herdr CLI')
   })
 
-  it('herdr：CLI 装好但服务端没跑时判 unverified 并说明原因', async () => {
+  it('herdr：服务端没跑时自动拉起来并判 ready', async () => {
+    const dir = home()
+    const bin = join(dir, 'bin')
+    const marker = join(dir, 'herdr-server.pid')
+    // 模拟真 Herdr：`herdr server` 起来之后，`status server` 才会报 running。
+    fakeBin(bin, 'herdr', [
+      'case "$1" in',
+      '  --version) echo "herdr 0.9.5";;',
+      `  server) echo $$ > "${marker}";;`,
+      `  status) if [ -f "${marker}" ]; then echo "status: running"; else echo "status: not running"; fi;;`,
+      'esac',
+    ].join('\n'))
+    const admin = new AcpRuntimeAdmin({ home: dir, env: { ...process.env, PATH: bin }, config: config() })
+    const snapshot = await admin.detect()
+    const herdr = snapshot.choices.find(choice => choice.id === 'herdr')
+    expect(herdr).toMatchObject({ status: 'ready', version: '0.9.5' })
+  })
+
+  it('herdr：服务端拉不起来时判 unverified 并说明原因', async () => {
     const dir = home()
     const bin = join(dir, 'bin')
     fakeBin(bin, 'herdr', 'case "$1" in --version) echo "herdr 0.9.5";; status) echo "status: not running";; esac')
-    const admin = new AcpRuntimeAdmin({ home: dir, env: { ...process.env, PATH: bin }, config: config() })
+    const admin = new AcpRuntimeAdmin({
+      home: dir,
+      env: { ...process.env, PATH: bin },
+      config: config(),
+      herdrServerTimeoutMs: 60,
+    })
     const snapshot = await admin.detect()
     const herdr = snapshot.choices.find(choice => choice.id === 'herdr')
     expect(herdr?.status).toBe('unverified')
