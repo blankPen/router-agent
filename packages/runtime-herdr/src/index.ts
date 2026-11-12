@@ -1,4 +1,5 @@
 import type { RuntimePlugin } from '@router-agent/runtime'
+import { runtimeOptionString } from '@router-agent/runtime'
 import { HERDR_OPTION_SPEC } from './herdr/options.js'
 import { HerdrRuntime } from './herdr/index.js'
 
@@ -21,6 +22,9 @@ const plugin: RuntimePlugin = {
       workersDir: ctx.workersDir,
       home: ctx.home,
       ...(ctx.claudeProjectsDir ? { claudeProjectsDir: ctx.claudeProjectsDir } : {}),
+      agent: runtimeOptionString(ctx.config.runtime.options, 'herdr', 'agent'),
+      model: runtimeOptionString(ctx.config.runtime.options, 'herdr', 'model') || undefined,
+      logger: ctx.logger,
     })
   },
 }
