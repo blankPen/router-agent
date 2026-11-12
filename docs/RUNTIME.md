@@ -75,6 +75,29 @@ runtime:
 
 `allowedTools` / `permissionMode` / `sandbox` / `shellAllow` / `allowNetwork` / `fileAccess` 这些安全字段不允许写在 `runtime.options` 里，写了会直接启动失败。Worker 权限统一由 `worker.tools` 与 adapter 内置基线决定。
 
+## 按 npm 包名添加运行时（插件）
+
+内置运行时之外的运行时以插件形式接入。`runtime.plugins.<id>` 可以写 npm 包名，也可以写本地路径：
+
+```yaml
+runtime:
+  default: my-runtime
+  plugins:
+    my-runtime: '@acme/router-agent-runtime'
+```
+
+插件包是普通 npm 包，默认导出 `kind: 'runtime'` 的对象，模板见 `templates/runtime-plugin`。加载器以 `<RA_HOME>/config.yaml` 为锚点解析包名，所以 ra 会把声明的包下载到 `<RA_HOME>/node_modules`：
+
+```bash
+ra runtime add my-runtime @acme/router-agent-runtime   # 写 runtime.plugins + 下载 npm 包
+ra runtime install my-runtime                          # 已声明但还没下载时补装（可加 --version）
+ra runtime list                                        # 「插件运行时」一节标出已安装 / 未安装
+```
+
+面板路径是「配置 → 其他设置 → 插件」（搜索「插件」可直接展开）：添加后先保存配置，再点该行的「安装依赖」。安装完成需要重启 ra 才会加载插件；`runtime.default` 填插件创建的运行时 id，插件 `meta.id` 建议与配置 id 保持一致（不一致会记 `plugin:id-mismatch`，运行时 id 以插件声明为准）。
+
+本地路径插件（`./my-runtime`、`/abs/path`）不需要下载，重启后按路径加载。安装过程看 `plugin:install-started` / `plugin:install-succeeded` / `plugin:install-failed`；重启后加载失败看 `plugin:load-failed`（常见原因：包没装上、装到了别的 node_modules、导出对象不是 `kind: 'runtime'`）。
+
 ## 运行时选项：各运行时自己声明
 
 `runtime.options.<运行时 id>.<键>` 是通用的扩展点。每个运行时在自己的 `options.ts` 里声明「能配什么、取值有哪些、默认是什么」，于是：

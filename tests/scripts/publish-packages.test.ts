@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
   PUBLISH_ORDER,
@@ -82,7 +83,7 @@ describe('多包发布', () => {
 
   it('每个内置插件包都声明了源码用到的第三方依赖', () => {
     for (const name of PUBLISH_ORDER) {
-      expect(undeclaredDependencies(new URL(`../../packages/${name}`, import.meta.url).pathname)).toEqual([])
+      expect(undeclaredDependencies(fileURLToPath(new URL(`../../packages/${name}/`, import.meta.url)))).toEqual([])
     }
   })
 })

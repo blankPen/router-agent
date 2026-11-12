@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { request } from 'node:http'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AddressInfo } from 'node:net'
@@ -13,6 +13,7 @@ import { defaultConfig, loadConfig, policyOf, projectsForRuntime, type AppConfig
 import { FeishuBotAdmin } from '@router-agent/channel-feishu'
 import type { IdentityStatusView } from '@router-agent/channel-feishu'
 import { ReportRejectedError } from '#runtime/evidence-gate.js'
+import type { ChannelAdmin } from '#channel/port.js'
 
 function call(server: ApiServer, method: string, path: string, body?: unknown): Promise<{ status: number; json: any }> {
   return new Promise((resolve, reject) => {
@@ -936,6 +937,77 @@ describe('API 异常日志', () => {
       expect(entry?.extra?.message).toBe('resume down')
     } finally {
       await server.close()
+      store.close()
+    }
+  })
+
+  it('清理工作区失败时记录 api:workspace-cleanup-failed', async () => {
+    const store = new Store(':memory:')
+    const config = { ...defaultConfig(), feishu: { ...defaultConfig().feishu, chats: [chatEntry('oc_dev')], botOpenIds: ['ou_bot'] } }
+    const engine = new Engine({ store, policy: policyOf(config), clock: { now: () => '2026-11-06T10:00:00.000Z' } })
+    const logs: { message: string; extra?: Record<string, unknown> }[] = []
+    const extra = await createApiServer({
+      engine, store, config,
+      logger: {
+        info: () => {},
+        warn: (message, extra) => logs.push({ message, ...(extra ? { extra } : {}) }),
+        error: () => {},
+      },
+      workspaceAdmin: {
+        list: async () => ({ runtimes: [], cleanableCount: 0 }),
+        cleanup: async () => { throw new Error('未知的 Worker 运行时: nope') },
+      },
+    })
+    try {
+      const res = await call(extra, 'POST', '/api/workspaces/cleanup', { runtimeId: 'nope' })
+      expect(res.status).toBe(400)
+      expect(res.json.error).toBe('workspace-cleanup-failed')
+      const entry = logs.find(log => log.message === 'api:workspace-cleanup-failed')
+      expect(entry?.extra?.runtimeId).toBe('nope')
+      expect(entry?.extra?.requested).toBe(0)
+      expect(entry?.extra?.message).toBe('未知的 Worker 运行时: nope')
+    } finally {
+      await extra.close()
+      store.close()
+    }
+  })
+
+  it('飞书凭据保存时配置落盘失败记录 config:write-failed', async () => {
+    const store = new Store(':memory:')
+    const engine = new Engine({ store, policy: policyOf(defaultConfig()), clock: { now: () => '2026-11-06T10:00:00.000Z' } })
+    const logs: { message: string; extra?: Record<string, unknown> }[] = []
+    const tmp = mkdtempSync(join(tmpdir(), 'ra-cred-write-fail-'))
+    const blocker = join(tmp, 'blocker')
+    writeFileSync(blocker, 'x')
+    const cfg = {
+      ...defaultConfig(),
+      home: join(blocker, 'home'),
+      feishu: { ...defaultConfig().feishu, chats: [chatEntry('oc_dev')], botOpenIds: ['ou_bot'] },
+    }
+    const extra = await createApiServer({
+      engine, store, config: cfg,
+      logger: {
+        info: () => {},
+        warn: () => {},
+        error: (message, extra) => logs.push({ message, ...(extra ? { extra } : {}) }),
+      },
+      feishuBot: {
+        profileHome: '/tmp/fake-lark',
+        status: async () => ({ appId: '', bot: { available: false, status: '' }, user: { available: false, status: '', openId: '', userName: '' } }),
+        configure: async () => ({ ok: true }),
+        startLogin: async () => ({}),
+        completeLogin: async () => ({}),
+      } as unknown as ChannelAdmin,
+    })
+    try {
+      const res = await call(extra, 'POST', '/api/feishu/credentials', { appId: 'cli_abc', appSecret: 'secret' })
+      expect(res.status).toBe(500)
+      expect(res.json.error).toBe('config-write-failed')
+      const entry = logs.find(log => log.message === 'config:write-failed')
+      expect(entry?.extra?.home).toBe(cfg.home)
+      expect(entry?.extra?.message).toBeTruthy()
+    } finally {
+      await extra.close()
       store.close()
     }
   })
