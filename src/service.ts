@@ -5,12 +5,15 @@ import type { Clock, Engine } from './core/engine.js'
 import type { Assignment, Report, Ticket, Trigger } from './core/model.js'
 import type { Store } from './store/db.js'
 import type { AppConfig, RetentionSettings, WorkspaceSettings } from './config.js'
-import { replyAlwaysChatsOf } from './config.js'
+import { DEFAULT_CHAT_INTAKE, replyAlwaysChatsOf } from './config.js'
 import { STAGE_LABELS } from './core/stage.js'
 import { WorkerRuntimeError, type WorkerRuntime, type WorkerContext, type SessionEvent, type WorkerRef, type AgentStatus, type ResumeHint } from './worker/port.js'
 import { AgentLoop } from './router/agent-loop.js'
 import type { DecisionAudit, DecisionEngine } from './router/decision-engine.js'
 import { dispatchSettingsOf } from './router/dispatch.js'
+import type { IntakeEngine } from './router/intake-engine.js'
+import type { IntakeChatSettings } from './router/intake-flow.js'
+import { createRepoPathResolver } from './router/repo-paths.js'
 import { ReportPoller, appendEvent, readWorkerMeta, type WorkerMeta, type WorkerStateFile } from './worker/report-poller.js'
 import { classifyAgentStatus } from './worker/status.js'
 import { RuntimeRegistry } from './worker/registry.js'
@@ -66,6 +69,20 @@ export interface RouterServiceOptions {
   runtimes?: RuntimeRegistry
   /** 唯一研判引擎（Pi）。 */
   decisionEngine: DecisionEngine
+  /**
+   * 需求识别引擎（初筛 + 分析子 Agent）。
+   * 只在有群开启「需求分析助手」时装配；不传则普通成员仍无法自助提需。
+   */
+  intakeEngine?: IntakeEngine
+  /**
+   * 群 id → 终审管理员 open_id（启动时已把邮箱解析成 open_id）。
+   * 没传时按「没配管理员」处理，终审回退到全局允许名单。
+   */
+  intakeApprovers?: Record<string, string[]>
+  /** intake 读代码时把 repo 选择器解析成本地目录；不传则只基于对话分析。 */
+  resolveIntakeProjectPath?: (project: { name: string; repo: string }) => Promise<string | undefined>
+  /** Orca 命令；传了但没传 resolveIntakeProjectPath 时用默认解析器。 */
+  orca?: CommandRunner
   prTracker: PrTracker
   clock?: Clock
   logger?: Logger
@@ -579,6 +596,15 @@ export class RouterService {
       sessionKeyScope: opts.config.router.session.keyScope,
       persona: opts.config.router.persona,
       ...(opts.onDecisionAudit ? { onAudit: opts.onDecisionAudit } : {}),
+      ...(opts.intakeEngine
+        ? {
+            intake: {
+              llm: opts.intakeEngine,
+              settings: { forChat: (chatId: string) => this.intakeSettingsOf(opts, chatId) },
+              resolveProjectPath: this.intakeProjectPathOf(opts),
+            },
+          }
+        : {}),
     })
     this.poller = opts.poller ?? new ReportPoller({
       workersDir: join(opts.config.home, 'workers'),
@@ -636,6 +662,31 @@ export class RouterService {
 
   private workspaceRefOf(assignment: Assignment): { ticketId: string; workdir: string } {
     return { ticketId: assignment.ticketId, workdir: assignment.workdir }
+  }
+
+  /** intake 用：优先注入的解析器，其次按 Orca 仓库清单解析；两者都没有就只做对话分析。 */
+  private intakeProjectPathOf(opts: RouterServiceOptions): (project: { name: string; repo: string }) => Promise<string | undefined> {
+    if (opts.resolveIntakeProjectPath) return opts.resolveIntakeProjectPath
+    // 没有 orca 也能解析 path:/abs 这类直接选择器；只有 name:/id: 选择器才需要 orca。
+    const resolve = createRepoPathResolver({ ...(opts.orca ? { orca: opts.orca } : {}) })
+    return async project => (await resolve(project.repo)) ?? (project.name ? resolve(project.name) : undefined)
+  }
+
+  /**
+   * 某个群的需求分析配置。
+   *
+   * 管理员取解析后的 open_id：配置里写邮箱时原始条目是邮箱，
+   * 拿邮箱去比 open_id 永远匹配不上，终审就没人能过。
+   */
+  private intakeSettingsOf(opts: RouterServiceOptions, chatId: string): IntakeChatSettings {
+    const chat = opts.config.feishu.chats.find(item => item.chat === chatId)
+    const intake = chat?.intake
+    return {
+      enabled: intake?.enabled ?? false,
+      approvers: opts.intakeApprovers?.[chatId] ?? [],
+      maxQuestions: intake?.maxQuestions ?? DEFAULT_CHAT_INTAKE.maxQuestions,
+      codeAccess: intake?.codeAccess ?? DEFAULT_CHAT_INTAKE.codeAccess,
+    }
   }
 
   /** 按 assignment 的 runtimeId 取运行时；旧工单不会被新默认运行时接管。 */

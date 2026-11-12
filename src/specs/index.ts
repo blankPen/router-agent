@@ -65,6 +65,22 @@ const SPECS: SpecDefinition[] = [
     applyHint: '保存后需重启服务生效',
   },
   {
+    id: 'router.intake-screener',
+    group: 'router',
+    file: 'intake-screener.md',
+    label: '需求初筛规范',
+    description: '轻量模型如何把群消息分成闲聊 / 咨询 / 疑似问题三类。',
+    applyHint: '保存后立即生效',
+  },
+  {
+    id: 'router.intake-analyst',
+    group: 'router',
+    file: 'intake-analyst.md',
+    label: '需求分析规范',
+    description: '分析子 Agent 如何追问、甄别并整理结构化需求单。',
+    applyHint: '保存后立即生效',
+  },
+  {
     id: 'worker.prompt-mode',
     group: 'worker',
     file: 'prompt-mode.md',

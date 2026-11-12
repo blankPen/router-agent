@@ -59,7 +59,7 @@ describe('规范 markdown API', () => {
   it('GET /api/specs 返回全部规范与当前内容', async () => {
     const res = await call(server, 'GET', '/api/specs')
     expect(res.status).toBe(200)
-    expect(res.json.specs).toHaveLength(6)
+    expect(res.json.specs).toHaveLength(8)
     const soul = res.json.specs.find((spec: { id: string }) => spec.id === 'router.soul')
     expect(soul.isCustom).toBe(false)
     expect(soul.content.length).toBeGreaterThan(0)
