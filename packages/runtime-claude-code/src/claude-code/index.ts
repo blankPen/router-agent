@@ -5,6 +5,7 @@ import type { CommandRunner } from '@router-agent/infra/process.js'
 import { noopLogger, type Logger } from '@router-agent/infra/logger.js'
 import { GitWorktreeProvider } from '@router-agent/runtime'
 import { claudeTranscriptPath, readClaudeSession, readTranscriptSince, transcriptSize } from '@router-agent/runtime'
+import { ensureClaudeBackgroundReady } from '@router-agent/runtime'
 import { workBranch, worktreeName } from '@router-agent/runtime'
 import { normalizeRuntimeId } from '@router-agent/runtime'
 import { injectViaAttach, type AttachInjectResult } from './inject.js'
@@ -166,6 +167,10 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
       startedAt: new Date().toISOString(),
     }
     this.writeMeta(ticket.id, meta)
+
+    // claude --bg 会先检查工作目录信任与免责提示，没确认过就直接退出。
+    // 这里替用户补上确认，否则每张工单都会卡在「请手动运行一次 claude」。
+    this.ensureBackgroundReady(ticket.id, workspace.workdir)
 
     try {
       const prompt = `Read ${briefPath} and execute the ticket. Report via ra report.`
@@ -540,6 +545,28 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
     return this.claude.run(argv, { cwd, env: this.env })
   }
 
+  /** 补齐 Claude Code 无人值守启动所需的确认；补不上只告警，交给 CLI 自己报错。 */
+  private ensureBackgroundReady(ticketId: string, workdir: string): void {
+    const trust = ensureClaudeBackgroundReady(workdir, { home: this.env.HOME })
+    if (!trust.ready) {
+      this.logger.warn('claude:workspace-untrusted', {
+        ticketId,
+        workdir,
+        reason: trust.reason ?? 'unknown',
+        configPath: trust.configPath,
+      })
+      return
+    }
+    if (trust.added.length > 0) {
+      this.logger.info('claude:workspace-trusted', {
+        ticketId,
+        workdir,
+        added: trust.added,
+        configPath: trust.configPath,
+      })
+    }
+  }
+
   private async bestEffortRollback(workdir: string, branch: string, repo: string): Promise<void> {
     await this.gitProvider.remove(workdir, { repo, force: true }).catch(() => {})
     // 分支删除不是所有仓库都允许；失败不影响主流程。
@@ -574,10 +601,26 @@ function parseBackgroundId(stdout: string): string | null {
 }
 
 function launchError(argv: string[], res: { stdout: string; stderr: string }): WorkerRuntimeError {
-  return new WorkerRuntimeError('agent:launch-failed', `claude 命令失败: ${res.stderr || res.stdout}`, {
-    cause: res.stderr || res.stdout,
+  const output = `${res.stderr || res.stdout}`
+  const hint = launchGateHint(`${res.stderr}\n${res.stdout}`)
+  return new WorkerRuntimeError('agent:launch-failed', `claude 命令失败: ${hint ?? output}`, {
+    cause: output,
     detail: { argv: argv.map(arg => (arg.length > 120 ? `<${arg.length} chars>` : arg)) },
   })
+}
+
+/**
+ * Claude Code 的两个启动前置确认没通过时，错误信息里是英文提示；
+ * 这里翻成能直接照着做的一句话，避免工单只显示一句看不懂的原文。
+ */
+function launchGateHint(output: string): string | null {
+  if (/Workspace not trusted/i.test(output)) {
+    return 'Claude Code 不信任这个工作目录，--bg 拒绝无人值守启动：请在该目录手动执行一次 claude 并接受信任提示'
+  }
+  if (/accepting the disclaimer/i.test(output)) {
+    return 'Claude Code 要求先接受「跳过权限确认」免责提示：请先手动执行一次 claude --dangerously-skip-permissions 并确认'
+  }
+  return null
 }
 
 /** Claude resume 产生副本时的固定文案（含 restricted / of that conversation 等变体）。 */

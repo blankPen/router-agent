@@ -98,6 +98,27 @@ Herdr 的 `agent` 取值是 Herdr 自己的 kind（`claude` / `codex` / `opencod
 
 进展巡检读的是 Agent 自己的结构化会话记录：Claude 读 `~/.claude/projects/<cwd>/`，Codex 读 `~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl`。没指定 Agent 时按默认值 `claude` 读，读不到就退回终端屏幕渲染。
 
+## Claude Code 运行时（`claude-code`）
+
+`claude-code` 用 `git worktree` + `claude --bg` 后台会话承载工单，无人值守跑。
+
+### 启动前要先满足 Claude 的两个确认
+
+`claude --bg` 在拉起后台会话前会检查两件事，**任何一件没过就直接退出、不返回会话 id**：
+
+| 检查 | CLI 的原话 | 存在哪 |
+| --- | --- | --- |
+| 工作目录是否被信任 | `Workspace not trusted. Run \`claude\` in <目录> once and accept the trust prompt, then retry.` | `~/.claude.json` 的 `projects[目录真实路径].hasTrustDialogAccepted` |
+| 是否接受过「跳过权限确认」免责提示 | `--bg with bypassPermissions requires accepting the disclaimer first.` | `~/.claude.json` 的 `bypassPermissionsModeAccepted`（Claude 自己会转存到 `~/.claude/settings.json` 的 `skipDangerousModePermissionPrompt`） |
+
+这两项平时只能由交互式确认写入，所以每张工单都会卡在「请手动运行一次 claude」上，Router 只能转人工。
+适配器在启动前把两项补齐（`ensureClaudeBackgroundReady`，写进子进程看到的同一个 `~/.claude.json`），
+补写成功记 `claude:workspace-trusted`，补不上（配置损坏或不可写）记 `claude:workspace-untrusted` 并仍然尝试启动——
+这时失败信息会被翻成一句能照着做的话（见 `docs/OPERATIONS.md` 的事件表）。
+
+> 目录信任按**真实路径**登记：软链目录要写 `/private/tmp/...` 而不是 `/tmp/...`，
+> 否则 Claude Code 认不出来。适配器用 `realpath` 换算。
+
 ## Codex App Server 运行时（`codex-app`）
 
 `codex-app` 直接启动 `codex app-server --stdio`，用 Codex 原生 JSON-RPC 承载工单：
@@ -105,6 +126,10 @@ Herdr 的 `agent` 取值是 Herdr 自己的 kind（`claude` / `codex` / `opencod
 - `thread/start` + `turn/start` 首轮；`thread/resume` 重启后接回；`turn/steer` 执行中追加输入；`turn/interrupt` 停止；
 - 原生处理 `item/commandExecution/requestApproval`、`item/fileChange/requestApproval`、`item/permissions/requestApproval` 等审批请求；
 - threadId 同时写入 `meta.handle` / `meta.sessionId`，Web 面板会显示「Codex 打开」按钮，用 `codex://threads/<threadId>` 在 Codex 桌面端打开同一 thread。
+
+> 启动握手（`initialize`）超时时报错里会带上 app-server 在 stdout 上打印的**非协议输出**：
+> Codex 若在启动时打印交互式提示，提示原文会出现在 `codex:launch-failed` 的 `reason` 里，
+> 不会只剩一句没有线索的「请求超时」。
 
 ### 重启后被中断的任务怎么恢复
 
