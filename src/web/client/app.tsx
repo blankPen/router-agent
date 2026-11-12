@@ -1560,7 +1560,7 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
         effect={effect}
         dirty={blockDirty(block)}
         open={open}
-        onToggle={() => setCollapsed(current => ({ ...current, [block.id]: open }))}
+        onToggle={() => setCollapsed(current => ({ ...current, [block.id]: !open }))}
       >
         {open ? body() : null}
       </ConfigBlockView>

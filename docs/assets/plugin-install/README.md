@@ -1,6 +1,6 @@
 # 插件依赖安装 · 界面 Before / After
 
-同一场景（配置 → 派工与服务 → 运行时插件）、同一视口（1440×1000 @2x）、同一主题（浅色）。
+同一场景（配置 → 其他设置 → 插件，搜索「插件」展开）、同一视口（1440×1000 @2x）、同一主题（浅色）。
 
 场景：`config.yaml` 里已声明 `runtime.plugins.demo-runtime: ra-demo-runtime`，
 但 npm 包还没下载到 `<RA_HOME>/node_modules`，插件加载失败。
