@@ -156,6 +156,11 @@ export interface Input {
   seq: number
   kind: InputKind
   text: string
+  /**
+   * 来源标识：同一条外部消息只入库一次。
+   * 空表示没有可去重的来源（例如内部补的 retry 输入）。
+   */
+  sourceKey?: string
   /** expired：worker 在 ack 前就没了；不再重投，也不代表用户请求被完成。 */
   status: 'pending' | 'delivered' | 'acked' | 'expired'
   createdAt: string

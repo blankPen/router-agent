@@ -22,6 +22,12 @@ export interface Clock {
   now(): string
 }
 
+/**
+ * 输入去重窗口：同工单内 kind + 文本完全相同、且还在 pending/delivered 时，
+ * 这段时间内只保留第一条。跨来源重复（飞书消息 + 面板补录）靠它兜住。
+ */
+export const INPUT_DEDUP_WINDOW_MS = 120_000
+
 export interface IdGen {
   next(prefix: string): string
 }
@@ -285,9 +291,22 @@ export class Engine {
     return { report, ackedInputs }
   }
 
-  deliverInput(ticketId: string, opts: { kind: InputKind; text: string; assignmentId?: string }): Input {
+  deliverInput(ticketId: string, opts: { kind: InputKind; text: string; assignmentId?: string; sourceKey?: string }): Input {
     const ticket = this.requireTicket(ticketId)
     if (ticket.stage === 'done') throw new Error('ticket:closed')
+    const duplicate = this.findDuplicateInput(ticketId, opts)
+    if (duplicate) {
+      // 同一条外部消息重复到达（飞书重投 / 面板再点一次）：只保留第一条，不重复投给 worker。
+      this.onEvent({
+        event: 'input:deduped',
+        ticketId,
+        inputId: duplicate.id,
+        seq: duplicate.seq,
+        kind: duplicate.kind,
+        ...(opts.sourceKey ? { sourceKey: opts.sourceKey } : {}),
+      })
+      return duplicate
+    }
     // 工单已接但还没派工时先挂起，派工后由 startAssignment 重新绑定。
     const assignment = opts.assignmentId ?? this.store.latestAssignment(ticketId)?.id ?? ''
     const input: Input = {
@@ -297,12 +316,43 @@ export class Engine {
       seq: this.store.nextInputSeq(ticketId),
       kind: opts.kind,
       text: opts.text,
+      ...(opts.sourceKey ? { sourceKey: opts.sourceKey } : {}),
       status: 'pending',
       createdAt: this.clock.now(),
     }
     this.store.insertInput(input)
+    if (!this.store.getInput(input.id)) {
+      // 唯一键冲突：同一条消息并发入库时命中了已有行，复用那一条而不是丢掉这次投递。
+      const existing = opts.sourceKey ? this.store.findInputBySourceKey(ticketId, opts.sourceKey) : null
+      if (existing) {
+        this.onEvent({ event: 'input:deduped', ticketId, inputId: existing.id, seq: existing.seq, kind: existing.kind })
+        return existing
+      }
+      throw new Error('input:insert-conflict')
+    }
     this.onEvent({ event: 'input:queued', ticketId, inputId: input.id, seq: input.seq, kind: input.kind, text: preview(input.text) })
     return input
+  }
+
+  /**
+   * 找到「已经入库过」的同一条输入。
+   *
+   * 两层判定：
+   * 1. sourceKey 精确匹配 —— 同一条外部消息（飞书 message_id）只入库一次；
+   * 2. 内容窗口 —— 同一工单内 kind + 文本完全相同、且还在 pending/delivered 状态、
+   *    且发生在 INPUT_DEDUP_WINDOW_MS 内时视为重复（面板与飞书各插了一条的兜底）。
+   *    已经 ack / expired 的不参与去重：用户确实可以再发一遍「继续」。
+   */
+  private findDuplicateInput(
+    ticketId: string,
+    opts: { kind: InputKind; text: string; sourceKey?: string },
+  ): Input | null {
+    if (opts.sourceKey) {
+      const existing = this.store.findInputBySourceKey(ticketId, opts.sourceKey)
+      if (existing) return existing
+    }
+    const since = new Date(Date.parse(this.clock.now()) - INPUT_DEDUP_WINDOW_MS).toISOString()
+    return this.store.findRecentInputByText(ticketId, opts.kind, opts.text, since)
   }
 
   ackInputs(ticketId: string, ids: string[]): void {
@@ -324,7 +374,8 @@ export class Engine {
     for (const sub of subscriptions) {
       const ticket = this.store.getTicket(sub.ticketId)
       if (!ticket || ticket.stage === 'done') continue
-      this.deliverInput(ticket.id, { kind: 'followup', text })
+      // sourceKey 用 trigger 的外部事件 id：同一条消息只会变成一条输入。
+      this.deliverInput(ticket.id, { kind: 'followup', text, sourceKey: `trigger:${trigger.externalId}` })
       delivered.push(ticket)
     }
     this.store.setTriggerDisposition(trigger.id, delivered.length > 0 ? 'fanned_out' : 'pending')

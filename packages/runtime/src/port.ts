@@ -74,7 +74,11 @@ export interface WorkspaceProvider {
   readonly id: string
   create(req: WorkspaceRequest): Promise<Workspace>
   inspect(ref: string): Promise<WorkspaceInfo | null>
-  remove(ref: string, opts?: { force?: boolean }): Promise<void>
+  /**
+   * 回收检出。`repo` 是源仓库绝对路径：git worktree remove 必须在 git 上下文里跑，
+   * 否则会报 `fatal: not a git repository`。
+   */
+  remove(ref: string, opts?: { force?: boolean; repo?: string }): Promise<void>
   listRepos?(): Promise<RepoDescriptor[]>
 }
 
@@ -92,6 +96,8 @@ export interface WorkspaceRef {
   workdir: string
   /** provider 自己的稳定标识；为空时由 workdir 推导。 */
   workspaceRef?: string
+  /** 源仓库绝对路径；回收检出时用它当 git 上下文。 */
+  repo?: string
 }
 
 export interface StartResult {
@@ -111,7 +117,16 @@ export interface ActivityQuery {
 
 /** 投递回执：Router 据此决定是否重投；accepted 不等于 ack。 */
 export type DeliveryReceipt =
-  | { status: 'accepted'; inputIds: string[] }
+  | {
+      status: 'accepted'
+      inputIds: string[]
+      /**
+       * 运行时在投递过程中切换了会话（例如 Claude 的 resume 产生副本）。
+       * Router 必须把 Assignment 的 handle 换成新值，后续 status/stop 才能命中同一会话。
+       */
+      handle?: string
+      sessionId?: string
+    }
   | { status: 'queued'; inputIds: string[]; reason?: string }
   | { status: 'rejected'; inputIds: string[]; reason: string; retryable?: boolean; retryAfterMs?: number }
 

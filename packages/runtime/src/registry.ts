@@ -28,6 +28,8 @@ export interface RuntimeDeps {
   orca: CommandRunner
   /** 已绑定 claude 的 runner。 */
   claude: CommandRunner
+  /** `claude` 可执行文件路径；轮内插话要直接 spawn attach，默认 `claude`。 */
+  claudeBin?: string
   /** 已绑定 git 的 runner。 */
   git: CommandRunner
   /** 已绑定 herdr 的 runner。 */
@@ -89,6 +91,7 @@ export function createRuntimes(config: RuntimeConfigView, deps: RuntimeDeps): Ru
     ?? {}) as Record<string, unknown>
   runtimes.set(CLAUDE_CODE_RUNTIME_ID, new ClaudeCodeRuntime({
     claude: deps.claude,
+    ...(deps.claudeBin ? { claudeBin: deps.claudeBin } : {}),
     git: deps.git,
     workersDir: deps.workersDir,
     home: deps.home,
@@ -96,6 +99,7 @@ export function createRuntimes(config: RuntimeConfigView, deps: RuntimeDeps): Ru
     // 只允许非安全参数；allowedTools / 跳过权限确认 / sandbox 由 worker.tools 与内置基线决定。
     ...(typeof claudeOptions.model === 'string' ? { model: claudeOptions.model } : {}),
     ...(deps.env ? { env: deps.env } : {}),
+    ...(deps.logger ? { logger: deps.logger } : {}),
   }))
 
   const codexOptions = codexAppOptionsOf(config)

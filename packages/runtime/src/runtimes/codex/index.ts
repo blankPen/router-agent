@@ -546,7 +546,8 @@ export class CodexAppRuntime implements WorkerRuntime {
   }
 
   async removeWorkspace(ref: WorkspaceRef): Promise<void> {
-    await this.workspaces.remove(ref.workdir)
+    const meta = this.readMeta(ref.ticketId)
+    await this.workspaces.remove(ref.workdir, { repo: ref.repo ?? meta?.repo })
   }
 
   async repoSlug(ref: WorkerRef): Promise<string | null> {
@@ -1019,7 +1020,7 @@ export class CodexAppRuntime implements WorkerRuntime {
   }
 
   private async rollback(workdir: string, branch: string, repo: string): Promise<void> {
-    await this.workspaces.remove(workdir).catch(() => {})
+    await this.workspaces.remove(workdir, { repo }).catch(() => {})
     if (this.workspaces.deleteBranch) await this.workspaces.deleteBranch(branch, repo).catch(() => {})
   }
 

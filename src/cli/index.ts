@@ -69,6 +69,8 @@ export interface CliIo {
   /** 测试注入点；默认用真实 orca / claude / git / lark-cli。 */
   orca?: CommandRunner
   claude?: CommandRunner
+  /** `claude` 可执行文件路径（轮内插话用）；默认 `claude`。 */
+  claudeBin?: string
   git?: CommandRunner
   /** Herdr CLI；默认用真实 herdr。 */
   herdr?: CommandRunner
@@ -329,6 +331,7 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
       workersDir: join(home, 'workers'),
       orca: output.orca ?? realRunner('orca'),
       claude: output.claude ?? realRunner('claude'),
+      claudeBin: output.claudeBin ?? 'claude',
       git: output.git ?? realRunner('git'),
       herdr: output.herdr ?? realRunner('herdr'),
       logger: createLogger(home, output, false),
@@ -1305,6 +1308,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     workersDir: join(home, 'workers'),
     orca: orcaRunner,
     claude: claudeRunner,
+    claudeBin: output.claudeBin ?? 'claude',
     git: gitRunner,
     herdr: herdrRunner,
     logger,

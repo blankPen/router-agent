@@ -80,9 +80,11 @@ Router 不做对话，只在必要时说话：
 | `router:decision` | Engine | `triggerId` `decision` `strength` `reason` `ticketId` `title` `scope` | Router 的研判结论 |
 | `launch` | Service | `ticketId` `handle` `workdir` | 派工到 Orca worktree |
 | `input:queued` | Engine | `ticketId` `seq` `text` | Router 准备发给 worker 的内容 |
+| `input:deduped` | Engine | `ticketId` `inputId` `seq` `kind` `sourceKey` | 同一条来源消息重复到达（飞书重投 / 面板再点一次），复用已有输入，没有重复投给 worker |
 | `input:delivered` | Service | `ticketId` `count` `text` | 实际投递进 worker 终端 |
 | `worker:lost` | Service | `ticketId` `handle` `reason` `lastSeq` `expired` | 执行会话已不存在；已投递未 ack 的输入标为 `expired`，不再参与重投 |
 | `input:relaunch` | Service | `ticketId` `pending` | 因新消息重建 worker；同一批积压输入只触发一次 |
+| `input:adopted-handle` | Service | `ticketId` `from` `to` `sessionId` | 运行时投递时接管了新会话（Claude resume fork），Assignment 已切换到新 handle |
 | `worker:stop-stale` | Service | `ticketId` `handle` | 终端句柄已失效（`terminal_handle_stale`），停止动作不再重试 |
 | `report` | Service | `ticketId` `state` `turn` `summary` `reply` `humanAction` `pr` | worker 的 `ra report` 上报 |
 | `report:evidence-missing` | Service | `ticketId` `mode` `action` `source` `reason` `missing` | UI 工单缺 Before / After 证据；`enforce` 时 action=reject，`warn` 时只记录 |
@@ -317,6 +319,13 @@ ra start
 - 实测 Orca 的 `lastOutputAt` 是毫秒数字、且 CLI 创建的终端可能 `orphaned=true` 但依然可用；适配层已分别做归一化与「只有 `connected=false` 才判死」的处理。
 - Claude Code 运行时用 `git worktree`，项目清单与 Orca 隔离（`runtime.projects.claude-code`），`repo` 必须是本地仓库绝对路径（`path:/abs` 或 `/abs`）；`ra init` 在 `runtime.default: claude-code` 时会直接问路径。切换运行时后，没有对应清单项目的工单会先追问，不会把 Orca 选择器当路径用。
 - Claude Code 运行时启动时带 `--dangerously-skip-permissions`，正常情况下不会因权限确认阻塞；若仍进入 `blocked`（例如等待人工输入），只转人工，不自动 resume。追问在当前轮结束后生效（与 TUI 输入排队一致）；需要轮内实时插话时要改用 `stream-json` 或 SDK/ACP。
+- Claude Code 的追问遵循「一个话题 = 一个会话」：本轮还在跑（`state=working`）时通过 `claude attach <id>` 把输入插进当前轮，agent 会像 TUI 里那样在处理中途收到这句话；本轮已结束（`done/stopped`）则先 `claude stop <id>`（会话与对话都保留），再用 `--bg --resume <完整 sessionId>` 原地续跑同一会话。**必须传 `claude agents --json` 里打印的完整 session id**（传 short id 会被 CLI 判成另开一个会话），也不能带新 flag。
+- Claude Code 轮内插话走的是 TUI 输入框（attach），不是官方接口：注入后必须用会话记录里的 `input-<id>` 标记校验，没落盘就退回排队、等本轮结束再 resume；同一条输入按 meta 水位线幂等，不会因为 Router 重投而重复插话。`blocked`（等权限/人工）不插话，只转人工。
+- Claude Code 的后台 worker 在本轮结束后仍然存活，此时直接 `--bg --resume` 会被 CLI 判成「already running in the background」并复制出一个副本——这才是 fork 的真正来源（不是 `--` 分隔符）。适配器已经先 stop 再 resume；万一仍出现副本，会 `claude stop` 掉副本、保留原会话不变，并把本轮输入退避重投回原会话（`claude:resume-forked`），5 次后转人工。
+- Claude Code 副本路径刻意不用 `claude rm`：部分版本会连带删掉工单的 worktree。
+- 输入按「来源标识」幂等：飞书消息用 trigger 的外部 id 做 `source_key`；跨来源重复（飞书 + 面板各插一条同文本）按 120 秒窗口去重。已 ack / expired 的输入不参与去重，用户可以再发一遍同样的话。
+- 回收检出时 `git worktree remove` 会带上源仓库作为 cwd（拿不到就退回检出目录自己），否则进程 cwd 不在仓库里会报 `fatal: not a git repository`，检出与分支会残留在磁盘上。
+- 自动升级的 npm 安装默认超时 300 秒；超时会被 SIGKILL，日志记 `update:upgrade-failed` 且带 `timedOut` / `signal` / `timeoutMs`，不再退化成看不出原因的「npm 退出码 1」。
 - Claude Code 依赖 `claude agents --json --all` 的字段（本仓库实测 `2.1.318`）；升级后字段变化时状态会退化为 `null`，需要按版本适配。
 - 派工草稿按「群 + 同一个人」保存，30 分钟有效；同一个群里的多个未补齐请求会互相覆盖（后一次追问覆盖前一次）。
 - Pi SDK 仍在演进，本仓库锁定 `@earendil-works/pi-coding-agent@1.5.0`，升级前先跑 `RA_PI_VERIFY=1` 的真实环境验证。

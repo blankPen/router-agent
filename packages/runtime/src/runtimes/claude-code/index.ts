@@ -2,10 +2,12 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { CommandRunner } from '#infra/process.js'
+import { noopLogger, type Logger } from '#infra/logger.js'
 import { GitWorktreeProvider } from '../../workspaces/git-worktree.js'
-import { readClaudeSession } from '../../agents/claude.js'
+import { claudeTranscriptPath, readClaudeSession, readTranscriptSince, transcriptSize } from '../../agents/claude.js'
 import { workBranch, worktreeName } from '../../naming.js'
 import { normalizeRuntimeId } from '../catalog.js'
+import { injectViaAttach, type AttachInjectResult } from './inject.js'
 import {
   WorkerRuntimeError,
   type ActivityQuery,
@@ -29,6 +31,10 @@ import {
 export interface ClaudeCodeRuntimeOptions {
   claude: CommandRunner
   git: CommandRunner
+  /** `claude` 可执行文件；轮内注入要直接 spawn attach（需要控制 stdin）。 */
+  claudeBin?: string
+  /** 测试注入点：默认走 attach。 */
+  inject?: (handle: string, text: string, cwd: string) => Promise<AttachInjectResult>
   /** ~/.router-agent/workers */
   workersDir: string
   /** ~/.router-agent */
@@ -40,6 +46,7 @@ export interface ClaudeCodeRuntimeOptions {
   env?: NodeJS.ProcessEnv
   /** 允许创建 worktree 的根目录；默认 <home>/worktrees。 */
   worktreesRoot?: string
+  logger?: Logger
 }
 
 interface ClaudeAgentRecord {
@@ -78,7 +85,8 @@ interface ClaudeMeta {
  *
  * - 首轮：claude --bg --dangerously-skip-permissions "<brief 文件路径>"；
  * - 状态：claude agents --json --all；
- * - 追问：会话 done/stopped 后 claude --bg --resume <sessionId>，**不能带新 flags**；
+ * - 追问：会话 done/stopped 后，先 `claude stop <id>` 停掉后台 worker（会话保留），
+ *   再 claude --bg --resume <完整 sessionId>，**不能带新 flags**——CLI 才会原地续跑同一会话；
  * - 停止：claude stop <id>（保留会话）。
  */
 export class ClaudeCodeRuntime implements WorkerRuntime {
@@ -88,6 +96,8 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
     workspace: { cleanup: true, prLink: false, discovery: false },
   }
   private claude: CommandRunner
+  private claudeBin: string
+  private inject: (handle: string, text: string, cwd: string) => Promise<AttachInjectResult>
   private workersDir: string
   private home: string
   private claudeProjectsDir?: string
@@ -95,9 +105,12 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
   private allowedTools?: string
   private env: NodeJS.ProcessEnv
   private gitProvider: GitWorktreeProvider
+  private logger: Logger
 
   constructor(opts: ClaudeCodeRuntimeOptions) {
     this.claude = opts.claude
+    this.claudeBin = opts.claudeBin ?? 'claude'
+    this.inject = opts.inject ?? ((handle, text, cwd) => injectViaAttach(this.claudeBin, handle, text, { env: this.env, cwd }))
     this.workersDir = opts.workersDir
     this.home = opts.home
     this.claudeProjectsDir = opts.claudeProjectsDir ?? defaultClaudeProjectsDir()
@@ -109,6 +122,7 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
       'Bash(python:*)', 'Bash(python3:*)', 'Bash(pytest:*)', 'Bash(cargo:*)', 'Bash(go:*)', 'Bash(make:*)', 'Bash(mvn:*)', 'Bash(gradle:*)',
     ].join(',')
     this.env = buildEnv(opts.env)
+    this.logger = opts.logger ?? noopLogger
     this.gitProvider = new GitWorktreeProvider({
       git: opts.git,
       worktreesRoot: opts.worktreesRoot ?? join(opts.home, 'worktrees'),
@@ -218,7 +232,9 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
     if (!record) {
       return { status: 'rejected', inputIds, reason: 'claude:session-not-found', retryable: false }
     }
-    const sessionId = ref.sessionId ?? meta?.sessionId ?? record.sessionId
+    // 用 agents 里查到的完整 session id（UUID）：CLI 只有拿到完整 id 才会原地续跑，
+    // 传 short id 会被判成「另开一个会话」。
+    const sessionId = record.sessionId ?? meta?.sessionId ?? ref.sessionId
     if (!sessionId) {
       return { status: 'rejected', inputIds, reason: 'claude:session-id-missing', retryable: true, retryAfterMs: 30_000 }
     }
@@ -227,9 +243,29 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
       meta.sessionId = record.sessionId
       this.writeMeta(ref.ticketId, meta)
     }
-    if (record.state === 'working' || record.state === 'blocked') {
-      // 当前轮还没结束；不做 resume（会 fork 副本），等状态变成 done/stopped。
-      return { status: 'queued', inputIds, reason: `claude:${record.state}` }
+    const cwd = meta?.workdir ?? ref.workdir ?? process.cwd()
+    if (record.state === 'working') {
+      // Router 在没收到 ack 时会带 redeliver=true 重投。轮内插话已经进过本轮，
+      // 再插一次只会让 agent 重复看到同一句话；这里按 input id 幂等。
+      if (meta?.lastHandedOffInputId === inputs.at(-1)?.id) return { status: 'accepted', inputIds }
+      // 本轮还在跑：直接插话进当前轮（与 TUI 里连续追问一致），不必等 done。
+      // 插话失败就退回排队，等本轮结束再走 resume。
+      const injected = await this.injectIntoRunningTurn(ref, sessionId, inputs, cwd)
+      if (!injected.ok) {
+        this.logger.warn('claude:inject-skipped', { handle: ref.handle, reason: injected.reason ?? 'unknown' })
+        return { status: 'queued', inputIds, reason: `claude:working-inject-failed:${injected.reason ?? 'unknown'}` }
+      }
+      if (meta) {
+        meta.lastHandedOffInputId = inputs.at(-1)?.id
+        meta.lastHandedOffAttempt = opts.attempt ?? 1
+        meta.status = 'running'
+        this.writeMeta(ref.ticketId, meta)
+      }
+      return { status: 'accepted', inputIds }
+    }
+    if (record.state === 'blocked') {
+      // 等权限/人工输入：插话不会被执行，排队等人工处理后再投。
+      return { status: 'queued', inputIds, reason: 'claude:blocked' }
     }
     if (record.state !== 'done' && record.state !== 'stopped') {
       return { status: 'queued', inputIds, reason: `claude:${record.state ?? 'unknown'}` }
@@ -238,18 +274,36 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
       return { status: 'accepted', inputIds }
     }
 
-    const dir = join(this.workersDir, ref.ticketId)
-    mkdirSync(dir, { recursive: true })
-    const inputPath = join(dir, `input-${safeSegment(inputs[0]!.id)}.md`)
-    writeFileSync(inputPath, inputs.map(input => `【Router 输入 ${input.id}】\n${input.text}`).join('\n\n'), 'utf8')
-    const prompt = `Read ${inputPath} and continue the ticket. This is a Router follow-up; report via ra report.`
-    const res = await this.runClaude(['--bg', '--resume', sessionId, '--', prompt], meta?.workdir ?? ref.workdir ?? process.cwd())
-    if (/started a copy as/i.test(res.stdout)) {
-      throw new WorkerRuntimeError('agent:launch-failed', `claude --resume 产生了副本，拒绝切换会话: ${res.stdout.slice(0, 200)}`)
-    }
-    const newId = parseBackgroundId(res.stdout)
-    if (newId && newId !== ref.handle) {
-      throw new WorkerRuntimeError('agent:launch-failed', `claude --resume 返回了新会话 ${newId}，原会话 ${ref.handle} 未被继续`)
+    const prompt = this.writeInputFile(ref.ticketId, inputs)
+    // Claude 的后台 worker 在本轮结束后仍然存活（agents 里 state=done 但 pid 还在）。
+    // 此时 --bg --resume 会被 CLI 判成「already running in the background」，
+    // 于是复制出一个新会话——一个话题就变成两个 session。
+    // 先 stop 掉后台 worker（会话与对话都保留），CLI 才会原地续跑同一个会话。
+    await this.stopBackgroundSession(ref.handle, cwd)
+    // resume 不带任何新 flag，沿用会话自己保存的选项；prompt 以 "Read " 开头，不会与 flag 解析冲突。
+    const argv = ['--bg', '--resume', sessionId, prompt]
+    const res = await this.runClaudeAllowFailure(argv, cwd)
+    // Claude 把副本提示写到 stderr，正常 id 写到 stdout；两边都要看。
+    // 输出可能带 ANSI 颜色码，先清洗再匹配。
+    const notice = stripAnsi(`${res.stdout}\n${res.stderr}`)
+    const forked = isResumeFork(notice)
+    if (res.code !== 0 && !forked) throw launchError(argv, res)
+    const nextHandle = forked
+      ? (parseForkId(notice) ?? parseBackgroundId(res.stdout))
+      : parseBackgroundId(res.stdout)
+    if (forked) {
+      // 原则是「一个话题 = 一个会话」：出现副本说明 CLI 没能原地续跑
+      // （会话还在跑 / 被别的进程打开 / 状态读不到）。
+      // 停掉副本，避免它和原会话在同一 worktree 上并发改代码；原会话保持不变，
+      // 本轮输入稍后重投回原会话。拿不到副本 id 时无法清理，只能退避重试。
+      if (nextHandle) await this.stopBackgroundSession(nextHandle, cwd)
+      this.logger.warn('claude:resume-forked', {
+        handle: ref.handle,
+        sessionId,
+        copy: nextHandle ?? null,
+        message: notice.slice(0, 200),
+      })
+      return { status: 'rejected', inputIds, reason: 'claude:resume-forked', retryable: true, retryAfterMs: 30_000 }
     }
     if (meta) {
       meta.lastHandedOffInputId = inputs.at(-1)?.id
@@ -274,6 +328,60 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
       meta.status = 'stopped'
       this.writeMeta(ref.ticketId, meta)
     }
+  }
+
+  /** 尽力停掉一个后台会话；失败不抛错（会话可能已经退出）。 */
+  private async stopBackgroundSession(handle: string, cwd: string): Promise<void> {
+    if (!handle) return
+    try {
+      const res = await this.claude.run(['stop', handle], { cwd, env: this.env })
+      if (res.code !== 0 && !/not found|no such|unknown|no job matching/i.test(`${res.stderr}${res.stdout}`)) {
+        this.logger.warn('claude:stop-original-failed', { handle, code: res.code, message: (res.stderr || res.stdout).slice(0, 200) })
+      }
+    } catch (error) {
+      this.logger.warn('claude:stop-original-failed', {
+        handle,
+        message: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  /** 把本批输入写成一个文件，返回让会话去读的那个 prompt。 */
+  private writeInputFile(ticketId: string, inputs: InboundMessage[]): string {
+    const dir = join(this.workersDir, ticketId)
+    mkdirSync(dir, { recursive: true })
+    const inputPath = join(dir, `input-${safeSegment(inputs[0]!.id)}.md`)
+    writeFileSync(inputPath, inputs.map(input => `【Router 输入 ${input.id}】\n${input.text}`).join('\n\n'), 'utf8')
+    return `Read ${inputPath} and continue the ticket. This is a Router follow-up; report via ra report.`
+  }
+
+  /**
+   * 把本轮输入插进「正在跑」的会话。
+   *
+   * attach 只是把文本敲进 TUI 的输入框，是否真的被这个回合接住必须用会话记录校验：
+   * 只有记录里出现了这次输入（以 input 文件名为标记），才算投递成功。
+   * 校验不通过就交给调用方退回「排队等本轮结束再 resume」。
+   */
+  private async injectIntoRunningTurn(
+    ref: WorkerRef,
+    sessionId: string,
+    inputs: InboundMessage[],
+    cwd: string,
+  ): Promise<{ ok: boolean; reason?: string }> {
+    const transcript = claudeTranscriptPath(cwd, sessionId, this.claudeProjectsDir ? { projectsDir: this.claudeProjectsDir } : {})
+    if (!transcript) return { ok: false, reason: 'transcript-not-found' }
+    const marker = `input-${safeSegment(inputs[0]!.id)}`
+    const before = transcriptSize(transcript)
+    const prompt = this.writeInputFile(ref.ticketId, inputs)
+    const injected = await this.inject(ref.handle, prompt, cwd)
+    if (!injected.ok) return injected
+
+    // 落盘有延迟；短暂轮询确认这一轮真的收到了输入。
+    for (let i = 0; i < 10; i++) {
+      if (readTranscriptSince(transcript, before).includes(marker)) return { ok: true }
+      await new Promise(resolve => setTimeout(resolve, 500))
+    }
+    return { ok: false, reason: 'not-recorded' }
   }
 
   async status(ref: WorkerRef): Promise<AgentStatus | null> {
@@ -342,7 +450,7 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
     // `claude rm` 在部分版本里会连带删掉它认为属于该会话的 worktree。
     if (existsSync(ref.workdir)) {
       try {
-        await this.gitProvider.remove(ref.workdir)
+        await this.gitProvider.remove(ref.workdir, { repo: ref.repo ?? meta?.repo })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         throw new WorkerRuntimeError('workspace:remove-failed', agentError
@@ -423,18 +531,17 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
   }
 
   private async runClaude(argv: string[], cwd: string) {
-    const res = await this.claude.run(argv, { cwd, env: this.env })
-    if (res.code !== 0) {
-      throw new WorkerRuntimeError('agent:launch-failed', `claude 命令失败: ${res.stderr || res.stdout}`, {
-        cause: res.stderr || res.stdout,
-        detail: { argv: argv.map(arg => (arg.length > 120 ? `<${arg.length} chars>` : arg)) },
-      })
-    }
+    const res = await this.runClaudeAllowFailure(argv, cwd)
+    if (res.code !== 0) throw launchError(argv, res)
     return res
   }
 
+  private async runClaudeAllowFailure(argv: string[], cwd: string) {
+    return this.claude.run(argv, { cwd, env: this.env })
+  }
+
   private async bestEffortRollback(workdir: string, branch: string, repo: string): Promise<void> {
-    await this.gitProvider.remove(workdir).catch(() => {})
+    await this.gitProvider.remove(workdir, { repo, force: true }).catch(() => {})
     // 分支删除不是所有仓库都允许；失败不影响主流程。
     await this.gitProvider.deleteBranch(branch, repo).catch(() => {})
   }
@@ -461,7 +568,26 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
 }
 
 function parseBackgroundId(stdout: string): string | null {
-  const match = stdout.match(/backgrounded\s*·\s*([0-9a-zA-Z_-]+)/i) ?? stdout.match(/backgrounded[\s\S]*?\b([0-9a-f]{8})\b/i)
+  const plain = stripAnsi(stdout)
+  const match = plain.match(/backgrounded\s*·\s*([0-9a-zA-Z_-]+)/i) ?? plain.match(/backgrounded[\s\S]*?\b([0-9a-f]{8})\b/i)
+  return match?.[1] ?? null
+}
+
+function launchError(argv: string[], res: { stdout: string; stderr: string }): WorkerRuntimeError {
+  return new WorkerRuntimeError('agent:launch-failed', `claude 命令失败: ${res.stderr || res.stdout}`, {
+    cause: res.stderr || res.stdout,
+    detail: { argv: argv.map(arg => (arg.length > 120 ? `<${arg.length} chars>` : arg)) },
+  })
+}
+
+/** Claude resume 产生副本时的固定文案（含 restricted / of that conversation 等变体）。 */
+export function isResumeFork(stdout: string): boolean {
+  return /\bstarted\b[^\n]*?\bcopy\b/i.test(stdout)
+}
+
+/** 从副本提示里取出新会话 id。 */
+export function parseForkId(stdout: string): string | null {
+  const match = stdout.match(/\bcopy\b[^\n]*?\bas\s+([0-9a-zA-Z_-]+)/i)
   return match?.[1] ?? null
 }
 

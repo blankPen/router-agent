@@ -180,6 +180,47 @@ describe('Store', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
+  it('旧库的 inputs 表补 source_key 列，并建来源唯一索引', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ra-db-'))
+    const path = join(dir, 'ra.sqlite')
+    const legacy = new DatabaseSync(path)
+    legacy.exec(`
+      CREATE TABLE inputs (
+        id TEXT PRIMARY KEY,
+        ticket_id TEXT NOT NULL,
+        assignment_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        text TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        delivered_at TEXT,
+        acked_at TEXT,
+        UNIQUE (ticket_id, seq)
+      );
+      INSERT INTO inputs VALUES
+        ('in1', 'tk1', 'as1', 1, 'followup', '继续', 'pending', '2026-11-06T10:00:00.000Z', NULL, NULL);
+    `)
+    legacy.close()
+
+    const s = new Store(path)
+    expect(s.getInput('in1')?.text).toBe('继续')
+    s.insertInput({
+      id: 'in2',
+      ticketId: 'tk1',
+      assignmentId: 'as1',
+      seq: 2,
+      kind: 'followup',
+      text: '继续',
+      sourceKey: 'trigger:om_1',
+      status: 'pending',
+      createdAt: '2026-11-06T10:01:00.000Z',
+    })
+    expect(s.findInputBySourceKey('tk1', 'trigger:om_1')?.id).toBe('in2')
+    s.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
   it('派工、报告与投递记录可以按工单取回，seq 单调递增', () => {
     const s = store()
     s.insertTicket(ticket)
