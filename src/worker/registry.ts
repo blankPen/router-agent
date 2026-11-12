@@ -96,6 +96,7 @@ export function createRuntimes(config: AppConfig, deps: RuntimeDeps): RuntimeReg
     // 只允许非安全参数；allowedTools / 跳过权限确认 / sandbox 由 worker.tools 与内置基线决定。
     ...(typeof claudeOptions.model === 'string' ? { model: claudeOptions.model } : {}),
     ...(deps.env ? { env: deps.env } : {}),
+    ...(deps.logger ? { logger: deps.logger } : {}),
   }))
 
   const codexOptions = codexAppOptionsOf(config)

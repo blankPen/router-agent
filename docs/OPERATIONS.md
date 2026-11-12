@@ -80,6 +80,7 @@ Router 不做对话，只在必要时说话：
 | `router:decision` | Engine | `triggerId` `decision` `strength` `reason` `ticketId` `title` `scope` | Router 的研判结论 |
 | `launch` | Service | `ticketId` `handle` `workdir` | 派工到 Orca worktree |
 | `input:queued` | Engine | `ticketId` `seq` `text` | Router 准备发给 worker 的内容 |
+| `input:deduped` | Engine | `ticketId` `inputId` `seq` `kind` `sourceKey` | 同一条来源消息重复到达（飞书重投 / 面板再点一次），复用已有输入，没有重复投给 worker |
 | `input:delivered` | Service | `ticketId` `count` `text` | 实际投递进 worker 终端 |
 | `worker:lost` | Service | `ticketId` `handle` `reason` `lastSeq` `expired` | 执行会话已不存在；已投递未 ack 的输入标为 `expired`，不再参与重投 |
 | `input:relaunch` | Service | `ticketId` `pending` | 因新消息重建 worker；同一批积压输入只触发一次 |
@@ -319,6 +320,10 @@ ra start
 - Claude Code 运行时用 `git worktree`，项目清单与 Orca 隔离（`runtime.projects.claude-code`），`repo` 必须是本地仓库绝对路径（`path:/abs` 或 `/abs`）；`ra init` 在 `runtime.default: claude-code` 时会直接问路径。切换运行时后，没有对应清单项目的工单会先追问，不会把 Orca 选择器当路径用。
 - Claude Code 运行时启动时带 `--dangerously-skip-permissions`，正常情况下不会因权限确认阻塞；若仍进入 `blocked`（例如等待人工输入），只转人工，不自动 resume。追问在当前轮结束后生效（与 TUI 输入排队一致）；需要轮内实时插话时要改用 `stream-json` 或 SDK/ACP。
 - Claude Code 的 `--bg --resume <sessionId>` **不能带任何新参数（包括 `--`）**，否则会 fork 副本；副本提示写在 stderr。适配器会解析并接管新会话（`input:adopted-handle`），投递异常也会计入重投次数、按指数退避，5 次后转人工，不会每秒重新创建会话。
+- Claude Code 接管副本后会 `claude stop` 掉原会话，避免原会话变成孤儿继续改代码（停不掉只记 `claude:stop-original-failed`）；这里刻意不用 `claude rm`，部分版本会连带删掉工单的 worktree。
+- 输入按「来源标识」幂等：飞书消息用 trigger 的外部 id 做 `source_key`；跨来源重复（飞书 + 面板各插一条同文本）按 120 秒窗口去重。已 ack / expired 的输入不参与去重，用户可以再发一遍同样的话。
+- 回收检出时 `git worktree remove` 会带上源仓库作为 cwd（拿不到就退回检出目录自己），否则进程 cwd 不在仓库里会报 `fatal: not a git repository`，检出与分支会残留在磁盘上。
+- 自动升级的 npm 安装默认超时 300 秒；超时会被 SIGKILL，日志记 `update:upgrade-failed` 且带 `timedOut` / `signal` / `timeoutMs`，不再退化成看不出原因的「npm 退出码 1」。
 - Claude Code 依赖 `claude agents --json --all` 的字段（本仓库实测 `2.1.318`）；升级后字段变化时状态会退化为 `null`，需要按版本适配。
 - 派工草稿按「群 + 同一个人」保存，30 分钟有效；同一个群里的多个未补齐请求会互相覆盖（后一次追问覆盖前一次）。
 - Pi SDK 仍在演进，本仓库锁定 `@earendil-works/pi-coding-agent@1.5.0`，升级前先跑 `RA_PI_VERIFY=1` 的真实环境验证。

@@ -74,7 +74,11 @@ export interface WorkspaceProvider {
   readonly id: string
   create(req: WorkspaceRequest): Promise<Workspace>
   inspect(ref: string): Promise<WorkspaceInfo | null>
-  remove(ref: string, opts?: { force?: boolean }): Promise<void>
+  /**
+   * 回收检出。`repo` 是源仓库绝对路径：git worktree remove 必须在 git 上下文里跑，
+   * 否则会报 `fatal: not a git repository`。
+   */
+  remove(ref: string, opts?: { force?: boolean; repo?: string }): Promise<void>
   listRepos?(): Promise<RepoDescriptor[]>
 }
 
@@ -92,6 +96,8 @@ export interface WorkspaceRef {
   workdir: string
   /** provider 自己的稳定标识；为空时由 workdir 推导。 */
   workspaceRef?: string
+  /** 源仓库绝对路径；回收检出时用它当 git 上下文。 */
+  repo?: string
 }
 
 export interface StartResult {

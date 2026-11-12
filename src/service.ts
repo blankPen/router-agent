@@ -662,8 +662,9 @@ export class RouterService {
     }
   }
 
-  private workspaceRefOf(assignment: Assignment): { ticketId: string; workdir: string } {
-    return { ticketId: assignment.ticketId, workdir: assignment.workdir }
+  private workspaceRefOf(assignment: Assignment): { ticketId: string; workdir: string; repo?: string } {
+    const repo = this.store.getTicket(assignment.ticketId)?.repo
+    return { ticketId: assignment.ticketId, workdir: assignment.workdir, ...(repo ? { repo } : {}) }
   }
 
   /** intake 用：优先注入的解析器，其次按 Orca 仓库清单解析；两者都没有就只做对话分析。 */

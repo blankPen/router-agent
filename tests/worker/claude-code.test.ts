@@ -194,6 +194,40 @@ describe('ClaudeCodeRuntime', () => {
     expect(meta.sessionId).toBe('s2')
   })
 
+  it('接管副本后停掉原会话，不留孤儿', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-claude-'))
+    const git = gitRunner()
+    const agents = [
+      { id: 'e46aaf7e', kind: 'background', state: 'done', status: 'idle', sessionId: 's1' },
+      { id: '95c4c910', kind: 'background', state: 'working', status: 'busy', sessionId: 's2' },
+    ]
+    const claude = scripted(argv => {
+      if (argv[0] === 'agents') return { code: 0, stdout: JSON.stringify(agents), stderr: '' }
+      if (argv[0] === '--bg') {
+        return {
+          code: 0,
+          stdout: 'backgrounded · 95c4c910 · ra-tk-1-demo\n',
+          stderr: 'note: session e46aaf7e is already running in the background, so this started a copy as 95c4c910.\n',
+        }
+      }
+      return { code: 0, stdout: '', stderr: '' }
+    })
+    const runtime = new ClaudeCodeRuntime({ claude, git, home, workersDir: join(home, 'workers') })
+    mkdirSync(join(home, 'workers', 'tk-1'), { recursive: true })
+    writeFileSync(join(home, 'workers', 'tk-1', 'meta.json'), JSON.stringify({
+      ticketId: 'tk-1', assignmentId: 'as-1', runtime: 'claude-code', handle: 'e46aaf7e',
+      workdir: join(home, 'worktrees', 'ra-tk-1-demo'), repo: '/tmp/repo', branch: 'main',
+      workBranch: 'ra/tk-1-demo', sessionId: 's1', status: 'running',
+    }))
+
+    await runtime.deliver(ref(home), [{ id: 'in_stop', kind: 'followup', text: '继续' }])
+
+    const stops = claude.calls.filter(call => call.argv[0] === 'stop')
+    expect(stops.map(call => call.argv[1])).toContain('e46aaf7e')
+    // 不能用 claude rm：部分版本会连带删掉工单的 worktree。
+    expect(claude.calls.some(call => call.argv[0] === 'rm')).toBe(false)
+  })
+
   it('兼容新版 Claude 的副本文案 started a copy of that conversation as', async () => {
     const home = mkdtempSync(join(tmpdir(), 'ra-claude-'))
     const agents = [

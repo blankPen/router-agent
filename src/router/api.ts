@@ -221,8 +221,10 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         const text = String((body as Record<string, unknown>).text ?? '').trim()
         if (!text) return respond(res, 400, { error: 'text-required' })
         const kind = String((body as Record<string, unknown>).kind ?? 'followup') as never
+        // 调用方可以自带来源标识做精确去重（例如面板按消息 id 提交）。
+        const sourceKey = String((body as Record<string, unknown>).sourceKey ?? '').trim()
         try {
-          const input = opts.engine.deliverInput(ticketId, { kind, text })
+          const input = opts.engine.deliverInput(ticketId, { kind, text, ...(sourceKey ? { sourceKey } : {}) })
           onEvent({ event: 'api:input', ticketId, inputId: input.id, kind, text: preview(text) })
           return respond(res, 201, { input })
         } catch (error) {

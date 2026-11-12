@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { CommandRunner } from '../../../infra/process.js'
+import { noopLogger, type Logger } from '../../../infra/logger.js'
 import { GitWorktreeProvider } from '../../workspaces/git-worktree.js'
 import { readClaudeSession } from '../../agents/claude.js'
 import { workBranch, worktreeName } from '../../naming.js'
@@ -40,6 +41,7 @@ export interface ClaudeCodeRuntimeOptions {
   env?: NodeJS.ProcessEnv
   /** 允许创建 worktree 的根目录；默认 <home>/worktrees。 */
   worktreesRoot?: string
+  logger?: Logger
 }
 
 interface ClaudeAgentRecord {
@@ -95,6 +97,7 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
   private allowedTools?: string
   private env: NodeJS.ProcessEnv
   private gitProvider: GitWorktreeProvider
+  private logger: Logger
 
   constructor(opts: ClaudeCodeRuntimeOptions) {
     this.claude = opts.claude
@@ -109,6 +112,7 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
       'Bash(python:*)', 'Bash(python3:*)', 'Bash(pytest:*)', 'Bash(cargo:*)', 'Bash(go:*)', 'Bash(make:*)', 'Bash(mvn:*)', 'Bash(gradle:*)',
     ].join(',')
     this.env = buildEnv(opts.env)
+    this.logger = opts.logger ?? noopLogger
     this.gitProvider = new GitWorktreeProvider({
       git: opts.git,
       worktreesRoot: opts.worktreesRoot ?? join(opts.home, 'worktrees'),
@@ -264,9 +268,13 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
     if (nextHandle && nextHandle !== ref.handle) {
       // 接管副本：会话内容完整，直接把它作为工单的新 handle，避免遗留孤儿会话。
       const record = await this.waitForAgent(nextHandle)
+      // 原会话不再被跟踪，若它还在跑就成了孤儿（会继续改代码、可能重复提交）。
+      // 这里停掉它；stop 失败不影响接管（本来就幂等）。
+      await this.stopBackgroundSession(ref.handle, cwd)
       if (meta) {
         meta.handle = nextHandle
-        if (record?.sessionId) meta.sessionId = record.sessionId
+        // 副本是新的会话：拿不到新 sessionId 时要清掉旧的，否则下次 resume 会指回原会话又 fork 一次。
+        meta.sessionId = record?.sessionId
         if (record?.pid) meta.pid = record.pid
         meta.lastHandedOffInputId = inputs.at(-1)?.id
         meta.lastHandedOffAttempt = opts.attempt ?? 1
@@ -302,6 +310,22 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
     if (meta) {
       meta.status = 'stopped'
       this.writeMeta(ref.ticketId, meta)
+    }
+  }
+
+  /** 尽力停掉一个后台会话；失败不抛错（会话可能已经退出）。 */
+  private async stopBackgroundSession(handle: string, cwd: string): Promise<void> {
+    if (!handle) return
+    try {
+      const res = await this.claude.run(['stop', handle], { cwd, env: this.env })
+      if (res.code !== 0 && !/not found|no such|unknown|no job matching/i.test(`${res.stderr}${res.stdout}`)) {
+        this.logger.warn('claude:stop-original-failed', { handle, code: res.code, message: (res.stderr || res.stdout).slice(0, 200) })
+      }
+    } catch (error) {
+      this.logger.warn('claude:stop-original-failed', {
+        handle,
+        message: error instanceof Error ? error.message : String(error),
+      })
     }
   }
 
@@ -371,7 +395,7 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
     // `claude rm` 在部分版本里会连带删掉它认为属于该会话的 worktree。
     if (existsSync(ref.workdir)) {
       try {
-        await this.gitProvider.remove(ref.workdir)
+        await this.gitProvider.remove(ref.workdir, { repo: ref.repo ?? meta?.repo })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         throw new WorkerRuntimeError('workspace:remove-failed', agentError
@@ -462,7 +486,7 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
   }
 
   private async bestEffortRollback(workdir: string, branch: string, repo: string): Promise<void> {
-    await this.gitProvider.remove(workdir).catch(() => {})
+    await this.gitProvider.remove(workdir, { repo, force: true }).catch(() => {})
     // 分支删除不是所有仓库都允许；失败不影响主流程。
     await this.gitProvider.deleteBranch(branch, repo).catch(() => {})
   }

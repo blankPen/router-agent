@@ -4,6 +4,10 @@ export interface CommandResult {
   code: number
   stdout: string
   stderr: string
+  /** 被信号终止时的信号名（SIGKILL 等）；正常退出为 null。 */
+  signal?: string | null
+  /** 是否因为超时被 kill —— 与「命令自己报错退出」要区分开。 */
+  timedOut?: boolean
 }
 
 /** argv 不含二进制名：runner 已绑定到某个可执行文件。 */
@@ -23,8 +27,12 @@ export function realRunner(bin: string): CommandRunner {
         })
         let stdout = ''
         let stderr = ''
+        let timedOut = false
         const timer = opts.timeoutMs
-          ? setTimeout(() => child.kill('SIGKILL'), opts.timeoutMs)
+          ? setTimeout(() => {
+              timedOut = true
+              child.kill('SIGKILL')
+            }, opts.timeoutMs)
           : null
         if (opts.input !== undefined) {
           child.stdin?.end(opts.input)
@@ -33,11 +41,17 @@ export function realRunner(bin: string): CommandRunner {
         child.stderr!.on('data', chunk => { stderr += String(chunk) })
         child.on('error', error => {
           if (timer) clearTimeout(timer)
-          resolve({ code: 127, stdout, stderr: `${stderr}${error.message}` })
+          resolve({ code: 127, stdout, stderr: `${stderr}${error.message}`, signal: null, timedOut })
         })
         child.on('close', code => {
           if (timer) clearTimeout(timer)
-          resolve({ code: code ?? 1, stdout, stderr })
+          resolve({
+            code: code ?? 1,
+            stdout,
+            stderr,
+            signal: child.signalCode ?? null,
+            timedOut,
+          })
         })
       })
     },

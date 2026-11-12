@@ -78,15 +78,42 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     }
   }
 
-  async remove(ref: string): Promise<void> {
+  /**
+   * 删除检出。
+   *
+   * `git worktree remove` 必须在 git 仓库上下文里跑，否则会报
+   * `fatal: not a git repository`（进程 cwd 通常不是仓库）。
+   * 所以优先用源仓库当 cwd；拿不到仓库时退回检出目录自己。
+   */
+  async remove(ref: string, opts: { force?: boolean; repo?: string } = {}): Promise<void> {
     const workdir = this.assertWorkdir(ref)
-    const res = await this.git.run(['worktree', 'remove', '--', workdir])
-    if (res.code !== 0) {
-      throw new WorkerRuntimeError('workspace:remove-failed', `git worktree remove 失败: ${res.stderr || res.stdout}`, {
-        cause: res.stderr || res.stdout,
-        detail: { workdir },
-      })
+    // 源仓库当 git 上下文；拿不到就用检出目录自己（worktree 本身也是 git 仓库）。
+    const repo = this.repoPathOrNull(opts.repo)
+    const cwd = repo ?? workdir
+    // 依次尝试：源仓库 → 检出目录 → （允许时）强制删除。
+    const candidates: { argv: string[]; cwd: string }[] = [
+      { argv: ['worktree', 'remove', '--', workdir], cwd },
+    ]
+    if (cwd !== workdir) {
+      candidates.push({ argv: ['worktree', 'remove', '--', workdir], cwd: workdir })
     }
+    if (opts.force) {
+      candidates.push({ argv: ['worktree', 'remove', '--force', '--', workdir], cwd })
+    }
+    let last: { code: number; stdout: string; stderr: string } | null = null
+    for (const candidate of candidates) {
+      const res = await this.git.run(candidate.argv, { cwd: candidate.cwd })
+      if (res.code === 0) return
+      last = res
+    }
+    throw this.removeFailed(workdir, repo, last ?? { code: 1, stdout: '', stderr: '' })
+  }
+
+  private removeFailed(workdir: string, repo: string | null | undefined, res: { stdout: string; stderr: string }): WorkerRuntimeError {
+    return new WorkerRuntimeError('workspace:remove-failed', `git worktree remove 失败: ${res.stderr || res.stdout}`, {
+      cause: res.stderr || res.stdout,
+      detail: { workdir, ...(repo ? { repo } : {}) },
+    })
   }
 
   /** 删除本次新建的分支；只用于 launch 失败回滚。 */
@@ -135,6 +162,14 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     if (!path || !isAbsolute(path)) {
       throw new WorkerRuntimeError('workspace:missing-repo', `git worktree 需要本地仓库绝对路径（path:/abs），收到: ${repo}`)
     }
+    return resolve(path)
+  }
+
+  /** 宽松版：拿不到本地仓库绝对路径时返回 null（不抛错，交给调用方兜底）。 */
+  private repoPathOrNull(repo?: string): string | null {
+    if (!repo) return null
+    const path = repo.trim().replace(/^(id|name|path):/, '')
+    if (!path || !isAbsolute(path)) return null
     return resolve(path)
   }
 

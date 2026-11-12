@@ -336,6 +336,7 @@ CREATE TABLE IF NOT EXISTS inputs (
   seq INTEGER NOT NULL,
   kind TEXT NOT NULL,
   text TEXT NOT NULL,
+  source_key TEXT,
   status TEXT NOT NULL,
   created_at TEXT NOT NULL,
   delivered_at TEXT,
@@ -467,6 +468,11 @@ export class Store {
     if (!ticketColumns.some(column => column.name === 'attachments')) {
       this.db.exec("ALTER TABLE tickets ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'")
     }
+    const inputColumns = this.db.prepare('PRAGMA table_info(inputs)').all() as Row[]
+    if (!inputColumns.some(column => column.name === 'source_key')) {
+      this.db.exec('ALTER TABLE inputs ADD COLUMN source_key TEXT')
+    }
+    this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_inputs_source_key ON inputs (ticket_id, source_key)')
     // 派工草稿从「一个群一条」改成「一个群 + 一个人一条」：旧库需要重建主键。
     const draftColumns = this.db.prepare('PRAGMA table_info(dispatch_drafts)').all() as Row[]
     const actorPk = Number(draftColumns.find(column => column.name === 'actor_id')?.pk ?? 0)
@@ -1111,9 +1117,9 @@ export class Store {
   }
 
   insertInput(i: Input): void {
-    this.db.prepare(`INSERT INTO inputs (id, ticket_id, assignment_id, seq, kind, text, status, created_at, delivered_at, acked_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(i.id, i.ticketId, i.assignmentId, i.seq, i.kind, i.text, i.status, i.createdAt, i.deliveredAt ?? null, i.ackedAt ?? null)
+    this.db.prepare(`INSERT OR IGNORE INTO inputs (id, ticket_id, assignment_id, seq, kind, text, source_key, status, created_at, delivered_at, acked_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(i.id, i.ticketId, i.assignmentId, i.seq, i.kind, i.text, i.sourceKey ?? null, i.status, i.createdAt, i.deliveredAt ?? null, i.ackedAt ?? null)
   }
 
   updateInput(i: Input): void {
@@ -1123,6 +1129,27 @@ export class Store {
 
   listInputs(ticketId: string): Input[] {
     return (this.db.prepare('SELECT * FROM inputs WHERE ticket_id = ? ORDER BY seq').all(ticketId) as Row[]).map(inputFromRow)
+  }
+
+  /** 按来源标识找已入库的输入；用于「同一条外部消息只入库一次」。 */
+  findInputBySourceKey(ticketId: string, sourceKey: string): Input | null {
+    const row = this.db.prepare('SELECT * FROM inputs WHERE ticket_id = ? AND source_key = ? ORDER BY seq LIMIT 1')
+      .get(ticketId, sourceKey) as Row | undefined
+    return row ? inputFromRow(row) : null
+  }
+
+  /** 按 id 取输入；用来确认刚插入的行是否真的落库。 */
+  getInput(id: string): Input | null {
+    const row = this.db.prepare('SELECT * FROM inputs WHERE id = ?').get(id) as Row | undefined
+    return row ? inputFromRow(row) : null
+  }
+
+  /** 最近一段时间内内容相同的输入；用于跨来源（飞书 / 面板）去重。 */
+  findRecentInputByText(ticketId: string, kind: Input['kind'], text: string, since: string): Input | null {
+    const row = this.db.prepare(
+      "SELECT * FROM inputs WHERE ticket_id = ? AND kind = ? AND text = ? AND created_at >= ? AND status IN ('pending','delivered') ORDER BY seq LIMIT 1",
+    ).get(ticketId, kind, text, since) as Row | undefined
+    return row ? inputFromRow(row) : null
   }
 
   pendingInputs(ticketId: string): Input[] {
@@ -1550,6 +1577,7 @@ function inputFromRow(row: Row): Input {
     seq: Number(row.seq),
     kind: row.kind as Input['kind'],
     text: String(row.text),
+    ...(row.source_key ? { sourceKey: String(row.source_key) } : {}),
     status: row.status as Input['status'],
     createdAt: String(row.created_at),
     ...(row.delivered_at ? { deliveredAt: String(row.delivered_at) } : {}),
