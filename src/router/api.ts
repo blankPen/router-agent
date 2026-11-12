@@ -4,12 +4,13 @@ import { homedir } from 'node:os'
 import { extname, join, normalize, resolve } from 'node:path'
 import type { Store } from '../store/db.js'
 import type { Engine } from '../core/engine.js'
-import { applyConfigPatch, isKnownRuntimeId, policyOf, publicConfig, publicDefaults, publicPlugins, requiresRestart, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
+import { applyConfigPatch, HOT_CONFIG_PREFIXES, isKnownRuntimeId, policyOf, publicConfig, publicDefaults, publicPlugins, requiresRestart, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
 import { InstallStartError, type AcpRuntimeAdmin } from '@router-agent/runtime-acp'
 import { normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
 import { ReportRejectedError } from '#runtime/evidence-gate.js'
 import { ProjectSetupError, type ProjectSetupPort } from './project-setup.js'
 import type { ChannelAdmin } from '#channel/port.js'
+import type { ChannelRegistry } from '#channel/registry.js'
 import type { AcceptMode } from '#core/policy.js'
 import type { Ticket } from '#core/model.js'
 import { noopSink, preview, type EventSink } from '#core/events.js'
@@ -18,6 +19,7 @@ import type { IdentityStatusView } from '@router-agent/channel-feishu'
 import type { WorkerStateFile } from '#runtime/report-poller.js'
 import type { ResumeHint } from '#runtime/port.js'
 import type { WorkspaceAdminPort } from '#runtime/workspaces/overview.js'
+import { PluginInstallStartError, type PluginPackageAdmin } from './plugin-admin.js'
 import { readLogs } from './log-tail.js'
 import type { LogAssistantQuestion, LogDiagnosis, LogSuggestion } from './log-assistant.js'
 import { buildIssueBody, type IssueReporter } from './issue-report.js'
@@ -106,8 +108,12 @@ export interface ApiServerOptions {
   resumeHint?: (ticketId: string) => Promise<ResumeHint | null> | ResumeHint | null
   /** ACP 运行时探测与安装；缺省时新端点返回 404。 */
   runtimeAdmin?: AcpRuntimeAdmin
+  /** 插件 npm 包安装任务；缺省时 `/api/plugins/install` 返回 404。 */
+  pluginAdmin?: PluginPackageAdmin
   /** 通道管理能力（飞书实现由 FeishuBotAdmin 提供）；缺省时相关端点返回 404。 */
   feishuBot?: ChannelAdmin
+  /** 已注册的消息通道；面板据此渲染「渠道配置」的渠道列表。缺省时返回空列表。 */
+  channels?: ChannelRegistry
   /** 面板「日志」页读取的日志文件；缺省时用 `<home>/logs/router-agent.log`。 */
   logPath?: string
   /** 项目登记：目录选择、Git 探测、clone 与 Orca 仓库登记；缺省时端点返回 404。 */
@@ -367,6 +373,20 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       }
       onEvent({ event: 'api:report', ticketId, state, turn, replyChars: reply.length })
       return respond(res, 201, { ok: true, ticketId, assignmentId: assignment.id, turn, state, reply: Boolean(reply) })
+    }
+
+    // 已注册的消息通道：面板的「渠道配置」据此列出渠道实例。
+    // 表单描述在前端注册表里，这里只给实例事实（id / kind / 能力），两边按 id 合并。
+    if (path === '/api/channels' && req.method === 'GET') {
+      const registered = opts.channels?.list() ?? []
+      onEvent({ event: 'api:channels', count: registered.length })
+      return respond(res, 200, {
+        channels: registered.map(channel => ({
+          id: channel.id,
+          kind: channel.kind,
+          capabilities: channel.capabilities,
+        })),
+      })
     }
 
     if (path === '/api/config') {
@@ -873,6 +893,36 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       return respond(res, 200, job)
     }
 
+    if (path === '/api/plugins/install' && req.method === 'POST') {
+      if (!opts.pluginAdmin) return respond(res, 404, { error: 'plugin-admin-not-available' })
+      const body = await readJson(req)
+      const kind = body.kind === undefined || body.kind === 'runtime'
+        ? 'runtime' as const
+        : body.kind === 'channel' ? 'channel' as const : null
+      if (!kind) return respond(res, 400, { error: 'invalid-kind', message: 'kind 只能是 runtime / channel' })
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      if (!id) return respond(res, 400, { error: 'id-required' })
+      try {
+        const job = opts.pluginAdmin.startInstall(kind, id, typeof body.version === 'string' ? { version: body.version } : {})
+        onEvent({ event: 'api:plugin-install', kind, id, package: job.packageName, version: job.version })
+        // jobId 与 ACP 安装端点保持同一字段名，面板轮询写同一套逻辑。
+        return respond(res, 202, { ok: true, jobId: job.id, ...job })
+      } catch (error) {
+        if (error instanceof PluginInstallStartError) {
+          return respond(res, error.code === 'busy' ? 409 : 400, { error: error.code, message: error.message })
+        }
+        throw error
+      }
+    }
+
+    const pluginJobPath = /^\/api\/plugins\/install\/([^/]+)$/.exec(path)
+    if (pluginJobPath && req.method === 'GET') {
+      if (!opts.pluginAdmin) return respond(res, 404, { error: 'plugin-admin-not-available' })
+      const job = opts.pluginAdmin.installJob(pluginJobPath[1]!)
+      if (!job) return respond(res, 404, { error: 'job-not-found' })
+      return respond(res, 200, job)
+    }
+
     if (path.startsWith('/api/')) return respond(res, 404, { error: 'not-found' })
 
     return serveStatic(res, path, opts.webRoot)
@@ -925,6 +975,8 @@ function configPayload(
     plugins: publicPlugins(config, plugins),
     detecting: runtimeAdmin?.isDetecting() ?? false,
     identity: identity?.snapshot() ?? emptyIdentityStatus(),
+    // 哪些配置路径保存后立即生效：面板按它给配置项标「立即生效 / 重启生效」。
+    hotPaths: [...HOT_CONFIG_PREFIXES],
   }
 }
 
