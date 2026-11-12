@@ -969,6 +969,14 @@ describe('已绑定工单的话题：名单内成员不 @ 也触发回复', () =
     const result = await loop.tick()
     expect(result.fannedOut).toBe(1)
     expect(store.pendingInputs(ticket.id)[0]?.text).toContain('60 秒')
+    // 未 @ 放行的消息要有一句话题回执：否则用户既没有表情也等不到回应。
+    const outbox = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)
+    const admitted = outbox.find(item => item.key === 'admitted:feishu_om_2')
+    expect(admitted?.text).toContain('已转给工单')
+    expect(admitted?.text).toContain(ticket.id)
+    expect(admitted?.threadId).toBe('om_1')
+    expect(admitted?.originMessageId).toBe('om_2')
+    expect(result.replied).toBe(1)
 
     // 名单外的人不 @ 依旧被丢弃
     const outsider = normalizeFeishuEventDetailed(
@@ -987,6 +995,47 @@ describe('已绑定工单的话题：名单内成员不 @ 也触发回复', () =
     }
     const normalized = normalizeFeishuEventDetailed(feishuEvent(), mentionCfg, '研发群', admit)
     expect(normalized.dropped).toBe('mention:required')
+  })
+
+  it('@ 机器人的消息照旧只扇出，不多发一条「已转给工单」回执', async () => {
+    const { engine, loop, store } = setup([ACCEPT()])
+    engine.ingest(trigger({ id: 't0', externalId: 'om_1', threadId: 'feishu:oc_dev:om_1' }))
+    await loop.tick()
+    const ticket = store.listTickets()[0]!
+    engine.startAssignment(ticket.id, { runtimeId: 'orca', handle: 'h', workdir: '/tmp/wt' })
+
+    engine.ingest(trigger({ id: 't9', externalId: 'om_9', threadId: 'feishu:oc_dev:om_1', addressed: 'mention', text: '再补一句' }))
+    const result = await loop.tick()
+
+    expect(result.fannedOut).toBe(1)
+    const outbox = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)
+    expect(outbox.some(item => item.key.startsWith('admitted:'))).toBe(false)
+  })
+
+  it('放行回执留痕：记 loop:admitted-replied，能追到是哪张工单', async () => {
+    const logs: { level: string; message: string; extra?: Record<string, unknown> }[] = []
+    const logger = {
+      info: (message: string, extra?: Record<string, unknown>) => logs.push({ level: 'info', message, ...(extra ? { extra } : {}) }),
+      warn: (message: string, extra?: Record<string, unknown>) => logs.push({ level: 'warn', message, ...(extra ? { extra } : {}) }),
+      error: (message: string, extra?: Record<string, unknown>) => logs.push({ level: 'error', message, ...(extra ? { extra } : {}) }),
+    }
+    const { engine, loop, store } = setup([ACCEPT()], undefined, undefined, false, undefined, logger)
+    engine.ingest(trigger({ id: 't0', externalId: 'om_1', threadId: 'feishu:oc_dev:om_1' }))
+    await loop.tick()
+    const ticket = store.listTickets()[0]!
+    engine.startAssignment(ticket.id, { runtimeId: 'orca', handle: 'h', workdir: '/tmp/wt' })
+
+    const admit = ({ actorId, threadKeys }: UnaddressedContext) => {
+      return effectiveAllowed(engine.policy()).includes(actorId) && store.hasLiveTicketForThreadKeys('feishu', threadKeys)
+    }
+    const normalized = normalizeFeishuEventDetailed(feishuEvent(), mentionCfg, '研发群', admit)
+    engine.ingest(normalized.trigger!)
+    await loop.tick()
+
+    const entry = logs.find(log => log.message === 'loop:admitted-replied')
+    expect(entry?.level).toBe('info')
+    expect(entry?.extra?.ticketId).toBe(ticket.id)
+    expect(entry?.extra?.chat).toBe('oc_dev')
   })
 
   it('名单存邮箱时按解析出的 open_id 放行，不能拿原始条目去比', async () => {
