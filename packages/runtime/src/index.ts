@@ -19,11 +19,7 @@ export {
   readTranscriptSince,
   transcriptSize,
 } from './agents/claude.js'
-export {
-  claudeConfigPath,
-  claudeTrustKey,
-  ensureClaudeBackgroundReady,
-} from './agents/claude-trust.js'
+export { ensureClaudeBackgroundReady } from './agents/claude-trust.js'
 export { decidePermission, isAllowed, shellAllowed, commandOf } from './permissions.js'
 export type { AcpPermissionOption, AcpToolCallInfo, AcpToolKind } from './permissions.js'
 export * from './errors.js'
