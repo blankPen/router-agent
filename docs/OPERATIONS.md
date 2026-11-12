@@ -9,7 +9,7 @@ Router 不做对话，只在必要时说话：
 | 场景 | 行为 |
 |-|-|
 | **会被处理的已寻址消息**（@ / 私聊 / 全量接收群） | 收到后**立即**加一个确认表情（默认 `Typing` ⌨️），回复发出后自动取消；被准入拦截的消息不加 |
-| **未 @ 但话题已绑定在办工单的消息**（名单内成员，tk-59） | 照样加确认表情，并在话题里回一句「收到，已转给工单…（id）的 worker」；**每张工单只回一次**，同单话题里的后续追问不再重复回执；消息直接投给该工单的 worker，不新开工单 |
+| **未 @ 但话题已绑定在办工单的消息**（名单内成员，tk-59） | 照样加确认表情；消息直接投给该工单的 worker，不新开工单，**不再发「已转给工单」文字回执**（避免追问时刷屏），进展由 worker 直接挂在同一条话题里 |
 | 群里 @机器人，但只是寒暄 / 试探 | **Pi 生成**一句礼貌回复，作为**普通消息**发出；不建单 |
 | 群里 @机器人，是真需求 | 只发一条**话题**消息：「工单「标题」（id）已开始执行。后续进展会在这个话题里更新。」，不再额外回「我帮你创建了工单」之类的普通消息 ack |
 | 未 @ 的群消息 | 走 Pi 研判；判为闲聊则**完全静默**（不刷屏） |
@@ -184,8 +184,6 @@ Router 不做对话，只在必要时说话：
 | `feishu:chat-allowlist-empty` | Identity | `chat` `name` `count` | 群级允许名单配了却一个都解析不出来，该群按「拒绝所有人」处理 |
 | `feishu:intake-approver-empty` | Identity | `chat` `name` `count` | 需求分析助手的终审管理员配了却一个都解析不出来，该群没有人能终审（不会退回全局名单） |
 | `loop:trigger-failed` | Agent Loop | `triggerId` `chat` `detail` | 单条消息处理异常，同批其它消息不受影响 |
-| `loop:admitted-replied` | Agent Loop | `triggerId` `chat` `ticketId` `tickets` | 未 @ 放行的消息已投给工单 worker，Router 在话题里回了一句「已转给工单」 |
-| `loop:admitted-suppressed` | Agent Loop | `triggerId` `chat` `ticketId` | 这张工单已经回过执，本次追问不再重复发「已转给工单」（消息照样投给了 worker） |
 | `loop:error` | Service | `detail` | 内部定时任务回调抛出的未预期异常，不影响主循环 |
 | `decision:engine-failed` | Agent Loop | `triggerId` `detail` | 研判引擎调用失败，按 unavailable 处理并留下原因 |
 | `decision:audit` / `decision:audit-write-failed` | CLI | `engine` `triggerId` `durationMs` `tokens` `toolCalls` `decision` / `detail` | 每次研判的审计记录写入 `decisions.jsonl`；写盘失败不影响研判 |
