@@ -261,26 +261,39 @@ export function assertUnpublished(names, targetVersion) {
   }
 }
 
+/**
+ * CLI 模式判定。sync / check 是独立命令，执行完必须提前返回；
+ * dry-run 与 publish 共享发布循环，只是 dry-run 只校验不推送。
+ */
+export function publishMode(argv) {
+  if (argv.includes('--sync')) return 'sync'
+  if (argv.includes('--check-publisher')) return 'check-publisher'
+  if (argv.includes('--check-versions')) return 'check-versions'
+  if (argv.includes('--dry-run')) return 'dry-run'
+  return 'publish'
+}
+
 async function main() {
-  const argv = process.argv.slice(2)
-  const sync = argv.includes('--sync')
-  const dryRun = argv.includes('--dry-run')
-  const check = argv.includes('--check-publisher')
-  const checkVersions = argv.includes('--check-versions')
-  if (sync) writeVersionedManifests(version)
-  if (check) {
+  const mode = publishMode(process.argv.slice(2))
+  if (mode === 'sync') {
+    // sync 是纯同步命令：只回写版本号。若不提前返回，会落到下面的发布循环，
+    // 在 CI 未构建的检出里因缺少 dist 而失败（0.3.31 发布回归）。
+    writeVersionedManifests(version)
+    return
+  }
+  if (mode === 'check-publisher') {
     const user = verifyPublisher('router-agent')
     console.log(`[publish-packages] 发布者校验通过：${user}`)
     return
   }
-  if (checkVersions) {
+  if (mode === 'check-versions') {
     assertUnpublished(PUBLISH_ORDER, version)
     console.log(`[publish-packages] 待发布版本 ${version} 未被占用`)
     return
   }
   for (const name of PUBLISH_ORDER) {
     const pkg = readJson(packagePath(name))
-    if (dryRun) {
+    if (mode === 'dry-run') {
       assertPackable(name, pkg)
       console.log(`[publish-packages] dry-run ${pkg.name}@${version}`)
       continue

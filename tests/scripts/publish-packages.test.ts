@@ -4,6 +4,7 @@ import {
   assertPublisher,
   assertPackable,
   scopeDiagnostic,
+  publishMode,
   syncManifest,
   syncRootDependencies,
   undeclaredDependencies,
@@ -18,6 +19,12 @@ describe('多包发布', () => {
     expect(PUBLISH_ORDER.indexOf('runtime-codex')).toBeLessThan(PUBLISH_ORDER.indexOf('runtime-acp'))
     expect(PUBLISH_ORDER.indexOf('runtime-herdr')).toBeLessThan(PUBLISH_ORDER.indexOf('runtime-acp'))
     expect(PUBLISH_ORDER).toContain('runtime-acp')
+  })
+
+  it('sync 模式只同步版本号，不会落到发布循环', () => {
+    expect(publishMode(['--sync'])).toBe('sync')
+    expect(publishMode(['--dry-run'])).toBe('dry-run')
+    expect(publishMode([])).toBe('publish')
   })
 
   it('同步版本时只改内部包依赖，不动第三方依赖', () => {

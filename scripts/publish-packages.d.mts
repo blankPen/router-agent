@@ -9,5 +9,6 @@ export function undeclaredDependencies(dir: string): string[]
 export function scopeDiagnostic(name: string, stdout: string, stderr: string): string
 export function assertPublisher(packageName: string, whoami: string, owners: string): string
 export function verifyPublisher(packageName?: string, scope?: string): string
+export function publishMode(argv: readonly string[]): 'sync' | 'check-publisher' | 'check-versions' | 'dry-run' | 'publish'
 export function versionExists(name: string, targetVersion: string): boolean
 export function assertUnpublished(names: readonly string[], targetVersion: string): void
