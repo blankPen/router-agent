@@ -3,6 +3,12 @@
  *
  * 服务端负责最终校验（src/config.ts 的 applyConfigPatch），这里只描述「怎么展示、
  * 默认值怎么取、明显不合法的值提前提示」，避免用户点保存后才被后端打回。
+ *
+ * 层次约定（配置页从上到下）：
+ *   一级分组 ConfigGroup —— 渠道 / 准入 / 研判 / 派工 / 运维；
+ *   二级块   ConfigBlock —— 分组内的一小节，可折叠；
+ *   字段     FieldDef    —— 一个可编辑项。
+ * 分组与块的顺序即优先级：接入与可用性在前，低频与高级项下沉折叠。
  */
 import { WORKER_RUNTIMES } from '../../worker/runtimes/catalog.js'
 import { ACP_AGENTS } from '../../worker/runtimes/acp/agents.js'
@@ -37,13 +43,34 @@ export interface FieldDef {
   placeholder?: string
 }
 
-export interface SectionDef {
+/**
+ * 配置块：卡片内的一小节。
+ *
+ * `render` 指定专属渲染器；缺省按 `fields` 逐行渲染。
+ * `folded` 的块默认收起，用于低频或高级项。
+ */
+export interface ConfigBlock {
+  id: string
+  title: string
+  description?: string
+  render?: 'fields' | 'runtime' | 'projects' | 'specs' | 'custom'
+  fields: FieldDef[]
+  /** 块自己管理的、不是普通字段的配置路径（如群列表）。 */
+  paths?: string[]
+  /** 默认折叠（低频 / 高级内容）。 */
+  folded?: boolean
+  /** 生效说明的显式文案；缺省时按字段路径与热配置前缀推导。 */
+  effectLabel?: string
+}
+
+/** 配置分组：配置页的一级层次。 */
+export interface ConfigGroup {
   id: string
   title: string
   description: string
-  /** 保存后是否立即生效；否则提示需要重启服务。 */
-  hot?: boolean
-  fields: FieldDef[]
+  /** 渠道组的内容来自渠道注册表，不在这里列字段。 */
+  kind?: 'channels'
+  blocks: ConfigBlock[]
 }
 
 const ACCEPT_MODE_OPTIONS: FieldOption[] = [
@@ -120,155 +147,228 @@ export const LLM_FIELDS: FieldDef[] = [
   },
 ]
 
-export const SECTIONS: SectionDef[] = [
+/**
+ * 配置页的分组与块。
+ *
+ * 顺序原则：先「能不能跑起来」（渠道接入、准入），再「跑得好不好」（研判、派工），
+ * 最后是低频的运维项。
+ */
+export const CONFIG_GROUPS: ConfigGroup[] = [
   {
-    id: 'llm',
-    title: 'LLM Provider',
-    description: 'Router 研判与图片转写使用的大模型接入，Base URL / 模型 / API Key 三项必填。密钥只写入 config.yaml，保存后不回显明文。',
-    fields: LLM_FIELDS,
+    id: 'channels',
+    title: '渠道配置',
+    description: '消息从哪个渠道进来。先选渠道，再配它的接入、接收范围与消息处理。',
+    kind: 'channels',
+    blocks: [],
   },
   {
-    id: 'policy',
-    title: '准入策略',
-    description: '决定什么消息能开工单、最多同时跑几张。保存后立即生效，不需要重启。',
-    hot: true,
-    fields: [
-      { path: 'policy.acceptMode', label: '接单模式', kind: 'select', options: ACCEPT_MODE_OPTIONS },
-      { path: 'policy.maxWorkers', label: '并发上限', kind: 'number', min: 1, max: 64, unit: '张' },
+    id: 'admission',
+    title: '准入与并发',
+    description: '什么消息能开工单、最多同时跑几张。保存后立即生效，不需要重启。',
+    blocks: [
       {
-        path: 'policy.admission.listedNotAddressed',
-        label: '白名单成员 · 未 @ 机器人',
-        kind: 'select',
-        options: ADMISSION_LISTED_OPTIONS,
-        hint: '已在允许名单里的人发消息但没 @ 机器人时怎么处理',
+        id: 'accept-mode',
+        title: '接单方式',
+        description: '决定 Router 收到消息后是只记录、只研判，还是直接开单派工。',
+        fields: [
+          { path: 'policy.acceptMode', label: '接单模式', kind: 'select', options: ACCEPT_MODE_OPTIONS },
+          { path: 'policy.maxWorkers', label: '并发上限', kind: 'number', min: 1, max: 64, unit: '张' },
+        ],
       },
       {
-        path: 'policy.admission.unlistedAddressed',
-        label: '名单外成员 · @ 了机器人',
-        kind: 'select',
-        options: ADMISSION_ADDRESSED_OPTIONS,
-        hint: '陌生人 @ 机器人时，是只认明确指名，还是允许模型推断',
+        id: 'admission-rules',
+        title: '谁能叫醒机器人',
+        description: '按「是否在名单里」和「是否 @ 了机器人」两个维度决定一条消息是否进入研判。',
+        fields: [
+          {
+            path: 'policy.admission.listedNotAddressed',
+            label: '名单内成员 · 未 @ 机器人',
+            kind: 'select',
+            options: ADMISSION_LISTED_OPTIONS,
+            hint: '已在允许名单里的人发消息但没 @ 机器人时怎么处理',
+          },
+          {
+            path: 'policy.admission.unlistedAddressed',
+            label: '名单外成员 · @ 了机器人',
+            kind: 'select',
+            options: ADMISSION_ADDRESSED_OPTIONS,
+            hint: '陌生人 @ 机器人时，是只认明确指名，还是允许模型推断',
+          },
+          {
+            path: 'policy.admission.unlistedNotAddressed',
+            label: '名单外成员 · 未 @ 机器人',
+            kind: 'select',
+            options: ADMISSION_LISTED_OPTIONS,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    id: 'reasoning',
+    title: '研判',
+    description: 'Router 用哪个模型研判、研判多久、怎么说话。',
+    blocks: [
+      {
+        id: 'llm',
+        title: '模型接入',
+        description: 'Router 研判与图片转写使用的大模型接入，Base URL / 模型 / API Key 三项必填。密钥只写入 config.yaml，保存后不回显明文。',
+        fields: LLM_FIELDS,
       },
       {
-        path: 'policy.admission.unlistedNotAddressed',
-        label: '名单外成员 · 未 @ 机器人',
-        kind: 'select',
-        options: ADMISSION_LISTED_OPTIONS,
+        id: 'judgement',
+        title: '研判预算',
+        description: '单次研判的超时与 token 上限；超预算会走兜底回复。',
+        fields: [
+          { path: 'router.timeoutMs', label: '单次研判超时', kind: 'number', min: 1_000, max: 600_000, unit: '毫秒', ms: true },
+          { path: 'router.tokenBudget', label: '单次 token 预算', kind: 'number', min: 0, max: 10_000_000, unit: 'token', hint: '0 表示不限制' },
+          { path: 'router.agentDir', label: 'Pi 配置目录', kind: 'text', placeholder: '留空 = ~/.router-agent/pi' },
+        ],
       },
-    ],
-  },
-  {
-    id: 'router',
-    title: '研判与人格',
-    description: 'Router 调用模型做研判时的超时、预算与表达风格。',
-    fields: [
-      { path: 'router.timeoutMs', label: '单次研判超时', kind: 'number', min: 1_000, max: 600_000, unit: '毫秒', ms: true },
-      { path: 'router.tokenBudget', label: '单次 token 预算', kind: 'number', min: 0, max: 10_000_000, unit: 'token', hint: '0 表示不限制' },
-      { path: 'router.agentDir', label: 'Pi 配置目录', kind: 'text', placeholder: '留空 = ~/.router-agent/pi' },
-      { path: 'router.persona.name', label: '机器人自称', kind: 'text' },
-      { path: 'router.persona.style', label: '说话风格', kind: 'select', options: PERSONA_STYLE_OPTIONS },
-      { path: 'router.persona.language', label: '回复语言', kind: 'text', placeholder: 'zh-CN' },
-    ],
-  },
-  {
-    id: 'session',
-    title: '会话复用',
-    description: '按人保留落盘的 Pi session，减少每次研判的重复上下文。',
-    fields: [
-      { path: 'router.session.enabled', label: '启用会话复用', kind: 'switch' },
-      { path: 'router.session.keyScope', label: '会话隔离维度', kind: 'select', options: KEY_SCOPE_OPTIONS },
-      { path: 'router.session.dir', label: 'session 目录', kind: 'text', placeholder: '留空 = ~/.router-agent/sessions' },
-      { path: 'router.session.maxActive', label: '内存中 session 上限', kind: 'number', min: 1, max: 1_000, unit: '个' },
-      { path: 'router.session.idleTtlMs', label: '空闲回收', kind: 'number', min: 0, max: 86_400_000, unit: '毫秒', ms: true, hint: '文件保留，只回收内存；0 = 立即回收' },
-      { path: 'router.session.turnTimeoutMs', label: '单轮硬超时', kind: 'number', min: 1_000, max: 3_600_000, unit: '毫秒', ms: true },
-      { path: 'router.session.retentionDays', label: '/new 后旧 session 保留', kind: 'number', min: 0, max: 3_650, unit: '天', hint: '0 = 不清理' },
-      { path: 'router.session.cleanupIntervalHours', label: '清理任务间隔', kind: 'number', min: 1, max: 720, unit: '小时' },
-      { path: 'router.session.tokenBudget', label: '会话 token 预算', kind: 'number', min: 0, max: 10_000_000, unit: 'token', hint: '0 = 不限制，交给压缩' },
-      { path: 'router.session.compaction.enabled', label: '启用自动压缩', kind: 'switch' },
-      { path: 'router.session.compaction.reserveTokens', label: '压缩预留 token', kind: 'number', min: 1_024, max: 1_000_000 },
-      { path: 'router.session.compaction.keepRecentTokens', label: '保留最近 token', kind: 'number', min: 1_024, max: 1_000_000 },
-    ],
-  },
-  {
-    id: 'progress',
-    title: '进展同步',
-    description: 'Worker 上报和主动巡检的节奏。',
-    fields: [
-      { path: 'progress.syncMs', label: '进展合并同步间隔', kind: 'number', min: 0, max: 3_600_000, unit: '毫秒', ms: true, hint: '0 = 关闭定时同步' },
-      { path: 'progress.probeMs', label: '主动巡检间隔', kind: 'number', min: 0, max: 3_600_000, unit: '毫秒', ms: true, hint: '0 = 关闭主动巡检' },
-      { path: 'progress.silenceMs', label: '静默判定阈值', kind: 'number', min: 1_000, max: 3_600_000, unit: '毫秒', ms: true },
-      { path: 'progress.repeatMs', label: '重复提醒最小间隔', kind: 'number', min: 1_000, max: 3_600_000, unit: '毫秒', ms: true },
-    ],
-  },
-  {
-    id: 'retention',
-    title: '闲置治理',
-    description: '长时间没有进展的工单，先提醒、再自动关单。',
-    fields: [
-      { path: 'retention.enabled', label: '启用闲置治理', kind: 'switch' },
-      { path: 'retention.idleHours', label: '多久没进展发提醒', kind: 'number', min: 1, max: 8_760, unit: '小时' },
-      { path: 'retention.closeGraceHours', label: '提醒后多久自动关单', kind: 'number', min: 1, max: 8_760, unit: '小时' },
-      { path: 'retention.zombieHours', label: '僵尸进程判定', kind: 'number', min: 1, max: 8_760, unit: '小时' },
-      { path: 'retention.sweepMinutes', label: '扫描间隔', kind: 'number', min: 1, max: 1_440, unit: '分钟' },
-    ],
-  },
-  {
-    id: 'workspace',
-    title: '工作区回收',
-    description: '工单关闭后只停 worker，workspace 先保留一段时间，再由定时任务回收；也可以随时在「清理工作区」里手动回收。',
-    fields: [
-      { path: 'workspace.enabled', label: '启用定时回收', kind: 'switch' },
-      { path: 'workspace.keepHours', label: '关单后保留多久', kind: 'number', min: 0, max: 8_760, unit: '小时', hint: '0 = 下个扫描周期就回收' },
-      { path: 'workspace.sweepMinutes', label: '扫描间隔', kind: 'number', min: 1, max: 1_440, unit: '分钟' },
-    ],
-  },
-  {
-    id: 'feishu',
-    title: '飞书消息',
-    description: '机器人 App ID、接收范围与图片转文本。App Secret 与授权状态在顶部「飞书机器人」区块维护。',
-    fields: [
-      { path: 'feishu.appId', label: '应用 App ID', kind: 'text', placeholder: '飞书开放平台 → 凭证与基础信息' },
-      { path: 'feishu.reaction', label: '回执表情', kind: 'text', placeholder: '例如 Typing，留空 = 关闭' },
-      { path: 'feishu.directMessages', label: '接收私聊', kind: 'switch' },
-      { path: 'feishu.images.enabled', label: '图片转文本', kind: 'switch', hint: '下载 image_key 后交给多模态模型识别' },
-      { path: 'feishu.images.maxChars', label: '单张图片最多字符', kind: 'number', min: 100, max: 20_000, unit: '字' },
-      { path: 'feishu.images.timeoutMs', label: '单张图片识别超时', kind: 'number', min: 1_000, max: 300_000, unit: '毫秒', ms: true },
-      { path: 'feishu.allowed', label: '全局允许名单（推荐邮箱，兼容 ou_xxx）', kind: 'list', placeholder: 'alice@company.com, bob@company.com', hint: '推荐填邮箱；换应用后 open_id 会变，邮箱不会' },
-      { path: 'feishu.bots', label: '可引用的机器人', kind: 'list', placeholder: 'ou_xxx' },
-      { path: 'feishu.botOpenIds', label: '机器人自身 open_id（高级，默认自动识别）', kind: 'list', placeholder: 'ou_xxx', hint: '留空 = 按 App ID 自动识别机器人' },
-      { path: 'feishu.botNames', label: '机器人显示名（高级，默认自动识别）', kind: 'list', placeholder: '阿罗', hint: '留空 = 按 App ID 自动识别机器人' },
+      {
+        id: 'persona',
+        title: '人格',
+        description: '机器人怎么称呼自己、用什么口吻回复。',
+        fields: [
+          { path: 'router.persona.name', label: '机器人自称', kind: 'text' },
+          { path: 'router.persona.style', label: '说话风格', kind: 'select', options: PERSONA_STYLE_OPTIONS },
+          { path: 'router.persona.language', label: '回复语言', kind: 'text', placeholder: 'zh-CN' },
+        ],
+      },
+      {
+        id: 'specs',
+        title: '规范文件',
+        description: 'Router 与 Worker 的提示词规范统一存放在内置存储里，可直接查看、编辑、保存或恢复默认；不再需要指定外部文件路径。',
+        render: 'specs',
+        fields: [],
+        effectLabel: '保存后按项生效',
+      },
+      {
+        id: 'session',
+        title: '会话复用',
+        description: '按人保留落盘的 Pi session，减少每次研判的重复上下文。低频项，保持默认即可。',
+        folded: true,
+        fields: [
+          { path: 'router.session.enabled', label: '启用会话复用', kind: 'switch' },
+          { path: 'router.session.keyScope', label: '会话隔离维度', kind: 'select', options: KEY_SCOPE_OPTIONS },
+          { path: 'router.session.dir', label: 'session 目录', kind: 'text', placeholder: '留空 = ~/.router-agent/sessions' },
+          { path: 'router.session.maxActive', label: '内存中 session 上限', kind: 'number', min: 1, max: 1_000, unit: '个' },
+          { path: 'router.session.idleTtlMs', label: '空闲回收', kind: 'number', min: 0, max: 86_400_000, unit: '毫秒', ms: true, hint: '文件保留，只回收内存；0 = 立即回收' },
+          { path: 'router.session.turnTimeoutMs', label: '单轮硬超时', kind: 'number', min: 1_000, max: 3_600_000, unit: '毫秒', ms: true },
+          { path: 'router.session.retentionDays', label: '/new 后旧 session 保留', kind: 'number', min: 0, max: 3_650, unit: '天', hint: '0 = 不清理' },
+          { path: 'router.session.cleanupIntervalHours', label: '清理任务间隔', kind: 'number', min: 1, max: 720, unit: '小时' },
+          { path: 'router.session.tokenBudget', label: '会话 token 预算', kind: 'number', min: 0, max: 10_000_000, unit: 'token', hint: '0 = 不限制，交给压缩' },
+          { path: 'router.session.compaction.enabled', label: '启用自动压缩', kind: 'switch' },
+          { path: 'router.session.compaction.reserveTokens', label: '压缩预留 token', kind: 'number', min: 1_024, max: 1_000_000 },
+          { path: 'router.session.compaction.keepRecentTokens', label: '保留最近 token', kind: 'number', min: 1_024, max: 1_000_000 },
+        ],
+      },
     ],
   },
   {
     id: 'delivery',
-    title: '派工与服务',
-    description: 'Worker 执行方式与监听端口。',
-    fields: [
+    title: '派工与项目',
+    description: '工单交给谁跑、在哪个仓库跑。',
+    blocks: [
       {
-        path: 'runtime.default',
-        label: 'Worker 运行时',
-        kind: 'select',
-        options: WORKER_RUNTIMES.map(runtime => ({ value: runtime.id, label: runtime.label, hint: runtime.hint })),
-        hint: '只影响新工单；已派出的工单继续使用创建时的运行时',
-      },
-      {
-        path: 'worker.evidence.ui',
-        label: 'UI 证据门禁',
-        kind: 'select',
-        options: [
-          { value: 'off', label: 'off · 关闭' },
-          { value: 'warn', label: 'warn · 只记日志' },
-          { value: 'enforce', label: 'enforce · 拦截 ready' },
+        id: 'runtime',
+        title: 'Worker 运行时',
+        description: '选择执行工单的运行时；只影响新工单，已派出的工单继续使用创建时的运行时。',
+        render: 'runtime',
+        fields: [
+          {
+            path: 'runtime.default',
+            label: 'Worker 运行时',
+            kind: 'select',
+            options: WORKER_RUNTIMES.map(runtime => ({ value: runtime.id, label: runtime.label, hint: runtime.hint })),
+            hint: '只影响新工单；已派出的工单继续使用创建时的运行时',
+          },
         ],
-        hint: 'UI 工单报 ready 时检查 PR / MR 是否有 Before / After 证据；修改后需重启服务',
       },
-      { path: 'server.port', label: '面板端口', kind: 'number', min: 1, max: 65_535, unit: '端口' },
+      {
+        id: 'projects',
+        title: '项目清单',
+        description: '可派工的项目。项目按运行时隔离，切换上方「Worker 运行时」即可编辑另一套。',
+        render: 'projects',
+        fields: [],
+      },
+    ],
+  },
+  {
+    id: 'ops',
+    title: '运维',
+    description: '进展同步、闲置治理、工作区回收与服务端口。',
+    blocks: [
+      {
+        id: 'progress',
+        title: '进展同步',
+        description: 'Worker 上报和主动巡检的节奏。',
+        fields: [
+          { path: 'progress.syncMs', label: '进展合并同步间隔', kind: 'number', min: 0, max: 3_600_000, unit: '毫秒', ms: true, hint: '0 = 关闭定时同步' },
+          { path: 'progress.probeMs', label: '主动巡检间隔', kind: 'number', min: 0, max: 3_600_000, unit: '毫秒', ms: true, hint: '0 = 关闭主动巡检' },
+          { path: 'progress.silenceMs', label: '静默判定阈值', kind: 'number', min: 1_000, max: 3_600_000, unit: '毫秒', ms: true },
+          { path: 'progress.repeatMs', label: '重复提醒最小间隔', kind: 'number', min: 1_000, max: 3_600_000, unit: '毫秒', ms: true },
+        ],
+      },
+      {
+        id: 'retention',
+        title: '闲置治理',
+        description: '长时间没有进展的工单，先提醒、再自动关单。',
+        fields: [
+          { path: 'retention.enabled', label: '启用闲置治理', kind: 'switch' },
+          { path: 'retention.idleHours', label: '多久没进展发提醒', kind: 'number', min: 1, max: 8_760, unit: '小时' },
+          { path: 'retention.closeGraceHours', label: '提醒后多久自动关单', kind: 'number', min: 1, max: 8_760, unit: '小时' },
+          { path: 'retention.zombieHours', label: '僵尸进程判定', kind: 'number', min: 1, max: 8_760, unit: '小时' },
+          { path: 'retention.sweepMinutes', label: '扫描间隔', kind: 'number', min: 1, max: 1_440, unit: '分钟' },
+        ],
+      },
+      {
+        id: 'workspace',
+        title: '工作区回收',
+        description: '工单关闭后只停 worker，workspace 先保留一段时间，再由定时任务回收；也可以随时在「清理工作区」里手动回收。',
+        fields: [
+          { path: 'workspace.enabled', label: '启用定时回收', kind: 'switch' },
+          { path: 'workspace.keepHours', label: '关单后保留多久', kind: 'number', min: 0, max: 8_760, unit: '小时', hint: '0 = 下个扫描周期就回收' },
+          { path: 'workspace.sweepMinutes', label: '扫描间隔', kind: 'number', min: 1, max: 1_440, unit: '分钟' },
+        ],
+      },
+      {
+        id: 'service',
+        title: '服务与门禁',
+        description: '面板端口与工单交付门禁。',
+        fields: [
+          { path: 'server.port', label: '面板端口', kind: 'number', min: 1, max: 65_535, unit: '端口' },
+          {
+            path: 'worker.evidence.ui',
+            label: 'UI 证据门禁',
+            kind: 'select',
+            options: [
+              { value: 'off', label: 'off · 关闭' },
+              { value: 'warn', label: 'warn · 只记日志' },
+              { value: 'enforce', label: 'enforce · 拦截 ready' },
+            ],
+            hint: 'UI 工单报 ready 时检查 PR / MR 是否有 Before / After 证据；修改后需重启服务',
+          },
+        ],
+      },
     ],
   },
 ]
 
+/** 分组里所有块的字段。 */
+export function groupFields(groups: ConfigGroup[]): FieldDef[] {
+  return groups.flatMap(group => group.blocks.flatMap(block => block.fields))
+}
+
+/** 块管理的全部配置路径：普通字段 + 块自己声明的路径。 */
+export function blockPaths(block: ConfigBlock): string[] {
+  return [...block.fields.map(field => field.path), ...(block.paths ?? [])]
+}
+
 /** 所有标量字段的点路径，用于计算「哪些配置被改过」。 */
-export const FIELD_PATHS: string[] = SECTIONS.flatMap(section => section.fields.map(field => field.path))
+export function fieldPaths(fields: FieldDef[]): string[] {
+  return fields.map(field => field.path)
+}
 
 /** 探测结果 → runtime.default 的下拉选项；无探测结果时回退静态清单。 */
 export function runtimeOptions(choices?: RuntimeChoiceView[]): FieldOption[] {
@@ -310,12 +410,36 @@ export function runtimeOptions(choices?: RuntimeChoiceView[]): FieldOption[] {
 }
 
 /** 用动态 choices 替换 runtime.default 的 options；其余字段原样保留。 */
-export function sectionsFor(choices?: RuntimeChoiceView[]): SectionDef[] {
+export function groupsFor(choices?: RuntimeChoiceView[]): ConfigGroup[] {
   const options = runtimeOptions(choices)
-  return SECTIONS.map(section => ({
-    ...section,
-    fields: section.fields.map(field => field.path === 'runtime.default' ? { ...field, options } : field),
+  return CONFIG_GROUPS.map(group => ({
+    ...group,
+    blocks: group.blocks.map(block => ({
+      ...block,
+      fields: block.fields.map(field => field.path === 'runtime.default' ? { ...field, options } : field),
+    })),
   }))
+}
+
+/** 配置块的生效方式：立即生效 / 重启生效 / 两者混合。 */
+export type BlockEffect = { label: string; tone: 'hot' | 'cold' | 'mixed' }
+
+export function blockEffect(block: ConfigBlock, hotPaths: string[]): BlockEffect {
+  if (block.effectLabel) return { label: block.effectLabel, tone: 'cold' }
+  if (block.fields.length === 0) return { label: '重启生效', tone: 'cold' }
+  const hot = block.fields.filter(field => hotPaths.some(prefix => field.path.startsWith(prefix))).length
+  if (hot === 0) return { label: '重启生效', tone: 'cold' }
+  if (hot === block.fields.length) return { label: '立即生效', tone: 'hot' }
+  return { label: '部分立即生效', tone: 'mixed' }
+}
+
+/** 分组的生效方式：块里只要有一项是热配置，就不能整体标成「重启生效」。 */
+export function groupEffect(group: ConfigGroup, hotPaths: string[]): BlockEffect {
+  const effects = group.blocks.map(block => blockEffect(block, hotPaths))
+  if (effects.length === 0) return { label: '重启生效', tone: 'cold' }
+  if (effects.every(effect => effect.tone === 'hot')) return { label: '立即生效', tone: 'hot' }
+  if (effects.every(effect => effect.tone === 'cold')) return { label: '重启生效', tone: 'cold' }
+  return { label: '部分立即生效', tone: 'mixed' }
 }
 
 export function getByPath(doc: unknown, path: string): unknown {

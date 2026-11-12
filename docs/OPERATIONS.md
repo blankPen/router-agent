@@ -35,7 +35,7 @@ Router 不做对话，只在必要时说话：
 - **初始化**：只放启动必需的五件事——LLM Provider、运行时、项目、飞书机器人、群与绑定，顶部有完成度清单；LLM Provider 的 Base URL / 模型 / API Key 三项必填（密钥只写入 `config.yaml`，保存后不回显），可选 OpenAI / Anthropic 两种接口协议，并支持从 Claude Code、CCSwitch、Pi、OpenCode、Magpie 的本地 Provider 配置一键导入；飞书 App ID / App Secret 与授权也直接在本页完成（固定 `~/.router-agent-lark` profile）。逐项说明见 [README · 快速开始](../README.md#快速开始)；运行时的卡片检测与安装引导见 [RUNTIME.md](RUNTIME.md)。
 - **工单**：按阶段分组 + 计数、关键字搜索（标题 / 工单号 / 仓库 / PR）、自动刷新开关与手动刷新；详情页有阶段、派工、PR、授权范围、上报时间线（含完整回复与 `humanAction`）、投递记录，可直接投递 follow-up 或停止工单。**人工停止工单会立即回收对应的 workspace**（先停 worker，再删 worktree）；而闲置超时、PR 合并等**自动关单只停 worker，workspace 会保留一段时间（默认 24 小时）后由定时任务回收**，也可以随时在「清理工作区」里手动回收。页头还有「清理工作区」入口：按 Worker 运行时分组列出仍在磁盘上的工单工作区，可勾选多个工单批量清理。清理动作按工单各自的运行时执行——Orca 关闭 worktree 并删除目录，Claude Code 删除 `claude agents` 视图与 worktree 目录，ACP 直接删除 worktree 目录；在办工单与有未提交改动的目录会被跳过，并在结果里说明原因。
 - **日志**：直接看 `~/.router-agent/logs/router-agent.log`，默认 2 秒增量拉取（只读游标之后的新字节，不重复读整个文件），可开「实时刷新」；按 INFO / WARN / ERROR 过滤、按消息或字段搜索、复制当前结果；停在底部时自动跟随新日志，往上翻后不再打断，点「最新」回到底部。文件不存在或还没写入时给出空状态提示。
-- **配置**：按「LLM Provider / 准入策略 / 研判与人格 / 会话复用 / 进展同步 / 闲置治理 / 工作区回收 / 飞书消息 / 派工与服务 / 项目与群绑定」分组；飞书分组的顶部是「飞书机器人」区块，可直接写入 App Secret、刷新授权状态并引导完成飞书授权。每个字段带说明与默认值提示，改动逐项标脏，保存前做前端 + 后端双重校验，保存后写回 `config.yaml`。「派工与服务」里的 Worker 运行时是与初始化页相同的卡片平铺组件（`orca` / `claude-code` / `acp` / `acp-*`），可检测安装状态、分别跳转官方文档安装 CLI 或由 ra 安装 ACP 扩展，并做 ACP 握手试启动；项目清单按运行时隔离，切换运行时后「项目与群绑定」里的项目清单会切换到该运行时自己的一套（Orca 用仓库选择器，Claude Code / ACP 必须是本地仓库绝对路径）；「添加本地项目」支持系统目录选择并自动识别 Git / 分支，「添加 Git 项目」支持填写 ssh / http(s) 地址后自动 clone 并登记。群绑定的项目只能从当前清单里选，分支自动跟随项目的默认分支，不能单独自定义。
+- **配置**：按「渠道配置 / 准入与并发 / 研判 / 派工与项目 / 运维」五层分组，每层再拆成可折叠的配置块——**渠道配置**最前面：先选渠道（当前内置飞书），再配该渠道自己的「应用凭据 / 机器人与授权 / 接收范围 / 群与绑定 / 消息处理」，低频的「高级」项默认折叠。渠道不是写死的分支：面板从 `GET /api/channels` 拿内核已注册的通道，按 id 与前端的渠道描述（`src/web/client/channels.ts`）合并，新增渠道只要再加一份描述与表单。其余分组依次是准入与并发（立即生效）、研判（模型接入 / 研判预算 / 人格 / 规范文件 / 会话复用）、派工与项目（Worker 运行时卡片 + 项目清单）、运维（进展同步 / 闲置治理 / 工作区回收 / 服务与门禁）。每个配置块标注生效方式（立即生效 / 重启生效 / 部分立即生效），改动逐项标脏，保存前做前端 + 后端双重校验，保存后写回 `config.yaml`。「Worker 运行时」是与初始化页相同的卡片平铺组件（`orca` / `claude-code` / `acp` / `acp-*`），可检测安装状态、分别跳转官方文档安装 CLI 或由 ra 安装 ACP 扩展，并做 ACP 握手试启动；项目清单按运行时隔离，切换运行时后项目清单会切换到该运行时自己的一套（Orca 用仓库选择器，Claude Code / ACP 必须是本地仓库绝对路径）；「添加本地项目」支持系统目录选择并自动识别 Git / 分支，「添加 Git 项目」支持填写 ssh / http(s) 地址后自动 clone 并登记。群绑定的项目只能从当前清单里选，分支自动跟随项目的默认分支，不能单独自定义。左侧导航随滚动高亮当前分组；顶部搜索框可按名称 / 路径筛配置项。
 - **来源**：服务状态、监控群、接收范围概览。
 
 侧栏品牌行末尾有全局主题切换图标：**跟随系统 / 亮色 / 暗色** 三态循环，默认跟随系统；选择只存在浏览器本地，不写入 `config.yaml`，所有页签即时生效。
@@ -119,6 +119,7 @@ Router 不做对话，只在必要时说话：
 | `config:invalid-security-override` | Config | `runtime` `keys` | `runtime.options` 试图覆盖安全参数，启动被拒绝 |
 | `config:patch-rejected` / `config:write-failed` | HTTP API | `errors` / `detail` | 面板保存的配置校验失败或落盘失败 |
 | `api:config` | HTTP API | `changed` `policyChanged` `restartRequired` `identityEffective` | 配置保存成功、是否需要重启、允许名单是否已即时生效 |
+| `api:channels` | HTTP API | `count` | 面板读取已注册的消息通道（渠道配置的渠道列表来源） |
 | `api:request-failed` | HTTP API | `method` `path` `detail` | 请求级未预期异常（客户端会收到 500） |
 | `ticket:resume-failed` | HTTP API | `ticketId` `detail` | 工单详情里的恢复命令生成失败，详情页仍可打开 |
 | `effect:done` / `effect:failed` | Effects | `kind` `key` / `error` | 派工、停止、清理等内部动作的执行结果 |

@@ -1428,6 +1428,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     runtimeAdmin,
     update: updateService,
     feishuBot: feishuChannel.admin,
+    channels,
     identity: identityPort,
     projectSetup: new ProjectSetup({ home, git: gitRunner, orca: orcaRunner }),
     // Web-only 模式没有 RouterService，工作区清理端点按「不支持」返回。

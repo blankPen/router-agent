@@ -4,12 +4,13 @@ import { homedir } from 'node:os'
 import { extname, join, normalize, resolve } from 'node:path'
 import type { Store } from '../store/db.js'
 import type { Engine } from '../core/engine.js'
-import { applyConfigPatch, policyOf, publicConfig, publicDefaults, requiresRestart, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
+import { applyConfigPatch, HOT_CONFIG_PREFIXES, policyOf, publicConfig, publicDefaults, requiresRestart, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
 import { InstallStartError, type AcpRuntimeAdmin } from '../worker/runtimes/acp/admin.js'
 import { isWorkerRuntimeId, normalizeRuntimeId } from '../worker/runtimes/catalog.js'
 import { ReportRejectedError } from '../worker/evidence-gate.js'
 import { ProjectSetupError, type ProjectSetupPort } from './project-setup.js'
 import type { ChannelAdmin } from '../channels/port.js'
+import type { ChannelRegistry } from '../channels/registry.js'
 import type { AcceptMode } from '../core/policy.js'
 import type { Ticket } from '../core/model.js'
 import { noopSink, preview, type EventSink } from '../core/events.js'
@@ -92,6 +93,8 @@ export interface ApiServerOptions {
   runtimeAdmin?: AcpRuntimeAdmin
   /** 通道管理能力（飞书实现由 FeishuBotAdmin 提供）；缺省时相关端点返回 404。 */
   feishuBot?: ChannelAdmin
+  /** 已注册的消息通道；面板据此渲染「渠道配置」的渠道列表。缺省时返回空列表。 */
+  channels?: ChannelRegistry
   /** 面板「日志」页读取的日志文件；缺省时用 `<home>/logs/router-agent.log`。 */
   logPath?: string
   /** 项目登记：目录选择、Git 探测、clone 与 Orca 仓库登记；缺省时端点返回 404。 */
@@ -334,6 +337,20 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       }
       onEvent({ event: 'api:report', ticketId, state, turn, replyChars: reply.length })
       return respond(res, 201, { ok: true, ticketId, assignmentId: assignment.id, turn, state, reply: Boolean(reply) })
+    }
+
+    // 已注册的消息通道：面板的「渠道配置」据此列出渠道实例。
+    // 表单描述在前端注册表里，这里只给实例事实（id / kind / 能力），两边按 id 合并。
+    if (path === '/api/channels' && req.method === 'GET') {
+      const registered = opts.channels?.list() ?? []
+      onEvent({ event: 'api:channels', count: registered.length })
+      return respond(res, 200, {
+        channels: registered.map(channel => ({
+          id: channel.id,
+          kind: channel.kind,
+          capabilities: channel.capabilities,
+        })),
+      })
     }
 
     if (path === '/api/config') {
@@ -828,6 +845,8 @@ function configPayload(config: AppConfig, runtimeAdmin?: AcpRuntimeAdmin, identi
     runtimeChoices: snapshot?.choices ?? [],
     detecting: runtimeAdmin?.isDetecting() ?? false,
     identity: identity?.snapshot() ?? emptyIdentityStatus(),
+    // 哪些配置路径保存后立即生效：面板按它给配置项标「立即生效 / 重启生效」。
+    hotPaths: [...HOT_CONFIG_PREFIXES],
   }
 }
 

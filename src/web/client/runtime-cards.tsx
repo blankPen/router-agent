@@ -52,6 +52,8 @@ interface RuntimeCardsProps {
   onNotice: (notice: RuntimeNotice | null) => void
   /** 安装成功等操作改变了冷配置，父级可据此显示持久的「需重启」提示。 */
   onPendingRestart?: () => void
+  /** 标题由外层配置块承担时关掉自带表头，避免同一屏出现两层标题。 */
+  showHead?: boolean
 }
 
 function errorText(error: unknown): string {
@@ -77,6 +79,7 @@ export function RuntimeCards({
   onDetecting,
   onNotice,
   onPendingRestart,
+  showHead = true,
 }: RuntimeCardsProps): JSX.Element {
   const [busy, setBusy] = useState<Record<string, 'check' | 'install'>>({})
   const [jobs, setJobs] = useState<Record<string, InstallJobView>>({})
@@ -232,16 +235,18 @@ export function RuntimeCards({
 
   return (
     <div className="runtime-status">
-      <div className="runtime-status-head">
-        <div>
-          <h3 className="editor-subtitle">运行时</h3>
-          <p className="editor-hint">点击卡片切换；只影响新工单。</p>
+      {showHead && (
+        <div className="runtime-status-head">
+          <div>
+            <h3 className="editor-subtitle">运行时</h3>
+            <p className="editor-hint">点击卡片切换；只影响新工单。</p>
+          </div>
+          <button className="btn tiny" onClick={() => void refresh()} disabled={detecting || anyBusy}>
+            <Icon name="refresh" size={12} className={detecting ? 'spin' : undefined} />
+            {detecting ? '检测中…' : '重新检测'}
+          </button>
         </div>
-        <button className="btn tiny" onClick={() => void refresh()} disabled={detecting || anyBusy}>
-          <Icon name="refresh" size={12} className={detecting ? 'spin' : undefined} />
-          {detecting ? '检测中…' : '重新检测'}
-        </button>
-      </div>
+      )}
 
       {selectedChoice && !isRuntimeSelectable(selectedChoice) && (
         <div className="banner warn compact">
