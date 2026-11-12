@@ -166,6 +166,51 @@ function readTailLines(path: string, maxBytes: number): string[] {
   return lines.filter(line => line.trim().length > 0)
 }
 
+/** 某个会话的记录文件路径；找不到返回 null（不做「最新文件」兜底，避免串工单）。 */
+export function claudeTranscriptPath(
+  workdir: string,
+  sessionId: string,
+  opts: { projectsDir?: string } = {},
+): string | null {
+  if (!workdir || !sessionId) return null
+  const file = join(
+    opts.projectsDir ?? defaultClaudeProjectsDir(),
+    claudeProjectSlug(workdir),
+    `${sessionId}.jsonl`,
+  )
+  return existsSync(file) ? file : null
+}
+
+/** 记录文件当前大小，用来只检查「注入之后新增的内容」。 */
+export function transcriptSize(path: string): number {
+  try {
+    return statSync(path).size
+  } catch {
+    return 0
+  }
+}
+
+/** 读取记录文件从 `from` 开始的内容；文件变短（重建）时从头读。 */
+export function readTranscriptSince(path: string, from: number): string {
+  let size = 0
+  try {
+    size = statSync(path).size
+  } catch {
+    return ''
+  }
+  const start = size >= from ? from : 0
+  const length = size - start
+  if (length <= 0) return ''
+  const buffer = Buffer.alloc(length)
+  const fd = openSync(path, 'r')
+  try {
+    readSync(fd, buffer, 0, length, start)
+  } finally {
+    closeSync(fd)
+  }
+  return buffer.toString('utf8')
+}
+
 /** 工具调用的结构化摘要：只保留「工具名 + 目标」，不把完整命令 / 文件内容带进话题。 */
 export interface ToolInfo {
   name: string

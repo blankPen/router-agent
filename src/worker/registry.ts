@@ -28,6 +28,8 @@ export interface RuntimeDeps {
   orca: CommandRunner
   /** 已绑定 claude 的 runner。 */
   claude: CommandRunner
+  /** `claude` 可执行文件路径；轮内插话要直接 spawn attach，默认 `claude`。 */
+  claudeBin?: string
   /** 已绑定 git 的 runner。 */
   git: CommandRunner
   /** 已绑定 herdr 的 runner。 */
@@ -89,6 +91,7 @@ export function createRuntimes(config: AppConfig, deps: RuntimeDeps): RuntimeReg
     ?? {}) as Record<string, unknown>
   runtimes.set(CLAUDE_CODE_RUNTIME_ID, new ClaudeCodeRuntime({
     claude: deps.claude,
+    ...(deps.claudeBin ? { claudeBin: deps.claudeBin } : {}),
     git: deps.git,
     workersDir: deps.workersDir,
     home: deps.home,

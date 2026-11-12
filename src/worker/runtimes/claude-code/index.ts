@@ -4,9 +4,10 @@ import { join } from 'node:path'
 import type { CommandRunner } from '../../../infra/process.js'
 import { noopLogger, type Logger } from '../../../infra/logger.js'
 import { GitWorktreeProvider } from '../../workspaces/git-worktree.js'
-import { readClaudeSession } from '../../agents/claude.js'
+import { claudeTranscriptPath, readClaudeSession, readTranscriptSince, transcriptSize } from '../../agents/claude.js'
 import { workBranch, worktreeName } from '../../naming.js'
 import { normalizeRuntimeId } from '../catalog.js'
+import { injectViaAttach, type AttachInjectResult } from './inject.js'
 import {
   WorkerRuntimeError,
   type ActivityQuery,
@@ -30,6 +31,10 @@ import {
 export interface ClaudeCodeRuntimeOptions {
   claude: CommandRunner
   git: CommandRunner
+  /** `claude` 可执行文件；轮内注入要直接 spawn attach（需要控制 stdin）。 */
+  claudeBin?: string
+  /** 测试注入点：默认走 attach。 */
+  inject?: (handle: string, text: string, cwd: string) => Promise<AttachInjectResult>
   /** ~/.router-agent/workers */
   workersDir: string
   /** ~/.router-agent */
@@ -91,6 +96,8 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
     workspace: { cleanup: true, prLink: false, discovery: false },
   }
   private claude: CommandRunner
+  private claudeBin: string
+  private inject: (handle: string, text: string, cwd: string) => Promise<AttachInjectResult>
   private workersDir: string
   private home: string
   private claudeProjectsDir?: string
@@ -102,6 +109,8 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
 
   constructor(opts: ClaudeCodeRuntimeOptions) {
     this.claude = opts.claude
+    this.claudeBin = opts.claudeBin ?? 'claude'
+    this.inject = opts.inject ?? ((handle, text, cwd) => injectViaAttach(this.claudeBin, handle, text, { env: this.env, cwd }))
     this.workersDir = opts.workersDir
     this.home = opts.home
     this.claudeProjectsDir = opts.claudeProjectsDir ?? defaultClaudeProjectsDir()
@@ -234,9 +243,29 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
       meta.sessionId = record.sessionId
       this.writeMeta(ref.ticketId, meta)
     }
-    if (record.state === 'working' || record.state === 'blocked') {
-      // 当前轮还没结束；不做 resume（会 fork 副本），等状态变成 done/stopped。
-      return { status: 'queued', inputIds, reason: `claude:${record.state}` }
+    const cwd = meta?.workdir ?? ref.workdir ?? process.cwd()
+    if (record.state === 'working') {
+      // Router 在没收到 ack 时会带 redeliver=true 重投。轮内插话已经进过本轮，
+      // 再插一次只会让 agent 重复看到同一句话；这里按 input id 幂等。
+      if (meta?.lastHandedOffInputId === inputs.at(-1)?.id) return { status: 'accepted', inputIds }
+      // 本轮还在跑：直接插话进当前轮（与 TUI 里连续追问一致），不必等 done。
+      // 插话失败就退回排队，等本轮结束再走 resume。
+      const injected = await this.injectIntoRunningTurn(ref, sessionId, inputs, cwd)
+      if (!injected.ok) {
+        this.logger.warn('claude:inject-skipped', { handle: ref.handle, reason: injected.reason ?? 'unknown' })
+        return { status: 'queued', inputIds, reason: `claude:working-inject-failed:${injected.reason ?? 'unknown'}` }
+      }
+      if (meta) {
+        meta.lastHandedOffInputId = inputs.at(-1)?.id
+        meta.lastHandedOffAttempt = opts.attempt ?? 1
+        meta.status = 'running'
+        this.writeMeta(ref.ticketId, meta)
+      }
+      return { status: 'accepted', inputIds }
+    }
+    if (record.state === 'blocked') {
+      // 等权限/人工输入：插话不会被执行，排队等人工处理后再投。
+      return { status: 'queued', inputIds, reason: 'claude:blocked' }
     }
     if (record.state !== 'done' && record.state !== 'stopped') {
       return { status: 'queued', inputIds, reason: `claude:${record.state ?? 'unknown'}` }
@@ -245,12 +274,7 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
       return { status: 'accepted', inputIds }
     }
 
-    const dir = join(this.workersDir, ref.ticketId)
-    mkdirSync(dir, { recursive: true })
-    const inputPath = join(dir, `input-${safeSegment(inputs[0]!.id)}.md`)
-    writeFileSync(inputPath, inputs.map(input => `【Router 输入 ${input.id}】\n${input.text}`).join('\n\n'), 'utf8')
-    const prompt = `Read ${inputPath} and continue the ticket. This is a Router follow-up; report via ra report.`
-    const cwd = meta?.workdir ?? ref.workdir ?? process.cwd()
+    const prompt = this.writeInputFile(ref.ticketId, inputs)
     // Claude 的后台 worker 在本轮结束后仍然存活（agents 里 state=done 但 pid 还在）。
     // 此时 --bg --resume 会被 CLI 判成「already running in the background」，
     // 于是复制出一个新会话——一个话题就变成两个 session。
@@ -320,6 +344,44 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
         message: error instanceof Error ? error.message : String(error),
       })
     }
+  }
+
+  /** 把本批输入写成一个文件，返回让会话去读的那个 prompt。 */
+  private writeInputFile(ticketId: string, inputs: InboundMessage[]): string {
+    const dir = join(this.workersDir, ticketId)
+    mkdirSync(dir, { recursive: true })
+    const inputPath = join(dir, `input-${safeSegment(inputs[0]!.id)}.md`)
+    writeFileSync(inputPath, inputs.map(input => `【Router 输入 ${input.id}】\n${input.text}`).join('\n\n'), 'utf8')
+    return `Read ${inputPath} and continue the ticket. This is a Router follow-up; report via ra report.`
+  }
+
+  /**
+   * 把本轮输入插进「正在跑」的会话。
+   *
+   * attach 只是把文本敲进 TUI 的输入框，是否真的被这个回合接住必须用会话记录校验：
+   * 只有记录里出现了这次输入（以 input 文件名为标记），才算投递成功。
+   * 校验不通过就交给调用方退回「排队等本轮结束再 resume」。
+   */
+  private async injectIntoRunningTurn(
+    ref: WorkerRef,
+    sessionId: string,
+    inputs: InboundMessage[],
+    cwd: string,
+  ): Promise<{ ok: boolean; reason?: string }> {
+    const transcript = claudeTranscriptPath(cwd, sessionId, this.claudeProjectsDir ? { projectsDir: this.claudeProjectsDir } : {})
+    if (!transcript) return { ok: false, reason: 'transcript-not-found' }
+    const marker = `input-${safeSegment(inputs[0]!.id)}`
+    const before = transcriptSize(transcript)
+    const prompt = this.writeInputFile(ref.ticketId, inputs)
+    const injected = await this.inject(ref.handle, prompt, cwd)
+    if (!injected.ok) return injected
+
+    // 落盘有延迟；短暂轮询确认这一轮真的收到了输入。
+    for (let i = 0; i < 10; i++) {
+      if (readTranscriptSince(transcript, before).includes(marker)) return { ok: true }
+      await new Promise(resolve => setTimeout(resolve, 500))
+    }
+    return { ok: false, reason: 'not-recorded' }
   }
 
   async status(ref: WorkerRef): Promise<AgentStatus | null> {

@@ -865,7 +865,8 @@ claude --bg --name <ticketId>-<slug> \
 `startedAt` 是毫秒时间戳，转 ISO；`lastActivityAt` 取 session JSONL 的 mtime 或最后一条事件时间。`claude logs` 是 TUI 渲染（含 ANSI/spinner），只作为最后兜底并清洗，不用于状态判定。
 
 **追问投递**：
-- `working` / `blocked`：`deliver` 返回 `queued`，输入留在 `inputs` 表；`blocked` 额外置 attention（权限/人工），等状态变成 `done/stopped` 再投；
+- `working`：通过 `claude attach <id>` 把输入敲进 TUI 输入框并回车，CLI 会把它当作「本轮中途发来的消息」交给当前回合（与用户在 TUI 里连续追问一致，不产生新会话）；注入后用会话记录校验是否真的收下，校验不过则退回 `queued`；
+- `blocked`：`deliver` 返回 `queued`，输入留在 `inputs` 表并置 attention（权限/人工），等状态变成 `done/stopped` 再投；此时插话不会被执行；
 - `done/stopped`：先 `claude stop <id>` 停掉后台 worker（会话与对话都保留），再 `claude --bg --resume <完整 sessionId> "<short input>"`，**不带任何新 flags**；输入正文写临时文件，prompt 只指向文件；
 - 必须传完整 session id（`claude agents --json` 打印的 UUID）：传 short id 会被 CLI 判成另开一个会话；
 - 同一 `sessionId` 单飞；按 `(input.id, attempt)` 去重；如果 `--resume` 仍产生新 id（fork），adapter 必须停掉副本、保留原会话并退避重投，禁止静默切换 handle。
@@ -1472,7 +1473,26 @@ Orca 运行时用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.t
 - 后台 worker 在本轮结束后**仍然存活**（`state=done`、`status=idle`，但 `pid` 还在），这才是 `done` 状态下依然 fork 的根因；`--` 分隔符无害；
 - 「新 flag」指会改变会话自身配置的参数（`--model` / `--permission-mode` / `--allowedTools` / `--add-dir` 等）。会话已经保存了自己的选项，resume 时再传新选项无法合并，CLI 只能复制：`background session X keeps its own saved options, so the flags you passed started a copy as Y`；
 - `claude stop` 停的是后台 worker 进程，**对话记录完整保留**（`claude stop` 自带说明：`Its conversation is kept`），`claude --resume works once it is stopped`；因此 stop → resume 是同一会话继续下一轮，不会丢上下文；
-- 结论：一个话题 = 一个会话是可达成的，前提是「等本轮结束 → stop 后台 worker → 用完整 session id 且不带新 flag resume」。
+- 结论：一个话题 = 一个会话是可达成的。
+
+### C.5 轮内插话（2.1.322 实测）
+
+`--bg --resume` 只能「续下一轮」，做不到 TUI 那种「本轮中途插一句话」。实测发现唯一能进当前轮的通道是 `claude attach`：
+
+| 场景 | 做法 | 结果 |
+|-|-|-|
+| `state=working` | `claude attach <id>`，往 stdin 写文本 + 回车 | 会话记录当前回合出现 `The user sent a new message while you were working: …`，agent 在本轮就回应 |
+| `state=done`（后台 worker 仍存活） | 同上 | 不新开会话，直接在同一会话里开始下一轮 |
+| 已 `claude stop` | 同上 | 同样可用（attach 会唤醒会话） |
+| `claude -p --input-format stream-json --resume <id>` | — | 被拒绝：`That session is running in the background` |
+
+实现要点：
+- 不需要 PTY，普通 pipe 即可（Node `spawn` 的 stdin 直接写）；
+- TUI 输入框会保留未提交内容：注入前先发 `Ctrl-U` 清行，写完等 2–3 秒再回车，避免被当成粘贴；
+- 偶发重复提交（同一条消息出现两次），所以必须用会话记录（`input-<id>` 标记）校验；校验不过退回 `queued`，不能当成已送达；
+- 同一 `input.id` 按 meta 水位线幂等，Router 重投不会重复插话；
+- 人工 `claude attach` 与 Router 注入可以并存（实测互不抢占）。
+
 ## 附录 D · ACP Runtime 实现（2026-11-09）
 
 `AcpRuntime`（`src/worker/runtimes/acp/`）是协议层实现：一个客户端同时适配所有实现 ACP 的 Agent。
