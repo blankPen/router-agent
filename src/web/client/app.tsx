@@ -12,17 +12,19 @@ import {
   setByPath,
   type ConfigBlock,
   type ConfigGroup,
-  type FieldDef,
   type RuntimeChoiceView,
 } from './fields.js'
 import {
-  CHANNELS,
+  channelSetupBlocks,
+  channelSetupExtraFields,
+  channelSetupFields,
+  channelSetupPaths,
   mergeChannels,
   type ChannelDescriptor,
   type ChannelPanelProps,
 } from './channels.js'
+import { ChannelPicker } from './channel-picker.js'
 import { FieldRow } from './field-row.js'
-import { ChatsEditor } from './chat-editor.js'
 import {
   chatsIssue,
   projectIssue,
@@ -47,7 +49,6 @@ import {
 import { Icon, LogoMark } from './icons.js'
 import type { IdentityStatusView } from './identity-status.js'
 import { RuntimeCards, type RuntimeNotice } from './runtime-cards.js'
-import { FeishuBotPanel } from './feishu-panel.js'
 import { SpecsEditor } from './specs-editor.js'
 import {
   mergeRuntimeChoices,
@@ -1460,7 +1461,7 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
     <>
       <PageHead
         title="配置"
-        subtitle="按「渠道 → 准入 → 研判 → 派工 → 运维」分层配置。策略项立即生效，其余配置在重启服务后生效。"
+        subtitle="按「LLM Provider → 运行时 → 渠道 → 项目 → 消息准入 → 其他设置」分层配置。策略项立即生效，其余配置在重启服务后生效。"
         actions={
           <>
             <button className="btn tiny" onClick={requestRestart} disabled={restarting} title="重启 ra 服务，当前页面不会刷新">
@@ -1539,31 +1540,13 @@ function ConfigView({ restarting, onRestart, onDirtyChange }: {
 
                 {group.kind === 'channels' && (
                   <div className="channel-area">
-                    <div className="channel-picker">
-                      <span className="channel-picker-label">消息渠道</span>
-                      <div className="channel-picker-list">
-                        {channels.map(channel => {
-                          const status = channel.status(draft, identity)
-                          const selected = channel.id === activeChannel?.id
-                          return (
-                            <button
-                              key={channel.id}
-                              type="button"
-                              className={`channel-card ${selected ? 'active' : ''}`}
-                              aria-pressed={selected}
-                              onClick={() => setChannelId(channel.id)}
-                            >
-                              <span className="channel-icon"><Icon name={channel.icon} size={16} /></span>
-                              <span className="channel-card-text">
-                                <strong>{channel.label}</strong>
-                                <small>{channel.summary}</small>
-                              </span>
-                              <span className={`channel-status ${status.tone}`}>{status.label}</span>
-                            </button>
-                          )
-                        })}
-                      </div>
-                    </div>
+                    <ChannelPicker
+                      channels={channels}
+                      activeId={activeChannel?.id}
+                      onSelect={setChannelId}
+                      draft={draft}
+                      identity={identity}
+                    />
                     {channels.length === 0
                       ? <p className="editor-empty">当前没有可用的消息渠道。</p>
                       : activeChannel && activeChannel.blocks.length > 0
@@ -1674,12 +1657,20 @@ function secretDropNotice(patch: Record<string, unknown>, result: ConfigSaveResu
   return { kind: 'error', text: 'API Key 没有写入 config.yaml：服务可能还在运行旧版本，请重启服务后再保存一次。' }
 }
 
-const SETUP_FEISHU_FIELDS: FieldDef[] = (() => {
-  const all = CHANNELS.flatMap(channel => channel.blocks.flatMap(block => block.fields))
-  return ['feishu.appId', 'feishu.directMessages']
-    .map(path => all.find(field => field.path === path))
-    .filter((field): field is FieldDef => Boolean(field))
-})()
+/**
+ * 把服务端返回配置里的指定路径合并进本地草稿。
+ *
+ * 渠道面板保存凭据后会回传一份完整配置；只回填渠道自己的路径，
+ * 免得把用户其它还没保存的修改冲掉。
+ */
+function mergeConfigPaths(target: ConfigDoc, source: ConfigDoc, paths: string[]): ConfigDoc {
+  let next = target
+  for (const path of paths) {
+    const value = getByPath(source, path)
+    if (value !== undefined) next = setByPath(next, path, value)
+  }
+  return next
+}
 
 /**
  * 初始化页 · 本地 Provider 选择弹窗。
@@ -1832,7 +1823,10 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
   const [configPath, setConfigPath] = useState('')
   const [runtimeChoices, setRuntimeChoices] = useState<RuntimeChoiceView[]>([])
   const [detecting, setDetecting] = useState(false)
-  const [feishuReady, setFeishuReady] = useState(false)
+  const [channelReady, setChannelReady] = useState(false)
+  const [registered, setRegistered] = useState<{ id: string; kind: string }[]>([])
+  const [channelId, setChannelId] = useState('')
+  const [identity, setIdentity] = useState<IdentityStatusView | undefined>(undefined)
   const [saving, setSaving] = useState(false)
   const [notice, setNotice] = useState<RuntimeNotice | null>(null)
   const [pendingRestart, setPendingRestart] = useState(false)
@@ -1853,9 +1847,14 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
         setConfigPath(data.configPath)
         setRuntimeChoices(data.runtimeChoices ?? [])
         setDetecting(Boolean(data.detecting))
+        setIdentity(data.identity)
         setLoadError(null)
       })
       .catch(error => setLoadError(error instanceof Error ? error.message : String(error)))
+    // 已注册的消息渠道由内核给出；拿不到（旧版服务）就退回前端的描述表。
+    void getJson<{ channels?: { id: string; kind: string }[] }>('/api/channels')
+      .then(data => setRegistered(data.channels ?? []))
+      .catch(() => undefined)
   }, [])
 
   const runtimeCatalog = useMemo(() => mergeRuntimeChoices(runtimeChoices), [runtimeChoices])
@@ -1866,12 +1865,20 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
   const activeProjects = draft ? projectsOf(draft, runtimeId) : []
   const runtimeLabel = runtimeCatalog.find(runtime => runtime.id === runtimeId)?.label ?? runtimeId
 
+  // 渠道与它的接入项都来自渠道注册表；初始化页不再写死飞书。
+  const channels = useMemo(() => mergeChannels(registered), [registered])
+  const activeChannel = channels.find(channel => channel.id === channelId) ?? channels[0]
+  const setupBlocks = useMemo(() => (activeChannel ? channelSetupBlocks(activeChannel) : []), [activeChannel])
+  const setupFields = useMemo(() => (activeChannel ? channelSetupFields(activeChannel) : []), [activeChannel])
+  const setupExtraFields = useMemo(() => (activeChannel ? channelSetupExtraFields(activeChannel) : []), [activeChannel])
+  const setupPaths = useMemo(() => (activeChannel ? channelSetupPaths(activeChannel) : []), [activeChannel])
+
   const changed = useMemo(() => {
     if (!draft || !original) return []
-    const paths = ['llm.baseUrl', 'llm.model', 'llm.apiKey', 'llm.api', 'llm.authHeader', 'runtime.default', 'feishu.appId', 'feishu.directMessages', 'feishu.chats']
+    const paths = ['llm.baseUrl', 'llm.model', 'llm.apiKey', 'llm.api', 'llm.authHeader', 'runtime.default', ...setupPaths]
     for (const runtime of runtimeCatalog) paths.push(projectPatchPath(runtime.id))
     return paths.filter(path => JSON.stringify(getByPath(draft, path)) !== JSON.stringify(getByPath(original, path)))
-  }, [draft, original, runtimeCatalog])
+  }, [draft, original, runtimeCatalog, setupPaths])
 
   useEffect(() => {
     onDirtyChange?.(changed.length > 0)
@@ -1885,13 +1892,13 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       const message = fieldError(field, getByPath(draft, field.path))
       if (message) map.set(field.path, message)
     }
-    for (const field of SETUP_FEISHU_FIELDS) {
+    for (const field of setupFields) {
       const message = fieldError(field, getByPath(draft, field.path))
       if (message) map.set(field.path, message)
     }
-    if (changedSet.has('feishu.chats')) {
-      const chatMessage = chatsIssue(draft.feishu?.chats)
-      if (chatMessage) map.set('feishu.chats', chatMessage)
+    // 渠道自己的校验（群列表之类），由渠道描述提供；只校验本次确实要提交的路径。
+    for (const [path, message] of Object.entries(activeChannel?.validate?.(draft) ?? {})) {
+      if (message && changedSet.has(path)) map.set(path, message)
     }
     for (const runtime of runtimeCatalog) {
       const path = projectPatchPath(runtime.id)
@@ -1906,7 +1913,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       map.set('runtime.default', '自定义 acp 未配置 runtime.options.acp.command，重启后服务会启动失败')
     }
     return map
-  }, [draft, changed, runtimeCatalog, runtimeId])
+  }, [draft, changed, runtimeCatalog, runtimeId, setupFields, activeChannel])
 
   const setField = (path: string, value: unknown): void => {
     setDraft(current => (current ? setByPath(current, path, value) : current))
@@ -1996,16 +2003,64 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
   const llmReady = Boolean(
     String(llmConfig.baseUrl ?? '').trim() && String(llmConfig.model ?? '').trim() && keyConfigured,
   )
+  const channelName = activeChannel?.label ?? '渠道'
   const steps = [
     { label: 'LLM 已配置', hint: llmReady ? '已就绪' : '填写 Base URL / 模型 / API Key', done: llmReady },
     { label: '运行时可用', hint: runtimeReady ? '已就绪' : runtimeChoice ? runtimeStatusLabel(runtimeChoice.status) : '未选择', done: runtimeReady },
     { label: '已登记项目', hint: projectReady ? `${activeProjects.length} 个项目` : '至少一个', done: projectReady },
-    { label: '飞书机器人已就绪', hint: feishuReady ? '已就绪' : '写入 App ID / App Secret', done: feishuReady },
+    { label: `${channelName}已接入`, hint: channelReady ? '已就绪' : `写入${channelName}接入信息`, done: channelReady },
     { label: '监控群已添加', hint: chatReady ? `${chats.length} 个群` : '至少一个', done: chatReady },
   ]
   const completed = steps.filter(step => step.done).length
-  const directMessagesField = SETUP_FEISHU_FIELDS.find(field => field.path === 'feishu.directMessages')
-  const missingBindings = chats.filter(chat => chat.repo && !activeProjects.some(project => project.name === chat.repo))
+
+  // 渠道面板的统一入参：初始化页与配置页给渠道的东西一样，只是渲染的块不同。
+  const channelPanelProps: ChannelPanelProps = {
+    draft,
+    defaults,
+    setField,
+    errors,
+    identity,
+    staleIdentity: false,
+    projects: activeProjects,
+    runtimeLabel,
+    onConfigSaved: config => {
+      // 只回填渠道自己的路径，别把用户其它未保存的修改冲掉。
+      setOriginal(current => (current ? mergeConfigPaths(current, config, setupPaths) : current))
+      setDraft(current => (current ? mergeConfigPaths(current, config, setupPaths) : current))
+    },
+    onStatus: setChannelReady,
+  }
+
+  const renderSetupBlock = (block: ConfigBlock): JSX.Element => {
+    const custom = activeChannel?.custom?.[block.id]
+    const body = block.render === 'custom' && custom
+      ? custom({ ...channelPanelProps, block })
+      : (
+        <div className="settings-rows">
+          {block.fields.map(field => (
+            <FieldRow
+              key={field.path}
+              field={field}
+              value={getByPath(draft, field.path)}
+              defaultValue={getByPath(defaults, field.path)}
+              error={errors.get(field.path)}
+              onChange={value => setField(field.path, value)}
+            />
+          ))}
+        </div>
+      )
+    return (
+      <div className="config-block" key={block.id}>
+        <div className="config-block-head">
+          <div>
+            <span className="config-block-title">{block.title}</span>
+            {block.description && <p className="config-block-desc">{block.description}</p>}
+          </div>
+        </div>
+        <div className="config-block-body">{body}</div>
+      </div>
+    )
+  }
 
   return (
     <>
@@ -2122,72 +2177,51 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
         />
       </section>
 
-      <section className="settings-card" id="setup-feishu">
+      <section className="settings-card" id="setup-channel">
         <header className="settings-head">
           <div>
-            <h2>4. 飞书机器人</h2>
-            <p>写入 App ID / App Secret 后，可在这里检查并完成飞书授权。</p>
+            <h2>4. 渠道配置</h2>
+            <p>消息从哪个渠道进来。先选渠道，再填它的接入信息并完成授权，Router 就能从那儿收消息。</p>
           </div>
           <div className="settings-badges">
-            {feishuReady ? <span className="badge hot">已就绪</span> : <span className="badge cold">未完成</span>}
+            {channelReady ? <span className="badge hot">已就绪</span> : <span className="badge cold">未完成</span>}
           </div>
         </header>
-        <div className="settings-rows">
-          {SETUP_FEISHU_FIELDS.filter(field => field.path !== 'feishu.directMessages').map(field => (
-            <FieldRow
-              key={field.path}
-              field={field}
-              value={getByPath(draft, field.path)}
-              defaultValue={getByPath(defaults, field.path)}
-              error={errors.get(field.path)}
-              onChange={value => setField(field.path, value)}
-            />
-          ))}
+        <div className="channel-area">
+          <ChannelPicker
+            channels={channels}
+            activeId={activeChannel?.id}
+            onSelect={setChannelId}
+            draft={draft}
+            identity={identity}
+            label="选择渠道"
+          />
+          {activeChannel
+            ? (
+              <div className="channel-detail">
+                {setupBlocks.map(block => renderSetupBlock(block))}
+                {setupExtraFields.length > 0 && (
+                  <div className="config-block">
+                    <div className="config-block-body">
+                      <div className="settings-rows">
+                        {setupExtraFields.map(field => (
+                          <FieldRow
+                            key={field.path}
+                            field={field}
+                            value={getByPath(draft, field.path)}
+                            defaultValue={getByPath(defaults, field.path)}
+                            error={errors.get(field.path)}
+                            onChange={value => setField(field.path, value)}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+            : <p className="editor-empty">当前没有可用的消息渠道。</p>}
         </div>
-        <FeishuBotPanel
-          appId={String(draft.feishu?.appId ?? '')}
-          onConfigSaved={config => {
-            const nextAppId = String(config.feishu?.appId ?? '')
-            setOriginal(current => (current ? setByPath(current, 'feishu.appId', nextAppId) : current))
-            setDraft(current => (current ? setByPath(current, 'feishu.appId', nextAppId) : current))
-          }}
-          onStatus={setFeishuReady}
-        />
-        {directMessagesField && (
-          <div className="settings-rows">
-            <FieldRow
-              field={directMessagesField}
-              value={getByPath(draft, directMessagesField.path)}
-              defaultValue={getByPath(defaults, directMessagesField.path)}
-              error={errors.get(directMessagesField.path)}
-              onChange={value => setField(directMessagesField.path, value)}
-            />
-          </div>
-        )}
-      </section>
-
-      <section className="settings-card" id="setup-chats">
-        <header className="settings-head">
-          <div>
-            <h2>5. 群与绑定</h2>
-            <p>至少添加一个监控群；绑定项目后 Router 开工不再追问，分支跟随项目默认分支。</p>
-          </div>
-          <div className="settings-badges">
-            {chatReady ? <span className="badge hot">已完成</span> : <span className="badge cold">未完成</span>}
-          </div>
-        </header>
-        {missingBindings.length > 0 && (
-          <div className="banner warn compact">
-            <Icon name="alert" size={14} />
-            <span>{missingBindings.length} 个群绑定的项目不在当前运行时清单里：{missingBindings.map(chat => chat.repo).join('、')}。请重新选择，或回到「配置」页调整。</span>
-          </div>
-        )}
-        <ChatsEditor
-          chats={chats}
-          projects={activeProjects}
-          error={errors.get('feishu.chats')}
-          onChange={value => setField('feishu.chats', value)}
-        />
       </section>
 
       <p className="editor-foot setup-config-path">配置文件：{configPath || '未知'}。保存后如需生效，请点上方「立即重启」。</p>

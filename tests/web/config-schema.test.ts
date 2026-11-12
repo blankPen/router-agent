@@ -13,18 +13,36 @@ import {
   groupFields,
   groupsFor,
 } from '../../src/web/client/fields.js'
-import { CHANNELS, channelById, channelFieldPaths, mergeChannels } from '../../src/web/client/channels.js'
+import {
+  CHANNELS,
+  channelById,
+  channelFieldPaths,
+  channelSetupBlocks,
+  channelSetupExtraFields,
+  channelSetupFields,
+  channelSetupPaths,
+  mergeChannels,
+} from '../../src/web/client/channels.js'
 
 const HOT = ['policy.', 'feishu.allowed']
 
 describe('配置分组与块', () => {
-  it('一级分组按「渠道 → 准入 → 研判 → 派工 → 运维」排列', () => {
+  it('一级分组按「LLM Provider → 运行时 → 渠道 → 项目 → 消息准入 → 其他设置」排列', () => {
     expect(CONFIG_GROUPS.map(group => group.id)).toEqual([
+      'llm',
+      'runtime',
       'channels',
+      'projects',
       'admission',
-      'reasoning',
-      'delivery',
       'ops',
+    ])
+    expect(CONFIG_GROUPS.map(group => group.title)).toEqual([
+      'LLM Provider',
+      '运行时配置',
+      '渠道配置',
+      '项目配置',
+      '消息准入',
+      '其他设置',
     ])
   })
 
@@ -48,6 +66,13 @@ describe('配置分组与块', () => {
     const channels = CONFIG_GROUPS.find(group => group.kind === 'channels')
     expect(channels).toBeDefined()
     expect(channels!.blocks).toEqual([])
+  })
+
+  it('运行时与项目各自成组，方便左侧导航定位', () => {
+    const runtime = CONFIG_GROUPS.find(group => group.id === 'runtime')!
+    const projects = CONFIG_GROUPS.find(group => group.id === 'projects')!
+    expect(runtime.blocks.map(block => block.id)).toContain('runtime')
+    expect(projects.blocks.map(block => block.id)).toContain('projects')
   })
 })
 
@@ -117,6 +142,39 @@ describe('渠道注册表', () => {
   })
 })
 
+describe('渠道在初始化页的接入项', () => {
+  it('初始化页展示的块来自渠道描述，不写死飞书', () => {
+    const feishu = channelById('feishu')!
+    expect(feishu.setup?.blocks).toEqual(['app', 'bot', 'chats'])
+    const blocks = channelSetupBlocks(feishu)
+    expect(blocks.map(block => block.id)).toEqual(['app', 'bot', 'chats'])
+  })
+
+  it('接入项的字段与路径覆盖凭据、私聊与群列表', () => {
+    const feishu = channelById('feishu')!
+    const fields = channelSetupFields(feishu)
+    expect(fields.map(field => field.path)).toContain('feishu.appId')
+    expect(fields.map(field => field.path)).toContain('feishu.directMessages')
+    const paths = channelSetupPaths(feishu)
+    expect(paths).toContain('feishu.chats')
+    // 字段不重复：块内字段与额外字段合并后按路径去重。
+    expect(new Set(fields.map(field => field.path)).size).toBe(fields.length)
+  })
+
+  it('额外字段单独渲染：不与块内字段重复', () => {
+    const feishu = channelById('feishu')!
+    const extra = channelSetupExtraFields(feishu)
+    expect(extra.map(field => field.path)).toEqual(['feishu.directMessages'])
+  })
+
+  it('没有描述接入项的渠道不参与初始化', () => {
+    const placeholder = mergeChannels([{ id: 'slack', kind: 'slack' }])[0]!
+    expect(placeholder.setup).toBeUndefined()
+    expect(channelSetupBlocks(placeholder)).toEqual([])
+    expect(channelSetupPaths(placeholder)).toEqual([])
+  })
+})
+
 describe('配置路径收集', () => {
   it('分组字段路径不重不漏地覆盖所有字段', () => {
     const paths = fieldPaths(groupFields(CONFIG_GROUPS))
@@ -132,7 +190,7 @@ describe('配置路径收集', () => {
 
   it('注入探测结果后运行时下拉用真实选项', () => {
     const groups = groupsFor([{ id: 'orca', label: 'Orca', hint: '', status: 'ready' }])
-    const runtime = groups.find(group => group.id === 'delivery')!.blocks
+    const runtime = groups.find(group => group.id === 'runtime')!.blocks
       .find(block => block.id === 'runtime')!
       .fields.find(field => field.path === 'runtime.default')!
     expect(runtime.options?.some(option => option.value === 'orca')).toBe(true)

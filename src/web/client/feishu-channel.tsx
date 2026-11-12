@@ -9,6 +9,7 @@ import { FeishuBotPanel } from './feishu-panel.js'
 import { ChatsEditor } from './chat-editor.js'
 import { IdentityNotices } from './identity-notices.js'
 import { FieldRow } from './field-row.js'
+import { Icon } from './icons.js'
 import { chatsIssue, type ChatDraft } from './config-shared.js'
 import type { ChannelDescriptor, ChannelPanelProps } from './channels.js'
 import { getByPath, type ConfigBlock, type FieldDef } from './fields.js'
@@ -110,6 +111,11 @@ export const feishuChannel: ChannelDescriptor = {
     receive: props => <FeishuReceiveBlock {...props} />,
     chats: props => <FeishuChatsBlock {...props} />,
   },
+  // 初始化页只问三件事：应用凭据、机器人授权、监控群；私聊开关顺带一起问。
+  setup: {
+    blocks: ['app', 'bot', 'chats'],
+    fields: [DIRECT_MESSAGES_FIELD],
+  },
   // 群列表不是普通字段：单独声明路径与校验规则。
   validate: (draft): Record<string, string> => {
     const message = chatsIssue(draft.feishu?.chats)
@@ -126,13 +132,14 @@ export const feishuChannel: ChannelDescriptor = {
 
 /** 机器人与授权：凭据写入 + 机器人 / 授权状态 + 机器人身份解析提示。 */
 function FeishuBotChannelBlock(props: ChannelPanelProps & { block: ConfigBlock }): JSX.Element {
-  const { draft, identity, staleIdentity, onConfigSaved } = props
+  const { draft, identity, staleIdentity, onConfigSaved, onStatus } = props
   return (
     <>
       <IdentityNotices identity={identity} stale={staleIdentity} scope="bot" />
       <FeishuBotPanel
         appId={String(draft.feishu?.appId ?? '')}
         onConfigSaved={onConfigSaved}
+        onStatus={onStatus}
       />
     </>
   )
@@ -164,8 +171,16 @@ function FeishuReceiveBlock(props: ChannelPanelProps & { block: ConfigBlock }): 
 function FeishuChatsBlock(props: ChannelPanelProps & { block: ConfigBlock }): JSX.Element {
   const { draft, setField, errors, projects } = props
   const chats = (draft.feishu?.chats ?? []) as ChatDraft[]
+  // 群绑定的项目不在当前运行时清单里时，先提醒，避免群绑定静默失效。
+  const missing = chats.filter(chat => chat.repo && !projects.some(project => project.name === chat.repo))
   return (
     <>
+      {missing.length > 0 && (
+        <div className="banner warn compact">
+          <Icon name="alert" size={14} />
+          <span>{missing.length} 个群绑定的项目不在当前运行时清单里：{missing.map(chat => chat.repo).join('、')}。请重新选择，或回到「配置」页调整。</span>
+        </div>
+      )}
       <p className="editor-hint">
         群级名单推荐填邮箱（兼容 ou_xxx）：配了却解析不到人时，该群会拒绝所有人，不会退回全局名单。
       </p>

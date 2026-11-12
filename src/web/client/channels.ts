@@ -10,7 +10,7 @@
  * 内核侧已注册的渠道实例由 `GET /api/channels` 给出，按 id 与这里的描述合并。
  */
 import type { ConfigDoc } from './api.js'
-import type { ConfigBlock } from './fields.js'
+import type { ConfigBlock, FieldDef } from './fields.js'
 import { blockPaths } from './fields.js'
 import type { IdentityStatusView } from './identity-status.js'
 import type { IconName } from './icons.js'
@@ -39,6 +39,16 @@ export interface ChannelPanelProps {
   runtimeLabel: string
   /** 渠道面板写入凭据后回传最新配置。 */
   onConfigSaved: (config: ConfigDoc) => void
+  /** 渠道自己的就绪状态回报（初始化页用它判断这一步是否完成）。 */
+  onStatus?: (ready: boolean) => void
+}
+
+/** 渠道在初始化页要展示的接入项。 */
+export interface ChannelSetup {
+  /** 初始化页展示的块 id，按顺序渲染。 */
+  blocks: string[]
+  /** 初始化页额外展示的字段（如「接收私聊」开关）。 */
+  fields?: FieldDef[]
 }
 
 /** 渠道描述：说明 + 表单。 */
@@ -57,6 +67,8 @@ export interface ChannelDescriptor {
   custom?: Record<string, (props: ChannelPanelProps & { block: ConfigBlock }) => JSX.Element>
   /** 渠道自己的校验：返回「配置路径 → 错误信息」，空值表示通过。 */
   validate?: (draft: ConfigDoc) => Record<string, string>
+  /** 初始化页要展示的接入项；缺省表示该渠道不参与初始化。 */
+  setup?: ChannelSetup
   /** 这些路径变更后，身份解析状态就是旧的（面板据此提示）。 */
   identityPaths?: string[]
   /** 渠道状态摘要。 */
@@ -73,6 +85,40 @@ export function channelById(id: string): ChannelDescriptor | undefined {
 /** 所有渠道的字段路径，用于计算「哪些配置被改过」。 */
 export function channelFieldPaths(channels: ChannelDescriptor[]): string[] {
   return channels.flatMap(channel => channel.blocks.flatMap(block => blockPaths(block)))
+}
+
+/** 初始化页要展示的块（按渠道描述的顺序）。 */
+export function channelSetupBlocks(channel: ChannelDescriptor): ConfigBlock[] {
+  const ids = channel.setup?.blocks ?? []
+  return ids
+    .map(id => channel.blocks.find(block => block.id === id))
+    .filter((block): block is ConfigBlock => Boolean(block))
+}
+
+/** 初始化页要展示的字段：块内字段 + 渠道声明的额外字段。 */
+export function channelSetupFields(channel: ChannelDescriptor): FieldDef[] {
+  const extra = channel.setup?.fields ?? []
+  const inBlocks = channelSetupBlocks(channel).flatMap(block => block.fields)
+  const seen = new Set<string>()
+  return [...inBlocks, ...extra].filter(field => {
+    if (seen.has(field.path)) return false
+    seen.add(field.path)
+    return true
+  })
+}
+
+/** 初始化页要单独展示的字段：不在任何接入块里的那些。 */
+export function channelSetupExtraFields(channel: ChannelDescriptor): FieldDef[] {
+  const inBlocks = new Set(channelSetupBlocks(channel).flatMap(block => block.fields).map(field => field.path))
+  return (channel.setup?.fields ?? []).filter(field => !inBlocks.has(field.path))
+}
+
+/** 初始化页涉及的全部配置路径（字段路径 + 块自己管理的路径）。 */
+export function channelSetupPaths(channel: ChannelDescriptor): string[] {
+  const blocks = channelSetupBlocks(channel)
+  const blockPathList = blocks.flatMap(block => blockPaths(block))
+  const fieldPathList = (channel.setup?.fields ?? []).map(field => field.path)
+  return [...new Set([...blockPathList, ...fieldPathList])]
 }
 
 /** 服务端已注册但前端还没有描述的通道：给出占位，避免用户以为渠道不存在。 */

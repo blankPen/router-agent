@@ -5,7 +5,7 @@
  * 默认值怎么取、明显不合法的值提前提示」，避免用户点保存后才被后端打回。
  *
  * 层次约定（配置页从上到下）：
- *   一级分组 ConfigGroup —— 渠道 / 准入 / 研判 / 派工 / 运维；
+ *   一级分组 ConfigGroup —— LLM Provider / 运行时配置 / 渠道配置 / 项目配置 / 消息准入 / 其他设置；
  *   二级块   ConfigBlock —— 分组内的一小节，可折叠；
  *   字段     FieldDef    —— 一个可编辑项。
  * 分组与块的顺序即优先级：接入与可用性在前，低频与高级项下沉折叠。
@@ -150,64 +150,14 @@ export const LLM_FIELDS: FieldDef[] = [
 /**
  * 配置页的分组与块。
  *
- * 顺序原则：先「能不能跑起来」（渠道接入、准入），再「跑得好不好」（研判、派工），
- * 最后是低频的运维项。
+ * 顺序原则：先「能不能跑起来」（LLM 接入、运行时、渠道、项目），再「谁来叫醒它」
+ * （消息准入），最后是低频的其它设置。
  */
 export const CONFIG_GROUPS: ConfigGroup[] = [
   {
-    id: 'channels',
-    title: '渠道配置',
-    description: '消息从哪个渠道进来。先选渠道，再配它的接入、接收范围与消息处理。',
-    kind: 'channels',
-    blocks: [],
-  },
-  {
-    id: 'admission',
-    title: '准入与并发',
-    description: '什么消息能开工单、最多同时跑几张。保存后立即生效，不需要重启。',
-    blocks: [
-      {
-        id: 'accept-mode',
-        title: '接单方式',
-        description: '决定 Router 收到消息后是只记录、只研判，还是直接开单派工。',
-        fields: [
-          { path: 'policy.acceptMode', label: '接单模式', kind: 'select', options: ACCEPT_MODE_OPTIONS },
-          { path: 'policy.maxWorkers', label: '并发上限', kind: 'number', min: 1, max: 64, unit: '张' },
-        ],
-      },
-      {
-        id: 'admission-rules',
-        title: '谁能叫醒机器人',
-        description: '按「是否在名单里」和「是否 @ 了机器人」两个维度决定一条消息是否进入研判。',
-        fields: [
-          {
-            path: 'policy.admission.listedNotAddressed',
-            label: '名单内成员 · 未 @ 机器人',
-            kind: 'select',
-            options: ADMISSION_LISTED_OPTIONS,
-            hint: '已在允许名单里的人发消息但没 @ 机器人时怎么处理',
-          },
-          {
-            path: 'policy.admission.unlistedAddressed',
-            label: '名单外成员 · @ 了机器人',
-            kind: 'select',
-            options: ADMISSION_ADDRESSED_OPTIONS,
-            hint: '陌生人 @ 机器人时，是只认明确指名，还是允许模型推断',
-          },
-          {
-            path: 'policy.admission.unlistedNotAddressed',
-            label: '名单外成员 · 未 @ 机器人',
-            kind: 'select',
-            options: ADMISSION_LISTED_OPTIONS,
-          },
-        ],
-      },
-    ],
-  },
-  {
-    id: 'reasoning',
-    title: '研判',
-    description: 'Router 用哪个模型研判、研判多久、怎么说话。',
+    id: 'llm',
+    title: 'LLM Provider',
+    description: 'Router 用哪个模型研判、怎么说话、上下文怎么复用。',
     blocks: [
       {
         id: 'llm',
@@ -266,9 +216,9 @@ export const CONFIG_GROUPS: ConfigGroup[] = [
     ],
   },
   {
-    id: 'delivery',
-    title: '派工与项目',
-    description: '工单交给谁跑、在哪个仓库跑。',
+    id: 'runtime',
+    title: '运行时配置',
+    description: '工单交给哪个运行时执行，同时能并发跑几张。',
     blocks: [
       {
         id: 'runtime',
@@ -286,6 +236,28 @@ export const CONFIG_GROUPS: ConfigGroup[] = [
         ],
       },
       {
+        id: 'concurrency',
+        title: '并发上限',
+        description: '同一时间最多跑几张工单；超出的工单排队等空闲 worker。',
+        fields: [
+          { path: 'policy.maxWorkers', label: '并发上限', kind: 'number', min: 1, max: 64, unit: '张' },
+        ],
+      },
+    ],
+  },
+  {
+    id: 'channels',
+    title: '渠道配置',
+    description: '消息从哪个渠道进来。先选渠道，再配它的接入、接收范围与消息处理。',
+    kind: 'channels',
+    blocks: [],
+  },
+  {
+    id: 'projects',
+    title: '项目配置',
+    description: '可派工的项目清单，按运行时隔离。',
+    blocks: [
+      {
         id: 'projects',
         title: '项目清单',
         description: '可派工的项目。项目按运行时隔离，切换上方「Worker 运行时」即可编辑另一套。',
@@ -295,8 +267,50 @@ export const CONFIG_GROUPS: ConfigGroup[] = [
     ],
   },
   {
+    id: 'admission',
+    title: '消息准入',
+    description: '哪些消息能开工单、以什么方式接单。保存后立即生效，不需要重启。',
+    blocks: [
+      {
+        id: 'accept-mode',
+        title: '接单方式',
+        description: '决定 Router 收到消息后是只记录、只研判，还是直接开单派工。',
+        fields: [
+          { path: 'policy.acceptMode', label: '接单模式', kind: 'select', options: ACCEPT_MODE_OPTIONS },
+        ],
+      },
+      {
+        id: 'admission-rules',
+        title: '谁能叫醒机器人',
+        description: '按「是否在名单里」和「是否 @ 了机器人」两个维度决定一条消息是否进入研判。',
+        fields: [
+          {
+            path: 'policy.admission.listedNotAddressed',
+            label: '名单内成员 · 未 @ 机器人',
+            kind: 'select',
+            options: ADMISSION_LISTED_OPTIONS,
+            hint: '已在允许名单里的人发消息但没 @ 机器人时怎么处理',
+          },
+          {
+            path: 'policy.admission.unlistedAddressed',
+            label: '名单外成员 · @ 了机器人',
+            kind: 'select',
+            options: ADMISSION_ADDRESSED_OPTIONS,
+            hint: '陌生人 @ 机器人时，是只认明确指名，还是允许模型推断',
+          },
+          {
+            path: 'policy.admission.unlistedNotAddressed',
+            label: '名单外成员 · 未 @ 机器人',
+            kind: 'select',
+            options: ADMISSION_LISTED_OPTIONS,
+          },
+        ],
+      },
+    ],
+  },
+  {
     id: 'ops',
-    title: '运维',
+    title: '其他设置',
     description: '进展同步、闲置治理、工作区回收与服务端口。',
     blocks: [
       {
