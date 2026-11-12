@@ -897,7 +897,10 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       const id = typeof body.id === 'string' ? body.id.trim() : ''
       if (!id) return respond(res, 400, { error: 'id-required' })
       try {
-        const job = opts.pluginAdmin.startInstall(kind, id, typeof body.version === 'string' ? { version: body.version } : {})
+        const installOpts: { version?: string; packageName?: string } = {}
+        if (typeof body.version === 'string') installOpts.version = body.version
+        if (typeof body.packageName === 'string') installOpts.packageName = body.packageName
+        const job = opts.pluginAdmin.startInstall(kind, id, installOpts)
         onEvent({ event: 'api:plugin-install', kind, id, package: job.packageName, version: job.version })
         // jobId 与 ACP 安装端点保持同一字段名，面板轮询写同一套逻辑。
         return respond(res, 202, { ok: true, jobId: job.id, ...job })
