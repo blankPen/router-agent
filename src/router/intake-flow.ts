@@ -19,14 +19,23 @@ import {
   ticketFromIntake,
 } from './intake.js'
 
-export interface IntakeSettingsView {
+/** 单个群的需求分析配置。 */
+export interface IntakeChatSettings {
   enabled: boolean
-  /** 开启 intake 的群；空表示全部监控群。 */
-  chats: string[]
+  /** 终审管理员 open_id；为空时回退到策略里的全局名单。 */
+  approvers: string[]
   maxQuestions: number
   codeAccess: boolean
-  /** 终审管理员；为空时回退到策略里的全局名单。 */
-  approvers: string[]
+}
+
+export interface IntakeSettingsView {
+  /**
+   * 按群取配置。
+   *
+   * 需求分析助手是群级能力：开关、追问轮数、终审管理员都跟着群走，
+   * 没配的群一律关闭（不会因为别的群开了就跟着开）。
+   */
+  forChat: (chatId: string) => IntakeChatSettings
 }
 
 export interface IntakeCoordinatorOptions {
@@ -91,14 +100,25 @@ export class IntakeCoordinator {
 
   /** 这个群是否开启了需求识别。 */
   enabledFor(trigger: Trigger): boolean {
-    if (!this.settings.enabled || trigger.isBot) return false
-    if (this.settings.chats.length === 0) return true
-    return this.settings.chats.includes(trigger.chatId)
+    if (trigger.isBot) return false
+    return this.settingsFor(trigger.chatId).enabled
   }
 
-  isApprover(actorId: string): boolean {
-    const approvers = this.settings.approvers.length > 0 ? this.settings.approvers : this.fallbackApprovers()
+  /** 该群是否配了终审管理员；没配时回退到策略里的全局名单。 */
+  isApprover(chatId: string, actorId: string): boolean {
+    const approvers = this.approversOf(chatId)
     return approvers.includes(actorId)
+  }
+
+  /** 该群的需求分析配置；没配的群按「关闭」处理。 */
+  private settingsFor(chatId: string): IntakeChatSettings {
+    return this.settings.forChat(chatId)
+  }
+
+  /** 该群生效的终审管理员 open_id；没配时回退到全局名单。 */
+  private approversOf(chatId: string): string[] {
+    const configured = this.settingsFor(chatId).approvers
+    return configured.length > 0 ? configured : this.fallbackApprovers()
   }
 
   /**
@@ -141,7 +161,7 @@ export class IntakeCoordinator {
     // 管理员 @机器人 说「确认派单 / 驳回」时仍然按终审处理（语义明确）；
     // 其余 @ 是新指令，要走原研判，不能被待审需求单截走。
     const settlesApproval = isApprovalCommand(trigger.text) || isRejectionCommand(trigger.text)
-    if (pending && this.isApprover(trigger.actorId) && (trigger.addressed === 'none' || settlesApproval)) {
+    if (pending && this.isApprover(trigger.chatId, trigger.actorId) && (trigger.addressed === 'none' || settlesApproval)) {
       await this.handleApproval(pending, trigger)
       return 'handled'
     }
@@ -228,12 +248,13 @@ export class IntakeCoordinator {
   /** 跑一轮分析：用户补充信息、得到答复，或收口成结构化需求单。 */
   private async advance(intake: Intake, trigger: Trigger): Promise<void> {
     const projectPath = await this.projectPathOf(intake)
-    const readCode = this.settings.codeAccess && Boolean(projectPath)
+    const settings = this.settingsFor(intake.chatId)
+    const readCode = settings.codeAccess && Boolean(projectPath)
     let outcome
     try {
       const text = await this.llm.run({
         systemPrompt: readRouterPrompt(this.home, 'intake-analyst.md'),
-        userPrompt: buildAnalystUserPrompt({ intake, trigger, maxQuestions: this.settings.maxQuestions, ...(projectPath ? { projectPath } : {}), readCode }),
+        userPrompt: buildAnalystUserPrompt({ intake, trigger, maxQuestions: settings.maxQuestions, ...(projectPath ? { projectPath } : {}), readCode }),
         readCode,
         ...(projectPath ? { projectPath } : {}),
       })
@@ -260,7 +281,7 @@ export class IntakeCoordinator {
       this.decideIgnore(trigger, `intake:clarify:q${intake.questions}`, 'inferred')
       this.logger.info('intake:clarify', { intakeId: intake.id, questions: intake.questions, chat: intake.chatId })
       // 追问轮数到顶仍拿不到结构化结果：直接按现有信息收口，避免无限对话。
-      if (intake.questions >= this.settings.maxQuestions) {
+      if (intake.questions >= settings.maxQuestions) {
         intake.report = this.fallbackReport(intake)
         await this.publishReady(intake, trigger)
       }
@@ -279,7 +300,7 @@ export class IntakeCoordinator {
     intake.updatedAt = this.clock.now()
     this.store.updateIntake(intake)
 
-    const approvers = this.settings.approvers.length > 0 ? this.settings.approvers : this.fallbackApprovers()
+    const approvers = this.approversOf(intake.chatId)
     this.replyTo(trigger, formatSubmittedToUser(intake), `intake:submitted:${intake.id}`, { thread: true })
     this.replyTo(trigger, formatReviewMessage(intake, approvers), `intake:review:${intake.id}`, { thread: true })
     this.decideIgnore(trigger, 'intake:ready-for-review', 'inferred')

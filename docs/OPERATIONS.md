@@ -124,6 +124,7 @@ Router 不做对话，只在必要时说话：
 | `feishu:bot-identity-resolved` | Identity | `bot` `name` | 机器人身份自动识别成功（按 `app_id` 匹配群成员），或使用了手动填写的身份 |
 | `feishu:bot-identity-failed` | Identity | `detail` | 机器人身份识别失败，`mode: mention` 的群会丢消息，需人工确认 |
 | `feishu:chat-allowlist-empty` | Identity | `chat` `name` `count` | 群级允许名单配了却一个都解析不出来，该群按「拒绝所有人」处理 |
+| `feishu:intake-approver-empty` | Identity | `chat` `name` `count` | 需求分析助手的终审管理员配了却一个都解析不出来，该群没有人能终审（不会退回全局名单） |
 | `loop:trigger-failed` | Agent Loop | `triggerId` `chat` `detail` | 单条消息处理异常，同批其它消息不受影响 |
 | `decision:engine-failed` | Agent Loop | `triggerId` `detail` | 研判引擎调用失败，按 unavailable 处理并留下原因 |
 | `chat:reply-failed` | Agent Loop | `triggerId` `chat` `reason` `detail` | 回复模型失败，已退回固定话术 |
@@ -131,6 +132,7 @@ Router 不做对话，只在必要时说话：
 | `config:created` | Config | `path` | 首次启动写入了默认 `config.yaml` |
 | `config:parse-failed` | Config | `path` `detail` | YAML 解析失败，已降级为默认配置启动 |
 | `config:legacy-backend` | Config | `path` | 旧版 `backend` 段已兼容映射到 `runtime` |
+| `config:intake-migrated` | Config | `chats` `enabled` `maxQuestions` | 旧版全局 `intake:` 段已迁移到群级配置（`chats` 是被迁移的群） |
 | `config:invalid-security-override` | Config | `runtime` `keys` | `runtime.options` 试图覆盖安全参数，启动被拒绝 |
 | `config:patch-rejected` / `config:write-failed` | HTTP API | `errors` / `detail` | 面板保存的配置校验失败或落盘失败 |
 | `api:config` | HTTP API | `changed` `policyChanged` `restartRequired` `identityEffective` | 配置保存成功、是否需要重启、允许名单是否已即时生效 |

@@ -5,7 +5,7 @@ import { dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { Command, CommanderError } from 'commander'
-import { ensureHome, loadConfig, policyOf, projectsForRuntime, publicConfig, replyAlwaysChatsOf, setConfigValue, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
+import { ensureHome, intakeEnabledChats, loadConfig, policyOf, projectsForRuntime, publicConfig, replyAlwaysChatsOf, setConfigValue, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
 import { Store, type SessionMigrationState } from '../store/db.js'
 import { Engine } from '../core/engine.js'
 import { effectiveAllowed, effectiveAllowedByChat, shouldAcknowledge } from '../core/policy.js'
@@ -1344,8 +1344,9 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
         scheduleRestart: scheduleUpdateRestart,
       })
     : null
-  // 需求识别（intake）：只在开启时装配，避免默认改变存量群的回复行为。
-  const intakeEngine = model && config.intake.enabled
+  // 需求分析助手：只在有群开启时装配，避免默认改变存量群的回复行为。
+  const intakeChats = new Set(intakeEnabledChats(config))
+  const intakeEngine = model && intakeChats.size > 0
     ? createIntakeEngine({ config, store, model })
     : undefined
   const auditPath = join(home, 'logs', 'decisions.jsonl')
@@ -1375,7 +1376,6 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
    * （allowedOpenIds / allowedByChatOpenIds）——名单改成邮箱后，原始条目里存的是邮箱，
    * 直接拿 allowed 去比 open_id 会永远匹配不上。
    */
-  const intakeChats = new Set(config.intake.enabled ? (config.intake.chats.length > 0 ? config.intake.chats : config.feishu.chats.map(chat => chat.chat)) : [])
   const allowUnaddressed: UnaddressedAdmission = ({ chatId, actorId, threadKeys }) => {
     const policy = engine.policy()
     const scoped = effectiveAllowedByChat(policy, chatId)
@@ -1465,6 +1465,8 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       sender: feishuOutbox,
       decisionEngine,
       ...(intakeEngine ? { intakeEngine } : {}),
+      // 终审管理员：配置里写邮箱，这里传解析后的 open_id。
+      ...(identity?.approverOpenIdsByChat ? { intakeApprovers: identity.approverOpenIdsByChat } : {}),
       orca: orcaRunner,
       onDecisionAudit,
     })

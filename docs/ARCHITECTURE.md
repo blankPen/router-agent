@@ -19,7 +19,7 @@ WorkerRuntime 端口 ── OrcaRuntime（默认）/ ClaudeCodeRuntime / AcpRunt
 
 源码目录见 [README](../README.md#开发)，运行时的差异与选型见 [RUNTIME.md](RUNTIME.md)。
 
-开启需求识别（`intake.enabled`）后，Router 与 Worker 之间多一条**并行**的能力链：
+某个群开启「需求分析助手」（`feishu.chats[].intake.enabled`）后，Router 与 Worker 之间多一条**并行**的能力链：
 
 ```text
 群消息（普通成员，可不 @）
@@ -36,7 +36,7 @@ PiIntakeEngine（只读项目代码：code_ls / code_read / code_grep）
                               └─ 驳回 / 补要求 → 结束 / 重新分析
 ```
 
-这条链**不改原有架构**：Router 仍只调度与收尾，读代码与业务判断全部落在子 Agent；派单仍只经 `Engine.decide()`；权限、项目隔离、五阶段工单、Outbox 与 PR 闭环一行不改。详见 [CONFIGURATION.md](CONFIGURATION.md#需求识别intake)。
+这条链**不改原有架构**：Router 仍只调度与收尾，读代码与业务判断全部落在子 Agent；派单仍只经 `Engine.decide()`；权限、项目隔离、五阶段工单、Outbox 与 PR 闭环一行不改。详见 [CONFIGURATION.md](CONFIGURATION.md#需求分析助手群级-intake)。
 
 ## 一条消息的四个步骤
 

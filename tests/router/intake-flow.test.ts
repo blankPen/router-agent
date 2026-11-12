@@ -6,6 +6,7 @@ import { DEFAULT_ADMISSION, type Policy } from '../../src/core/policy.js'
 import type { Trigger } from '../../src/core/model.js'
 import type { IntakeEngine, IntakeRunRequest } from '../../src/router/intake-engine.js'
 import type { DispatchSettings } from '../../src/router/dispatch.js'
+import type { IntakeSettingsView } from '../../src/router/intake-flow.js'
 import { chatEntry } from '../../src/config.js'
 
 /** 按顺序返回预设 JSON 的假识别引擎，并记录每轮请求。 */
@@ -72,16 +73,28 @@ function setup(llm: IntakeEngine, over: { maxQuestions?: number; approvers?: str
     replyAlwaysChats: ['oc_dev'],
     intake: {
       llm,
-      settings: {
-        enabled: true,
-        chats: [],
-        maxQuestions: over.maxQuestions ?? 2,
-        codeAccess: false,
-        approvers: over.approvers ?? ['ou_admin'],
-      },
+      settings: intakeSettings(over),
     },
   })
   return { store, engine, loop, advance: (at: string) => { now = at } }
+}
+
+/** 群级需求分析配置：默认只有 oc_dev 开启，其它群关闭。 */
+function intakeSettings(over: {
+  maxQuestions?: number
+  approvers?: string[]
+  enabledChats?: string[]
+  approversByChat?: Record<string, string[]>
+} = {}): IntakeSettingsView {
+  const enabledChats = new Set(over.enabledChats ?? ['oc_dev'])
+  return {
+    forChat: (chatId: string) => ({
+      enabled: enabledChats.has(chatId),
+      maxQuestions: over.maxQuestions ?? 2,
+      codeAccess: false,
+      approvers: over.approversByChat?.[chatId] ?? over.approvers ?? ['ou_admin'],
+    }),
+  }
 }
 
 const QUESTIONS = { kind: 'issue', reason: '页面报错' }
@@ -253,13 +266,99 @@ describe('需求识别（intake）', () => {
       replyAlwaysChats: ['oc_dev'],
       intake: {
         llm,
-        settings: { enabled: true, chats: [], maxQuestions: 2, codeAccess: false, approvers: ['ou_admin'] },
+        settings: intakeSettings(),
       },
     })
     engine.ingest(trigger({ actorId: 'ou_mallory', actorName: 'Mallory' }))
     await loop.tick()
     expect(llm.requests).toHaveLength(0)
     expect(store.latestIntakeByThread('feishu:oc_dev:om_1')).toBeNull()
+  })
+
+  it('没开启需求分析助手的群不接管：走原有研判路径', async () => {
+    const llm = new FakeIntake([QUESTIONS])
+    const store = new Store(':memory:')
+    const clock = { now: () => now }
+    let n = 0
+    const engine = new Engine({ store, policy, clock, ids: { next: p => `${p}_${++n}` } })
+    const loop = new AgentLoop({
+      engine,
+      decisionEngine: { async assess() { throw new Error('不应研判') }, async reply() { throw new Error('不应回复') } },
+      clock,
+      batchWindowMs: 0,
+      source: 'feishu',
+      dispatch,
+      replyAlwaysChats: ['oc_dev'],
+      // 需求分析助手只在 oc_ops 开启：oc_dev 不受影响。
+      intake: { llm, settings: intakeSettings({ enabledChats: ['oc_ops'] }) },
+    })
+    engine.ingest(trigger())
+    await loop.tick()
+    expect(llm.requests).toHaveLength(0)
+    expect(store.latestIntakeByThread('feishu:oc_dev:om_1')).toBeNull()
+  })
+
+  it('终审管理员按群取：别的群的管理员在本群不能拍板', async () => {
+    const llm = new FakeIntake([
+      QUESTIONS,
+      { action: 'report', reply: '整理好了', report: { title: '登录 500', problem: '500' } },
+    ])
+    const store = new Store(':memory:')
+    const clock = { now: () => now }
+    let n = 0
+    const engine = new Engine({ store, policy, clock, ids: { next: p => `${p}_${++n}` } })
+    const loop = new AgentLoop({
+      engine,
+      decisionEngine: { async assess() { throw new Error('不应研判') }, async reply() { throw new Error('不应回复') } },
+      clock,
+      batchWindowMs: 0,
+      source: 'feishu',
+      dispatch: {
+        projects: [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }],
+        bindings: [
+          chatEntry('oc_dev', { mode: 'all', repo: 'router-agent', branch: 'main' }),
+          chatEntry('oc_ops', { mode: 'all', repo: 'router-agent', branch: 'main' }),
+        ],
+      },
+      replyAlwaysChats: ['oc_dev', 'oc_ops'],
+      intake: {
+        llm,
+        settings: intakeSettings({
+          enabledChats: ['oc_dev', 'oc_ops'],
+          approversByChat: { oc_dev: ['ou_admin'], oc_ops: ['ou_lead'] },
+        }),
+      },
+    })
+    engine.ingest(trigger({ chatId: 'oc_ops', threadId: 'feishu:oc_ops:om_1' }))
+    await loop.tick()
+    now = '2026-11-12T10:02:10.000Z'
+    // oc_dev 的管理员在 oc_ops 里不是管理员：不能拍板。
+    engine.ingest(trigger({
+      id: 't_approve',
+      externalId: 'om_approve',
+      chatId: 'oc_ops',
+      threadId: 'feishu:oc_ops:om_1',
+      actorId: 'ou_admin',
+      text: '确认派单',
+      receivedAt: '2026-11-12T10:02:00.000Z',
+    }))
+    await loop.tick()
+    expect(engine.store.listTickets()).toHaveLength(0)
+
+    // 本群的管理员可以拍板。
+    now = '2026-11-12T10:03:10.000Z'
+    engine.ingest(trigger({
+      id: 't_approve_lead',
+      externalId: 'om_approve_lead',
+      chatId: 'oc_ops',
+      threadId: 'feishu:oc_ops:om_1',
+      actorId: 'ou_lead',
+      text: '确认派单',
+      receivedAt: '2026-11-12T10:03:00.000Z',
+    }))
+    await loop.tick()
+    expect(engine.store.listTickets()).toHaveLength(1)
+    expect(store.latestIntakeByThread('feishu:oc_ops:om_1')?.status).toBe('approved')
   })
 
   it('管理员 @机器人 时不被待审需求单截走，走原研判', async () => {
@@ -289,7 +388,7 @@ describe('需求识别（intake）', () => {
       source: 'feishu',
       dispatch,
       replyAlwaysChats: ['oc_dev'],
-      intake: { llm, settings: { enabled: true, chats: [], maxQuestions: 2, codeAccess: false, approvers: ['ou_admin'] } },
+      intake: { llm, settings: intakeSettings() },
     })
     engine.ingest(trigger())
     await loop.tick()
@@ -324,7 +423,7 @@ describe('需求识别（intake）', () => {
       replyAlwaysChats: ['oc_dev'],
       intake: {
         llm,
-        settings: { enabled: true, chats: [], maxQuestions: 2, codeAccess: false, approvers: ['ou_admin'] },
+        settings: intakeSettings(),
       },
     })
     engine.ingest(trigger())

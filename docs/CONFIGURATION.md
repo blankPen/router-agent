@@ -15,6 +15,11 @@ feishu:
       repo: router-agent   # 可选：群绑定项目（只能是当前后端项目清单里的项目名）
       branch: main         # 由项目默认分支自动决定，面板不可单独编辑
       allowed: [ou_xxx]    # 可选：本群只允许这些人操作（空=沿用全局 allowed）；支持邮箱（推荐）或 ou_xxx
+      intake:          # 可选：本群的「需求分析助手」（Web 面板里点群配置里的「需求分析助手」按钮编辑）
+        enabled: false     # 开启后，本群未 @ 机器人的消息也会先经过初筛
+        maxQuestions: 10  # 最多主动追问几轮；达到上限按现有信息收口
+        codeAccess: true   # 分析子 Agent 是否只读本群绑定项目的本地代码
+        approvers: []      # 终审管理员；支持邮箱（推荐）或 ou_xxx；空 = 回退到全局 allowed 名单
   directMessages: true
   allowed: []          # 允许发起工作的人（邮箱，推荐；兼容 ou_xxx）
   bots: []             # 允许产生推断候选的机器人
@@ -40,15 +45,6 @@ policy:
     listedNotAddressed: inferred    # 名单内、未 @：inferred | ignore
     unlistedAddressed: inferred     # 名单外、@bot：explicit | inferred | ignore
     unlistedNotAddressed: ignore    # 名单外、未 @：inferred | ignore
-
-# 需求识别（intake）：普通成员在群里直接反馈问题，由轻量初筛 + 分析子 Agent 澄清，
-# 结构化需求单必须经管理员终审（回复「确认派单」）才进入原有派单流程。默认关闭。
-intake:
-  enabled: false       # 开启后，群里未 @ 机器人的消息也会先经过初筛
-  chats: []            # 只对这些群生效；空 = 所有已监控的群
-  maxQuestions: 3      # 最多主动追问几轮；达到上限按现有信息收口
-  codeAccess: true     # 分析子 Agent 是否读取当前群绑定项目的本地代码
-  approvers: []        # 终审管理员 open_id；空 = 回退到全局 allowed 名单
 
 # 研判层：Pi 单引擎；超时、token 预算与独立配置目录
 router:
@@ -160,7 +156,7 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 | `policy.admission.listedNotAddressed` / `unlistedAddressed` / `unlistedNotAddressed` | 见「准入规则」 |
 | `router.timeoutMs` / `router.tokenBudget` / `router.agentDir` | 毫秒（1s–600s） / token（0=不限） / Pi 配置目录 |
 | `progress.syncMs` / `probeMs` / `silenceMs` / `repeatMs` | 毫秒；前两项 0 = 关闭 |
-| `intake.enabled` / `chats` / `maxQuestions` / `codeAccess` / `approvers` | 见「需求识别」 |
+| `feishu.chats[].intake.enabled` / `maxQuestions` / `codeAccess` / `approvers` | 见「需求分析助手」 |
 | `retention.enabled` / `idleHours` / `closeGraceHours` / `zombieHours` / `sweepMinutes` | 见「闲置工单治理」 |
 | `workspace.enabled` / `keepHours` / `sweepMinutes` | 见「关单后的工作区回收」 |
 | `worker.evidence.ui` | `off` / `warn` / `enforce`；UI 证据门禁档位（保存后需重启） |
@@ -317,34 +313,49 @@ Web 面板的「登记项目」提供两种添加方式：
 
 `inferred` 进入研判（再由 `acceptMode` 决定 observe 时是否真的开工），`explicit` 直接按显式请求开单，`ignore` 直接丢弃。这三项属于 `policy.*`：Web 面板保存后立即生效；`ra config set` 写的是文件，重启服务后生效。
 
-## 需求识别（intake）
+## 需求分析助手（群级 intake）
 
-默认关闭。开启后 Router 仍然是纯路由层，但多了一条「普通成员自助提需」的链路：
+每个群单独开关，默认关闭。开启后 Router 仍然是纯路由层，但多了一条「普通成员自助提需」的链路：
 
 1. **初筛**：群里的消息（包括没 @ 机器人的）先过一遍轻量模型，分成 `chat` / `question` / `issue`；
 2. **分析**：`question` / `issue` 交给分析子 Agent，它只读当前群绑定项目的代码，主动追问补齐信息；
-3. **终审**：信息收敛后整理成结构化需求单，@终审管理员（`intake.approvers`，为空则用全局 `allowed`）；
+3. **终审**：信息收敛后整理成结构化需求单，@终审管理员（本群 `approvers`，为空则用全局 `allowed`）；
 4. **派单**：管理员回复「确认派单」才走原有 `Engine.decide()` 生成工单；回复「驳回」结束这条需求。
 
+配置入口在 Web 面板：**「配置 → 项目清单 → 群与绑定」**里每一行都有一个「需求分析助手」按钮，点开弹窗就能开关、填管理员、调轮次、决定是否读代码；也可以直接改 `config.yaml`：
+
 ```bash
-ra config set intake.enabled true
-ra config set intake.chats "oc_dev,oc_test"    # 空 = 所有已监控的群
-ra config set intake.maxQuestions 3             # 0 = 不主动追问，直接按现有信息收口
-ra config set intake.codeAccess true            # false = 分析 Agent 不读代码，只基于对话判断
-ra config set intake.approvers "ou_admin"       # 空 = 回退到全局 allowed
+feishu:
+  chats:
+    - chat: oc_dev
+      mode: all
+      repo: router-agent
+      intake:
+        enabled: true
+        maxQuestions: 10          # 最多追问 10 轮（默认 10，0 = 不追问）
+        codeAccess: true          # false = 分析 Agent 不读代码，只基于对话判断
+        approvers: [lead@example.com]   # 终审管理员：邮箱（推荐）或 ou_xxx；空 = 回退到全局 allowed
 ```
+
+| 字段 | 含义 |
+|-|-|
+| `enabled` | 是否在这个群开启需求分析助手；一个群开了不影响别的群 |
+| `maxQuestions` | 最多主动追问几轮，默认 **10**，上限 50；到顶后按现有信息收口成需求单 |
+| `codeAccess` | 分析子 Agent 是否只读本群绑定项目的代码；关闭后只依据对话与通用业务知识判断 |
+| `approvers` | 终审管理员：支持**邮箱**（推荐）或 `ou_xxx`；启动时把邮箱解析成 open_id，解析不到就没人能终审（不会退回全局名单） |
 
 | 约束 | 实现 |
 |-|-|
 | Router 不读代码、不做业务分析 | 读代码与判断只发生在 `IntakeEngine`；主链路只做调度、落库与出站 |
-| 权限不变 | 普通成员没有派单权限；终审口令只认 `intake.approvers`（或全局 allowed） |
+| 权限不变 | 普通成员没有派单权限；终审口令只认本群 `approvers`（或全局 allowed） |
 | 项目隔离 | 分析工具（`code_ls` / `code_read` / `code_grep`）只接受项目目录内的相对路径，越界直接拒绝 |
 | 群级白名单 | 群配了 `allowed` 时，只有名单内成员能触发 intake；「配了但没解析出来」的群一律拒绝 |
 | 不干扰存量派单流程 | 同一话题里管理员 @机器人 的新指令仍走原研判，不会被待审需求单截走 |
+| 旧配置自动迁移 | 旧版全局 `intake:` 段（`enabled` / `chats` / `maxQuestions` / `codeAccess` / `approvers`）在启动时迁移到对应群；写回配置后全局段消失 |
 
-需求识别会话在 `~/.router-agent/state.db` 的 `intakes` 表里持久化；72 小时没有新消息自动放弃，不会挡住后续新问题。分析 Agent 的追问 / 收口规范在 Web 面板「配置 → 规范文件」里可查看和修改（`需求初筛规范` / `需求分析规范`）。
+需求分析会话在 `~/.router-agent/state.db` 的 `intakes` 表里持久化；72 小时没有新消息自动放弃，不会挡住后续新问题。分析 Agent 的追问 / 收口规范在 Web 面板「配置 → 规范文件」里可查看和修改（`需求初筛规范` / `需求分析规范`）。
 
-> 注意：`intake` 依赖群已绑定项目（`chatBinding` / `feishu.chats[].repo`）。没有绑定项目的群里，intake 不会接管消息，仍按原准入规则处理——因为拿不到项目就无法生成可派单的需求单。
+> 注意：需求分析助手依赖群已绑定项目（`chatBinding` / `feishu.chats[].repo`）。没有绑定项目的群里，它不会接管消息，仍按原准入规则处理——因为拿不到项目就无法生成可派单的需求单。
 
 ## 闲置工单治理
 
