@@ -15,13 +15,19 @@ import { preview } from '../core/events.js'
 import { noopLogger, errorMessage, type Logger } from '../infra/logger.js'
 import { createChatClient, type ChatClient, type ChatMessage, type ChatModelConfig } from '../infra/chat.js'
 import { extractJsonObject } from './model-config.js'
-import { readLogs, type LogEntry } from './log-tail.js'
+import { readLogTail, type LogEntry } from './log-tail.js'
 import { toolSpecs, type DiagnosisTool } from './diagnosis-tools.js'
 
 /** 一次排查最多带多少条证据给模型。 */
 export const MAX_ASSISTANT_EVIDENCE = 40
-/** 读取日志时一次回看的行数上限。 */
-const READ_LIMIT = 500
+/**
+ * 读取日志时一次回看的行数上限。
+ *
+ * 取 5000 而不是 500：服务繁忙时一小时内能写几千行日志，
+ * 只看最后 500 行的话，早先的 error 会被 info 挤出去——
+ * 排查助手给出的证据里一条错误都没有，用户上报 issue 时正文也就没有错误日志。
+ */
+const READ_LIMIT = 5_000
 /** 用户问题的字符上限，超出部分截断。 */
 const MAX_QUESTION_CHARS = 2_000
 
@@ -310,8 +316,7 @@ export function createLogAssistant(opts: LogAssistantOptions): LogAssistant {
     diagnose(question: LogAssistantQuestion): Promise<LogDiagnosis> {
       return run(async () => {
         const text = question.question.trim().slice(0, MAX_QUESTION_CHARS)
-        const read = readLogs(opts.logPath, { limit: READ_LIMIT })
-        const entries = read.entries
+        const entries = readLogTail(opts.logPath, { lines: READ_LIMIT })
         // 助手与日志页共用同一套过滤：用户看到的范围就是排查范围。
         const scoped = filterEntries(entries, {
           ...(question.level ? { level: question.level } : {}),

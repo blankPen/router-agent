@@ -164,35 +164,14 @@ export function LogAssistantFab({ onOpenConfig }: { onOpenConfig: (section?: str
   }, [analyze])
 
   /**
-   * 「上报 GitHub issue」快捷入口：先分析，再直接建 issue。
+   * 「上报 GitHub issue」快捷入口：先分析，看完结论再决定要不要报。
    *
-   * 之前这个入口只调 openWithAnalysis，等于「点了只出结论、什么也没上报」，
-   * 用户以为已经建好 issue，实际一条都没发出去。现在分析完直接提交，
-   * 失败原因也会显示在弹窗里。
+   * 这里只负责打开面板并跑分析，不代替用户提交：
+   * 自动建 issue 会在用户还没看结论时就往仓库里写东西，
+   * 结论若是「配置没生效」，用户根本不想报。所以真正的上报入口是
+   * 弹窗底部那个按钮——分析完、用户看过结论，由用户点一下才发出。
+   * 快捷菜单只是把用户送到「结论 + 上报按钮」这一步。
    */
-  const openWithIssue = useCallback(async (text: string): Promise<void> => {
-    setOpen(true)
-    setQuestion(text)
-    setBusy(true)
-    setFailure(null)
-    setIssue(null)
-    try {
-      const data = await sendJson<{ diagnosis: LogDiagnosis }>('/api/logs/assistant', 'POST', { question: text })
-      setResult(data.diagnosis)
-      const issueStep = data.diagnosis.next?.find(step => step.kind === 'issue')
-      const issue = await sendJson<{ issue: { number: number; url: string } }>(
-        '/api/logs/assistant/issue',
-        'POST',
-        { question: text, diagnosis: data.diagnosis, ...(issueStep?.issueTitle ? { title: issueStep.issueTitle } : {}) },
-      )
-      setIssue(issue.issue)
-    } catch (err) {
-      setFailure(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(false)
-    }
-  }, [])
-
   useEffect(() => {
     if (!open) return
     const onKey = (event: globalThis.KeyboardEvent): void => {
@@ -230,8 +209,8 @@ export function LogAssistantFab({ onOpenConfig }: { onOpenConfig: (section?: str
           <button
             type="button"
             role="menuitem"
-            title="分析最近的错误日志，并把结论与证据上报成 issue"
-            onClick={() => void openWithIssue('最近的错误日志是什么问题？帮我排查一下。')}
+            title="先分析最近的错误日志，看完结论再决定要不要上报"
+            onClick={() => openWithAnalysis('最近的错误日志是什么问题？帮我排查一下。')}
           >
             <Icon name="external" size={14} />
             上报 GitHub issue
