@@ -17,7 +17,12 @@ Router（AgentLoop + DecisionEngine(Pi) + HTTP API + Web）
 WorkerRuntime 端口 ── OrcaRuntime（默认）/ ClaudeCodeRuntime / AcpRuntime（acp 与 7 个 acp-*）
 ```
 
-源码目录见 [README](../README.md#开发)，运行时的差异与选型见 [RUNTIME.md](RUNTIME.md)。
+仓库是 pnpm workspace：领域内核、基础设施、Worker 运行时与消息通道分别在
+`packages/core`、`packages/infra`、`packages/runtime`、`packages/channel`，宿主应用仍在 `src/`。
+依赖单向向下（`core ← infra ← runtime / channel ← src`），跨包用 `#core/*` / `#infra/*` /
+`#runtime/*` / `#channel/*` 别名。包划分、依赖约束与新增适配器的步骤见 [MONOREPO.md](MONOREPO.md)。
+
+运行时的差异与选型见 [RUNTIME.md](RUNTIME.md)。
 
 某个群开启「需求分析助手」（`feishu.chats[].intake.enabled`）后，Router 与 Worker 之间多一条**并行**的能力链：
 

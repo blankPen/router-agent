@@ -303,7 +303,7 @@ ra config edit                                   # 用 $EDITOR 编辑全文
 ## 开发
 
 ```bash
-pnpm test        # 740 个测试通过（4 个默认跳过，其中包含真实 Pi 验证）
+pnpm test        # 1230 个测试通过（4 个默认跳过，其中包含真实 Pi 验证）
 pnpm typecheck
 pnpm build       # tsc + esbuild（Web 面板与 Markdown 资产）
 pnpm check       # typecheck + test
@@ -314,17 +314,18 @@ RA_PI_VERIFY=1 npx vitest run tests/verify-pi-live.test.ts   # 真实 Pi + 真�
 时跳过；需要 minor / major 时在 PR 里手动改版本号），也支持推送 `v*` tag 或手动触发。
 配置与发版流程见 [docs/PUBLISHING.md](docs/PUBLISHING.md)。
 
-代码结构：
+代码结构（pnpm workspace，适配器包可插拔）：
 
 ```text
-src/core/     领域内核（model / stage / policy / engine / effects）
-src/store/    SQLite（node:sqlite）
-src/worker/   WorkerRuntime 端口、RuntimeRegistry、OrcaRuntime、ClaudeCodeRuntime、AcpRuntime、state.json 轮询、worker 手册
-src/sources/  飞书事件、GitHub / GitLab PR / MR 跟踪
-src/router/   AgentLoop、工具契约、提示词、HTTP API
-src/web/      React 面板
-src/cli/      ra 命令
+packages/core/     领域内核：Ticket / Mandate / Stage / Policy 与共享类型
+packages/infra/    日志、子进程、对话模型、图片识别
+packages/runtime/  WorkerRuntime 端口、RuntimeRegistry、Orca / Claude Code / Codex / ACP / Herdr adapter
+packages/channel/  ChannelAdapter 端口、ChannelRegistry、飞书 adapter 与 lark-cli 封装
+src/               宿主：Engine / Store、Router、HTTP API、Web 面板、CLI 与装配
 ```
+
+包之间只向下依赖（`core ← infra ← runtime / channel ← src`），跨包用 `#core/*`、`#infra/*`、
+`#runtime/*`、`#channel/*` 别名；新增运行时 / 通道的步骤见 [docs/MONOREPO.md](docs/MONOREPO.md)。
 
 ## 已知限制
 
@@ -338,6 +339,7 @@ src/cli/      ra 命令
 
 | 文档 | 内容 |
 |-|-|
+| [docs/MONOREPO.md](docs/MONOREPO.md) | Monorepo 包划分、依赖方向、包别名，以及新增 runtime / channel 的步骤 |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 分层、一条消息的四步、研判 / 会话 / 派工机制、工单阶段与 `ra report` 协议 |
 | [docs/RUNTIME.md](docs/RUNTIME.md) | Worker 运行时对比、ACP Agent 目录、Worker 工具策略与规范注入 |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | 完整 `config.yaml`、`ra config set`、环境变量、模型与飞书接入、准入矩阵、闲置治理 |

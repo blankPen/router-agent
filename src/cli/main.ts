@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process'
 import { checkbox, confirm, input, password, select } from '@inquirer/prompts'
-import { realRunner } from '../infra/process.js'
-import { createLarkRunner } from '../sources/lark.js'
+import { realRunner } from '#infra/process.js'
+import { createLarkRunner } from '#channel/sources/lark.js'
 import { runCli, type CliIo } from './index.js'
 import type { Prompter } from './prompts.js'
 

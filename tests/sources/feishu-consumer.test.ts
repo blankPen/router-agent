@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import type { ChildProcess } from 'node:child_process'
 import { describe, expect, it, vi } from 'vitest'
-import { FeishuConsumer, larkStderrLevel } from '../../src/sources/feishu.js'
+import { FeishuConsumer, larkStderrLevel } from '#channel/sources/feishu.js'
 
 class FakeChild extends EventEmitter {
   stdout = new PassThrough()

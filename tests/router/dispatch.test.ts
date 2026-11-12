@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { chatEntry, defaultConfig } from '../../src/config.js'
 import { activeDraft, dispatchSettingsOf, matchProject, resolveDispatch, type DispatchSettings } from '../../src/router/dispatch.js'
-import type { DispatchDraft } from '../../src/core/model.js'
+import type { DispatchDraft } from '#core/model.js'
 
 const project = (over: Partial<DispatchSettings['projects'][number]> = {}) => ({
   name: 'router-agent',

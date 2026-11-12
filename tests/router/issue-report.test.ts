@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { buildIssueBody, createIssueReporter, explainFailure, DEFAULT_ISSUE_REPO } from '../../src/router/issue-report.js'
-import type { CommandRunner } from '../../src/infra/process.js'
-import type { Logger } from '../../src/infra/logger.js'
+import type { CommandRunner } from '#infra/process.js'
+import type { Logger } from '#infra/logger.js'
 import type { LogDiagnosis } from '../../src/router/log-assistant.js'
 
 function captureLogger(): { logger: Logger; events: { level: string; message: string; extra: Record<string, unknown> }[] } {

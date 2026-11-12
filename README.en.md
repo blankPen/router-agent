@@ -257,7 +257,7 @@ The global option `--home <dir>` switches the state directory (for tests and mul
 ## Development
 
 ```bash
-pnpm test        # 740 tests pass (4 skipped by default, including the live Pi check)
+pnpm test        # 1230 tests pass (4 skipped by default, including the live Pi check)
 pnpm typecheck
 pnpm build       # tsc + esbuild (web dashboard and Markdown assets)
 pnpm check       # typecheck + test
@@ -269,17 +269,18 @@ to npm (merges that only touch docs / tests / CI are skipped; bump the version i
 minor / major releases). Pushing a `v*` tag or running the workflow manually still works.
 See [docs/PUBLISHING.md](docs/PUBLISHING.md) for details.
 
-Source layout:
+Source layout (pnpm workspace with pluggable adapter packages):
 
 ```text
-src/core/     domain core (model / stage / policy / engine / effects)
-src/store/    SQLite (node:sqlite)
-src/worker/   WorkerRuntime port, RuntimeRegistry, OrcaRuntime, ClaudeCodeRuntime, AcpRuntime, state.json polling, worker handbook
-src/sources/  Feishu events, GitHub / GitLab PR / MR tracking
-src/router/   AgentLoop, tool contracts, prompts, HTTP API
-src/web/      React dashboard
-src/cli/      ra commands
+packages/core/     domain core: Ticket / Mandate / Stage / Policy and shared types
+packages/infra/    logger, subprocess runner, chat model, image transcription
+packages/runtime/  WorkerRuntime port, RuntimeRegistry, Orca / Claude Code / Codex / ACP / Herdr adapters
+packages/channel/  ChannelAdapter port, ChannelRegistry, Feishu adapter and lark-cli wrapper
+src/               host: Engine / Store, Router, HTTP API, web dashboard, CLI and wiring
 ```
+
+Dependencies only point downward (`core ← infra ← runtime / channel ← src`); cross-package imports use
+the `#core/*`, `#infra/*`, `#runtime/*` and `#channel/*` aliases. See [docs/MONOREPO.md](docs/MONOREPO.md).
 
 ## Known limitations
 
@@ -294,6 +295,7 @@ The detailed docs are currently Chinese-only.
 
 | Document | Contents |
 |-|-|
+| [docs/MONOREPO.md](docs/MONOREPO.md) | Monorepo package layout, dependency direction, aliases, and how to add a runtime / channel |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layering, the four steps, triage / session / dispatch mechanics, ticket stages and the `ra report` protocol |
 | [docs/RUNTIME.md](docs/RUNTIME.md) | Worker runtime comparison, ACP agent catalog, worker tool policy and spec injection |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Full `config.yaml`, `ra config set`, environment variables, model and Feishu setup, admission matrix, idle governance |

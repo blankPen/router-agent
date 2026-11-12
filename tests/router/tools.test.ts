@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { Store } from '../../src/store/db.js'
 import { Engine } from '../../src/core/engine.js'
-import type { Trigger } from '../../src/core/model.js'
-import { DEFAULT_ADMISSION, type Policy } from '../../src/core/policy.js'
+import type { Trigger } from '#core/model.js'
+import { DEFAULT_ADMISSION, type Policy } from '#core/policy.js'
 import { RouterToolbox } from '../../src/router/tools.js'
 
 const policy: Policy = {

@@ -7,7 +7,7 @@ import { PiDecisionEngine } from './pi-decision-engine.js'
 import { PiIntakeEngine } from './intake-engine.js'
 import { SqliteSessionPersistence } from './session-persistence.js'
 import { RouterToolbox, type RouterToolboxDeps } from './tools.js'
-import type { Logger } from '../infra/logger.js'
+import type { Logger } from '#infra/logger.js'
 
 export interface DecisionEngineFactoryOptions {
   config: AppConfig

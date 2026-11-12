@@ -12,9 +12,9 @@ import { resolvePiModelConfig } from '../src/router/model-config.js'
 import { RouterToolbox } from '../src/router/tools.js'
 import { defaultConfig, loadConfig, policyOf, chatEntry } from '../src/config.js'
 import { createApiServer } from '../src/router/api.js'
-import { OrcaRuntime } from '../src/worker/orca/index.js'
-import { realRunner } from '../src/infra/process.js'
-import type { Trigger } from '../src/core/model.js'
+import { OrcaRuntime } from '#runtime/orca/index.js'
+import { realRunner } from '#infra/process.js'
+import type { Trigger } from '#core/model.js'
 
 const LIVE = process.env.RA_VERIFY === '1'
 

@@ -1,8 +1,8 @@
 import { join } from 'node:path'
 import { chatEntry, loadConfig, projectNameOf, projectsForRuntime, setProjectsForRuntime, writeConfig, type AppConfig, type ProjectConfig } from '../config.js'
-import { ORCA_RUNTIME_ID, normalizeRuntimeId } from '../worker/runtimes/catalog.js'
-import type { CommandRunner } from '../infra/process.js'
-import { FeishuBotAdmin, FEISHU_AUTH_DOMAINS } from '../sources/feishu-bot-admin.js'
+import { ORCA_RUNTIME_ID, normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
+import type { CommandRunner } from '#infra/process.js'
+import { FeishuBotAdmin, FEISHU_AUTH_DOMAINS } from '#channel/sources/feishu-bot-admin.js'
 import {
   larkEnv,
   parseAppId,
@@ -13,7 +13,7 @@ import {
   parseSelfOpenId,
   type LarkChat,
   type LarkMember,
-} from '../sources/lark.js'
+} from '#channel/sources/lark.js'
 import type { Prompter } from './prompts.js'
 
 export interface InitDeps {

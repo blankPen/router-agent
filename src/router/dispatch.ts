@@ -1,6 +1,6 @@
 import type { AppConfig, ChatBinding, ProjectConfig } from '../config.js'
 import { projectsForRuntime } from '../config.js'
-import type { DispatchDraft } from '../core/model.js'
+import type { DispatchDraft } from '#core/model.js'
 
 /** 草稿的默认有效期：半小时内没补齐就当作新会话。 */
 export const DRAFT_TTL_MS = 30 * 60_000

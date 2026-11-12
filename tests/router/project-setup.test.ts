@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { CommandResult, CommandRunner } from '../../src/infra/process.js'
+import type { CommandResult, CommandRunner } from '#infra/process.js'
 import {
   ProjectSetup,
   ProjectSetupError,

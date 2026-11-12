@@ -1,5 +1,5 @@
 import { Type, type TSchema } from 'typebox'
-import { STAGE_VALUES } from '../core/stage.js'
+import { STAGE_VALUES } from '#core/stage.js'
 
 /**
  * 研判工具的单一事实来源。

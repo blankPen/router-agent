@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildResumeHint, resumeCommand, resumeSpecOf, shellQuote } from '../../src/worker/resume.js'
+import { buildResumeHint, resumeCommand, resumeSpecOf, shellQuote } from '#runtime/resume.js'
 
 describe('resume 命令拼装', () => {
   it('空串也生成合法的单引号参数', () => {

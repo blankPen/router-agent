@@ -5,9 +5,9 @@ import { join } from 'node:path'
 import { Store } from '../src/store/db.js'
 import { Engine } from '../src/core/engine.js'
 import { RouterService, extractTerminalSnippet, extractSessionSnippet, formatProbeMessage } from '../src/service.js'
-import { claudeProjectSlug } from '../src/worker/agents/claude.js'
+import { claudeProjectSlug } from '#runtime/agents/claude.js'
 import { defaultConfig, policyOf, type AppConfig, chatEntry } from '../src/config.js'
-import { DEFAULT_ADMISSION } from '../src/core/policy.js'
+import { DEFAULT_ADMISSION } from '#core/policy.js'
 import type {
   WorkerRuntime,
   WorkerContext,
@@ -18,8 +18,8 @@ import type {
   AgentStatus,
   WorkspaceInfo,
   WorkspaceRef,
-} from '../src/worker/port.js'
-import type { Trigger } from '../src/core/model.js'
+} from '#runtime/port.js'
+import type { Trigger } from '#core/model.js'
 import type { DecisionEngine } from '../src/router/decision-engine.js'
 
 /** 测试用：所有候选都 accept，回复为空。 */

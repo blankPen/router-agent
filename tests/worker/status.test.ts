@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { latestActivityAt } from '../../src/worker/status.js'
+import { latestActivityAt } from '#runtime/status.js'
 
 describe('最后活动时间', () => {
   it('取多个时间戳里最新的一个，空值忽略', () => {

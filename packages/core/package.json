@@ -1,0 +1,12 @@
+{
+  "name": "@router-agent/core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "领域内核：工单、授权、阶段、策略与共享类型",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*.js": "./src/*.ts",
+    "./*": "./src/*"
+  }
+}

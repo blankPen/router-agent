@@ -2,9 +2,9 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { agentProfileOf, resolveSession, resolveSessionId } from '../../src/worker/agents/registry.js'
-import { readCodexSession } from '../../src/worker/agents/codex.js'
-import { claudeProjectSlug } from '../../src/worker/agents/claude.js'
+import { agentProfileOf, resolveSession, resolveSessionId } from '#runtime/agents/registry.js'
+import { readCodexSession } from '#runtime/agents/codex.js'
+import { claudeProjectSlug } from '#runtime/agents/claude.js'
 
 const NL = String.fromCharCode(10)
 

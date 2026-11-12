@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { realRunner } from '../../src/infra/process.js'
+import { realRunner } from '#infra/process.js'
 
 describe('realRunner', () => {
   it('支持通过 stdin 传入敏感内容，避免出现在 argv', async () => {

@@ -11,7 +11,7 @@
 - 服务日志一行一个 JSON：`at`（ISO 时间）/ `level` / `message` + 业务字段，由 `src/cli/index.ts` 的 `createLogger` 统一写入 `<RA_HOME>/logs/router-agent.log`。
 - `message` 用 `域:动作` 的 kebab-case，例如 `trigger:ingested`、`config:parse-failed`。常用域：`feishu` / `chats` / `trigger` / `loop` / `decision` / `chat` / `session` / `config` / `api` / `ticket` / `outbox` / `effect` / `worker` / `launch` / `input` / `report` / `progress` / `pr` / `retention` / `recover`。
 - `message` 只放事件名，错误详情、stderr 摘要等文本一律用 `detail` 字段；`createLogger` 会把业务字段里的 `message` 自动改写成 `detail`，事件名不会被冲掉。
-- 业务字段**平铺**在同一层，不要塞 `payload` / `data` 嵌套对象；长文本用 `preview()`（`src/core/events.ts`）截断。
+- 业务字段**平铺**在同一层，不要塞 `payload` / `data` 嵌套对象；长文本用 `preview()`（`packages/core/src/events.ts`）截断。
 - 每个事件至少带一个可定位字段：`triggerId` / `ticketId` / `inputId` / `key` / `chat` / `path` / `handle`。
 
 ### 级别
@@ -24,7 +24,7 @@
 
 ### 硬性要求
 
-1. **禁止空 catch**：每个 `catch` 要么重新抛出，要么写 `warn` / `error`，并且必须带上错误原因（统一用 `errorMessage(error)`，来自 `src/infra/logger.ts`）。如果失败被有意忽略，注释里要写清为什么。
+1. **禁止空 catch**：每个 `catch` 要么重新抛出，要么写 `warn` / `error`，并且必须带上错误原因（统一用 `errorMessage(error)`，来自 `packages/infra/src/logger.ts`）。如果失败被有意忽略，注释里要写清为什么。
 2. **关键链路必须留痕**：
    - 消息：接入、过滤（`trigger:dropped`）、去重（`trigger:duplicate`）、研判结论、回复生成与投递（`outbox:sent` / `outbox:failed`）；
    - 通信：飞书事件消费与重连、lark-cli 调用失败、卡片降级、群名目录刷新；
@@ -34,7 +34,7 @@
 4. **不打印堆栈**：日志只写一行可读原因；调试堆栈留在终端或测试里。
 5. **高频路径降噪**：轮询、重复状态、同一错误的连续重试不要每条都打；在状态变化或首次失败时打一次。同类事件用稳定字段做去重。
 6. **日志失败不能影响主流程**：写日志本身要吞掉 IO 异常（`createLogger` 已处理）；`appendEventLog` 等辅助写盘也要 try/catch。
-7. **模块只依赖 `Logger` 接口**：通过构造参数注入 `src/infra/logger.ts` 的 `Logger`，缺省用 `noopLogger`；不要在业务模块里直接 `console.log`、直接写文件或自己拼时间戳。
+7. **模块只依赖 `Logger` 接口**：通过构造参数注入 `packages/infra/src/logger.ts` 的 `Logger`，缺省用 `noopLogger`；不要在业务模块里直接 `console.log`、直接写文件或自己拼时间戳。
 8. **新增事件同步文档**：在 `docs/OPERATIONS.md` 的日志事件表里补上事件名、来源、关键字段与含义（`README.md` / `README.en.md` 只保留入口链接）。
 9. **失败路径要测试**：新增的 warn / error 日志，至少补一条测试断言事件名与关键字段（参考 `tests/config.test.ts`、`tests/router/agent-loop.test.ts`、`tests/router/api.test.ts`）。
 
@@ -53,3 +53,17 @@ grep '"message":"trigger:' ~/.router-agent/logs/router-agent.log
 - 代码注释、提交信息、文档统一使用中文。
 - 提交前至少通过 `pnpm typecheck` 与 `pnpm test`；交付前跑 `pnpm build`。
 - 不直接连数据库做写操作；状态写入一律走 `src/core/engine.ts`。
+
+## 仓库结构（pnpm workspace）
+
+- `packages/core`：领域内核（model / stage / policy / events / 跨包配置视图）；零 Node 依赖。
+- `packages/infra`：Logger、CommandRunner、对话模型、图片识别。
+- `packages/runtime`：WorkerRuntime 端口、RuntimeRegistry、Orca / Claude Code / Codex / ACP / Herdr adapter、worker 手册模板。
+- `packages/channel`：ChannelAdapter 端口、ChannelRegistry、飞书 adapter 与 lark-cli 封装。
+- `src/`：宿主应用（Engine / Store、Router、API / Web、CLI、配置与装配）。
+
+依赖单向向下：`core ← infra ← runtime / channel ← src`。
+- `packages/*` 不能 import `src/`，`runtime` 与 `channel` 也不能互相 import；边界由 `tests/architecture/packages.test.ts` 兜底。
+- 跨包用 `#core/*`、`#infra/*`、`#runtime/*`、`#channel/*` 别名；`tsconfig.paths`、`vitest` alias 与根 `package.json` 的 `imports` 需保持一致。
+- 适配器需要的配置形状放 `packages/core/src/config.ts`，不要反向依赖宿主 `AppConfig`。
+- 新增运行时 / 通道的步骤见 `docs/MONOREPO.md`。

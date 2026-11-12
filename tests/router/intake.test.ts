@@ -9,7 +9,7 @@ import {
   parseScreenerVerdict,
   ticketFromIntake,
 } from '../../src/router/intake.js'
-import type { Intake } from '../../src/core/model.js'
+import type { Intake } from '#core/model.js'
 
 function intake(over: Partial<Intake> = {}): Intake {
   return {

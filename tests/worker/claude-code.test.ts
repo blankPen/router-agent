@@ -3,11 +3,11 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import type { CommandResult, CommandRunner } from '../../src/infra/process.js'
-import { ClaudeCodeRuntime, allowedToolsFrom } from '../../src/worker/runtimes/claude-code/index.js'
-import { WorkerRuntimeError, type WorkerContext, type WorkerRef } from '../../src/worker/port.js'
-import { claudeProjectSlug } from '../../src/worker/agents/claude.js'
-import { parseGitHubRepo } from '../../src/worker/workspaces/git-worktree.js'
+import type { CommandResult, CommandRunner } from '#infra/process.js'
+import { ClaudeCodeRuntime, allowedToolsFrom } from '#runtime/runtimes/claude-code/index.js'
+import { WorkerRuntimeError, type WorkerContext, type WorkerRef } from '#runtime/port.js'
+import { claudeProjectSlug } from '#runtime/agents/claude.js'
+import { parseGitHubRepo } from '#runtime/workspaces/git-worktree.js'
 
 interface Call {
   argv: string[]

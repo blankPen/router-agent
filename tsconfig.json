@@ -17,7 +17,14 @@
     "types": ["node"],
     "noEmit": true,
     "outDir": "dist",
-    "rootDir": "."
+    "rootDir": ".",
+    "baseUrl": ".",
+    "paths": {
+      "#core/*": ["packages/core/src/*"],
+      "#infra/*": ["packages/infra/src/*"],
+      "#runtime/*": ["packages/runtime/src/*"],
+      "#channel/*": ["packages/channel/src/*"]
+    }
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "tests/**/*.ts", "scripts/**/*.mjs"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "packages/*/src/**/*.ts", "tests/**/*.ts", "scripts/**/*.mjs"]
 }

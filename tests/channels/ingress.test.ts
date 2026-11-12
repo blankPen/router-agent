@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { ChannelIngress } from '../../src/channels/ingress.js'
-import type { ChannelAdapter } from '../../src/channels/port.js'
+import { ChannelIngress } from '#channel/ingress.js'
+import type { ChannelAdapter } from '#channel/port.js'
 import type { Engine } from '../../src/core/engine.js'
-import type { Trigger } from '../../src/core/model.js'
-import { DEFAULT_ADMISSION, shouldAcknowledge, type Policy } from '../../src/core/policy.js'
+import type { Trigger } from '#core/model.js'
+import { DEFAULT_ADMISSION, shouldAcknowledge, type Policy } from '#core/policy.js'
 import { Store } from '../../src/store/db.js'
-import type { Logger } from '../../src/infra/logger.js'
+import type { Logger } from '#infra/logger.js'
 
 const policy: Policy = {
   version: 'p1',

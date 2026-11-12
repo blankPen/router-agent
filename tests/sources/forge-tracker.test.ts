@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { GitHubTracker } from '../../src/sources/github.js'
 import { GitLabTracker } from '../../src/sources/gitlab.js'
 import { ForgeTracker } from '../../src/sources/forge-tracker.js'
-import type { CommandRunner } from '../../src/infra/process.js'
+import type { CommandRunner } from '#infra/process.js'
 
 interface Call { argv: string[]; cwd?: string }
 

@@ -2,7 +2,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import type { CommandRunner } from '../../src/infra/process.js'
+import type { CommandRunner } from '#infra/process.js'
 import type { PrInfo } from '../../src/sources/github.js'
 import {
   analyzeEvidenceBody,
@@ -13,7 +13,7 @@ import {
   isUiPath,
   type EvidenceContext,
   type EvidenceReport,
-} from '../../src/worker/evidence-gate.js'
+} from '#runtime/evidence-gate.js'
 
 function gitRunner(files: string[] | null): CommandRunner {
   return {

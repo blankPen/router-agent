@@ -52,6 +52,14 @@ importers:
         specifier: 3.2.4
         version: 3.2.4(@types/node@22.20.0)(jiti@2.7.0)(yaml@2.8.1)
 
+  packages/channel: {}
+
+  packages/core: {}
+
+  packages/infra: {}
+
+  packages/runtime: {}
+
 packages:
 
   '@anthropic-ai/sdk@0.129.0':

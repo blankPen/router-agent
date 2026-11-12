@@ -6,10 +6,10 @@ import { Store } from '../src/store/db.js'
 import { Engine } from '../src/core/engine.js'
 import { RouterService } from '../src/service.js'
 import { defaultConfig, policyOf, type AppConfig } from '../src/config.js'
-import type { WorkerRuntime } from '../src/worker/port.js'
+import type { WorkerRuntime } from '#runtime/port.js'
 import type { PrInfo } from '../src/sources/github.js'
-import { ReportRejectedError, type UiEvidenceMode } from '../src/worker/evidence-gate.js'
-import { parseStateFile, type WorkerStateFile } from '../src/worker/report-poller.js'
+import { ReportRejectedError, type UiEvidenceMode } from '#runtime/evidence-gate.js'
+import { parseStateFile, type WorkerStateFile } from '#runtime/report-poller.js'
 
 class GatePrTracker {
   body: string | undefined = ''

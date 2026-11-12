@@ -8,10 +8,10 @@ import {
   resolveBotIdentity,
   resolveRuntimeIdentity,
   type IdentityCache,
-} from '../../src/sources/feishu-identity.js'
+} from '#channel/sources/feishu-identity.js'
 import { chatEntry, defaultConfig, type AppConfig, type FeishuSettings } from '../../src/config.js'
-import type { CommandRunner } from '../../src/infra/process.js'
-import type { Logger } from '../../src/infra/logger.js'
+import type { CommandRunner } from '#infra/process.js'
+import type { Logger } from '#infra/logger.js'
 
 type Reply = { code: number; stdout: string; stderr: string }
 

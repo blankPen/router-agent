@@ -12,7 +12,7 @@ import {
   runtimeOptionPaths,
   runtimeOptionString,
   validateRuntimeOption,
-} from '../../src/worker/runtimes/options.js'
+} from '#runtime/runtimes/options.js'
 import {
   allRuntimeOptionFields,
   fieldValue,

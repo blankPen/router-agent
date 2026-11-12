@@ -16,7 +16,7 @@ import {
   type SectionDef,
 } from './fields.js'
 import { FieldRow } from './field-row.js'
-import { runtimeOptionPaths } from '../../worker/runtimes/options.js'
+import { runtimeOptionPaths } from '#runtime/runtimes/options.js'
 import {
   importLocalProvider,
   listLocalProviders,
@@ -63,13 +63,13 @@ import {
   type UpdateRunPhase,
   type UpdateSnapshot,
 } from './update.js'
-import { ACP_RUNTIME_ID, ORCA_RUNTIME_ID, normalizeRuntimeId } from '../../worker/runtimes/catalog.js'
+import { ACP_RUNTIME_ID, ORCA_RUNTIME_ID, normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
 import type {
   WorkspaceCleanupResultView,
   WorkspaceOverviewView,
   WorkspaceRuntimeGroupView,
   WorkspaceSkipView,
-} from '../../worker/workspaces/overview.js'
+} from '#runtime/workspaces/overview.js'
 
 /** 三态各自一个图标：跟随系统用显示器，亮色用太阳，暗色用月亮。 */
 const THEME_ICON: Record<ThemeMode, 'monitor' | 'sun' | 'moon'> = {

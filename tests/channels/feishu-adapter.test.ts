@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { FeishuChannel, type FeishuSenderLike } from '../../src/channels/feishu/index.js'
+import { FeishuChannel, type FeishuSenderLike } from '#channel/feishu/index.js'
 import { chatEntry } from '../../src/config.js'
-import type { FeishuConfig } from '../../src/sources/feishu.js'
-import type { Trigger } from '../../src/core/model.js'
+import type { FeishuConfig } from '#channel/sources/feishu.js'
+import type { Trigger } from '#core/model.js'
 
 const cfg: FeishuConfig = {
   chats: [chatEntry('oc_dev'), chatEntry('oc_other', { mode: 'mention' })],

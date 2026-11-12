@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ticketSlug, workBranch, worktreeName } from '../../src/worker/naming.js'
+import { ticketSlug, workBranch, worktreeName } from '#runtime/naming.js'
 
 describe('工单命名', () => {
   it('英文标题转成短横线 slug', () => {

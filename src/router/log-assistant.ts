@@ -11,9 +11,9 @@
  * 规则式降级不是摆设：现场机器经常还没配好模型，但日志事件名是固定的，
  * 靠知识库照样能指出「消息被 allowed 规则丢掉了」这类结论。
  */
-import { preview } from '../core/events.js'
-import { noopLogger, errorMessage, type Logger } from '../infra/logger.js'
-import { createChatClient, type ChatClient, type ChatMessage, type ChatModelConfig } from '../infra/chat.js'
+import { preview } from '#core/events.js'
+import { noopLogger, errorMessage, type Logger } from '#infra/logger.js'
+import { createChatClient, type ChatClient, type ChatMessage, type ChatModelConfig } from '#infra/chat.js'
 import { extractJsonObject } from './model-config.js'
 import { readLogTail, type LogEntry } from './log-tail.js'
 import { toolSpecs, type DiagnosisTool } from './diagnosis-tools.js'
