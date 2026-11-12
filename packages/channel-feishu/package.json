@@ -1,6 +1,6 @@
 {
   "name": "@router-agent/channel-feishu",
-  "version": "0.0.0",
+  "version": "0.3.31",
   "type": "module",
   "description": "飞书通道插件：lark-cli 事件、消息、卡片与授权",
   "license": "MIT",
@@ -31,8 +31,8 @@
     "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
-    "@router-agent/channel": "0.0.0",
-    "@router-agent/core": "0.0.0",
-    "@router-agent/infra": "0.0.0"
+    "@router-agent/channel": "0.3.31",
+    "@router-agent/core": "0.3.31",
+    "@router-agent/infra": "0.3.31"
   }
 }

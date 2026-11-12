@@ -5,3 +5,4 @@ packages/*/dist/
 .DS_Store
 .taste-skill/
 .playwright-cli/
+.env
