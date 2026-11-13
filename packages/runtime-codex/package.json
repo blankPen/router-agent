@@ -1,6 +1,6 @@
 {
   "name": "@router-agent/runtime-codex",
-  "version": "0.3.32",
+  "version": "0.3.33",
   "type": "module",
   "description": "Codex App Server 运行时插件",
   "license": "MIT",
@@ -31,8 +31,8 @@
     "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
-    "@router-agent/runtime": "0.3.32",
-    "@router-agent/core": "0.3.32",
-    "@router-agent/infra": "0.3.32"
+    "@router-agent/runtime": "0.3.33",
+    "@router-agent/core": "0.3.33",
+    "@router-agent/infra": "0.3.33"
   }
 }
