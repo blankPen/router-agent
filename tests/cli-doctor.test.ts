@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { formatChecks, runDoctor, type DoctorDeps } from '../src/cli/doctor.js'
+import { formatChecks, runConfigDoctor, runDoctor, type DoctorDeps } from '../src/cli/doctor.js'
 import { defaultConfig, type AppConfig, chatEntry } from '../src/config.js'
 import type { CommandRunner } from '#infra/process.js'
 
 function healthyConfig(): AppConfig {
   const config = defaultConfig()
-  config.projects = [{ name: 'teamwork-repos', repo: 'teamwork-repos', defaultBranch: 'main' }]
+  // 项目路径统一是本地仓库绝对路径：用真实存在的目录代表项目。
+  config.projects = [{ name: 'teamwork-repos', repo: process.cwd(), defaultBranch: 'main' }]
   config.feishu.chats = [chatEntry('oc_dsh')]
   config.feishu.allowed = ['ou_me']
   config.feishu.botOpenIds = ['ou_bot', 'cli_bot']
@@ -118,15 +119,17 @@ describe('ra doctor', () => {
     expect(item.hint).toContain('ra config set')
   })
 
-  it('机器人身份不可用 / 事件未就绪 / 仓库不存在 / 端口被占 都会 fail', async () => {
+  it('机器人身份不可用 / 事件未就绪 / 项目路径不存在 / 端口被占 都会 fail', async () => {
+    const config = healthyConfig()
+    config.projects = [{ name: 'teamwork-repos', repo: '/Users/me/not-exist-repo', defaultBranch: 'main' }]
     const checks = await runDoctor(deps({
+      config,
       lark: lark({ bot: false, event: false }),
-      orca: orca({ repo: JSON.stringify({ result: { repos: [] } }) }),
       portFree: async () => false,
     }))
     expect(checks.find(item => item.name === '飞书机器人身份')?.status).toBe('fail')
     expect(checks.find(item => item.name === '事件订阅预检')?.status).toBe('fail')
-    expect(checks.find(item => item.name === 'Orca 仓库')?.status).toBe('fail')
+    expect(checks.find(item => item.name === '本地项目路径')?.status).toBe('fail')
     expect(checks.find(item => item.name === '服务端口')?.status).toBe('fail')
   })
 
@@ -180,5 +183,36 @@ describe('ra doctor', () => {
     const lines = formatChecks(await runDoctor(deps({ config: { ...healthyConfig(), projects: [] } })))
     expect(lines.join('\n')).toContain('❌')
     expect(lines.join('\n')).toContain('→')
+  })
+})
+
+describe('面板用的配置自检', () => {
+  it('缺配置时指出缺什么、去哪改', () => {
+    const config = healthyConfig()
+    config.feishu.allowed = []
+    const checks = runConfigDoctor({ config, llm: () => ({ ok: true, detail: 'model' }) })
+
+    const required = checks.find(item => item.name === '配置必填项')!
+    expect(required.status).toBe('fail')
+    expect(required.detail).toContain('feishu.allowed')
+    expect(required.section).toBe('channels')
+  })
+
+  it('模型没配时指向模型配置分组', () => {
+    const checks = runConfigDoctor({
+      config: healthyConfig(),
+      llm: () => ({ ok: false, detail: '缺 baseUrl' }),
+    })
+
+    const llm = checks.find(item => item.name === '模型配置')!
+    expect(llm.status).toBe('fail')
+    expect(llm.section).toBe('llm')
+  })
+
+  it('配齐时全部通过，不给出修改入口', () => {
+    const checks = runConfigDoctor({ config: healthyConfig(), llm: () => ({ ok: true, detail: 'model' }) })
+
+    expect(checks.every(item => item.status === 'ok')).toBe(true)
+    expect(checks.some(item => item.section)).toBe(false)
   })
 })

@@ -42,12 +42,82 @@ describe('日志增量读取', () => {
     expect(result.entries[0]).toEqual({
       at: '2026-11-09T10:00:00.000Z',
       level: 'info',
+      domain: 'api',
+      event: 'listening',
+      category: 'event',
       message: 'api:listening',
       data: { port: 8787 },
     })
     expect(result.entries[1]?.level).toBe('warn')
     expect(result.more).toBe(false)
     expect(result.cursor).toBeGreaterThan(0)
+  })
+
+  it('解析出结构字段 domain / event / trace，且不进业务字段', () => {
+    setup([
+      jsonLine({
+        at: '2026-11-09T10:00:00.000Z',
+        level: 'info',
+        domain: 'trigger',
+        event: 'ingested',
+        message: 'trigger:ingested',
+        trace: 'trg-1',
+        id: 'trg-1',
+      }),
+    ].join(''))
+
+    const result = readLogs(path)
+    expect(result.entries[0]).toEqual({
+      at: '2026-11-09T10:00:00.000Z',
+      level: 'info',
+      domain: 'trigger',
+      event: 'ingested',
+      category: 'message',
+      trace: 'trg-1',
+      message: 'trigger:ingested',
+      data: { id: 'trg-1' },
+    })
+  })
+
+  it('解析群、发起人、运行时与工单等维度，不混进业务字段', () => {
+    setup([
+      jsonLine({
+        at: '2026-11-09T10:00:00.000Z',
+        level: 'info',
+        message: 'trigger:ingested',
+        chat: 'oc_1',
+        chatName: '研发群',
+        actor: 'ou_alice',
+        actorName: '林薇',
+        actorType: 'user',
+        runtime: 'orca',
+        ticketId: 'tk-1',
+        id: 'trg-1',
+      }),
+    ].join(''))
+
+    const entry = readLogs(path).entries[0]
+    expect(entry).toMatchObject({
+      domain: 'trigger',
+      event: 'ingested',
+      category: 'message',
+      chat: 'oc_1',
+      chatName: '研发群',
+      actor: 'ou_alice',
+      actorName: '林薇',
+      actorType: 'user',
+      runtime: 'orca',
+      ticket: 'tk-1',
+    })
+    // 维度已经单独成列，业务字段里不再重复出现。
+    expect(entry?.data).toEqual({ id: 'trg-1' })
+  })
+
+  it('旧日志没有结构字段时按事件名与业务字段补齐', () => {
+    setup(jsonLine({ at: '2026-11-09T10:00:00.000Z', level: 'warn', message: 'worker:status-failed', ticketId: 'tk-84' }))
+
+    const result = readLogs(path)
+    expect(result.entries[0]).toMatchObject({ domain: 'worker', event: 'status-failed', trace: 'tk-84' })
   })
 
   it('带 cursor 只返回之后新增的行', () => {
@@ -64,6 +134,15 @@ describe('日志增量读取', () => {
     const empty = readLogs(path, { cursor: next.cursor })
     expect(empty.entries).toEqual([])
     expect(empty.cursor).toBe(next.cursor)
+  })
+
+  it('版本号单独解析出来，不混进业务字段', () => {
+    setup(jsonLine({ at: '2026-11-09T10:00:00.000Z', level: 'info', message: 'api:listening', version: '1.2.3', port: 8787 }))
+
+    const result = readLogs(path)
+
+    expect(result.entries[0]?.version).toBe('1.2.3')
+    expect(result.entries[0]?.data).toEqual({ port: 8787 })
   })
 
   it('末尾写了一半的行不下发，补全后能读到', () => {
@@ -83,7 +162,7 @@ describe('日志增量读取', () => {
   it('非 JSON 行按原文返回，不拖累后续行', () => {
     setup(`这是旧格式日志\n${jsonLine({ at: '2026-11-09T10:00:00.000Z', level: 'info', message: 'after' })}`)
     const result = readLogs(path)
-    expect(result.entries[0]).toEqual({ at: '', level: 'raw', message: '这是旧格式日志' })
+    expect(result.entries[0]).toEqual({ at: '', level: 'raw', domain: '', event: '', category: '', message: '这是旧格式日志' })
     expect(result.entries[1]?.message).toBe('after')
   })
 

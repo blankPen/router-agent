@@ -226,7 +226,9 @@ jobs:
           git reset --hard --quiet origin/main
           node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.version=process.env.VERSION;fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
           node scripts/publish-packages.mjs --sync
-          git add package.json packages/*/package.json
+          # 锁文件必须一起提交：内部包版本变了但锁文件没变，
+          # 下一次 CI 的 pnpm install --frozen-lockfile 会失败。
+          git add package.json packages/*/package.json pnpm-lock.yaml
           git commit -m "chore: 发布 v${VERSION} [skip release]" >/dev/null
 
           if git push origin HEAD:main; then

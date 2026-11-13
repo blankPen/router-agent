@@ -9,6 +9,7 @@ import { ensureHome, intakeEnabledChats, loadConfig, policyOf, projectsForRuntim
 import { Store, type SessionMigrationState } from '../store/db.js'
 import { Engine } from '../core/engine.js'
 import { effectiveAllowed, effectiveAllowedByChat, shouldAcknowledge } from '#core/policy.js'
+import { logDimensions } from '#core/events.js'
 import { loadRuntimePlugins, type LoadedRuntimePlugins } from '#runtime/plugins/loader.js'
 import { loadChannelPlugins, type LoadedChannelPlugins } from '#channel/plugins/loader.js'
 import { AcpRuntimeAdmin } from '@router-agent/runtime-acp'
@@ -27,14 +28,14 @@ import { createLarkRunner, larkEnv } from '@router-agent/channel-feishu'
 import { parseMessageThreadIds, type UnaddressedAdmission } from '@router-agent/channel-feishu'
 import { createVisionTranscriber, type ImageTranscriber } from '#infra/vision.js'
 import { runInitWizard } from './init.js'
-import { formatChecks, runDoctor } from './doctor.js'
+import { formatChecks, runConfigDoctor, runDoctor } from './doctor.js'
 import { cmdRuntimeAdd, cmdRuntimeCheck, cmdRuntimeInstall, cmdRuntimeList, cmdRuntimeLogin, cmdRuntimeUninstall } from './runtime.js'
 import { PACKAGE_NAME, PACKAGE_VERSION, UpdateService, runNpmUpgrade } from '../update/index.js'
 import { simulate } from './simulate.js'
 import { runReply, readContentArg, type ReplyOptions } from './reply.js'
 import type { Prompter } from './prompts.js'
 import { realRunner, type CommandRunner } from '#infra/process.js'
-import { errorMessage } from '#infra/logger.js'
+import { errorMessage, withFieldContext } from '#infra/logger.js'
 import { resolveImageModelConfig, resolvePiModelConfig, type PiModelConfig } from '../router/model-config.js'
 import { createDecisionEngine, createIntakeEngine } from '../router/engine-factory.js'
 import type { DecisionAudit } from '../router/decision-engine.js'
@@ -44,6 +45,7 @@ import { EffectsProcessor } from '../core/effects.js'
 import { createApiServer, emptyIdentityStatus, type IdentityPort } from '../router/api.js'
 import { PluginPackageAdmin } from '../router/plugin-admin.js'
 import { ProjectSetup } from '../router/project-setup.js'
+import { scanLocalProjects } from '../router/project-scan.js'
 import { createLogAssistant } from '../router/log-assistant.js'
 import { createDiagnosisTools } from '../router/diagnosis-tools.js'
 import { createIssueReporter } from '../router/issue-report.js'
@@ -124,7 +126,7 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
   ra init
   ra tickets --stage blocked
   ra config set policy.acceptMode observe
-  ra config set project.router-agent "name:dsh/router-agent@main"
+  ra config set project.router-agent "/Users/me/router-agent@main"
   ra config set chatBinding.oc_xxx "router-agent@main"
   ra config --edit`)
 
@@ -326,7 +328,7 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
 示例:
   ra config                      查看全部配置
   ra config set policy.acceptMode observe
-  ra config set project.router-agent "name:dsh/router-agent@main"
+  ra config set project.router-agent "/Users/me/router-agent@main"
   ra config set chatBinding.oc_xxx "router-agent@main"
   ra config edit                 用 $EDITOR 打开`)
     .action(async (action: string | undefined, key: string | undefined, value: string | undefined, opts: { home?: string }) => {
@@ -1355,7 +1357,8 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       t3: t3Runner,
     },
     claudeBin: output.claudeBin ?? 'claude',
-    logger,
+    // 运行时适配器的日志同样按工单补上下文：面板上要能看出是哪个工单、哪个群、哪个运行时。
+    logger: withFieldContext(logger, 'ticketId', ticketId => store.ticketLogContext(ticketId)),
   })
   config.runtime.loadedIds = runtimePlugins.ids
   config.runtime.optionSpecs = runtimePlugins.specs
@@ -1553,12 +1556,25 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   // 助手还能读本机装的 router-agent 代码与当前配置，用来判断「是不是 ra 的 bug」。
   const logAssistant = createLogAssistant({
     logPath: join(home, 'logs', 'router-agent.log'),
+    version: PACKAGE_VERSION,
     model,
     tools: createDiagnosisTools({
       codeRoot: packageRoot(),
       config: publicConfig(config),
       configPath: join(home, 'config.yaml'),
       version: PACKAGE_VERSION,
+    }),
+    // 面板打开时先给「配置缺了什么」：只跑不联网的那部分自检，不等飞书与 Orca。
+    configChecks: () => runConfigDoctor({
+      config,
+      llm: () => {
+        try {
+          const resolved = resolvePiModelConfig({ configPath: join(home, 'config.yaml') })
+          return { ok: true, detail: `${resolved.model} @ ${resolved.baseUrl}` }
+        } catch (error) {
+          return { ok: false, detail: errorMessage(error) }
+        }
+      },
     }),
     logger,
   })
@@ -1600,6 +1616,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     logAssistant,
     issueReporter,
     projectSetup: new ProjectSetup({ home, git: gitRunner, orca: orcaRunner }),
+    projectScan: { scan: () => scanLocalProjects() },
     // Web-only 模式没有 RouterService，工作区清理端点按「不支持」返回。
     ...(service
       ? {
@@ -1953,16 +1970,24 @@ function syncIdentitySnapshot(
   for (const [openId, name] of identity.names) target.actorNames.set(openId, name)
 }
 
-function createLogger(home: string, output: CliIo, echo = true): Logger {
+export function createLogger(home: string, output: CliIo, echo = true): Logger {
   const path = join(home, 'logs', 'router-agent.log')
   const write = (level: string, message: string, extra?: Record<string, unknown>): void => {
     // message 永远是事件名；业务字段里的 message 改写成 detail，避免把事件名冲掉。
     const { message: detail, ...rest } = extra ?? {}
+    // domain / event / trace 是结构字段：面板按它们过滤，链路 ID 把同一条链路的日志串起来。
+    const dimensions = logDimensions(message, rest)
     const line = JSON.stringify({
       at: new Date().toISOString(),
       level,
+      domain: dimensions.domain,
+      event: dimensions.event,
+      category: dimensions.category,
       message,
+      // 记下写入时的版本号：排查助手靠它判断这条日志是不是当前版本还在报。
+      version: PACKAGE_VERSION,
       ...(detail === undefined ? {} : { detail }),
+      ...(dimensions.trace ? { trace: dimensions.trace } : {}),
       ...rest,
     })
     try {

@@ -2,7 +2,7 @@ import type { Clock, DecideOutcome, Engine } from '../core/engine.js'
 import type { Intake, IntakeReport, Ticket, Trigger } from '#core/model.js'
 import { effectiveAllowedByChat } from '#core/policy.js'
 import { readRouterPrompt } from '../specs/index.js'
-import { preview } from '#core/events.js'
+import { messageContext, preview } from '#core/events.js'
 import { noopLogger, errorMessage, type Logger } from '#infra/logger.js'
 import type { DispatchSettings } from './dispatch.js'
 import { resolveDispatch } from './dispatch.js'
@@ -183,7 +183,7 @@ export class IntakeCoordinator {
       }
       // 群白名单是硬边界：名单外的人不能借「继续追问」绕过准入。
       if (!this.canRequest(trigger)) {
-        this.logger.warn('intake:requester-not-allowed', { triggerId: trigger.id, chat: trigger.chatId, actor: trigger.actorId })
+        this.logger.warn('intake:requester-not-allowed', { triggerId: trigger.id, ...messageContext(trigger) })
         return 'screen'
       }
       // 发起人补充信息时，如果上一版已经整理成待审需求单，这版必须作废重来：
@@ -205,7 +205,7 @@ export class IntakeCoordinator {
     // 同一话题可能还有别人提问，所以必须按人匹配，不能只看线程。
     if (pending && pending.actorId === trigger.actorId && !isApprovalCommand(trigger.text) && !isRejectionCommand(trigger.text)) {
       if (!this.canRequest(trigger)) {
-        this.logger.warn('intake:requester-not-allowed', { triggerId: trigger.id, chat: trigger.chatId, actor: trigger.actorId })
+        this.logger.warn('intake:requester-not-allowed', { triggerId: trigger.id, ...messageContext(trigger) })
         return 'screen'
       }
       pending.turns.push({ role: 'user', text: trigger.text, at: trigger.receivedAt, actorId: trigger.actorId })
@@ -235,7 +235,7 @@ export class IntakeCoordinator {
     if (!this.enabledFor(trigger) || trigger.mediaOnly) return false
     if (!this.hasBoundProject(trigger.chatId)) {
       // 群没绑定项目：分析 Agent 无法定位代码，也不能生成可派单的需求单。
-      this.logger.warn('intake:project-unbound', { chat: trigger.chatId, triggerId: trigger.id })
+      this.logger.warn('intake:project-unbound', { triggerId: trigger.id, ...messageContext(trigger) })
       return false
     }
     return this.screen(trigger)
@@ -251,14 +251,14 @@ export class IntakeCoordinator {
       })
       verdict = parseScreenerVerdict(text)
     } catch (error) {
-      this.logger.warn('intake:screen-failed', { triggerId: trigger.id, detail: errorMessage(error) })
+      this.logger.warn('intake:screen-failed', { triggerId: trigger.id, ...messageContext(trigger), detail: errorMessage(error) })
       return false
     }
     if (!verdict) {
-      this.logger.warn('intake:screen-invalid', { triggerId: trigger.id })
+      this.logger.warn('intake:screen-invalid', { triggerId: trigger.id, ...messageContext(trigger) })
       return false
     }
-    this.logger.info('intake:screen', { triggerId: trigger.id, chat: trigger.chatId, kind: verdict.kind, reason: preview(verdict.reason, 120) })
+    this.logger.info('intake:screen', { triggerId: trigger.id, ...messageContext(trigger), kind: verdict.kind, reason: preview(verdict.reason, 120) })
     if (verdict.kind === 'chat') {
       // 模型给的 reason 可能复述用户原话，进决策记录前先截断。
       this.decideIgnore(trigger, `intake:chat:${preview(verdict.reason, 120)}`, 'inferred')
@@ -297,8 +297,7 @@ export class IntakeCoordinator {
     this.store.insertIntake(intake)
     this.logger.info('intake:opened', {
       intakeId: intake.id,
-      chat: trigger.chatId,
-      actor: trigger.actorId,
+      ...messageContext(trigger),
       kind,
       project: intake.project,
     })
@@ -320,13 +319,13 @@ export class IntakeCoordinator {
       })
       outcome = parseAnalystOutcome(text)
     } catch (error) {
-      this.logger.warn('intake:analysis-failed', { intakeId: intake.id, detail: errorMessage(error) })
+      this.logger.warn('intake:analysis-failed', { intakeId: intake.id, ...messageContext(trigger), detail: errorMessage(error) })
       this.replyTo(trigger, '这次没分析出来，稍后再把问题描述一遍，或者直接 @管理员 看一下。', `intake:analysis-failed:${trigger.id}`, { thread: true })
       this.decideIgnore(trigger, 'intake:analysis-failed', 'inferred')
       return
     }
     if (!outcome) {
-      this.logger.warn('intake:analysis-invalid', { intakeId: intake.id, triggerId: trigger.id })
+      this.logger.warn('intake:analysis-invalid', { intakeId: intake.id, triggerId: trigger.id, ...messageContext(trigger) })
       this.replyTo(trigger, '我这边没能整理清楚，麻烦再说一下具体现象和复现步骤。', `intake:analysis-invalid:${trigger.id}`, { thread: true })
       this.decideIgnore(trigger, 'intake:analysis-invalid', 'inferred')
       return
@@ -345,7 +344,7 @@ export class IntakeCoordinator {
       this.store.updateIntake(intake)
       this.replyTo(trigger, outcome.reply, `intake:reply:${intake.id}:${intake.turns.length}`, { thread: true })
       this.decideIgnore(trigger, `intake:clarify:q${intake.questions}`, 'inferred')
-      this.logger.info('intake:clarify', { intakeId: intake.id, questions: intake.questions, chat: intake.chatId })
+      this.logger.info('intake:clarify', { intakeId: intake.id, questions: intake.questions, ...messageContext(trigger) })
       // 追问轮数到顶仍拿不到结构化结果：直接按现有信息收口，避免无限对话。
       if (intake.questions >= settings.maxQuestions) {
         intake.report = this.fallbackReport(intake)
@@ -359,7 +358,7 @@ export class IntakeCoordinator {
       this.replyTo(trigger, outcome.reply, `intake:answer:${intake.id}:${intake.turns.length}`, { thread: true })
       this.closeIntake(intake, 'answered')
       this.decideIgnore(trigger, 'intake:answered', 'inferred')
-      this.logger.info('intake:answered', { intakeId: intake.id, chat: intake.chatId })
+      this.logger.info('intake:answered', { intakeId: intake.id, ...messageContext(trigger) })
       return
     }
 
@@ -384,7 +383,7 @@ export class IntakeCoordinator {
     this.decideIgnore(trigger, 'intake:ready-for-review', 'inferred')
     this.logger.info('intake:ready', {
       intakeId: intake.id,
-      chat: intake.chatId,
+      ...messageContext(trigger),
       title: intake.report?.title ?? '',
       approvers: approvers.length,
     })
@@ -399,7 +398,7 @@ export class IntakeCoordinator {
       this.replyTo(trigger, `已驳回需求单「${intake.report?.title ?? intake.id}」，不会派单。`, `intake:rejected:${intake.id}`, { thread: true })
       this.replyTo(trigger, '管理员确认这条需求不需要处理，先关闭了。之后如果还需要跟进，可以重新描述问题。', `intake:rejected-user:${intake.id}`, { thread: true })
       this.decideIgnore(trigger, 'intake:rejected', 'explicit')
-      this.logger.info('intake:rejected', { intakeId: intake.id, actor: trigger.actorId })
+      this.logger.info('intake:rejected', { intakeId: intake.id, ...messageContext(trigger) })
       return
     }
 
@@ -438,7 +437,7 @@ export class IntakeCoordinator {
       intake.updatedAt = this.clock.now()
       this.store.updateIntake(intake)
       this.replyTo(trigger, `已确认派单：工单「${existing.title}」（${existing.id}）开始执行。`, `intake:approved:${intake.id}`, { thread: true })
-      this.logger.info('intake:approved', { intakeId: intake.id, ticketId: existing.id, actor: trigger.actorId, reused: true })
+      this.logger.info('intake:approved', { intakeId: intake.id, ticketId: existing.id, ...messageContext(trigger), reused: true })
       return
     }
 
@@ -461,7 +460,7 @@ export class IntakeCoordinator {
         owner: { actorId: intake.actorId, actorName: intake.actorName },
       })
     } catch (error) {
-      this.logger.warn('intake:approve-failed', { intakeId: intake.id, detail: errorMessage(error) })
+      this.logger.warn('intake:approve-failed', { intakeId: intake.id, ...messageContext(trigger), detail: errorMessage(error) })
       this.replyTo(trigger, '派单没有成功，稍后再回复「确认派单」试一次。', `intake:approve-failed:${intake.id}`, { thread: true })
       return
     }
@@ -475,7 +474,7 @@ export class IntakeCoordinator {
     intake.updatedAt = this.clock.now()
     this.store.updateIntake(intake)
     this.replyTo(trigger, `已确认派单：工单「${outcome.ticket.title}」（${outcome.ticket.id}）开始执行。`, `intake:approved:${intake.id}`, { thread: true })
-    this.logger.info('intake:approved', { intakeId: intake.id, ticketId: outcome.ticket.id, actor: trigger.actorId })
+    this.logger.info('intake:approved', { intakeId: intake.id, ticketId: outcome.ticket.id, ...messageContext(trigger) })
   }
 
   /** 追问到上限仍无结构化报告时的兜底：用原始对话拼一份可审阅的需求单。 */
@@ -582,7 +581,7 @@ export class IntakeCoordinator {
       this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength, reason })
     } catch (error) {
       // Trigger 已被处理（例如同一轮已落过决定）时忽略，但留下原因便于排查。
-      this.logger.warn('intake:decision-failed', { triggerId: trigger.id, detail: errorMessage(error) })
+      this.logger.warn('intake:decision-failed', { triggerId: trigger.id, ...messageContext(trigger), detail: errorMessage(error) })
     }
   }
 }

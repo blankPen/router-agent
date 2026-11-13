@@ -3,6 +3,7 @@ import type { Clock, Engine } from '../core/engine.js'
 import { effectiveAllowed, effectiveAllowedByChat, gate, type Policy } from '#core/policy.js'
 import type { SourceKind, Strength, Ticket, Trigger } from '#core/model.js'
 import { DEFAULT_CHANNEL_ID } from '#channel/port.js'
+import { messageContext } from '#core/events.js'
 import { noopLogger, errorMessage, type Logger } from '#infra/logger.js'
 import { activeDraft, resolveDispatch, type DispatchMissing, type DispatchSettings } from './dispatch.js'
 import { readRouterPrompt } from '../specs/index.js'
@@ -116,12 +117,14 @@ export function isReopenRequest(text: string): boolean {
 }
 
 /** 关闭话题的固定回复；不调用模型，保证每次都是同一套口径。 */
-export function closedThreadText(ticket: Ticket): string {
+export function closedThreadText(ticket: Ticket, opts: { workspaceRemoved?: boolean } = {}): string {
   const closedAt = ticket.closedAt ? ticket.closedAt.slice(0, 10) : ''
   const pr = ticket.prUrl ? `，PR：${ticket.prUrl}` : ''
   return [
     `这张工单「${ticket.title}」（${ticket.id}）已于 ${closedAt} 关闭${pr}，后续消息不会自动继续处理。`,
     '',
+    // 工作区已经被回收，原工单没有现场可接，只能另开一张单。
+    ...(opts.workspaceRemoved ? ['需要的话，我可以帮你新开工单进行处理。'] : []),
     '如果还需要继续，请回复「重新开工」并说明要补充的内容，我会基于原工单创建一张新工单跟进。',
     '如果是新需求，请描述完整需求并回复「重新开工」，我会创建一张新工单。',
   ].join('\n')
@@ -230,7 +233,7 @@ export class AgentLoop {
         // 这里必须留日志，否则用户只会看到「消息没反应」却查不到原因。
         this.logger.error('loop:trigger-failed', {
           triggerId: trigger.id,
-          chat: trigger.chatId,
+          ...messageContext(trigger),
           thread: trigger.threadId,
           message: errorMessage(error),
         })
@@ -438,7 +441,7 @@ export class AgentLoop {
       const message = errorMessage(error)
       this.logger.warn('chat:reply-failed', {
         triggerId: trigger.id,
-        chat: trigger.chatId,
+        ...messageContext(trigger),
         reason,
         message,
       })
@@ -452,7 +455,7 @@ export class AgentLoop {
     if (!text) {
       this.logger.warn('chat:reply-failed', {
         triggerId: trigger.id,
-        chat: trigger.chatId,
+        ...messageContext(trigger),
         reason,
         message: 'pi:empty-reply',
       })
@@ -511,7 +514,7 @@ export class AgentLoop {
         ...(session ? { session } : {}),
       })
       .catch(error => {
-        this.logger.warn('decision:engine-failed', { triggerId: trigger.id, message: errorMessage(error) })
+        this.logger.warn('decision:engine-failed', { triggerId: trigger.id, ...messageContext(trigger), message: errorMessage(error) })
         return failedResult(trigger.id, error)
       })
     this.onAudit?.(result.audit)
@@ -783,10 +786,11 @@ export class AgentLoop {
       // 用户可能是先描述需求、再补一句「重新开工」；把这条原文记下来。
       this.store.setCursor(reopenDraftKey(trigger.threadId, trigger.actorId), trigger.text.trim().slice(0, 4000), this.clock.now())
     }
-    this.reply(trigger, closedThreadText(closed), `closed-thread:${trigger.id}`, { thread: true })
+    const text = closedThreadText(closed, { workspaceRemoved: this.store.isWorkspaceRemoved(closed.id) })
+    this.reply(trigger, text, `closed-thread:${trigger.id}`, { thread: true })
     await this.recordTranscript(
       trigger,
-      `${trigger.actorName || trigger.actorId}：${trigger.text}\nRouter：${closedThreadText(closed)}`,
+      `${trigger.actorName || trigger.actorId}：${trigger.text}\nRouter：${text}`,
     )
     this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength, reason: 'thread:closed' })
     result.replied += 1

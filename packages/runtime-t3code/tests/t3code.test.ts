@@ -286,6 +286,41 @@ describe('T3CodeRuntime', () => {
     await expect(runtime.start(context(home))).rejects.toMatchObject({ code: 'runtime:unavailable' })
   })
 
+  it('start 在 provider 与 model 不成对时拒绝派工并说明怎么改', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-t3-'))
+    const t3 = t3Runner()
+    const runtime = new T3CodeRuntime({ t3, git: gitRunner(), home, workersDir: join(home, 'workers'), provider: 'codex' })
+    await expect(runtime.start(context(home))).rejects.toMatchObject({
+      code: 'agent:launch-failed',
+      reason: expect.stringContaining('runtime.options.t3code.model'),
+    })
+    // 校验不过就不该建检出、也不该调 T3。
+    expect(t3.calls.some(call => call.argv[0] === 'thread' && call.argv[1] === 'start')).toBe(false)
+  })
+
+  it('start 失败回滚时先删 T3 项目再回收 worktree', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-t3-'))
+    const t3 = t3Runner()
+    const order: string[] = []
+    const git = scripted(argv => {
+      order.push(`${argv[0]} ${argv[1]}`)
+      return gitRunner().run(argv)
+    })
+    const failing = scripted(argv => {
+      order.push(`${argv[0]} ${argv[1]}`)
+      if (argv[0] === 'thread' && argv[1] === 'start') {
+        return { code: 1, stdout: '', stderr: 'boom\n' }
+      }
+      return t3.run(argv)
+    })
+    const runtime = new T3CodeRuntime({ t3: failing, git, home, workersDir: join(home, 'workers') })
+    await expect(runtime.start(context(home))).rejects.toMatchObject({ code: 'agent:launch-failed' })
+    const removeProject = order.indexOf('project remove')
+    const removeWorktree = order.findIndex(item => item.startsWith('worktree remove'))
+    expect(removeProject).toBeGreaterThanOrEqual(0)
+    expect(removeWorktree).toBeGreaterThan(removeProject)
+  })
+
   it('deliver 把追问投进线程并认领输入', async () => {
     const home = mkdtempSync(join(tmpdir(), 'ra-t3-'))
     const t3 = t3Runner()

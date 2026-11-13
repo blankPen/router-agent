@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileS
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import type { Clock, Engine } from './core/engine.js'
-import type { Assignment, Question, Report, Ticket, Trigger } from '#core/model.js'
+import type { Assignment, Input, Question, Report, Ticket, Trigger } from '#core/model.js'
 import type { ReplyBlock, ReplyPayload, ReplyQuestion } from '#core/reply.js'
 import { choiceBlockOf } from '#core/reply.js'
 import type { Store } from './store/db.js'
@@ -41,7 +41,7 @@ import type { CardAction, QuestionCardUpdate } from '#channel/port.js'
 import type { ChannelRegistry } from '#channel/registry.js'
 import type { CommandRunner } from '#infra/process.js'
 import { realRunner } from '#infra/process.js'
-import { errorMessage, noopLogger, type Logger } from '#infra/logger.js'
+import { errorMessage, noopLogger, withFieldContext, type Logger } from '#infra/logger.js'
 import type { PrInfo } from './sources/github.js'
 import {
 
@@ -168,6 +168,17 @@ function prUrgeCursorKey(ticketId: string): string {
 function zombieCursorKey(ticketId: string): string {
   return `retention:zombie:${ticketId}`
 }
+
+/** 未 ack 提醒水位：同一条输入只提醒一次。 */
+function unackedNoticeCursorKey(inputId: string): string {
+  return `input:unacked-notice:${inputId}`
+}
+
+/** 单条输入最多投递次数；超过转人工，不再无限重投。 */
+const MAX_DELIVERY_ATTEMPTS = 5
+
+/** 已投递未 ack 多久算「worker 一直没确认」，记 warn 提示人工看一眼。 */
+const UNACKED_TIMEOUT_MS = 30 * 60_000
 
 interface ReminderRecord {
   remindedAt: number
@@ -568,7 +579,8 @@ export class RouterService {
     this.config = opts.config
     this.runtimes = opts.runtimes ?? new RuntimeRegistry(new Map([[opts.runtime.id, opts.runtime]]), opts.runtime.id)
     this.clock = opts.clock ?? { now: () => new Date().toISOString() }
-    this.logger = opts.logger ?? noopLogger
+    // 工单日志统一补上下文：任何带 ticketId 的日志都会带上群、发起人与运行时。
+    this.logger = withFieldContext(opts.logger ?? noopLogger, 'ticketId', ticketId => this.contextOf(ticketId))
     this.prTracker = opts.prTracker
     this.git = opts.git ?? realRunner('git')
     this.idleAfterMs = opts.idleAfterMs ?? 120_000
@@ -649,7 +661,7 @@ export class RouterService {
         // 终端句柄属于当时签发它的 Orca 服务；服务重启 / 终端早已关闭时永远关不掉。
         // 这种失败重试再多次也不会成功，只会无限刷 effect:failed，所以吞掉并记一次。
         if (!isStaleHandleError(error)) throw error
-        this.logger.info('worker:stop-stale', { ticketId, handle: assignment.handle })
+        this.logger.info('worker:stop-stale', { ticketId, handle: assignment.handle, runtime: assignment.runtimeId })
         return
       }
       this.log('worker:stopped', ticketId, { handle: assignment.handle })
@@ -923,6 +935,7 @@ export class RouterService {
           }
         }
         await runtime.removeWorkspace(this.workspaceRefOf(assignment))
+        this.store.markWorkspaceRemoved(entry.ticketId, this.clock.now())
         result.removed.push({ ticketId: entry.ticketId, workdir: entry.workdir })
         this.log('workspace:bulk-removed', entry.ticketId, { runtimeId, workdir: entry.workdir })
       } catch (error) {
@@ -1315,7 +1328,9 @@ export class RouterService {
     const lastSeq = this.store.pendingInputs(ticket.id).reduce((max, input) => Math.max(max, input.seq), 0)
     this.saveLaunchFailure(ticket.id, { attempts, lastSeq, lastReason: failure.reason })
 
-    const hint = `请确认项目「${ticket.repo}」与起始分支「${ticket.branch}」存在；修正后在本话题回复任意内容即可重试`
+    // 运行时能说清原因时用它（例如「provider 与 model 要成对」），否则退回通用的仓库/分支兜底。
+    const hint = failure.hint
+      ?? `请确认项目「${ticket.repo}」与起始分支「${ticket.branch}」存在；修正后在本话题回复任意内容即可重试`
     this.engine.setAttention(ticket.id, `执行环境创建失败：${failure.reason}`)
     this.appendEventLog(ticket.id, { kind: 'launch-failure', attempt: attempts, reason: failure.reason, at: this.clock.now() })
 
@@ -1392,7 +1407,7 @@ export class RouterService {
   async deliverPendingInputs(): Promise<void> {
     for (const ticket of this.store.listOpenTickets()) {
       if (ticket.stage === 'done') continue
-      const assignment = this.store.latestAssignment(ticket.id)
+      let assignment = this.store.latestAssignment(ticket.id)
       const pending = this.store.pendingInputs(ticket.id)
       const unacked = this.store.unackedInputs(ticket.id)
       if (pending.length === 0 && unacked.length === 0) continue
@@ -1404,109 +1419,138 @@ export class RouterService {
         await this.relaunchForInput(ticket)
         continue
       }
-      // 只有「确实有新 seq 的输入」才允许立即投递；同一批 pending / 未 ack 必须走退避。
+      // 只有「确实有新 seq 的输入」才允许立即投递；同一批 pending 必须走退避。
       // 否则 deliver 抛错时 input 仍是 pending，会绕过退避每轮重试（Claude 会反复 resume）。
       const maxPendingSeq = pending.at(-1)?.seq ?? 0
       const attemptedSeq = this.deliveryAttemptedSeq.get(ticket.id) ?? 0
       const hasNewerPending = maxPendingSeq > attemptedSeq
       if (!hasNewerPending && Number.isFinite(nowMs) && cooldownUntil > nowMs) continue
-      // 下次唤醒时把上次已投递但没 ack 的输入一并重发，靠 id 去重。
-      const batch = [...unacked, ...pending.filter(item => !unacked.some(u => u.id === item.id))]
-      const lastId = batch.at(-1)?.id
-      const prevAttempt = lastId ? (this.deliveryAttempts.get(lastId) ?? 0) : 0
-      const attempt = prevAttempt + 1
-      const maxBatchSeq = batch.reduce((max, item) => Math.max(max, item.seq), 0)
-      try {
-        // 用 input.id（而不是 assignmentId:seq）作为投递 id：worker 会原样写进 acked_inputs。
-        const runtime = this.runtimeFor(assignment)
-        if (prevAttempt >= 5) {
-          this.engine.setAttention(ticket.id, `输入 ${lastId ?? ''} 已重投 ${prevAttempt} 次仍未 ack，请人工确认`)
-          this.deliveryCooldown.set(ticket.id, nowMs + 10 * 60_000)
-          this.logger.warn('input:redeliver-giveup', { ticketId: ticket.id, inputId: lastId, attempt: prevAttempt + 1 })
+      // 已经送进终端、只是还没 ack 的输入不再重发原文：重发会把同一条消息重复灌进
+      // worker 上下文（同一段话在 worker 侧出现多次，tk-85）。改成只等 ack，超时提示人工。
+      this.noteUnackedInputs(ticket, unacked, nowMs)
+      if (pending.length === 0) {
+        continue
+      }
+      // 逐条投递：一条失败不影响其它输入，也能准确知道是哪条没送到。
+      const runtime = this.runtimeFor(assignment)
+      const delivered: Input[] = []
+      for (const input of pending) {
+        const attempt = (this.deliveryAttempts.get(input.id) ?? 0) + 1
+        if (attempt > MAX_DELIVERY_ATTEMPTS) {
+          // 重投到上限还没送出去：转人工，这条输入不再重投。
+          this.store.expireInput(ticket.id, input.id)
+          this.deliveryAttempts.delete(input.id)
+          this.engine.setAttention(ticket.id, `输入 ${input.id} 已重投 ${MAX_DELIVERY_ATTEMPTS} 次仍未成功，请人工确认`)
+          this.logger.warn('input:redeliver-giveup', { ticketId: ticket.id, inputId: input.id, attempt: MAX_DELIVERY_ATTEMPTS })
           continue
         }
-        this.deliveryAttemptedSeq.set(ticket.id, maxBatchSeq)
-        const receipt = await runtime.deliver(
-          this.refOf(assignment),
-          batch.map(input => ({ id: input.id, kind: input.kind, text: input.text })),
-          { attempt, redeliver: attempt > 1 },
-        )
-        if (receipt.status === 'queued') {
-          // worker 只是忙，不算一次失败的投递尝试；否则长回合会被误判 giveup。
-          this.deliveryCooldown.set(ticket.id, nowMs + 30_000)
-          this.log('input:queued', ticket.id, { count: batch.length, reason: receipt.reason ?? 'runtime-busy' })
-          continue
-        }
-        if (lastId) this.deliveryAttempts.set(lastId, attempt)
-        if (receipt.status === 'accepted' && receipt.handle && receipt.handle !== assignment.handle) {
-          // 运行时接管了新会话（Claude resume fork）：持久化新 handle，后续 status/stop 才命中。
-          this.store.updateAssignment({ ...assignment, handle: receipt.handle })
-          this.log('input:adopted-handle', ticket.id, {
-            from: assignment.handle,
-            to: receipt.handle,
-            ...(receipt.sessionId ? { sessionId: receipt.sessionId } : {}),
-          })
-        }
-        if (receipt.status === 'rejected') {
-          // Agent 停在交互式提示上（如 Codex 的版本更新浮层）：Router 代答不了，
-          // 立刻转人工并通知话题，否则工单只会一直卡着没人知道。
-          if (receipt.needsHuman) {
-            this.engine.setAttention(
-              ticket.id,
-              `Agent 停在交互式提示上，需要人工处理${receipt.detail ? '：' + receipt.detail : ''}`,
-            )
-            // 同一轮里反复重投不重复打扰；下一轮再卡住才重新通知。
-            const turn = this.store.latestReport(ticket.id)?.turn ?? 0
-            this.notify(
-              ticket,
-              `工单「${ticket.title}」的 Agent 停在交互式提示上（例如 Codex 的版本更新选择），Router 无法代答，请到 Orca 终端手动选一下，处理完在本话题回复即可继续。`,
-              `prompt-blocked:${ticket.id}:${turn}`,
-            )
-            this.logger.warn('input:prompt-blocked', {
-              ticketId: ticket.id,
-              reason: receipt.reason,
-              attempt,
-              detail: receipt.detail ?? '',
+        try {
+          const receipt = await runtime.deliver(
+            this.refOf(assignment),
+            [{ id: input.id, kind: input.kind, text: input.text }],
+            { attempt, redeliver: attempt > 1 },
+          )
+          if (receipt.status === 'queued') {
+            // worker 只是忙，不算一次失败的投递尝试；否则长回合会被误判 giveup。
+            this.deliveryCooldown.set(ticket.id, nowMs + 30_000)
+            this.deliveryAttemptedSeq.set(ticket.id, Math.max(this.deliveryAttemptedSeq.get(ticket.id) ?? 0, input.seq))
+            this.log('input:queued', ticket.id, { count: 1, inputId: input.id, reason: receipt.reason ?? 'runtime-busy' })
+            break
+          }
+          if (receipt.status === 'rejected') {
+            // Agent 停在交互式提示上（如 Codex 的版本更新浮层）：Router 代答不了，
+            // 立刻转人工并通知话题，否则工单只会一直卡着没人知道。
+            if (receipt.needsHuman) {
+              this.engine.setAttention(
+                ticket.id,
+                `Agent 停在交互式提示上，需要人工处理${receipt.detail ? '：' + receipt.detail : ''}`,
+              )
+              // 同一轮里反复重投不重复打扰；下一轮再卡住才重新通知。
+              const turn = this.store.latestReport(ticket.id)?.turn ?? 0
+              this.notify(
+                ticket,
+                `工单「${ticket.title}」的 Agent 停在交互式提示上（例如 Codex 的版本更新选择），Router 无法代答，请到 Orca 终端手动选一下，处理完在本话题回复即可继续。`,
+                `prompt-blocked:${ticket.id}:${turn}`,
+              )
+              this.logger.warn('input:prompt-blocked', {
+                ticketId: ticket.id,
+                inputId: input.id,
+                reason: receipt.reason,
+                attempt,
+                detail: receipt.detail ?? '',
+              })
+            }
+            if (receipt.retryable === false) {
+              this.handleLostWorker(ticket, `input-rejected:${receipt.reason}`)
+              break
+            }
+            this.deliveryCooldown.set(ticket.id, nowMs + (receipt.retryAfterMs ?? 60_000))
+            this.logger.warn('input:rejected', { ticketId: ticket.id, inputId: input.id, reason: receipt.reason })
+            break
+          }
+          // 送达：这条输入不再重投，计数清零。
+          this.deliveryAttempts.delete(input.id)
+          this.store.markInputsDelivered(ticket.id, [input.id], this.clock.now())
+          this.deliveryAttemptedSeq.set(ticket.id, Math.max(this.deliveryAttemptedSeq.get(ticket.id) ?? 0, input.seq))
+          delivered.push(input)
+          if (receipt.handle && receipt.handle !== assignment.handle) {
+            // 运行时接管了新会话（Claude resume fork）：持久化新 handle，后续 status/stop 才命中。
+            const from = assignment.handle
+            assignment = { ...assignment, handle: receipt.handle }
+            this.store.updateAssignment(assignment)
+            this.log('input:adopted-handle', ticket.id, {
+              from,
+              to: receipt.handle,
+              ...(receipt.sessionId ? { sessionId: receipt.sessionId } : {}),
             })
           }
-          if (receipt.retryable === false) {
-            this.handleLostWorker(ticket, `input-rejected:${receipt.reason}`)
-            continue
+        } catch (error) {
+          // 抛错也代表一次真实投递尝试：必须累计，否则重投上限永远触发不了。
+          this.deliveryAttempts.set(input.id, attempt)
+          this.deliveryAttemptedSeq.set(ticket.id, Math.max(this.deliveryAttemptedSeq.get(ticket.id) ?? 0, input.seq))
+          const backoffMs = Math.min(30_000 * 2 ** Math.max(0, attempt - 1), 10 * 60_000)
+          this.deliveryCooldown.set(ticket.id, nowMs + backoffMs)
+          // 终端被删掉时 send 会一直失败；先确认会话是否还在，别每秒重试。
+          if (await this.workerGone(assignment)) {
+            this.handleLostWorker(ticket, 'input-deliver-failed')
+            break
           }
-          this.deliveryCooldown.set(ticket.id, nowMs + (receipt.retryAfterMs ?? 60_000))
-          this.logger.warn('input:rejected', { ticketId: ticket.id, reason: receipt.reason })
-          continue
+          this.logger.warn('input:deliver-failed', {
+            ticketId: ticket.id,
+            inputId: input.id,
+            attempt,
+            message: errorMessage(error),
+          })
         }
-        this.deliveryCooldown.set(ticket.id, nowMs + Math.min(30_000 * 2 ** Math.max(0, attempt - 1), 10 * 60_000))
-        this.store.markInputsDelivered(ticket.id, this.clock.now())
+      }
+      if (delivered.length > 0) {
         this.log('input:delivered', ticket.id, {
-          count: batch.length,
-          redelivered: unacked.length,
-          text: preview(batch.map(item => item.text).join(' / ')),
-        })
-      } catch (error) {
-        // 抛错也代表一次真实投递尝试：必须累计，否则重投上限永远触发不了。
-        if (lastId) this.deliveryAttempts.set(lastId, attempt)
-        this.deliveryAttemptedSeq.set(ticket.id, maxBatchSeq)
-        const backoffMs = Math.min(30_000 * 2 ** Math.max(0, attempt - 1), 10 * 60_000)
-        this.deliveryCooldown.set(ticket.id, nowMs + backoffMs)
-        if (attempt >= 5) {
-          this.engine.setAttention(ticket.id, `输入 ${lastId ?? ''} 已重投 ${attempt} 次仍未成功，请人工确认`)
-          this.deliveryCooldown.set(ticket.id, nowMs + 10 * 60_000)
-          this.logger.warn('input:redeliver-giveup', { ticketId: ticket.id, inputId: lastId, attempt })
-        }
-        // 终端被删掉时 send 会一直失败；先确认会话是否还在，别每秒重试。
-        if (await this.workerGone(assignment)) {
-          this.handleLostWorker(ticket, 'input-deliver-failed')
-          continue
-        }
-        this.logger.warn('input:deliver-failed', {
-          ticketId: ticket.id,
-          attempt,
-          message: error instanceof Error ? error.message : String(error),
+          count: delivered.length,
+          inputIds: delivered.map(item => item.id),
+          text: preview(delivered.map(item => item.text).join(' / ')),
         })
       }
     }
+  }
+
+  /**
+   * 已投递但一直没 ack 的输入：记一条 warn 提示人工看一眼。
+   *
+   * 不再把原文重投给 worker —— 同一段话重复灌进 worker 上下文只会污染它的判断（tk-85）。
+   */
+  private noteUnackedInputs(ticket: Ticket, unacked: Input[], nowMs: number): void {
+    const oldest = unacked.at(0)
+    if (!oldest) return
+    const deliveredMs = Date.parse(oldest.deliveredAt ?? '')
+    if (!Number.isFinite(deliveredMs) || nowMs - deliveredMs < UNACKED_TIMEOUT_MS) return
+    const key = unackedNoticeCursorKey(oldest.id)
+    if (this.store.getCursor(key) !== null) return
+    this.store.setCursor(key, String(nowMs), this.clock.now())
+    this.logger.warn('input:unacked-timeout', {
+      ticketId: ticket.id,
+      inputId: oldest.id,
+      waitedMs: nowMs - deliveredMs,
+    })
   }
 
   /**
@@ -1873,7 +1917,7 @@ export class RouterService {
   }
 
   /**
-   * 投递「只停 worker」的收尾任务：自动关单（闲置超时、PR 合并 / 关闭）都走这里。
+   * 投递「只停 worker」的收尾任务：闲置超时自动关单走这里。
    * 目录不删 —— 关单和回收 workspace 是两件事，回收交给定时任务或用户手动触发。
    */
   private enqueueStopWorker(ticket: Ticket, source: string): void {
@@ -1935,6 +1979,7 @@ export class RouterService {
     try {
       // 不带 force：脏工作区交给 provider 拒绝，避免误删未提交改动。
       await runtime.removeWorkspace(this.workspaceRefOf(assignment))
+      this.store.markWorkspaceRemoved(ticketId, this.clock.now())
       this.log('cleanup:worktree-removed', ticketId, { workdir: assignment.workdir })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -2474,6 +2519,8 @@ export class RouterService {
 
   async trackPullRequests(): Promise<void> {
     for (const ticket of this.store.listOpenTickets()) {
+      // 已合并的 PR 状态不会再变：工单保持开放，但没必要继续每 5 秒查一次。
+      if (ticket.prState === 'merged') continue
       // 每张工单自带仓库，不再有全局 repo 兜底。
 let repo = ticket.repo
       // 派工信息在下面多处要用（workdir 兜底、PR 查询提示），提前取一次。
@@ -2550,16 +2597,15 @@ let repo = ticket.repo
       const updated = this.engine.updatePr(ticket.id, { number: info.number, url: info.url || ticket.prUrl, state: info.state })
       if (before !== info.state) this.log('pr:state', ticket.id, { from: before, to: info.state })
 
-      if ((info.state === 'merged' || info.state === 'closed') && updated.stage !== 'done') {
-        const closed = this.engine.closeTicket(ticket.id, `pr:${info.state}`)
+      // PR 终态不等于会话结束：合并或关闭后话题照常开着，用户追问还能接着推进。
+      // 只有巡查判定长期无进展、或用户主动关闭时才会结束会话。
+      if (before !== info.state && (info.state === 'merged' || info.state === 'closed') && updated.stage !== 'done') {
         appendEvent(join(this.config.home, 'workers', ticket.id, 'events.log'), { kind: 'pr', state: info.state, at: this.clock.now() })
-        // PR 闭环也是自动关单：和闲置超时关单一样只停 worker，目录留给定时任务 / 用户回收。
-        this.enqueueStopWorker(closed, `pr:${info.state}`)
         const label = info.state === 'merged' ? '已合并' : '已关闭'
         this.notify(
-          closed,
-          `工单「${closed.title}」的 PR ${info.url} ${label}，工单闭环。`
-          + `workspace 会保留 ${this.workspace.keepHours} 小时后自动回收，也可以随时手动回收。`,
+          updated,
+          `工单「${updated.title}」的 PR ${info.url} ${label}。`
+          + `工单保持开放，你在本话题继续回复就能接着推进；只有长期无进展被巡查关闭、或你主动关闭时才会结束会话。`,
           `pr:${ticket.id}:${info.state}`,
         )
       }
@@ -2892,6 +2938,25 @@ let repo = ticket.repo
   private log(kind: string, ticketId: string, extra: Record<string, unknown>): void {
     this.logger.info(kind, { ticketId, ...extra })
   }
+
+  /**
+   * 工单日志的统一上下文：群、发起人、运行时。
+   *
+   * 「是 Orca 还是 Codex 在动」「这是哪个群、谁提的需求」这两件事，
+   * 每一行工单日志都要能直接回答，不用再回查别的日志。
+   */
+  private contextOf(ticketId: string): Record<string, unknown> {
+    return {
+      ...this.store.ticketLogContext(ticketId),
+      // 还没派工时退回默认运行时：日志里要能看出「这条链路该由谁跑」。
+      runtime: this.runtimeOf(ticketId),
+    }
+  }
+
+  /** 工单当前用的运行时；还没派工时退回默认运行时。 */
+  private runtimeOf(ticketId: string): string {
+    return this.store.latestAssignment(ticketId)?.runtimeId ?? this.runtimes.default().id
+  }
 }
 
 export interface CreateServiceDeps {
@@ -2929,6 +2994,8 @@ function selectedOptions(value: Record<string, unknown>): string[] {
 
 export interface LaunchErrorDetail {
   reason: string
+  /** 运行时给的处置建议；比通用兜底文案更贴近真实原因。 */
+  hint?: string
   /** provider 包装成通用文案时保留的底层原因。 */
   cause?: string
   /** 启动结果未知时的重试句柄。 */
@@ -2962,6 +3029,7 @@ export function describeLaunchError(error: unknown): LaunchErrorDetail {
     const detail = error.detail ?? {}
     return {
       reason: error.reason,
+      ...(typeof detail.hint === 'string' ? { hint: detail.hint } : {}),
       ...(error.cause ? { cause: error.cause } : {}),
       ...(typeof detail.operationId === 'string' ? { operationId: detail.operationId } : {}),
       ...(typeof detail.code === 'number' ? { code: detail.code } : {}),

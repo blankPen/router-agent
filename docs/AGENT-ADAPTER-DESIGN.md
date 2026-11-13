@@ -666,8 +666,9 @@ function classifyAgentStatus(s: AgentStatus | null): AgentVerdict {
 
 **配套约束（并发去重与可靠重投是两件事）**：
 - **并发去重**：adapter 以 `(input.id, attempt)` 为键；同一 attempt 的并发 `deliver` 只 handoff 一次，持久化到 meta 的 `lastHandedOffInputId + attempt`；
-- **串行重投**：Router 对「已 accepted/queued 但未 ack」的输入按指数退避（30s/60s/120s，上限 10 分钟）再次调用，并带 `{ attempt: n+1, redeliver: true }`；adapter 看到更大的 attempt 或 `redeliver=true` 必须允许再次 resume，不能被幂等水位线吞掉；
-- **Orca TTY**：保持现状，每次重投都 `terminal send` 同一输入 id（TUI 侧可能重复显示，但这是已验证行为）；
+- **串行重投**：Router 只对「没有成功送达」的输入按指数退避（30s/60s/120s，上限 10 分钟）再次调用，并带 `{ attempt: n+1, redeliver: true }`；adapter 看到更大的 attempt 或 `redeliver=true` 必须允许再次 resume，不能被幂等水位线吞掉；
+- **accepted 不重投原文**：Router 认定输入已送达后就不再把同一段话发第二次（`accepted` 之后只等 ack；超时记 `input:unacked-timeout` 提示人工）。重投原文会把同一句话重复灌进 worker 上下文，污染它的判断（tk-85）；
+- **Orca TTY**：同一 input.id 只 send 一次；只有 queued / 投递失败的输入才会再次 send；
 - **queued 的消费**：adapter 在「当前进程退出 / 本轮结束 / 下一次 deliver」时消费队列；Router 不假设 queued 已送达，继续按 attempt 重投直到 ack；
 - **rejected**：`retryable=true` 按 `retryAfterMs` 退避；`retryable=false` 或超过上限转人工；
 - 同一 `sessionId` 仍加单飞锁，禁止并发 resume；但串行重投必须可达。
@@ -794,7 +795,7 @@ OrcaRuntime (id='orca')
 |-|-|
 | `isZombie` 把「无 inspect」当僵尸 | 改为「无 status / null → 不判僵尸」，并统一 6.4 矩阵 |
 | `deliver` 失败每秒重试 | 增加 `delivery-failure:<ticket>` 游标（attempts/lastInputId/nextAt），按 `retryable` 退避；超限转人工 |
-| 投递成功但未 ack 仍每 tick 重投 | 按 `(input.id, attempt)` 去重 + 单飞；Router 退避后带 `attempt+1 / redeliver=true` 串行重投，adapter 必须允许再次 resume |
+| 投递成功但未 ack 仍每 tick 重投 | Router 侧改成「accepted 即不再重投原文」，只等 ack；重投只针对没送达的输入，并带 `attempt+1 / redeliver=true`，adapter 必须允许再次 resume |
 | launch 半成功留下 worktree/branch | `start()` 失败时把已创建的 `workdir/branch` 放进 `WorkerRuntimeError.detail`；Router 落库后入队 cleanup；adapter best-effort 回滚 |
 | 进程退出但未上报被当作 idle | `status` 区分 `exited` + `exitCode`；非 0 退出在 grace 窗口后转人工，不进入可 resume 的 idle |
 | 崩溃/挂起没有看门狗 | 增加 wall-clock 超时（默认 2h）与输出停滞超时（默认 15min）；`markZombie` 停止已挂起进程，或明确提示人工保留 |

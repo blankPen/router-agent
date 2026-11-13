@@ -9,6 +9,7 @@ import { InstallStartError, type AcpRuntimeAdmin } from '@router-agent/runtime-a
 import { normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
 import { ReportRejectedError } from '#runtime/evidence-gate.js'
 import { ProjectSetupError, type ProjectSetupPort } from './project-setup.js'
+import type { ProjectScanPort } from './project-scan.js'
 import type { ChannelAdmin } from '#channel/port.js'
 import type { ChannelRegistry } from '#channel/registry.js'
 import type { AcceptMode } from '#core/policy.js'
@@ -22,7 +23,7 @@ import { isReplyPayload, type ReplyPayload } from '#core/reply.js'
 import type { WorkspaceAdminPort } from '#runtime/workspaces/overview.js'
 import { PluginInstallStartError, type PluginPackageAdmin } from './plugin-admin.js'
 import { readLogs } from './log-tail.js'
-import type { LogAssistantQuestion, LogDiagnosis, LogSuggestion } from './log-assistant.js'
+import type { LogAssistantQuestion, LogAssistantOverview, LogDiagnosis } from './log-assistant.js'
 import { buildIssueBody, type IssueReporter } from './issue-report.js'
 import { getSpec, listSpecs, resetSpec, saveSpec, SpecError } from '../specs/index.js'
 import { PACKAGE_VERSION, type UpdateSnapshot } from '../update/index.js'
@@ -82,8 +83,8 @@ export function emptyIdentityStatus(): IdentityStatusView {
 export interface LogAssistantPort {
   /** 模型是否配齐；面板据此提示「去配置模型」。 */
   llmConfigured(): boolean
-  /** 常见问题快捷入口。 */
-  suggestions(): LogSuggestion[]
+  /** 面板打开时展示的当前状态摘要（异常 + 配置问题）。 */
+  overview(): LogAssistantOverview
   /** 基于最近日志给出排查结论。 */
   diagnose(question: LogAssistantQuestion): Promise<LogDiagnosis>
 }
@@ -119,6 +120,8 @@ export interface ApiServerOptions {
   logPath?: string
   /** 项目登记：目录选择、Git 探测、clone 与 Orca 仓库登记；缺省时端点返回 404。 */
   projectSetup?: ProjectSetupPort
+  /** 扫描本机会话日志里的候选项目；缺省时端点返回 404。 */
+  projectScan?: ProjectScanPort
   /** 面板「停止」：由服务层关单并排 workspace 回收；缺省时只停 worker（Web-only 模式）。 */
   onStopTicket?: (ticketId: string, reason: string) => Ticket
   /** 工单页「批量清理工作区」：按运行时列出与回收遗留 worktree；缺省时端点返回 501。 */
@@ -642,7 +645,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       if (req.method === 'GET') {
         return respond(res, 200, {
           llmConfigured: opts.logAssistant.llmConfigured(),
-          suggestions: opts.logAssistant.suggestions(),
+          overview: opts.logAssistant.overview(),
         })
       }
       if (req.method === 'POST') {
@@ -738,6 +741,18 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         return respond(res, 200, await opts.projectSetup.pickDirectory())
       } catch (error) {
         return respondProjectSetupError(res, error)
+      }
+    }
+
+    if (path === '/api/projects/scan' && req.method === 'POST') {
+      if (!opts.projectScan) return respond(res, 404, { error: 'project-scan-not-available' })
+      try {
+        const projects = await opts.projectScan.scan()
+        onEvent({ event: 'project:scanned', count: projects.length })
+        return respond(res, 200, { projects })
+      } catch (error) {
+        logger.warn('project:scan-failed', { detail: errorMessage(error) })
+        return respond(res, 500, { error: 'project-scan-failed', message: errorMessage(error) })
       }
     }
 

@@ -1,4 +1,5 @@
 import type { Trigger } from '@router-agent/core/model.js'
+import { messageContext } from '@router-agent/core/events.js'
 import { errorMessage, noopLogger, type Logger } from '@router-agent/infra/logger.js'
 import type { ChannelAdapter } from './port.js'
 
@@ -79,7 +80,11 @@ export class ChannelIngress {
       const stored = this.engine.ingest(trigger)
       if (!stored) {
         // 重放 / 重复投递：消息已入库但被去重，日志里说清楚，避免误判成「消息丢了」。
-        this.logger.info('trigger:duplicate', { channel: this.adapter.id, id: trigger.id, chat: trigger.chatId })
+        this.logger.info('trigger:duplicate', {
+          channel: this.adapter.id,
+          id: trigger.id,
+          ...messageContext(trigger),
+        })
         return
       }
       const raw = trigger.raw as Record<string, unknown> | undefined
@@ -87,7 +92,8 @@ export class ChannelIngress {
       this.logger.info('trigger:ingested', {
         channel: this.adapter.id,
         id: trigger.id,
-        chat: trigger.chatId,
+        // 群与发起人（用户还是机器人）：排查「谁触发的」时第一眼就要看到。
+        ...messageContext(trigger),
         addressed: trigger.addressed,
         // 没 @ 但被放行的消息（tk-59）：处理它是因为话题绑着在办工单，不是「漏了 @ 判断」。
         admitted: Boolean(trigger.unaddressedAdmitted),

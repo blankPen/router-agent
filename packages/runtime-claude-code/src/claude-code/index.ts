@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { CommandRunner } from '@router-agent/infra/process.js'
-import { noopLogger, type Logger } from '@router-agent/infra/logger.js'
+import { noopLogger, withContext, type Logger } from '@router-agent/infra/logger.js'
 import { GitWorktreeProvider } from '@router-agent/runtime'
 import { claudeTranscriptPath, readClaudeSession, readTranscriptSince, transcriptSize } from '@router-agent/runtime'
 import { ensureClaudeBackgroundReady } from '@router-agent/runtime'
@@ -123,7 +123,8 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
       'Bash(python:*)', 'Bash(python3:*)', 'Bash(pytest:*)', 'Bash(cargo:*)', 'Bash(go:*)', 'Bash(make:*)', 'Bash(mvn:*)', 'Bash(gradle:*)',
     ].join(',')
     this.env = buildEnv(opts.env)
-    this.logger = opts.logger ?? noopLogger
+    // 套一层固定上下文：适配器写的每条日志都带上 runtime，省得每个调用点重复写。
+    this.logger = withContext(opts.logger ?? noopLogger, { runtime: this.id })
     this.gitProvider = new GitWorktreeProvider({
       git: opts.git,
       worktreesRoot: opts.worktreesRoot ?? join(opts.home, 'worktrees'),
@@ -257,7 +258,7 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
       // 插话失败就退回排队，等本轮结束再走 resume。
       const injected = await this.injectIntoRunningTurn(ref, sessionId, inputs, cwd)
       if (!injected.ok) {
-        this.logger.warn('claude:inject-skipped', { handle: ref.handle, reason: injected.reason ?? 'unknown' })
+        this.logger.warn('claude:inject-skipped', { ticketId: ref.ticketId, handle: ref.handle, reason: injected.reason ?? 'unknown' })
         return { status: 'queued', inputIds, reason: `claude:working-inject-failed:${injected.reason ?? 'unknown'}` }
       }
       if (meta) {
@@ -303,6 +304,7 @@ export class ClaudeCodeRuntime implements WorkerRuntime {
       // 本轮输入稍后重投回原会话。拿不到副本 id 时无法清理，只能退避重试。
       if (nextHandle) await this.stopBackgroundSession(nextHandle, cwd)
       this.logger.warn('claude:resume-forked', {
+        ticketId: ref.ticketId,
         handle: ref.handle,
         sessionId,
         copy: nextHandle ?? null,

@@ -12,7 +12,7 @@
  */
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { errorMessage, noopLogger, type Logger } from '@router-agent/infra/logger.js'
+import { errorMessage, noopLogger, withContext, type Logger } from '@router-agent/infra/logger.js'
 import type { CommandRunner } from '@router-agent/infra/process.js'
 import { GitWorktreeProvider, workBranch, worktreeName } from '@router-agent/runtime'
 import {
@@ -161,7 +161,8 @@ export class T3CodeRuntime implements WorkerRuntime {
     this.serverTimeoutMs = opts.serverTimeoutMs
     this.autoStartServer = opts.autoStartServer !== false
     this.env = buildEnv(opts.env)
-    this.logger = opts.logger ?? noopLogger
+    // 套一层固定上下文：适配器写的每条日志都带上 runtime，省得每个调用点重复写。
+    this.logger = withContext(opts.logger ?? noopLogger, { runtime: this.id })
     this.spawnServer = opts.spawnServer
   }
 
@@ -171,6 +172,13 @@ export class T3CodeRuntime implements WorkerRuntime {
     const baseBranch = ticket.branch
     if (!repo) throw new WorkerRuntimeError('workspace:missing-repo', '工单没有指定仓库，拒绝创建 worktree')
     if (!baseBranch) throw new WorkerRuntimeError('workspace:missing-branch', '工单没有指定起始分支，拒绝创建 worktree')
+    // T3 的 --provider 与 --model 必须成对出现，只给一个会被 CLI 直接拒绝。
+    if (Boolean(this.provider) !== Boolean(this.model)) {
+      const missing = this.provider ? 'runtime.options.t3code.model' : 'runtime.options.t3code.provider'
+      throw new WorkerRuntimeError('agent:launch-failed', `T3 的 provider 与 model 必须成对配置，缺 ${missing}`, {
+        detail: { hint: `请在配置里同时填 runtime.options.t3code.provider 与 runtime.options.t3code.model（当前缺 ${missing}）` },
+      })
+    }
     const name = worktreeName(ticket)
     const branch = workBranch(ticket)
     const workdir = ctx.workdir || join(this.home, 'worktrees', name)
@@ -242,8 +250,9 @@ export class T3CodeRuntime implements WorkerRuntime {
       }
     } catch (error) {
       // launch 半成功：回滚本次新建的 worktree/branch，避免重试撞名。
-      await this.bestEffortRollback(workspace.workdir, workspace.branch, repo)
+      // 先删 T3 侧项目再回收 worktree：反过来 CLI 会因为目录没了而 spawn 失败，残留一个孤儿项目。
       await this.removeProject(workspace.workdir)
+      await this.bestEffortRollback(workspace.workdir, workspace.branch, repo)
       if (error instanceof WorkerRuntimeError) {
         throw new WorkerRuntimeError(error.code, error.reason, {
           retryable: error.retryable,

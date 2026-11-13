@@ -38,8 +38,8 @@ Router 不做对话，只在必要时说话：
 
 - **初始化**：只放启动必需的五件事——LLM Provider、运行时、项目、渠道接入、监控群，顶部有完成度清单；LLM Provider 的 Base URL / 模型 / API Key 三项必填（密钥只写入 `config.yaml`，保存后不回显），可选 OpenAI / Anthropic 两种接口协议，并支持从 Claude Code、CCSwitch、Pi、OpenCode、Magpie 的本地 Provider 配置一键导入；渠道那一步走渠道注册表：先选渠道（当前内置飞书），再填它的接入项（应用凭据 / 机器人与授权 / 群与绑定 + 接收私聊），App Secret 与授权也直接在本页完成（固定 `~/.router-agent-lark` profile）。新增渠道只需补一份描述与表单，初始化页不用改。逐项说明见 [README · 快速开始](../README.md#快速开始)；运行时的卡片检测与安装引导见 [RUNTIME.md](RUNTIME.md)。
 - **工单**：按阶段分组 + 计数、关键字搜索（标题 / 工单号 / 仓库 / PR）、自动刷新开关与手动刷新；详情页有阶段、派工、PR、授权范围、上报时间线（含完整回复与 `humanAction`）、投递记录，可直接投递 follow-up 或停止工单。**人工停止工单会立即回收对应的 workspace**（先停 worker，再删 worktree）；而闲置超时、PR 合并等**自动关单只停 worker，workspace 会保留一段时间（默认 24 小时）后由定时任务回收**，也可以随时在「清理工作区」里手动回收。页头还有「清理工作区」入口：按 Worker 运行时分组列出仍在磁盘上的工单工作区，可勾选多个工单批量清理。清理动作按工单各自的运行时执行——Orca 关闭 worktree 并删除目录，Claude Code 删除 `claude agents` 视图与 worktree 目录，ACP 直接删除 worktree 目录；在办工单与有未提交改动的目录会被跳过，并在结果里说明原因。
-- **日志**：直接看 `~/.router-agent/logs/router-agent.log`，默认 2 秒增量拉取（只读游标之后的新字节，不重复读整个文件），可开「实时刷新」；按 INFO / WARN / ERROR 过滤、按消息或字段搜索、复制当前结果；停在底部时自动跟随新日志，往上翻后不再打断，点「最新」回到底部。文件不存在或还没写入时给出空状态提示。
-- **配置**：按「LLM Provider / 运行时配置 / 渠道配置 / 项目配置 / 消息准入 / 其他设置」六层分组，每层再拆成可折叠的配置块。分组名与初始化页用词一致，按「先能跑起来、再看细节」排列：**LLM Provider**（模型接入 / 研判预算 / 人格 / 规范文件 / 会话复用）、**运行时配置**（Worker 运行时卡片 + 并发上限）、**渠道配置**（先选渠道，当前内置飞书，再配该渠道自己的「应用凭据 / 机器人与授权 / 接收范围 / 群与绑定 / 消息处理」，低频的「高级」项默认折叠）、**项目配置**（项目清单）、**消息准入**（接单方式 / 谁能叫醒机器人，立即生效）、**其他设置**（进展同步 / 闲置治理 / 工作区回收 / 服务与门禁）。渠道不是写死的分支：面板从 `GET /api/channels` 拿内核已注册的通道，按 id 与前端的渠道描述（`src/web/client/channels.ts`）合并，新增渠道只要再加一份描述与表单。每个配置块标注生效方式（立即生效 / 重启生效 / 部分立即生效），改动逐项标脏，保存前做前端 + 后端双重校验，保存后写回 `config.yaml`。「Worker 运行时」是与初始化页相同的卡片平铺组件（`orca` / `claude-code` / `codex-app` / `acp` / `acp-*`，卡片标题是首字母大写的运行时名 `Orca` / `Claude Code` / `Codex App`），已有原生运行时替代品的 `acp-claude` / `acp-codex` 不再出现在可选列表里（当前正选中的仍保留，老配置继续可用），可检测安装状态、分别跳转官方文档安装 CLI 或由 ra 安装 ACP 扩展，并做 ACP 握手试启动；项目清单按运行时隔离，切换运行时后项目清单会切换到该运行时自己的一套（Orca 用仓库选择器，Claude Code / ACP 必须是本地仓库绝对路径）；「添加本地项目」支持系统目录选择并自动识别 Git / 分支，「添加 Git 项目」支持填写 ssh / http(s) 地址后自动 clone 并登记。群绑定的项目只能从当前清单里选，分支自动跟随项目的默认分支，不能单独自定义。左侧导航随滚动高亮当前分组；顶部搜索框可按名称 / 路径筛配置项。
+- **日志**：直接看 `~/.router-agent/logs/router-agent.log`，默认 2 秒增量拉取（只读游标之后的新字节，不重复读整个文件），可开「实时刷新」。日志页是一张**表**：一行一条事件，列依次是「时间 / 级别 / 类别 / 事件 / 群 / 发起人 / 运行时 / 工单 / 详情」——群名、发起人（用户还是机器人）、运行时、消息还是事件都不用再从原始字段里猜。点事件名展开该行，能看到这条事件的全部字段与原始值。筛选按「级别 + 类别 + 域 + 动作 + 群 + 发起人 + 运行时 + 工单 + 追踪 ID + 关键字」多维取交集，每个维度都带命中条数；复制当前结果；停在底部时自动跟随新日志，往上翻后不再打断，点「最新」回到底部。文件不存在或还没写入时给出空状态提示。
+- **配置**：按「LLM Provider / 运行时配置 / 渠道配置 / 项目配置 / 消息准入 / 其他设置」六层分组，每层再拆成可折叠的配置块。分组名与初始化页用词一致，按「先能跑起来、再看细节」排列：**LLM Provider**（模型接入 / 研判预算 / 人格 / 规范文件 / 会话复用）、**运行时配置**（Worker 运行时卡片 + 并发上限）、**渠道配置**（先选渠道，当前内置飞书，再配该渠道自己的「应用凭据 / 机器人与授权 / 接收范围 / 群与绑定 / 消息处理」，低频的「高级」项默认折叠）、**项目配置**（项目清单）、**消息准入**（接单方式 / 谁能叫醒机器人，立即生效）、**其他设置**（进展同步 / 闲置治理 / 工作区回收 / 服务与门禁）。渠道不是写死的分支：面板从 `GET /api/channels` 拿内核已注册的通道，按 id 与前端的渠道描述（`src/web/client/channels.ts`）合并，新增渠道只要再加一份描述与表单。每个配置块标注生效方式（立即生效 / 重启生效 / 部分立即生效），改动逐项标脏，保存前做前端 + 后端双重校验，保存后写回 `config.yaml`。「Worker 运行时」是与初始化页相同的卡片平铺组件（`orca` / `claude-code` / `codex-app` / `acp` / `acp-*`，卡片标题是首字母大写的运行时名 `Orca` / `Claude Code` / `Codex App`），已有原生运行时替代品的 `acp-claude` / `acp-codex` 不再出现在可选列表里（当前正选中的仍保留，老配置继续可用），可检测安装状态、分别跳转官方文档安装 CLI 或由 ra 安装 ACP 扩展，并做 ACP 握手试启动；项目清单按运行时隔离，切换运行时后项目清单会切换到该运行时自己的一套（清单里的 `repo` 统一是本地仓库绝对路径，Orca 侧由适配器翻译成 `path:` 选择器并在派工前自动登记成 Orca 项目）；「扫描本地项目」读本机 Claude Code / Codex / OpenCode 的会话日志列出候选目录（worktree 归并到主仓库、临时目录与非 Git 目录剔除，默认勾选最近活跃的 5 个），「添加本地项目」支持系统目录选择并自动识别 Git / 分支，「添加 Git 项目」支持填写 ssh / http(s) 地址后自动 clone 并登记。群绑定的项目只能从当前清单里选，分支自动跟随项目的默认分支，不能单独自定义。左侧导航随滚动高亮当前分组；顶部搜索框可按名称 / 路径筛配置项。
 - **来源**：服务状态、监控群、接收范围概览。
 
 侧栏品牌行末尾有全局主题切换图标：**跟随系统 / 亮色 / 暗色** 三态循环，默认跟随系统；选择只存在浏览器本地，不写入 `config.yaml`，所有页签即时生效。
@@ -50,18 +50,42 @@ Router 不做对话，只在必要时说话：
 
 ## 日志
 
-所有关键节点都是结构化 JSON，一行一个事件（`at` / `level` / `message` + 业务字段），写入 `~/.router-agent/logs/router-agent.log`。`message` 固定是事件名（`域:动作`），错误详情等文本一律用 `detail` 字段，不要占用 `message`：
+所有关键节点都是结构化 JSON，一行一个事件，写入 `~/.router-agent/logs/router-agent.log`。`message` 固定是事件名（`域:动作`），错误详情等文本一律用 `detail` 字段，不要占用 `message`。
+
+一行日志的结构：
+
+| 字段 | 含义 |
+|-|-|
+| `at` | 写入时间（ISO 8601） |
+| `level` | `info` / `warn` / `error` |
+| `domain` | 事件域，事件名的第一段（`trigger:ingested` → `trigger`） |
+| `event` | 事件动作，事件名冒号后的部分（`trigger:ingested` → `ingested`） |
+| `category` | 类别：`message`（用户发来的消息及其处理）/ `action`（Router / Worker 对外做过的动作）/ `event`（内部状态变化） |
+| `message` | 完整事件名，保留是为了兼容 `grep '"message":"trigger:'` 这类用法 |
+| `trace` | 链路 ID：按 `ticketId` → `triggerId` → `intakeId` → `inputId` → `handle` → `threadId` → `id` → `chat` 取第一个存在的可定位字段，把同一条链路的日志串起来 |
+| `chat` / `chatName` | 群 / 会话 ID 与群名 |
+| `actor` / `actorName` / `actorType` | 发起人 ID、名字与类型（`user` 用户 / `bot` 机器人 / `system` Router 自己） |
+| `runtime` | 运行时：`orca` / `codex-app` / `claude-code` / `t3code` / `herdr` |
+| 其余字段 | 业务字段，平铺在同一层 |
+
+`domain` / `event` / `category` / `trace` 由 `createLogger` 自动补齐，业务代码不用自己写；旧日志没有这些字段时，面板读日志时会按同一套规则补出来，所以历史日志照样能按维度过滤。
+
+**维度由谁补**：
+
+- 消息链路（`trigger:*` / `intake:*` / `router:decision` / `chat:*`）在写日志时带上群、群名、发起人与发起人类型——「谁在哪个群说的」不用再回查别的地方。
+- 工单链路（带 `ticketId` 的日志）由 `RouterService` 统一补上群、发起人与运行时；运行时适配器自己的日志也按工单补齐，不用每个调用点手写。
+- 运行时适配器（`packages/runtime-*`）统一带上 `runtime`——「这是 Orca 还是 Codex 在动」一眼可辨。
 
 | 事件 | 来源 | 关键字段 | 说明 |
 |-|-|-|-|
 | `feishu:ready` | 事件消费者 | — | 事件流已连上 |
-| `trigger:ingested` | Source | `id` `chat` `addressed` `admitted` `threadKeys` `topic` | 用户消息进入系统；`topic=true` 表示事件带了话题 ID（omt_）；`admitted=true` 表示没 @ 但因话题已绑定在办工单被放行（tk-59） |
-| `trigger:dropped` | Source | `reason` `chat` `actor` | 收到但被过滤 |
+| `trigger:ingested` | Source | `id` `chat` `chatName` `actor` `actorName` `actorType` `addressed` `admitted` `threadKeys` `topic` | 用户消息进入系统；`topic=true` 表示事件带了话题 ID（omt_）；`admitted=true` 表示没 @ 但因话题已绑定在办工单被放行（tk-59） |
+| `trigger:dropped` | Source | `reason` `chat` `chatName` `actor` `actorName` `actorType` | 收到但被过滤 |
 | `trigger:ingest-failed` | Channel Ingress | `channel` `detail` | 富化或入库抛错，消息没能进入系统；重试依赖飞书重投兜底 |
 | `trigger:admitted-unaddressed` | CLI | `chat` `actor` `keys` | 已绑定工单的话题里，名单内成员没 @ 机器人也放行处理（tk-59） |
-| `intake:screen` | AgentLoop | `triggerId` `chat` `kind` `reason` | 需求识别初筛结论：chat / question / issue（`reason` 已截断到 120 字） |
+| `intake:screen` | AgentLoop | `triggerId` `chat` `chatName` `actor` `actorName` `actorType` `kind` `reason` | 需求识别初筛结论：chat / question / issue（`reason` 已截断到 120 字） |
 | `intake:screen-failed` / `intake:screen-invalid` | AgentLoop | `triggerId` `detail` / `triggerId` | 初筛模型失败或输出不合法；消息按原准入规则继续处理 |
-| `intake:opened` | AgentLoop | `intakeId` `chat` `actor` `kind` `project` | 为一条疑似问题创建需求识别会话 |
+| `intake:opened` | AgentLoop | `intakeId` `chat` `chatName` `actor` `actorName` `actorType` `kind` `project` | 为一条疑似问题创建需求识别会话 |
 | `intake:clarify` | AgentLoop | `intakeId` `questions` | 分析 Agent 发起追问 |
 | `intake:answered` | AgentLoop | `intakeId` `chat` | 分析 Agent 直接给出结论，会话结束，不产出需求单 |
 | `intake:ready` | AgentLoop | `intakeId` `chat` `title` `approvers` | 需求单整理完成，已 @管理员终审 |
@@ -80,20 +104,22 @@ Router 不做对话，只在必要时说话：
 | `thread:resolved` | Engine | `threadId` `rawThreadId` `triggerId` `source` | 消息自带线程标识没对上，靠别名收敛到了已有线程（排查「消息没进工单」先看这条） |
 | `thread:backfilled` / `thread:backfill-failed` | CLI | `filled` `failed` / `batch` `code` `detail` | `ra migrate threads --apply` 的回填结果 |
 | `thread:backfill-incomplete` | CLI | `total` `pending` | 回填后仍有线程缺话题 ID 别名，命令以非零退出 |
-| `router:decision` | Engine | `triggerId` `decision` `strength` `reason` `ticketId` `title` `scope` | Router 的研判结论 |
-| `launch` | Service | `ticketId` `handle` `workdir` `skillMode` | 派工到 Orca worktree；`skillMode=path` 时首轮只发短引导 |
+| `router:decision` | Engine | `triggerId` `chat` `chatName` `actor` `actorName` `actorType` `decision` `strength` `reason` `ticketId` `title` `scope` | Router 的研判结论 |
+| `launch` | Service | `ticketId` `runtime` `chat` `actor` `handle` `workdir` `skillMode` | 派工到 Orca worktree；`skillMode=path` 时首轮只发短引导 |
 | `launch:queued` | Service | `maxWorkers` `capacity` `waiting` `ticketIds` | 并发已满，工单排队等待派工 |
 | `launch:queued-input` | Service | `ticketId` `pending` `maxWorkers` | 有新输入但并发满，暂不重建 worker |
 | `launch:skill` | Service | `ticketId` `mode` `name` `version` `sha256` | 本次派工生效的 Worker 技能指纹；回答「这张工单用的哪版手册」 |
 | `launch:skill-meta-failed` | Service | `workdir` `detail` | 技能指纹合并进运行时 `meta.json` 失败；不影响已启动的 worker |
 | `launch:request-write-failed` | Service | `ticketId` `message` | 用户原话落盘 `request.md` 失败；首轮仍带截断后的原文 |
-| `launch:failed` | Service | `ticketId` `title` `repo` `branch` `attempt` `reason` | 派工失败，已转人工并通知发起人 |
+| `launch:failed` | Service | `ticketId` `title` `repo` `branch` `attempt` `reason` `hint` | 派工失败，已转人工并通知发起人；`hint` 是给用户的处置建议（运行时没给就退回通用的仓库/分支兜底） |
 | `input:queued` | Engine | `ticketId` `seq` `text` | Router 准备发给 worker 的内容 |
 | `input:deduped` | Engine | `ticketId` `inputId` `seq` `kind` `sourceKey` | 同一条来源消息重复到达（飞书重投 / 面板再点一次），复用已有输入，没有重复投给 worker |
-| `input:delivered` | Service | `ticketId` `count` `text` | 实际投递进 worker 终端 |
-| `input:deliver-failed` | Service | `ticketId` `attempt` `detail` | 投递进 worker 终端失败，按指数退避重试 |
+| `input:delivered` | Service | `ticketId` `count` `inputIds` `text` | 实际投递进 worker 终端的输入；`inputIds` 是这轮真正送出的输入 id |
+| `input:deliver-failed` | Service | `ticketId` `inputId` `attempt` `message` | 投递进 worker 终端失败，按指数退避重试 |
+| `input:queued` | Service | `ticketId` `inputId` `reason` | 运行时正忙（busy），这轮没投出去，退避后再投 |
+| `input:unacked-timeout` | Service | `ticketId` `inputId` `waitedMs` | 已投递很久仍未 ack：只提示人工确认，不再把原文重投给 worker |
 | `input:redeliver-giveup` | Service | `ticketId` `inputId` `attempt` | 同一条输入重投到上限仍未成功，已标 attention 转人工 |
-| `input:rejected` | Service | `ticketId` `reason` | 运行时明确拒绝输入（busy 等），按退避重试 |
+| `input:rejected` | Service | `ticketId` `inputId` `reason` | 运行时明确拒绝输入，按退避重试 |
 | `worker:lost` | Service | `ticketId` `handle` `reason` `lastSeq` `expired` | 执行会话已不存在；已投递未 ack 的输入标为 `expired`，不再参与重投 |
 | `input:relaunch` | Service | `ticketId` `pending` | 因新消息重建 worker；同一批积压输入只触发一次 |
 | `input:adopted-handle` | Service | `ticketId` `from` `to` `sessionId` | 运行时投递时接管了新会话（Claude resume fork），Assignment 已切换到新 handle |
@@ -131,7 +157,7 @@ Router 不做对话，只在必要时说话：
 | `retention:pr-urge` | Service | `ticketId` `pr` | 有未合并 PR 的闲置工单已催办 |
 | `retention:closed` | Service | `ticketId` `reason` | 闲置超时自动关单 |
 | `retention:sweep-failed` | Service | `ticketId` `detail` | 单个工单的闲置治理检查失败 |
-| `pr:linked` / `pr:state` | Service | — | PR / MR 跟踪 |
+| `pr:linked` / `pr:state` | Service | — | PR / MR 跟踪；PR 进入 `merged` / `closed` 只更新状态并通知发起人，工单保持开放，可继续追问 |
 | `pr:track-failed` | Service | `ticketId` `prNumber` `repo` `detail` | PR / MR 状态查询无结果；同一工单 + PR 只记一次 |
 | `recover:*` | Service | — | 重启对账 |
 | `recover:interrupted` | Service | `ticketId` `turnId` `mode` `autoRecovered` | 发现 worker 上一轮被服务重启打断，按 `policy.interruptedRecovery` 处置 |
@@ -222,7 +248,8 @@ Router 不做对话，只在必要时说话：
 | `api:workspace-cleanup-failed` | HTTP API | `requested` `runtimeId` `detail` | 面板批量清理工作区失败 |
 | `api:channels` | HTTP API | `count` | 面板读取已注册的消息通道（渠道配置的渠道列表来源） |
 | `api:request-failed` | HTTP API | `method` `path` `detail` | 请求级未预期异常（客户端会收到 500） |
-| `logs:assistant-answered` | Log Assistant | `question` `evidence` `source` `tools` | 日志页排查助手给出结论；`source` 为 `llm`（模型总结）或 `rules`（规则降级），`tools` 是这次用到的工具名 |
+| `logs:assistant-overview` | Log Assistant | `errors` `warns` `configIssues` `since` `version` | 排查面板打开时给出的现状摘要：窗口内的错误 / 警告条数与配置问题数，`since` / `version` 是本次排查用的时间窗口与版本 |
+| `logs:assistant-answered` | Log Assistant | `question` `evidence` `errors` `source` `tools` | 排查助手给出结论；`source` 为 `llm`（模型总结）或 `rules`（规则降级），`errors` 是证据里的错误条数，`tools` 是这次用到的工具名 |
 | `logs:assistant-model-failed` | Log Assistant | `question` `detail` | 模型总结失败，已退回规则式排查，结论里会写明降级原因 |
 | `api:log-assistant-failed` | HTTP API | `question` `detail` | 排查请求本身失败（客户端会收到 500） |
 | `issue:created` | Issue Reporter | `repo` `number` `title` | 排查结论已上报成 GitHub issue |
@@ -233,7 +260,7 @@ Router 不做对话，只在必要时说话：
 | `ticket:closed` | Engine | `ticketId` `by` `reason` `stage` | 工单被关闭（人工停止 / 自动关单） |
 | `effect:done` / `effect:failed` | Effects | `kind` `key` / `error` | 派工、停止、清理等内部动作的执行结果 |
 | `cleanup:stop-failed` | Service | `ticketId` `handle` `detail` | 回收工作区前停 worker 失败 |
-| `worker:stop-queued` | Service | `ticketId` `source` | 自动关单（`idle` / `pr:merged` / `pr:closed`）后排队停 worker，workspace 保留给定时任务回收；同 key 已存在时不重复记录 |
+| `worker:stop-queued` | Service | `ticketId` `source` | 自动关单（`idle`）后排队停 worker，workspace 保留给定时任务回收；同 key 已存在时不重复记录 |
 | `cleanup:queued` | Service | `ticketId` `source` | 排队回收 workspace：人工停止（`stop`）与派工半成功（`launch-failed`）；同 key 已存在时不重复记录 |
 | `workspace:sweep` / `workspace:sweep-failed` | Service | `due` `removed` `skipped` `keepHours` / `message` | 定时任务回收已关闭工单残留工作区的汇总；扫描失败只记一次，不影响主流程 |
 | `cleanup:worktree-removed` / `cleanup:worktree-skipped` / `cleanup:no-remove-capability` | Service | `ticketId` `workdir` / `reason` `attempts` | 自动回收 workspace 的结果；脏目录或不可重试的失败只记录一次并通知发起人 |
@@ -278,6 +305,10 @@ Router 不做对话，只在必要时说话：
 | `codex:launch-failed` | Codex runtime | `workdir` `branch` `reason` | 派工启动失败 |
 | `claude:workspace-trusted` | Claude Code runtime | `ticketId` `workdir` `added` `configPath` | 启动前补齐 Claude 的目录信任与「跳过权限确认」免责提示；`--bg` 缺这两项会直接退出 |
 | `claude:workspace-untrusted` | Claude Code runtime | `ticketId` `workdir` `reason` `configPath` | 补写失败（Claude 配置损坏或不可写）；仍会尝试启动，失败时按 CLI 的提示转人工 |
+| `project:scanned` | Web 面板 | `count` | 「扫描本地项目」扫出的候选项目数量（读 Claude Code / Codex / OpenCode 的会话日志） |
+| `project:scan-failed` | Web 面板 | `detail` | 扫描本地项目失败；面板弹出错误，配置不受影响 |
+| `orca:project-registered` | Orca runtime | `ticketId` `path` `displayName` | 派工前把项目路径登记成 Orca 项目（`orca repo add`，已登记时 Orca 返回原项目） |
+| `orca:project-register-failed` | Orca runtime | `ticketId` `path` `reason` | 自动登记 Orca 项目失败；不阻断派工，真正的失败由 `worktree create` 报出来 |
 | `orca:codex-update-dismissed` | Orca runtime | `ticketId` `version` `path` | 启动 Codex 前把版本更新提示记成已忽略，等价于用户选「Skip until next version」 |
 | `orca:codex-update-dismiss-failed` | Orca runtime | `ticketId` `reason` `path` | 版本缓存读不到 / 写不进；Codex 仍可能弹更新浮层，随后由 `orca:agent-prompt-blocked` 转人工 |
 | `orca:agent-prompt-blocked` | Orca runtime | `handle` `inputId` `reason` | Agent 停在交互式提示上（Codex 版本更新浮层、权限确认等），Orca 拒收输入；Router 代答不了，转人工 |
@@ -307,23 +338,78 @@ ra logs --follow                         # 实时跟随
 grep '"message":"trigger:' ~/.router-agent/logs/router-agent.log
 ```
 
-面板「日志」页支持按 INFO / WARN / ERROR 过滤与关键字搜索。
+面板「日志」页支持多维过滤，维度之间取交集：
+
+| 维度 | 说明 |
+|-|-|
+| 级别 | 全部 / INFO / WARN / ERROR / TEXT（TEXT 是非 JSON 的旧行） |
+| 类别 | 消息 / 事件 / 动作，按 `category` 过滤 |
+| 域 | 事件域，按 `domain` 过滤；下拉里带每条链路的条数 |
+| 动作 | 事件动作，按 `event` 过滤；跟着选中的域级联，只列该域里出现的动作 |
+| 群 | 按 `chat` 过滤，下拉里显示群名 |
+| 发起人 | 按 `actor` 过滤，下拉里显示名字 |
+| 运行时 | 按 `runtime` 过滤（Orca / Codex App / …） |
+| 工单 | 按 `ticketId` 过滤 |
+| 追踪 | 链路 ID，按 `trace` 过滤；选一个工单 ID 就能只看这条链路的日志 |
+| 关键字 | 命中事件名、维度与任一业务字段 |
+
+各维度上的计数是**分面计数**：只受其它维度影响，不受自身影响——选中 `tk-84` 后，级别上的「全部」是这条链路的条数，而不是缓冲区总数。
+
+带 `ticketId` 的事件（`launch` / `input:*` / `worker:*` / `report:*` / `cleanup:*` / `retention:*` 等）由 `RouterService` 自动补上 `runtime`、群与发起人；运行时适配器写的日志（`orca:*` / `codex:*` / `claude:*` / `herdr:*` / `t3code:*`）自动补上 `runtime`。这两类补齐由日志器统一完成，调用点只写自己知道的事。
+
+#### 日志页改版前后对比
+
+同一场景、同一视口（1440×900）、同一主题、同一批事件。基线是 `origin/main`，改动是本工单。
+
+| | 改版前 | 改版后 |
+|-|-|-|
+| 日志页形态 | 一行行原始字段，维度全挤在文本里<br>![改版前的日志页](assets/tk-84/before-logs-light.png) | **一张表**：时间 / 级别 / 类别 / 事件 / 群 / 发起人 / 运行时 / 工单 / 详情<br>![改版后的日志页](assets/tk-84/after-logs-light.png) |
+| 看得见的维度 | 群是 `oc_rd_team`，发起人是 `ou_7f21`，看不出是用户还是机器人，也看不出是 Orca 还是 Codex | 群显示「研发三组」，发起人显示「林薇 · 用户」，运行时显示 `orca` / `codex-app` |
+| 消息还是事件 | 只能从事件名猜 | 「类别」列直接给「消息 / 事件 / 动作」 |
+| 字段明细 | 详情全部挤在一行里，长字段被截断 | 点事件名展开这一行，标签右对齐、值左对齐，全部字段与原始值都能看<br>![展开后的完整字段](assets/tk-84/after-logs-expanded.png) |
+| 筛选维度 | 级别 + 关键字 | 级别 / 类别 / 域 / 动作 / 群 / 发起人 / 运行时 / 工单 / 追踪 ID / 关键字，维度之间取交集<br>![按群筛选](assets/tk-84/after-logs-filter-chat.png) |
+
+深色主题的同场景对比见 [assets/tk-84](assets/tk-84/README.md)。
 
 ### 智能问题排查助手
 
-面板右下角常驻一个**智能排查助手悬浮按钮**，不用切到「日志」页也能用：
+面板右下角常驻一个**智能排查助手悬浮按钮**，不用切到「日志」页也能用。它只有一个动作：**打开排查面板**。
 
-> 本节的现状与改造方向见 [DIAGNOSIS-REDESIGN.md](DIAGNOSIS-REDESIGN.md)：拟把助手升级成「先自检配置、再扫错误告警、最后按问题性质分流」的诊断管线。
+> 设计背景见 [DIAGNOSIS-REDESIGN.md](DIAGNOSIS-REDESIGN.md)（tk-78）；本节描述的是当前已落地的行为。
 
-1. 服务日志里出现 `error` 时，按钮变成红色并带上错误条数，同时弹一条「检测到 N 条新的错误日志」的提示；没有错误时是普通状态。
-2. 鼠标移到按钮上会展开快捷菜单：**智能分析异常**（直接分析最近的错误）、**上报 GitHub issue**（打开面板并分析，看完结论再决定要不要报）、**打开排查面板**。
-3. 点开后是弹窗：描述问题（也可以点常见问题快捷入口）→ 给出结论、可能原因、建议的下一步、证据日志；结论属于配置类时给「去配置页修改」的入口，属于缺陷 / 体验类时给「一键上报 GitHub issue」的按钮。
+1. 按钮在最近有错误日志时变红并带上错误条数，没有错误时是普通状态。
+2. 点开就是面板，**不需要先描述问题、也不会自动开始分析**。面板一打开就先摆出现状：
+   - 状态摘要：「一切正常」或「发现了一些需要处理的问题」，并注明看的是最近 3 小时、当前版本；
+   - 最近的异常：把窗口内的错误翻成人话（命中已知问题模式时用知识库的说法），并给出下一步；
+   - 配置还没配齐：来自 `ra doctor` 的配置自检（不联网的那部分），缺什么、错在哪、点「去改这一项」直接跳到配置页对应分组。
+3. 用户看完现状，点「分析」才发起**一次**分析；结论出来后主区只说「发生了什么」与「现在该做什么」，可能原因与原始日志收进「补充细节」的折叠区。
+
+结论的形态是**结构化**的：模型输出「结论 / 引导动作 / 补充细节」三段，由面板渲染，不会把模型的原始文本直接甩给用户。
 
 - 有配置模型时由模型总结，结论里会标注「模型总结」；没配模型或模型调用失败时自动退回**规则式排查**（内置「事件名 → 症状」知识库），结论标注「规则排查」，降级原因写在结论下方。
-- 助手与日志页共用同一套筛选：用户看到的日志范围就是排查范围，结论里引用的事件一定能在证据列表里看到。
-- 证据按分诊顺序排列：错误 → 警告 → 普通信息，同级里越新越靠前。
 - 助手只读日志，不改配置、不动工单；所有动作仍要走面板或 CLI。
 - 发给模型前，日志里的正文类字段（`text` / `reply` / `summary` / `content` 等）会被替换成「（内容已省略）」：排查用不到用户消息正文，没必要把它送到外部模型。面板上看到的证据仍是完整内容。
+
+#### 改版前后对比
+
+同一场景、同一视口（1440×900）、同一主题（亮色）、同一份演示日志。基线是 tk-7 的版本，改动是本工单。
+
+| | 改版前 | 改版后 |
+|-|-|-|
+| 悬浮按钮 | 悬停展开三个快捷项（智能分析异常 / 上报 GitHub issue / 打开排查面板） | **只有一个动作**：点开就是排查面板，不自动分析<br>![改版前的快捷菜单](assets/tk-12/before-fab-menu.png)<br>![改版后的单个按钮](assets/tk-12/after-fab.png) |
+| 面板打开 | 先要你描述问题，还给一排常见问题快捷入口<br>![改版前要先填问题](assets/tk-12/before-panel-input.png) | **直接给现状**：状态摘要 + 最近的异常 + 配置还没配齐（带「去改这一项」入口）<br>![改版后直接给现状](assets/tk-12/after-panel-overview.png) |
+| 分析结论 | 可能原因、建议、证据日志平铺在主区 | 主区只说「发生了什么」「现在该做什么」；原因与原始日志收进折叠的补充细节<br>![改版后的分析结论](assets/tk-12/after-panel-analysis.png)<br>![改版后的补充细节](assets/tk-12/after-panel-details.png) |
+
+#### 排查窗口：只看最近 3 小时、只看当前版本
+
+排查助手不拿整个日志文件下手，只看一个**窗口**：
+
+- **时间**：最近 3 小时（`DEFAULT_WINDOW_MS`）。三小时前的旧问题不是「现在的问题」，用户点「分析」时不该看到它们。
+- **版本**：服务日志每行都记着写入时的 `version`（router-agent 版本号）。**版本对不上的日志视为已修复，排除掉**——用户升级过之后，旧版本报的错不该继续出现在排查结论里。
+
+两个条件都判断不了的日志按「保留」处理：时间解析不出来（老日志、raw 行）或没有版本号（升级前写的旧日志），都留在窗口内。宁可多给一条，也不要漏掉真正的错误——漏一条会让结论直接变成错的。
+
+日志里没有版本号的历史文件不需要迁移：升级后第一次写日志就带上了版本号，助手按「无法判断」保留旧行直到它们滑出 3 小时窗口。
 
 #### 模型能看本机代码与配置
 
@@ -338,14 +424,11 @@ grep '"message":"trigger:' ~/.router-agent/logs/router-agent.log
 
 安全边界（硬约束，不要为了方便放宽）：**只读**（没有写、删、执行命令的能力）、**路径封闭**（所有路径必须在安装目录内，`..` 越界一律拒绝）、**限量**（单次读文件 400 行 / 20000 字符，搜索最多 30 条命中）。结论里会列出这次用到的工具，用户知道判断依据是什么。
 
-#### 一键上报 GitHub issue
+#### 上报 GitHub issue
 
-判定为缺陷 / 体验问题时，点「一键上报 GitHub issue」会把**问题描述 + 排查结论 + 可能原因 + 建议 + 证据日志**拼成一条 issue 发到 `blankPen/router-agent`（仓库可用环境变量 `RA_ISSUE_REPO` 覆盖）。走 `gh` CLI，与 PR 跟踪共用同一套登录态，用户不用额外配置。issue 正文里的日志就是面板上看到的那批证据。
+判定为缺陷 / 体验问题时，弹窗底部会出现「上报 GitHub issue」按钮，把**排查结论 + 可能原因 + 建议 + 证据日志**拼成一条 issue 发到 `blankPen/router-agent`（仓库可用环境变量 `RA_ISSUE_REPO` 覆盖）。走 `gh` CLI，与 PR 跟踪共用同一套登录态，用户不用额外配置。issue 正文里的日志就是面板上看到的那批证据。
 
-上报入口有两处，任意一处都会真的建出 issue：
-
-- **悬浮菜单的「上报 GitHub issue」**：打开面板并分析，**不会自动提交**——分析完、用户看过结论后，弹窗底部才出现「一键上报 GitHub issue」，由用户点一下才发出。结论若是「配置没生效」，用户可以不上报。
-- **弹窗底部的「一键上报 GitHub issue」**：结论里命中缺陷 / 体验类问题时出现。配置类与缺陷类同时命中时，**两个入口都给出**——只给「去配置页修改」的话，缺陷就报不上去。
+上报**永远由用户点一下才发出**，没有任何自动提交的入口。结论若是「配置没生效」，用户看完可以直接不上报。配置类与缺陷类同时命中时，**「去配置页修改」与「上报 GitHub issue」两个按钮都给出**——只给配置引导的话，缺陷就报不上去。
 
 issue 正文分四段：**问题描述**、**排查结论**（可能原因 + 建议的下一步）、**错误日志**、**证据日志**。其中「错误日志」段把 `error` 级的条目单独提到最前面——用户上报 issue 就是冲着错误来的，混在几十条 `info` 里等于没有。助手回看日志的窗口也比面板大（5000 行 / 4MB），避免服务一忙、错误被后来的 `info` 挤出窗口。
 
@@ -420,7 +503,8 @@ ra start
 - 图片会下载并落盘到 `/tmp/ra-images/`，原图路径透传给 Worker（可直接查看）；同时用多模态模型转成文字供研判。文件 / 语音等其它附件只识别到「这是一条附件消息」，需要内容时请用文字描述。
 - 图片转文本依赖模型支持 image 输入；主模型不支持时请在 `llm.imageModel` 单独配置视觉模型。单张转写失败时原图仍会落盘并透传，研判只能看到占位说明；`feishu.images.enabled: false` 则整条图片链路关闭。
 - 实测 Orca 的 `lastOutputAt` 是毫秒数字、且 CLI 创建的终端可能 `orphaned=true` 但依然可用；适配层已分别做归一化与「只有 `connected=false` 才判死」的处理。
-- Claude Code 运行时用 `git worktree`，项目清单与 Orca 隔离（`runtime.projects.claude-code`），`repo` 必须是本地仓库绝对路径（`path:/abs` 或 `/abs`）；`ra init` 在 `runtime.default: claude-code` 时会直接问路径。切换运行时后，没有对应清单项目的工单会先追问，不会把 Orca 选择器当路径用。
+- 所有运行时的项目清单里 `repo` 统一是本地仓库绝对路径（`/abs`，兼容 `path:/abs` 写法）；Orca 的历史 `name:` / `id:` 选择器不再接受，配置里仍能读，但保存时会被校验拒绝。Orca 运行时派工前会自动 `orca repo add` 把路径登记成 Orca 项目，登记失败只记 `orca:project-register-failed`，不阻断派工。
+- Claude Code 运行时用 `git worktree`，项目清单与 Orca 隔离（`runtime.projects.claude-code`）；`ra init` 在 `runtime.default: claude-code` 时会直接问路径。切换运行时后，没有对应清单项目的工单会先追问。
 - Claude Code 运行时启动时带 `--dangerously-skip-permissions`，正常情况下不会因权限确认阻塞；若仍进入 `blocked`（例如等待人工输入），只转人工，不自动 resume。追问在当前轮结束后生效（与 TUI 输入排队一致）；需要轮内实时插话时要改用 `stream-json` 或 SDK/ACP。
 - Claude Code 的追问遵循「一个话题 = 一个会话」：本轮还在跑（`state=working`）时通过 `claude attach <id>` 把输入插进当前轮，agent 会像 TUI 里那样在处理中途收到这句话；本轮已结束（`done/stopped`）则先 `claude stop <id>`（会话与对话都保留），再用 `--bg --resume <完整 sessionId>` 原地续跑同一会话。**必须传 `claude agents --json` 里打印的完整 session id**（传 short id 会被 CLI 判成另开一个会话），也不能带新 flag。
 - Claude Code 轮内插话走的是 TUI 输入框（attach），不是官方接口：注入后必须用会话记录里的 `input-<id>` 标记校验，没落盘就退回排队、等本轮结束再 resume；同一条输入按 meta 水位线幂等，不会因为 Router 重投而重复插话。`blocked`（等权限/人工）不插话，只转人工。

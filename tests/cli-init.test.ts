@@ -97,7 +97,7 @@ function setup(script: Script, over: Partial<InitDeps> = {}) {
 describe('交互式 ra init', () => {
   it('按必填项引导：仓库 → 飞书凭据 → 群 → 授权成员，并自动识别机器人身份', async () => {
     const script: Script = {
-      selects: ['teamwork-repos', 'existing'],
+      selects: ['/p', 'existing'],
       inputs: ['main', 'cli_new'],
       passwords: ['shh'],
       checkboxes: [['oc_dsh'], ['ou_me']],
@@ -108,7 +108,8 @@ describe('交互式 ra init', () => {
     expect(asked[0]).toContain('Orca 仓库')
     expect(asked.some(q => q.includes('飞书机器人'))).toBe(true)
     expect(asked.some(q => q.includes('监控'))).toBe(true)
-    expect(config.projects[0]).toMatchObject({ name: 'teamwork-repos', repo: 'teamwork-repos', defaultBranch: 'main' })
+    // 项目路径统一写本地绝对路径：选中的 Orca 仓库存的是路径，项目名沿用 displayName。
+    expect(config.projects[0]).toMatchObject({ name: 'teamwork-repos', repo: '/p', defaultBranch: 'main' })
     expect('larkHome' in config.feishu).toBe(false)
     expect(config.feishu.appId).toBe('cli_new')
     expect(config.feishu.chats).toEqual([chatEntry('oc_dsh')])
@@ -123,14 +124,14 @@ describe('交互式 ra init', () => {
     expect(JSON.stringify(initCall?.argv)).not.toContain('shh')
 
     const saved = loadConfig(home)
-    expect(saved.projects[0]?.repo).toBe('teamwork-repos')
+    expect(saved.projects[0]?.repo).toBe('/p')
     expect(saved.feishu.appId).toBe('cli_new')
     expect(saved.feishu.botOpenIds).toEqual(['ou_bot', 'cli_bot'])
   })
 
   it('选择跳过时不写凭据，仍可完成群与成员选择', async () => {
     const { home, deps, prompts } = setup({
-      selects: ['teamwork-repos', 'skip'],
+      selects: ['/p', 'skip'],
       inputs: ['release'],
       checkboxes: [['oc_dsh'], ['ou_me']],
     })
@@ -143,7 +144,7 @@ describe('交互式 ra init', () => {
     const config = await runInitWizard(deps)
     expect(prompts.asked.length).toBeGreaterThan(0)
     // 已有项目的分支 / 群 / 白名单不被默认项清掉
-    expect(config.projects[0]).toMatchObject({ name: 'teamwork-repos', repo: 'teamwork-repos', defaultBranch: 'release' })
+    expect(config.projects[0]).toMatchObject({ name: 'teamwork-repos', repo: '/p', defaultBranch: 'release' })
     expect(config.feishu.chats).toEqual([chatEntry('oc_dsh')])
     expect(config.feishu.allowed).toEqual(['ou_me'])
     expect(config.feishu.appId).toBe('')
@@ -151,7 +152,7 @@ describe('交互式 ra init', () => {
 
   it('读不到群列表时引导去 Web 配置页，且不阻塞写配置', async () => {
     const { home, out, deps } = setup({
-      selects: ['teamwork-repos', 'skip'],
+      selects: ['/p', 'skip'],
       inputs: ['main'],
     }, {
       lark: { async run() { return { code: 1, stdout: '', stderr: 'not configured' } } },

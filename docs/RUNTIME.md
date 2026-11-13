@@ -2,7 +2,7 @@
 
 Worker 不在 Router 进程里跑。每张工单开工时，Router 按 `runtime.default` 选一个 **WorkerRuntime** 适配器，由它负责：创建隔离 workspace、拉起 Agent、投递工单、读取状态、接住追问。内核与 Router 只依赖 `WorkerRuntime` 端口，换运行时不需要改业务代码。
 
-一份配置只有一个默认运行时，但**项目清单按运行时分开维护**：Orca 用仓库选择器（`name:` / `id:` / `path:`），Claude Code 与 ACP 用本地仓库绝对路径。切换运行时不会把 Orca 的选择器当成文件路径；旧工单也不会被新的默认运行时接管，而是继续用 Assignment 里记录的运行时。
+一份配置只有一个默认运行时，**项目清单按运行时分开维护**，但清单里的 `repo` 口径统一：所有运行时都填**本地仓库绝对路径**（`/Users/me/project`，`path:/Users/me/project` 是兼容写法）。Orca 运行时把它翻译成 `path:` 选择器，并在派工前自动把目录登记成 Orca 项目（`orca repo add`，幂等）；其它运行时直接拿它做 `git worktree`。切换运行时不会把一个运行时的路径当成另一个运行时的选择器；旧工单也不会被新的默认运行时接管，而是继续用 Assignment 里记录的运行时。
 
 ## 内置运行时
 
@@ -60,8 +60,8 @@ runtime:
       approvalPolicy: never    # never / on-request / untrusted
       network: true
     t3code:
-      provider: codex       # T3 的 provider 实例 id；留空用 T3 项目的默认模型
-      model: gpt-5.4        # 模型；ra 建的项目没有默认模型，一般要连 provider 一起填
+      provider: codex       # T3 的 provider 实例 id；必须与模型一起配置
+      model: group/never-stuck  # 模型；ra 建的项目没有默认模型，必须与 provider 一起填
       # baseDir: ~/.t3      # T3 数据目录（等价 T3CODE_HOME）
     acp:                    # 自定义 ACP 命令
       command: opencode
@@ -71,7 +71,7 @@ runtime:
   projects:
     claude-code:
       - name: router-agent
-        repo: /Users/me/router-agent   # 本地仓库绝对路径
+        repo: /Users/me/router-agent   # 所有 runtime 统一是本地仓库绝对路径
         defaultBranch: main
     acp-codex:
       - name: router-agent
@@ -289,7 +289,7 @@ ra config set runtime.options.herdr.agent claude   # claude / codex / opencode
 ra config set runtime.options.herdr.model sonnet    # 可选；留空用 Agent 自己的默认
 ```
 
-项目清单按运行时隔离，与 `claude-code` / `codex-app` 一样填**本地仓库绝对路径**：
+项目清单按运行时隔离，与 `claude-code` / `codex-app` 一样填**本地仓库绝对路径**（所有运行时口径一致）：
 
 ```yaml
 runtime:
@@ -361,7 +361,7 @@ Herdr 的全局仓库表；仓库目录一旦被删（例如临时目录被清�
 ```bash
 ra config set runtime.default t3code
 ra config set runtime.options.t3code.provider codex
-ra config set runtime.options.t3code.model gpt-5.4
+ra config set runtime.options.t3code.model group/never-stuck
 ```
 
 ### 职责切分：检出归 ra，线程归 T3
@@ -395,9 +395,12 @@ ra config set runtime.options.t3code.model gpt-5.4
 
 ### 能力边界
 
-- **provider / model 要显式配**。ra 建的项目没有默认模型，`t3 thread start` 会报
-  `the project has no default model`；所以 `runtime.options.t3code.provider` 与 `model` 一般要一起填。
-  provider 是 T3 的实例 id（`codex` / `claude` / `opencode` 等），不是模型名。
+- **provider / model 必须成对配置**。T3 的 `--provider` 与 `--model` 只给一个会被 CLI 直接拒绝
+  （`--provider and --model go together.`），两个都不给则报 `the project has no default model`
+  —— ra 建的项目没有默认模型。所以 `runtime.options.t3code.provider` 与 `model` 要一起填。
+  provider 是 T3 的实例 id（`codex` / `claude` / `opencode` 等），不是模型名；
+  model 填 Agent 实际认的模型名（如 `group/never-stuck`）。
+- **只配一半会在派工前被挡住**。ra 在建检出之前就校验这一对，不成对时直接拒绝派工并提示补哪个键。
 - **仓库发现（`listRepos`）不支持**：T3 没有仓库清单接口，项目按本地绝对路径登记。
 - **PR 关联不支持**：PR 跟踪仍走 GitHub / GitLab 侧。
 - **回收检出不删分支**（与其它运行时一致：分支只在启动失败回滚时删）。

@@ -61,14 +61,14 @@ export const T3CODE_OPTION_SPEC: RuntimeOptionSpec = {
       label: 'Provider',
       kind: 'text',
       placeholder: 'codex',
-      hint: 'T3 的 provider 实例 id，例如 codex / claude；留空则用 T3 项目的默认模型',
+      hint: 'T3 的 provider 实例 id，例如 codex / claude；必须与模型一起配置',
     },
     {
       key: 'model',
       label: '模型',
       kind: 'text',
-      placeholder: '留空则用 provider 的默认模型',
-      hint: '传给 T3 的模型名；ra 建的项目没有默认模型，一般要连 provider 一起填',
+      placeholder: 'group/never-stuck',
+      hint: '传给 T3 的模型名；ra 建的项目没有默认模型，必须与 provider 一起填',
     },
     {
       key: 'baseDir',

@@ -1,6 +1,6 @@
 {
   "name": "@router-agent/runtime-orca",
-  "version": "0.3.34",
+  "version": "0.3.37",
   "type": "module",
   "description": "Orca 运行时插件：worktree + 终端 Agent",
   "license": "MIT",
@@ -31,9 +31,9 @@
     "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
-    "@router-agent/runtime": "0.3.34",
-    "@router-agent/core": "0.3.34",
-    "@router-agent/infra": "0.3.34",
+    "@router-agent/runtime": "0.3.37",
+    "@router-agent/core": "0.3.37",
+    "@router-agent/infra": "0.3.37",
     "zod": "4.4.3"
   }
 }

@@ -13,11 +13,24 @@ import {
   selectEvidence,
   tokenize,
 } from '../../src/router/log-assistant.js'
+import { DEFAULT_WINDOW_MS, filterByWindow, isInWindow, logWindow } from '../../src/router/log-window.js'
 import type { LogEntry } from '../../src/router/log-tail.js'
+import { logDimensions } from '#core/events.js'
 import type { DiagnosisTool } from '../../src/router/diagnosis-tools.js'
 
 function entry(at: string, level: string, message: string, data?: Record<string, unknown>): LogEntry {
-  return { at, level, message, ...(data ? { data } : {}) }
+  // 维度按真实日志的推导方式补齐，测试里的条目与线上结构一致。
+  const dimensions = logDimensions(message, data ?? {})
+  return {
+    at,
+    level,
+    domain: dimensions.domain,
+    event: dimensions.event,
+    category: dimensions.category,
+    ...(dimensions.trace ? { trace: dimensions.trace } : {}),
+    message,
+    ...(data ? { data } : {}),
+  }
 }
 
 function jsonResponse(payload: unknown, status = 200): Response {
@@ -25,6 +38,7 @@ function jsonResponse(payload: unknown, status = 200): Response {
 }
 
 describe('tokenize', () => {
+
   it('中文按二元组切，英文数字按整词切', () => {
     const tokens = tokenize('飞书消息没反应 codex timeout')
     expect(tokens).toContain('飞书')
@@ -38,6 +52,49 @@ describe('tokenize', () => {
   })
 })
 
+describe('排查窗口', () => {
+  const window = logWindow({ version: '1.2.3', now: '2026-11-09T10:00:00.000Z' })
+
+  it('默认窗口是 3 小时', () => {
+    expect(DEFAULT_WINDOW_MS).toBe(3 * 60 * 60 * 1000)
+    expect(window.since).toBe('2026-11-09T07:00:00.000Z')
+  })
+
+  it('窗口外的日志被排除', () => {
+    const old = { at: '2026-11-09T06:00:00.000Z' }
+    const fresh = { at: '2026-11-09T09:00:00.000Z' }
+    expect(isInWindow(old, window)).toBe(false)
+    expect(isInWindow(fresh, window)).toBe(true)
+  })
+
+  it('旧版本留下的日志视为已修复，排除掉', () => {
+    expect(isInWindow({ at: '2026-11-09T09:00:00.000Z', version: '1.2.2' }, window)).toBe(false)
+    expect(isInWindow({ at: '2026-11-09T09:00:00.000Z', version: '1.2.3' }, window)).toBe(true)
+  })
+
+  it('没有版本号的旧日志保留：无法判断不等于已修复', () => {
+    expect(isInWindow({ at: '2026-11-09T09:00:00.000Z' }, window)).toBe(true)
+  })
+
+  it('不知道当前版本时不做版本过滤，避免把日志全滤光', () => {
+    const unknown = logWindow({ version: '', now: '2026-11-09T10:00:00.000Z' })
+    expect(isInWindow({ at: '2026-11-09T09:00:00.000Z', version: '1.0.0' }, unknown)).toBe(true)
+  })
+
+  it('时间解析不出来的行保留，不让真正的错误被丢掉', () => {
+    expect(isInWindow({ at: '' }, window)).toBe(true)
+  })
+
+  it('filterByWindow 按窗口过滤条目', () => {
+    const entries = [
+      { at: '2026-11-09T06:00:00.000Z', version: '1.2.3' },
+      { at: '2026-11-09T09:00:00.000Z', version: '1.2.2' },
+      { at: '2026-11-09T09:30:00.000Z', version: '1.2.3' },
+    ]
+    expect(filterByWindow(entries, window)).toHaveLength(1)
+  })
+})
+
 describe('selectEvidence', () => {
   const entries: LogEntry[] = [
     entry('2026-11-09T10:00:00.000Z', 'info', 'api:listening', { port: 8787 }),
@@ -48,6 +105,33 @@ describe('selectEvidence', () => {
   it('错误优先于普通信息', () => {
     const evidence = selectEvidence(entries, { question: '消息没发出去' })
     expect(evidence[0]?.message).toBe('outbox:failed')
+  })
+
+  it('证据里带上群、发起人与运行时等结构维度', () => {
+    const evidence = selectEvidence([
+      {
+        at: '2026-11-09T10:00:00.000Z',
+        level: 'error',
+        message: 'worker:status-failed',
+        domain: 'worker',
+        event: 'status-failed',
+        category: 'event',
+        chat: 'oc_1',
+        chatName: '研发群',
+        actor: 'ou_alice',
+        actorName: '林薇',
+        actorType: 'user',
+        runtime: 'orca',
+        ticket: 'tk-1',
+        trace: 'tk-1',
+        data: { reason: '超时' },
+      },
+    ], { question: 'worker 状态' })
+
+    // 维度已经单独成列，但排查证据里不能丢：群和发起人正是要回答的问题。
+    expect(evidence[0]?.detail).toContain('chatName=研发群')
+    expect(evidence[0]?.detail).toContain('actorType=user')
+    expect(evidence[0]?.detail).toContain('runtime=orca')
   })
 
   it('级别过滤生效', () => {
@@ -104,11 +188,11 @@ describe('ruleDiagnosis', () => {
 
   it('没有问题模式命中时如实说明', () => {
     const diagnosis = ruleDiagnosis('随便问问', [{ at: '2026-11-09T10:00:00.000Z', level: 'info', message: 'api:listening' }], [])
-    expect(diagnosis.summary).toContain('没有命中已知问题模式')
+    expect(diagnosis.summary).toContain('没有找到已知的问题模式')
     expect(diagnosis.causes).toEqual([])
   })
 
-  it('问题点名的那类症状排在最前并写进结论', () => {
+  it('问题点名的那类症状排在最前，结论用大白话', () => {
     const entries = [
       entry('2026-11-09T10:00:00.000Z', 'info', 'router:decision', { triggerId: 'om_x' }),
       entry('2026-11-09T10:01:00.000Z', 'warn', 'trigger:dropped', { reason: 'not-allowed' }),
@@ -117,8 +201,19 @@ describe('ruleDiagnosis', () => {
     const diagnosis = ruleDiagnosis('机器人没反应', [], hits)
 
     expect(diagnosis.causes[0]?.title).toContain('被过滤')
-    expect(diagnosis.summary).toContain('最可能是')
+    // 结论面向普通用户：说清「现在是什么情况」，不带事件名。
+    expect(diagnosis.summary).toContain('消息收到了')
+    expect(diagnosis.summary).not.toContain('trigger:dropped')
     expect(diagnosis.causes.length).toBeLessThanOrEqual(3)
+  })
+
+  it('行动指引说清改哪一项、去哪改，技术细节不混进主语句', () => {
+    const hits = matchSymptoms([entry('2026-11-09T10:01:00.000Z', 'warn', 'trigger:dropped')])
+    const diagnosis = ruleDiagnosis('机器人没反应', [], hits)
+
+    expect(diagnosis.actions.join()).toContain('允许名单')
+    // 事件名属于补充细节，不该出现在行动指引里。
+    expect(diagnosis.actions.join()).not.toContain('trigger:dropped')
   })
 
   it('同时点名两类症状时，命中关键词多的那类排最前', () => {
@@ -151,16 +246,20 @@ describe('redactFields', () => {
 describe('createLogAssistant', () => {
   let home: string
   let logPath: string
+  /** 固定「现在」，让日志时间落在排查窗口内。 */
+  const now = '2026-11-09T10:05:00.000Z'
+  /** 相对 now 的分钟数 → ISO 时间。 */
+  const at = (minutesAgo: number): string => new Date(Date.parse(now) - minutesAgo * 60_000).toISOString()
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'ra-log-assistant-'))
     mkdirSync(join(home, 'logs'), { recursive: true })
     logPath = join(home, 'logs', 'router-agent.log')
     writeFileSync(logPath, [
-      `${JSON.stringify({ at: '2026-11-09T10:00:00.000Z', level: 'info', message: 'feishu:ready' })}`,
-      `${JSON.stringify({ at: '2026-11-09T10:01:00.000Z', level: 'warn', message: 'trigger:dropped', reason: 'not-allowed', chat: 'oc_x' })}`,
-      `${JSON.stringify({ at: '2026-11-09T10:02:00.000Z', level: 'error', message: 'outbox:failed', error: 'http-500' })}`,
-      `${JSON.stringify({ at: '2026-11-09T10:03:00.000Z', level: 'info', message: 'input:queued', ticketId: 'tk-7', text: '帮我改一下 README 的端口' })}`,
+      `${JSON.stringify({ at: at(5), level: 'info', message: 'feishu:ready' })}`,
+      `${JSON.stringify({ at: at(4), level: 'warn', message: 'trigger:dropped', reason: 'not-allowed', chat: 'oc_x' })}`,
+      `${JSON.stringify({ at: at(3), level: 'error', message: 'outbox:failed', error: 'http-500' })}`,
+      `${JSON.stringify({ at: at(2), level: 'info', message: 'input:queued', ticketId: 'tk-7', text: '帮我改一下 README 的端口' })}`,
     ].join('\n') + '\n', 'utf8')
   })
 
@@ -169,7 +268,7 @@ describe('createLogAssistant', () => {
   })
 
   it('没有模型时走规则式排查并给出已知问题', async () => {
-    const assistant = createLogAssistant({ logPath })
+    const assistant = createLogAssistant({ logPath, now: () => now })
     expect(assistant.llmConfigured()).toBe(false)
 
     const diagnosis = await assistant.diagnose({ question: '飞书消息机器人没反应' })
@@ -193,6 +292,7 @@ describe('createLogAssistant', () => {
 
     const assistant = createLogAssistant({
       logPath,
+      now: () => now,
       model: { baseUrl: 'https://api.example.com/v1', apiKey: 'sk-test', model: 'chat-model' },
       fetchImpl,
     })
@@ -211,6 +311,7 @@ describe('createLogAssistant', () => {
     const fetchImpl = (async () => new Response('boom', { status: 500 })) as unknown as typeof fetch
     const assistant = createLogAssistant({
       logPath,
+      now: () => now,
       model: { baseUrl: 'https://api.example.com/v1', apiKey: 'sk-test', model: 'chat-model' },
       fetchImpl,
     })
@@ -225,6 +326,7 @@ describe('createLogAssistant', () => {
     const fetchImpl = (async () => jsonResponse({ choices: [{ message: { content: '随便说点什么' } }] })) as unknown as typeof fetch
     const assistant = createLogAssistant({
       logPath,
+      now: () => now,
       model: { baseUrl: 'https://api.example.com/v1', apiKey: 'sk-test', model: 'chat-model' },
       fetchImpl,
     })
@@ -233,6 +335,67 @@ describe('createLogAssistant', () => {
     expect(diagnosis.source).toBe('rules')
     expect(diagnosis.degraded).toContain('模型总结失败')
   })
+
+  it('时间窗口外的错误日志不纳入排查结论', async () => {
+    const assistant = createLogAssistant({ logPath, now: () => '2026-11-10T10:05:00.000Z' })
+
+    const diagnosis = await assistant.diagnose({ question: '消息没反应' })
+
+    expect(diagnosis.evidence).toEqual([])
+    expect(diagnosis.causes).toEqual([])
+  })
+})
+
+describe('排查概览', () => {
+  let home: string
+  let logPath: string
+  const now = '2026-11-09T10:05:00.000Z'
+  const at = (minutesAgo: number): string => new Date(Date.parse(now) - minutesAgo * 60_000).toISOString()
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'ra-log-assistant-overview-'))
+    mkdirSync(join(home, 'logs'), { recursive: true })
+    logPath = join(home, 'logs', 'router-agent.log')
+    writeFileSync(logPath, [
+      `${JSON.stringify({ at: at(10), level: 'error', message: 'outbox:failed', error: 'http-500', version: '1.0.0' })}`,
+      `${JSON.stringify({ at: at(5), level: 'error', message: 'codex:turn-failed', detail: 'timeout', version: '1.0.0' })}`,
+      `${JSON.stringify({ at: at(4), level: 'warn', message: 'trigger:dropped', reason: 'not-allowed', version: '1.0.0' })}`,
+    ].join('\n') + '\n', 'utf8')
+  })
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  it('概览给出错误条数与配置问题，配置问题带上去改的入口', () => {
+    const assistant = createLogAssistant({
+      logPath,
+      now: () => now,
+      version: '1.0.0',
+      configChecks: () => [
+        { name: '配置必填项', status: 'fail', detail: '缺少 feishu.allowed', hint: '补上允许名单', section: 'channels' },
+        { name: '模型配置', status: 'ok', detail: 'ok' },
+      ],
+    })
+
+    const overview = assistant.overview()
+
+    expect(overview.errorCount).toBe(2)
+    expect(overview.warnCount).toBe(1)
+    expect(overview.issues[0]?.event).toBe('codex:turn-failed')
+    expect(overview.configIssues).toHaveLength(1)
+    expect(overview.configIssues[0]?.section).toBe('channels')
+    expect(overview.window.version).toBe('1.0.0')
+  })
+
+  it('版本对不上的旧错误不计入概览', () => {
+    const assistant = createLogAssistant({ logPath, now: () => now, version: '2.0.0' })
+
+    const overview = assistant.overview()
+
+    expect(overview.errorCount).toBe(0)
+    expect(overview.issues).toEqual([])
+  })
 })
 
 describe('nextStepsFor', () => {
@@ -240,7 +403,7 @@ describe('nextStepsFor', () => {
     const hits = matchSymptoms([entry('2026-11-09T10:01:00.000Z', 'warn', 'trigger:dropped')])
     const steps = nextStepsFor(hits, '机器人没反应')
     expect(steps[0]?.kind).toBe('config')
-    expect(steps[0]?.section).toBe('feishu')
+    expect(steps[0]?.section).toBe('channels')
   })
 
   it('缺陷类症状给出一键上报 issue', () => {
@@ -309,7 +472,7 @@ describe('工具调用', () => {
     mkdirSync(join(home, 'logs'), { recursive: true })
     logPath = join(home, 'logs', 'router-agent.log')
     writeFileSync(logPath, [
-      `${JSON.stringify({ at: '2026-11-09T10:00:00.000Z', level: 'error', message: 'outbox:failed', error: 'http-500' })}`,
+      `${JSON.stringify({ at: '2026-11-09T10:04:00.000Z', level: 'error', message: 'outbox:failed', error: 'http-500' })}`,
     ].join('\n') + '\n', 'utf8')
   })
 
@@ -359,6 +522,7 @@ describe('工具调用', () => {
 
     const assistant = createLogAssistant({
       logPath,
+      now: () => '2026-11-09T10:05:00.000Z',
       model: { baseUrl: 'https://api.example.com/v1', apiKey: 'sk-test', model: 'chat-model' },
       tools: [fakeTool()],
       fetchImpl,
@@ -398,6 +562,7 @@ describe('工具调用', () => {
 
     const assistant = createLogAssistant({
       logPath,
+      now: () => '2026-11-09T10:05:00.000Z',
       model: { baseUrl: 'https://api.example.com/v1', apiKey: 'sk-test', model: 'chat-model' },
       tools: [fakeTool()],
       fetchImpl,

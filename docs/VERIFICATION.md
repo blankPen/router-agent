@@ -136,14 +136,14 @@ ra status               # 工单应变为 closed
 ### 4.3 多项目 / 多分支派工（本轮新增）
 
 ```bash
-ra config set project.router-agent "name:dsh/router-agent@main"
-ra config set project.super-agent  "name:dsh/super-agent@release"
+ra config set project.router-agent "/Users/me/router-agent@main"
+ra config set project.super-agent  "/Users/me/super-agent@release"
 ra config set chatBinding.oc_xxx   "router-agent@main"   # 绑定即监控
 ra stop && ra start
 ```
 
 1. **未绑定的群**：@bot 说「把登录超时改成 30 秒」→ Router 应**追问**「要改哪个项目、从哪个分支开始」（列出 router-agent / super-agent），`ra tickets` 里**没有新工单**。
-2. 接着回「router-agent，从 release 开始」→ 开出工单，`ra ticket <id>` 的「派工」一行显示 `name:dsh/router-agent @ release`；`ra logs` 里 `launch` 记录 worktree 带 `--base-branch release`。
+2. 接着回「router-agent，从 release 开始」→ 开出工单，`ra ticket <id>` 的「派工」一行显示 `/Users/me/router-agent @ release`；`ra logs` 里 `launch` 记录 worktree 带 `--base-branch release`。
 3. **绑定的群**（`oc_xxx`）：直接 @bot 派活 → 不追问，直接开单并派工到 `router-agent @ main`。
 4. 任意分支：@bot 说「用 feature/x 分支改一下」→ 分支不再做白名单校验，直接按 feature/x 开单（不存在时由 git 报错）。
 

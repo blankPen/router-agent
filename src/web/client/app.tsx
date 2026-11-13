@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
+  ALL_FILTER,
+  EMPTY_FILTER,
+  facetCounts,
+  filterLogLines,
+  isFilterActive,
+  type LogFilter,
+} from './log-filters.js'
+import { FilterMenu } from './log-filter-menu.js'
+import {
   LLM_FIELDS,
   allRuntimeOptionFields,
   blockEffect,
@@ -54,6 +63,7 @@ import {
   type PluginView,
 } from './api.js'
 import { Icon, LogoMark } from './icons.js'
+import { defaultSelectedPaths, mergeImportedProjects, type ScanCandidate } from './project-scan.js'
 import type { IdentityStatusView } from './identity-status.js'
 import { RuntimeCards, type RuntimeNotice } from './runtime-cards.js'
 import { FeishuBotPanel } from './feishu-panel.js'
@@ -159,6 +169,28 @@ interface ServiceStatus {
 interface LogEntry {
   at: string
   level: string
+  /** 事件域（事件名第一段），日志页按它过滤。 */
+  domain?: string
+  /** 事件动作（事件名冒号后的部分）。 */
+  event?: string
+  /** 类别：message（用户消息）/ event（内部状态）/ action（对外动作）。 */
+  category?: string
+  /** 链路 ID：把同一条链路的日志串起来。 */
+  trace?: string
+  /** 群 / 会话。 */
+  chat?: string
+  /** 群名。 */
+  chatName?: string
+  /** 发起人。 */
+  actor?: string
+  /** 发起人名字。 */
+  actorName?: string
+  /** 发起人类型：user / bot / system。 */
+  actorType?: string
+  /** 运行时：orca / codex-app 等。 */
+  runtime?: string
+  /** 工单 ID。 */
+  ticket?: string
   message: string
   data?: Record<string, unknown>
 }
@@ -215,12 +247,17 @@ const PR_STATE_LABEL: Record<string, string> = {
   closed: '已关闭',
 }
 
+/** 日志类别：面板上用中文说人话，机器值仍写在展开详情里。 */
+const CATEGORY_LABEL: Record<string, string> = { message: '消息', event: '事件', action: '动作' }
+/** 发起人类型：用户、机器人还是 Router 自己。 */
+const ACTOR_LABEL: Record<string, string> = { user: '用户', bot: '机器人', system: '系统' }
+
 const LOG_LEVELS = ['all', 'info', 'warn', 'error', 'raw'] as const
 const LOG_LEVEL_LABEL: Record<string, string> = { all: '全部', info: 'INFO', warn: 'WARN', error: 'ERROR', raw: 'TEXT' }
 const LOG_LEVEL_COLOR: Record<string, string> = {
-  // 颜色只落在状态上：总数用中性灰，其余按级别取语义色。
+  // 颜色只落在状态上：正常态保持中性，WARN / ERROR 才带语义色。
   all: 'var(--muted)',
-  info: 'var(--info)',
+  info: 'var(--faint)',
   warn: 'var(--warning)',
   error: 'var(--negative)',
   raw: 'var(--faint)',
@@ -1339,7 +1376,7 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
       }
     }
     for (const runtime of runtimeCatalog) {
-      const issue = projectIssue(runtime.id, projectsOf(draft, runtime.id))
+      const issue = projectIssue(projectsOf(draft, runtime.id))
       if (issue) map.set(projectPatchPath(runtime.id), `${runtimeDisplayName(runtime)}：${issue}`)
     }
     return map
@@ -2024,7 +2061,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       const path = projectPatchPath(runtime.id)
       // 只校验当前运行时的清单 + 本次确实要提交的其它清单，避免历史脏数据挡住保存。
       if (runtime.id !== runtimeId && !changedSet.has(path)) continue
-      const issue = projectIssue(runtime.id, projectsOf(draft, runtime.id))
+      const issue = projectIssue(projectsOf(draft, runtime.id))
       if (issue) map.set(path, `${runtimeDisplayName(runtime)}：${issue}`)
     }
     // 自定义 acp 没有 command 时重启会直接启动失败，保存前就挡住。
@@ -2117,7 +2154,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
   const chats = (draft.feishu?.chats ?? []) as ChatDraft[]
   const runtimeChoice = runtimeCatalog.find(choice => choice.id === runtimeId)
   const runtimeReady = runtimeChoice?.status === 'ready' || runtimeChoice?.status === 'unverified'
-  const projectReady = activeProjects.length > 0 && !projectIssue(runtimeId, activeProjects)
+  const projectReady = activeProjects.length > 0 && !projectIssue(activeProjects)
   const chatReady = chats.length > 0 && !chatsIssue(chats)
   const llmConfig = (draft.llm ?? {}) as { baseUrl?: string; model?: string; apiKey?: string; apiKeySet?: boolean }
   // LLM Provider 必填：baseUrl + model + apiKey 缺一不可（本次新填、尚未保存的密钥也算）。
@@ -2129,7 +2166,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
   const steps = [
     { label: 'LLM 已配置', hint: llmReady ? '已就绪' : '填写 Base URL / 模型 / API Key', done: llmReady },
     { label: '运行时可用', hint: runtimeReady ? '已就绪' : runtimeChoice ? runtimeStatusLabel(runtimeChoice.status) : '未选择', done: runtimeReady },
-    { label: '已登记项目', hint: projectReady ? `${activeProjects.length} 个项目` : '至少一个', done: projectReady },
+    { label: '已配置项目', hint: projectReady ? `${activeProjects.length} 个项目` : '至少一个', done: projectReady },
     { label: `${channelName}已接入`, hint: channelReady ? '已就绪' : `写入${channelName}接入信息`, done: channelReady },
     { label: '监控群已添加', hint: chatReady ? `${chats.length} 个群` : '至少一个', done: chatReady },
   ]
@@ -2289,8 +2326,8 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       <section className="settings-card" id="setup-projects">
         <header className="settings-head">
           <div>
-            <h2>3. 登记项目</h2>
-            <p>当前运行时：<strong>{runtimeLabel}</strong>。至少登记一个项目，群绑定才能选；可以选本机已有目录，也可以填 Git 地址自动 clone。</p>
+            <h2>3. 项目配置</h2>
+            <p>当前运行时：<strong>{runtimeLabel}</strong>。至少配置一个项目，群绑定才能选；可以扫本机会话日志批量导入，也可以选本机已有目录或填 Git 地址自动 clone。</p>
           </div>
           <div className="settings-badges">
             {projectReady ? <span className="badge hot">已完成</span> : <span className="badge cold">未完成</span>}
@@ -2388,6 +2425,16 @@ interface ProjectInspectionView {
   orca?: { registered: boolean; repo: string; displayName: string; error?: string }
 }
 
+/** 「扫描本地项目」的弹窗状态。 */
+interface ProjectScanState {
+  busy: boolean
+  candidates: ScanCandidate[]
+  selected: string[]
+  importing: boolean
+  error: string | null
+  notice: string | null
+}
+
 interface ProjectDialogState {
   mode: 'local' | 'git'
   url: string
@@ -2402,6 +2449,15 @@ interface ProjectDialogState {
   force: boolean
 }
 
+/** 候选项目的最近活跃时间：显示到分钟。 */
+function formatActivity(iso: string): string {
+  const stamp = Date.parse(iso)
+  if (Number.isNaN(stamp)) return iso
+  const date = new Date(stamp)
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
 function dialogError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -2414,6 +2470,7 @@ function ProjectsEditor({ runtimeId, projects, error, onChange }: {
 }): JSX.Element {
   const isOrca = runtimeId === ORCA_RUNTIME_ID
   const [dialog, setDialog] = useState<ProjectDialogState | null>(null)
+  const [scan, setScan] = useState<ProjectScanState | null>(null)
   const update = (index: number, patch: Partial<ProjectDraft>): void => {
     onChange(projects.map((project, i) => (i === index ? { ...project, ...patch } : project)))
   }
@@ -2565,6 +2622,59 @@ function ProjectsEditor({ runtimeId, projects, error, onChange }: {
     setDialog(null)
   }
 
+  /** 「扫描本地项目」：读 Claude Code / Codex / OpenCode 的会话日志，列出候选目录。 */
+  const startScan = async (): Promise<void> => {
+    setScan({ busy: true, candidates: [], selected: [], importing: false, error: null, notice: null })
+    try {
+      const result = await sendJson<{ projects: ScanCandidate[] }>('/api/projects/scan', 'POST', {})
+      const candidates = result.projects ?? []
+      setScan({
+        busy: false,
+        candidates,
+        selected: defaultSelectedPaths(candidates),
+        importing: false,
+        error: null,
+        notice: null,
+      })
+    } catch (failure) {
+      setScan({ busy: false, candidates: [], selected: [], importing: false, error: dialogError(failure), notice: null })
+    }
+  }
+
+  /** 导入勾选的项目：逐个登记（Orca 运行时同时登记到 Orca），再并进项目清单。 */
+  const importSelected = async (): Promise<void> => {
+    if (!scan) return
+    const picked = scan.candidates.filter(candidate => scan.selected.includes(candidate.path))
+    setScan({ ...scan, importing: true, error: null, notice: null })
+    const drafts: ProjectDraft[] = []
+    const failures: string[] = []
+    for (const candidate of picked) {
+      try {
+        const prepared = await sendJson<ProjectInspectionView>('/api/projects/register', 'POST', { path: candidate.path, runtimeId })
+        drafts.push({
+          name: prepared.name || candidate.name,
+          repo: prepared.repo ?? prepared.path,
+          defaultBranch: prepared.detached ? '' : prepared.branch,
+        })
+        if (prepared.orca && !prepared.orca.registered) {
+          failures.push(`${candidate.name}：登记到 Orca 失败（${prepared.orca.error ?? '未知原因'}）`)
+        }
+      } catch (failure) {
+        failures.push(`${candidate.name}：${dialogError(failure)}`)
+      }
+    }
+    if (drafts.length > 0) onChange(mergeImportedProjects(projects, drafts))
+    setScan(current => (current
+      ? {
+        ...current,
+        importing: false,
+        selected: [],
+        error: failures.length > 0 ? failures.join('；') : null,
+        notice: drafts.length > 0 ? `已导入 ${drafts.length} 个项目，记得保存配置` : null,
+      }
+      : current))
+  }
+
   const canAdd = Boolean(dialog?.info?.isGit && dialog.name.trim())
 
   return (
@@ -2573,7 +2683,7 @@ function ProjectsEditor({ runtimeId, projects, error, onChange }: {
       {projects.length > 0 && (
         <div className="editor-head">
           <span>项目名</span>
-          <span>{isOrca ? 'Orca 选择器' : '本地仓库路径'}</span>
+          <span>本地仓库路径</span>
           <span>默认分支</span>
           <span />
         </div>
@@ -2583,7 +2693,7 @@ function ProjectsEditor({ runtimeId, projects, error, onChange }: {
           <input value={project.name} placeholder="router-agent" onChange={event => update(index, { name: event.target.value })} />
           <input
             value={project.repo}
-            placeholder={isOrca ? 'name:dsh/router-agent' : '/Users/me/router-agent'}
+            placeholder="/Users/me/router-agent"
             onChange={event => update(index, { repo: event.target.value })}
           />
           <input value={project.defaultBranch} placeholder="main" onChange={event => update(index, { defaultBranch: event.target.value })} />
@@ -2594,6 +2704,9 @@ function ProjectsEditor({ runtimeId, projects, error, onChange }: {
       ))}
       {error && <p className="field-error">{error}</p>}
       <div className="project-add-actions">
+        <button className="btn add" onClick={() => void startScan()}>
+          <Icon name="search" size={13} />扫描本地项目
+        </button>
         <button className="btn add" onClick={() => void startLocal()}>
           <Icon name="folder" size={13} />添加本地项目
         </button>
@@ -2716,6 +2829,70 @@ function ProjectsEditor({ runtimeId, projects, error, onChange }: {
           </div>
         </div>
       )}
+
+      {scan && (
+        <div className="modal-layer">
+          <button className="modal-backdrop" aria-label="关闭" onClick={() => { if (!scan.importing) setScan(null) }} />
+          <div className="modal modal-wide" role="dialog" aria-modal="true" aria-label="扫描本地项目">
+            <header className="modal-head">
+              <div>
+                <h3>扫描本地项目</h3>
+                <p>从 Claude Code / Codex / OpenCode 的历史会话日志里读出用过的目录，勾选后导入当前运行时。</p>
+              </div>
+              <button className="icon-btn" title="关闭" onClick={() => setScan(null)} disabled={scan.importing}>
+                <Icon name="close" size={14} />
+              </button>
+            </header>
+            <div className="modal-body">
+              {scan.busy && <p className="modal-hint"><Icon name="refresh" size={13} className="spin" />正在扫描会话日志…</p>}
+              {scan.error && <p className="modal-error">{scan.error}</p>}
+              {scan.notice && <p className="modal-notice">{scan.notice}</p>}
+              {!scan.busy && scan.candidates.length === 0 && (
+                <p className="editor-empty">没有扫到候选项目。确认 Claude Code / Codex / OpenCode 在本机留有会话记录后再试。</p>
+              )}
+              {scan.candidates.length > 0 && (
+                <div className="scan-list">
+                  {scan.candidates.map(candidate => (
+                    <label key={candidate.path} className="scan-item">
+                      <input
+                        type="checkbox"
+                        checked={scan.selected.includes(candidate.path)}
+                        disabled={scan.importing}
+                        onChange={event => setScan(current => (current
+                          ? {
+                            ...current,
+                            selected: event.target.checked
+                              ? [...current.selected, candidate.path]
+                              : current.selected.filter(item => item !== candidate.path),
+                          }
+                          : current))}
+                      />
+                      <span className="scan-item-main">
+                        <strong>{candidate.name}</strong>
+                        <code>{candidate.path}</code>
+                      </span>
+                      <span className="scan-item-meta">
+                        <span>{candidate.sources.join(' / ')}</span>
+                        <span>{formatActivity(candidate.lastActiveAt)}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+            <footer className="modal-foot">
+              <button className="btn tiny" onClick={() => setScan(null)} disabled={scan.importing}>取消</button>
+              <button
+                className="btn primary"
+                onClick={() => void importSelected()}
+                disabled={scan.busy || scan.importing || scan.selected.length === 0}
+              >
+                {scan.importing ? '导入中…' : `导入勾选的 ${scan.selected.length} 个项目`}
+              </button>
+            </footer>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -2821,12 +2998,13 @@ function LogsView(): JSX.Element {
   const [lines, setLines] = useState<LogLine[]>([])
   const [meta, setMeta] = useState<{ path: string; exists: boolean; size: number } | null>(null)
   const [live, setLive] = useState(true)
-  const [level, setLevel] = useState<string>('all')
-  const [keyword, setKeyword] = useState('')
+  const [filter, setFilter] = useState<LogFilter>(EMPTY_FILTER)
   const [syncedAt, setSyncedAt] = useState<Date | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [following, setFollowing] = useState(true)
+  /** 展开完整字段的行；按 seq 记，行滚出缓冲区后自然失效。 */
+  const [expanded, setExpanded] = useState<Set<number>>(() => new Set())
 
   const scrollerRef = useRef<HTMLDivElement | null>(null)
   // 游标用 ref 保存：轮询回调里要读最新值，放进 state 会让定时器拿到旧闭包。
@@ -2902,42 +3080,63 @@ function LogsView(): JSX.Element {
     setFollowing(true)
   }, [])
 
-  const counts = useMemo(() => {
-    const map: Record<string, number> = { all: lines.length }
-    for (const line of lines) map[line.level] = (map[line.level] ?? 0) + 1
-    return map
-  }, [lines])
+  // 各维度候选按「其它维度」的条件统计：选中 tk-84 后，级别上的「全部」就是这条链路的条数。
+  const levelOptions = useMemo(() => facetCounts(lines, filter, 'level'), [lines, filter])
+  // 类别的候选值是机器值（message / event / action），下拉里显示中文。
+  const categoryOptions = useMemo(() => facetCounts(lines, filter, 'category').map(option => ({
+    ...option,
+    label: CATEGORY_LABEL[option.value] ?? option.value,
+  })), [lines, filter])
+  const domainOptions = useMemo(() => facetCounts(lines, filter, 'domain'), [lines, filter])
+  const eventOptions = useMemo(() => facetCounts(lines, filter, 'event'), [lines, filter])
+  const chatOptions = useMemo(() => facetCounts(lines, filter, 'chat'), [lines, filter])
+  const actorOptions = useMemo(() => facetCounts(lines, filter, 'actor'), [lines, filter])
+  const runtimeOptions = useMemo(() => facetCounts(lines, filter, 'runtime'), [lines, filter])
+  const ticketOptions = useMemo(() => facetCounts(lines, filter, 'ticket'), [lines, filter])
+  const traceOptions = useMemo(() => facetCounts(lines, filter, 'trace'), [lines, filter])
 
-  const visible = useMemo(() => {
-    const query = keyword.trim().toLowerCase()
-    return lines.filter(line => {
-      if (level !== 'all' && line.level !== level) return false
-      if (!query) return true
-      const haystack = `${line.message} ${JSON.stringify(line.data ?? {})}`
-      return haystack.toLowerCase().includes(query)
+  // 候选里已经没有的选中值要退回「全部」，否则会出现「筛不出东西也不报错」的死状态。
+  const domainValue = pickValue(domainOptions, filter.domain)
+  const eventValue = pickValue(eventOptions, filter.event)
+  const chatValue = pickValue(chatOptions, filter.chat)
+  const actorValue = pickValue(actorOptions, filter.actor)
+  const runtimeValue = pickValue(runtimeOptions, filter.runtime)
+  const ticketValue = pickValue(ticketOptions, filter.ticket)
+  const traceValue = pickValue(traceOptions, filter.trace)
+  const categoryValue = pickValue(categoryOptions, filter.category)
+
+  const visible = useMemo(
+    () => filterLogLines(lines, {
+      ...filter,
+      category: categoryValue,
+      domain: domainValue,
+      event: eventValue,
+      chat: chatValue,
+      actor: actorValue,
+      runtime: runtimeValue,
+      ticket: ticketValue,
+      trace: traceValue,
+    }),
+    [lines, filter, categoryValue, domainValue, eventValue, chatValue, actorValue, runtimeValue, ticketValue, traceValue],
+  )
+
+  const setDimension = useCallback((key: keyof LogFilter, value: string): void => {
+    setFilter(prev => ({ ...prev, [key]: value }))
+  }, [])
+
+  const toggleRow = useCallback((seq: number): void => {
+    setExpanded(prev => {
+      const next = new Set(prev)
+      if (next.has(seq)) next.delete(seq)
+      else next.add(seq)
+      return next
     })
-  }, [lines, level, keyword])
+  }, [])
 
   // 行元素按过滤结果缓存：轮询没有新内容时不再重建整张列表。
   const rows = useMemo(() => visible.map(line => (
-    <div key={line.seq} className={`log-row level-${line.level}`}>
-      <span className="log-time" title={line.at || undefined}>{logClock(line.at)}</span>
-      <span className="log-level">{LOG_LEVEL_LABEL[line.level] ?? line.level.toUpperCase()}</span>
-      <span className="log-message">
-        {line.message}
-        {line.data && (
-          <span className="log-data">
-            {' '}
-            {Object.entries(line.data).map(([key, value]) => (
-              <span key={key} className="log-pair">
-                <span className="log-key">{key}</span>={formatLogValue(value)}
-              </span>
-            ))}
-          </span>
-        )}
-      </span>
-    </div>
-  )), [visible])
+    <LogRowView key={line.seq} line={line} expanded={expanded.has(line.seq)} onToggle={() => toggleRow(line.seq)} />
+  )), [visible, expanded, toggleRow])
 
   const copyVisible = async (): Promise<void> => {
     try {
@@ -2951,11 +3150,17 @@ function LogsView(): JSX.Element {
   }
 
   const clearFilters = useCallback((): void => {
-    setLevel('all')
-    setKeyword('')
+    setFilter(EMPTY_FILTER)
   }, [])
 
-  const levels = LOG_LEVELS.filter(item => item !== 'raw' || (counts.raw ?? 0) > 0)
+  const levelCounts = useMemo(() => {
+    const map: Record<string, number> = {}
+    for (const option of levelOptions) map[option.value] = option.count
+    // 「全部」是不限级别时的条数：其它维度都算上。
+    map.all = levelOptions.reduce((sum, option) => sum + option.count, 0)
+    return map
+  }, [levelOptions])
+  const levels = LOG_LEVELS.filter(item => item !== 'raw' || (levelCounts.raw ?? 0) > 0)
   const loading = meta === null
   const subtitle = meta ? (
     <>
@@ -2992,33 +3197,51 @@ function LogsView(): JSX.Element {
       />
 
       <section className="log-console" aria-busy={loading || undefined}>
+        {/* 第一行：级别（scope）在左，搜索与工具在右。 */}
         <div className="log-toolbar">
-          <div className="log-filters" role="group" aria-label="按级别过滤">
+          <div className="segmented log-levels" role="group" aria-label="按级别过滤">
             {levels.map(item => (
               <button
                 key={item}
                 type="button"
-                className={`log-chip ${level === item ? 'active' : ''}`}
-                aria-pressed={level === item}
-                onClick={() => setLevel(item)}
+                className={filter.level === item ? 'active' : ''}
+                aria-pressed={filter.level === item}
+                onClick={() => setDimension('level', item)}
               >
-                <span className="log-chip-dot" style={{ background: LOG_LEVEL_COLOR[item] }} />
+                {item !== 'all' && <span className="log-chip-dot" style={{ background: LOG_LEVEL_COLOR[item] }} />}
                 <span>{LOG_LEVEL_LABEL[item]}</span>
-                <span className="log-chip-count">{counts[item] ?? 0}</span>
+                <span className="log-chip-count">{levelCounts[item] ?? 0}</span>
               </button>
             ))}
           </div>
           <div className="search-box log-search">
             <Icon name="search" size={15} />
             <input
-              value={keyword}
-              onChange={event => setKeyword(event.target.value)}
-              placeholder="过滤消息或字段…"
+              value={filter.keyword}
+              onChange={event => setDimension('keyword', event.target.value)}
+              placeholder="搜索事件、字段或群名…"
               aria-label="过滤日志"
             />
           </div>
           {notice && <span className="log-notice" role="status">{notice}</span>}
-          <button className="btn ghost tiny" onClick={() => setLines([])} disabled={lines.length === 0}>清空视图</button>
+          <button className="btn ghost tiny log-toolbar-end" onClick={() => setLines([])} disabled={lines.length === 0}>清空视图</button>
+        </div>
+
+        {/* 第二行：多维过滤。每一维都能单独收窄，维度之间取交集。 */}
+        <div className="log-toolbar log-toolbar-dims">
+          <div className="log-dims" role="group" aria-label="按维度过滤">
+            <FilterMenu label="类别" value={categoryValue} options={categoryOptions} onChange={value => setDimension('category', value)} />
+            <FilterMenu label="域" value={domainValue} options={domainOptions} onChange={value => setDimension('domain', value)} />
+            <FilterMenu label="动作" value={eventValue} options={eventOptions} onChange={value => setDimension('event', value)} />
+            <FilterMenu label="群" value={chatValue} options={chatOptions} onChange={value => setDimension('chat', value)} />
+            <FilterMenu label="发起人" value={actorValue} options={actorOptions} onChange={value => setDimension('actor', value)} />
+            <FilterMenu label="运行时" value={runtimeValue} options={runtimeOptions} onChange={value => setDimension('runtime', value)} />
+            <FilterMenu label="工单" value={ticketValue} options={ticketOptions} onChange={value => setDimension('ticket', value)} />
+            <FilterMenu label="追踪" value={traceValue} options={traceOptions} onChange={value => setDimension('trace', value)} />
+            {isFilterActive(filter) && (
+              <button className="btn ghost tiny" onClick={clearFilters}>清除筛选</button>
+            )}
+          </div>
         </div>
 
         {error && (
@@ -3058,13 +3281,39 @@ function LogsView(): JSX.Element {
             <div className="log-empty">
               <Icon name="file-text" size={22} />
               <p>{lines.length === 0 ? '暂无日志' : '没有匹配的日志'}</p>
-              <small>{lines.length === 0 ? '服务产生新日志后会自动出现在这里。' : '换个级别或关键字试试。'}</small>
-              {(level !== 'all' || keyword.trim()) && (
+              <small>{lines.length === 0 ? '服务产生新日志后会自动出现在这里。' : '换个级别、维度或关键字试试。'}</small>
+              {isFilterActive(filter) && (
                 <button className="btn ghost tiny" onClick={clearFilters}>清除筛选</button>
               )}
             </div>
           ) : (
-            rows
+            <table className="log-table">
+              <colgroup>
+                <col className="log-col-time" />
+                <col className="log-col-level" />
+                <col className="log-col-category" />
+                <col className="log-col-event" />
+                <col className="log-col-chat" />
+                <col className="log-col-actor" />
+                <col className="log-col-runtime" />
+                <col className="log-col-ticket" />
+                <col className="log-col-detail" />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th scope="col">时间</th>
+                  <th scope="col">级别</th>
+                  <th scope="col">类别</th>
+                  <th scope="col">事件</th>
+                  <th scope="col">群</th>
+                  <th scope="col">发起人</th>
+                  <th scope="col">运行时</th>
+                  <th scope="col">工单</th>
+                  <th scope="col">详情</th>
+                </tr>
+              </thead>
+              <tbody>{rows}</tbody>
+            </table>
           )}
         </div>
         {!following && (
@@ -3076,6 +3325,87 @@ function LogsView(): JSX.Element {
       </section>
     </>
   )
+}
+
+/**
+ * 一行日志：左边是能定位的维度，右边是这条事件的业务字段。
+ *
+ * 点事件名展开完整字段——表格里放不下全部字段，展开后能看到原始值。
+ */
+function LogRowView({ line, expanded, onToggle }: { line: LogLine; expanded: boolean; onToggle: () => void }): JSX.Element {
+  const details = line.data ? Object.entries(line.data) : []
+  return (
+    <>
+      <tr className={`log-row level-${line.level}`}>
+        <td className="log-cell-time">{logClock(line.at)}</td>
+        <td className="log-cell-level">
+          <span className="log-chip-dot" style={{ background: LOG_LEVEL_COLOR[line.level] ?? LOG_LEVEL_COLOR.all }} />
+          {LOG_LEVEL_LABEL[line.level] ?? line.level.toUpperCase()}
+        </td>
+        <td className="log-cell-category">{CATEGORY_LABEL[line.category ?? ''] ?? '—'}</td>
+        <td className="log-cell-event">
+          <button type="button" className="log-event-button" onClick={onToggle} aria-expanded={expanded}>
+            <Icon name="chevron" size={11} className={`log-event-chevron${expanded ? ' open' : ''}`} />
+            {line.message}
+          </button>
+        </td>
+        <td className="log-cell-chat" title={line.chatName || line.chat || undefined}>{line.chatName || line.chat || '—'}</td>
+        <td className="log-cell-actor">
+          {line.actorName || line.actor
+            ? <><span className="log-actor-name">{line.actorName || line.actor}</span>{ACTOR_LABEL[line.actorType ?? ''] && <span className="log-actor-type">{ACTOR_LABEL[line.actorType ?? '']}</span>}</>
+            : '—'}
+        </td>
+        <td className="log-cell-runtime">{line.runtime || '—'}</td>
+        <td className="log-cell-ticket">{line.ticket || '—'}</td>
+        <td className="log-cell-detail">
+          {details.length === 0
+            ? '—'
+            : details.map(([key, value]) => (
+              <span key={key} className="log-pair">
+                <span className="log-key">{key}</span>={formatLogValue(value)}
+              </span>
+            ))}
+        </td>
+      </tr>
+      {expanded && (
+        <tr className="log-detail-row">
+          <td colSpan={9}>
+            <div className="log-detail-grid">
+              <LogDetailField label="时间" value={line.at || '—'} />
+              <LogDetailField label="级别" value={line.level} />
+              <LogDetailField label="类别" value={`${CATEGORY_LABEL[line.category ?? ''] ?? '—'}（${line.category ?? '—'}）`} />
+              <LogDetailField label="事件" value={line.message} />
+              <LogDetailField label="域 / 动作" value={`${line.domain || '—'} / ${line.event || '—'}`} />
+              <LogDetailField label="群" value={line.chatName ? `${line.chatName}（${line.chat ?? ''}）` : line.chat || '—'} />
+              <LogDetailField label="发起人" value={line.actorName ? `${line.actorName}（${line.actor ?? ''}）` : line.actor || '—'} />
+              <LogDetailField label="发起人类型" value={ACTOR_LABEL[line.actorType ?? ''] ?? '—'} />
+              <LogDetailField label="运行时" value={line.runtime || '—'} />
+              <LogDetailField label="工单" value={line.ticket || '—'} />
+              <LogDetailField label="链路 ID" value={line.trace || '—'} />
+              {details.map(([key, value]) => (
+                <LogDetailField key={key} label={key} value={formatLogValue(value)} />
+              ))}
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  )
+}
+
+/** 展开行里的一个字段：标签在左、值在右，长值独占一行。 */
+function LogDetailField({ label, value }: { label: string; value: string }): JSX.Element {
+  return (
+    <div className="log-detail-field">
+      <span className="log-detail-label">{label}</span>
+      <span className="log-detail-value">{value}</span>
+    </div>
+  )
+}
+
+/** 选中值不在候选里时退回「全部」，避免筛不出东西也不报错。 */
+function pickValue(options: { value: string }[], current: string): string {
+  return options.some(option => option.value === current) ? current : ALL_FILTER
 }
 
 function logClock(at: string): string {

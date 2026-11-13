@@ -123,7 +123,7 @@ runtime:
   # projects:
   #   claude-code:
   #     - name: router-agent
-  #       repo: /Users/me/router-agent   # Claude Code 需要本地仓库绝对路径
+  #       repo: /Users/me/router-agent   # 所有 runtime 统一是本地仓库绝对路径
   # 自定义运行时插件：npm 包名或本地路径；npm 包要先下载到 <RA_HOME>/node_modules
   # （用 ra runtime add / ra runtime install，或面板「安装依赖」）
   # plugins:
@@ -133,7 +133,7 @@ runtime:
 # orca 项目清单：开单前必须确认「哪个项目 + 哪个起始分支」
 projects: []
 #  - name: router-agent            # 用户/模型引用的项目名
-#    repo: name:dsh/router-agent   # 交给 Orca 的仓库选择器
+#    repo: /Users/me/router-agent   # 本地仓库绝对路径；派工时自动登记成 Orca 项目
 #    defaultBranch: main           # 未指定分支时使用；留空则每次开工前追问
 
 server:
@@ -177,7 +177,7 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 
 | 写法 | 例子 | 说明 |
 |-|-|-|
-| `project.<名>` | `ra config set project.router-agent "name:dsh/router-agent@main"` | `@` 后可带默认起始分支 |
+| `project.<名>` | `ra config set project.router-agent "/Users/me/router-agent@main"` | `@` 后可带默认起始分支；`repo` 必须是本地仓库绝对路径 |
 | `chatBinding.<chatId>` | `ra config set chatBinding.oc_xxx "router-agent@main"` | 绑定群的项目与起始分支 |
 | `chatMode.<chatId>` | `ra config set chatMode.oc_xxx mention` | `all` / `mention` |
 | `chatSync.<chatId>` | `ra config set chatSync.oc_xxx true` | 启动时补拉该群历史 |
@@ -277,31 +277,39 @@ router-agent 固定使用 `~/.router-agent-lark` 作为 lark-cli profile，**不
 
 ## 项目与仓库选择
 
-每个 `projects[].repo` 决定该工单的仓库：Orca 运行时交给 `orca worktree create --repo`；其它运行时作为 `git worktree` 的本地仓库绝对路径。先看 Orca 里注册了哪些：
+每个 `projects[].repo` 决定该工单的仓库，**所有运行时统一填本地仓库绝对路径**（`/Users/admin/du/teamwork-repos`）：
+
+| 运行时 | 怎么用这个路径 |
+|-|-|
+| Orca | 翻译成 Orca 的 `path:` 选择器交给 `orca worktree create --repo`，并在派工前自动 `orca repo add --path … --kind git` 登记成 Orca 项目 |
+| claude-code / codex-app / t3code / herdr / acp | 直接作为 `git worktree` 的仓库目录 |
+
+项目清单仍按运行时隔离：Orca 用顶层 `projects`，其它运行时用 `runtime.projects.<runtime id>`，见 [RUNTIME.md](RUNTIME.md)。
+
+Web 面板的「项目配置」提供三种添加方式：
+
+| 入口 | 行为 |
+|-|-|
+| 扫描本地项目 | 读本机 Claude Code（`~/.claude/projects`）、Codex（`~/.codex/sessions`）、OpenCode（`~/.local/share/opencode`）的历史会话日志，从里面还原用过的目录，按最近活跃时间倒序列出候选；默认勾选最近活跃的 5 个 Git 项目，其余不勾。导入时逐个走本地项目登记流程（Orca 运行时同时 `orca repo add`），路径重复的自动跳过，项目名撞了加序号 |
+| 添加本地项目 | 弹出系统目录选择框；选中后自动识别 Git 根目录、当前分支与 origin。不是 Git 仓库时直接提示，不能用于创建 worktree |
+| 添加 Git 项目 | 填写 ssh / http(s) 地址，自动 clone 到 `<RA_HOME>/repos/<项目名>`（默认 `~/.router-agent/repos`） |
+
+扫描只读会话日志，不写任何文件。候选会收敛成「能直接当项目用的目录」：
+
+- **worktree 归并到主仓库**：`.git` 是文件说明这是 git worktree，扫描时归并到它所属的主仓库（活跃时间照算），worktree 自己不会出现在候选里；
+- **临时目录丢掉**：`/tmp`、`/var/folders` 等系统临时区里的目录直接剔除；
+- **只留 Git 仓库**：面板只能加 Git 目录（worktree 需要它），非 Git 目录不进候选；
+- 目录已不存在的会话记录会被跳过。
+
+登记到 Orca 是自动的：Orca 运行时新增项目时立刻 `orca repo add`，派工时再兜底登记一次，所以清单里只写路径就够了。想看 Orca 侧已登记的仓库：
 
 ```bash
 orca repo list --json | jq -r '.result.repos[] | "\(.displayName)\t\(.path)\t\(.kind)"'
 ```
 
-Web 面板的「登记项目」提供两种添加方式：
-
-| 入口 | 行为 |
-|-|-|
-| 添加本地项目 | 弹出系统目录选择框；选中后自动识别 Git 根目录、当前分支与 origin。不是 Git 仓库时直接提示，不能用于创建 worktree |
-| 添加 Git 项目 | 填写 ssh / http(s) 地址，自动 clone 到 `<RA_HOME>/repos/<项目名>`（默认 `~/.router-agent/repos`）；Orca 运行时再执行 `orca repo add --path ... --kind git` 登记，配置里写 `path:<绝对路径>` |
-
-四种写法都支持：
-
-| 写法 | 例子 | 说明 |
-|-|-|-|
-| displayName | `teamwork-repos` | 默认按 `name:` 匹配，最常用 |
-| `name:` | `name:teamwork-repos` | 显式按名称 |
-| `id:` | `id:3ee11f05-...` | 名称重名时按 id 精确匹配 |
-| `path:` | `path:/Users/admin/du/teamwork-repos` | 按绝对路径 |
-
 注意：只有 `kind: git` 的仓库能创建 worktree；`kind: folder`（纯文件夹项目）会在 `orca worktree create` 阶段失败。
 
-非 Orca 运行时（`claude-code` / `acp-*`）不使用仓库选择器，`repo` 直接填本地仓库绝对路径，项目清单写在 `runtime.projects.<runtime id>` 下，见 [RUNTIME.md](RUNTIME.md)。
+**历史写法**：Orca 的 `name:` / `id:` 选择器（如 `name:teamwork-repos`）不再接受——旧配置仍能读，但保存时会被校验拒绝，请改成上面表格里的绝对路径。
 
 另外，旧版的全局 `repo` 配置已移除（`ra` 不再读取它）。已有配置文件请改成 `projects`，`ra doctor` 会在没有任何项目时直接报错并给出命令。
 
@@ -376,7 +384,8 @@ feishu:
 - **提醒后 6 小时仍无回复** → 自动关闭工单，只停终端；对应的 workspace 保留到定时任务回收（见「关单后的工作区回收」），脏工作区不强删，会通知人工；
 - **PR 仍开着** → 只催办一次，不自动关闭；
 - **执行中但 6 小时无上报且终端无输出** → 转人工，不自动关闭；
-- **已关闭话题再次被回复** → 固定回复「工单已关闭」；回复「重新开工」会基于原工单的仓库 / 起点分支创建新工单，并带上之前描述的需求。
+- **PR 合并 / 关闭** → 不关单，只通知一次进展；工单保持开放，用户在话题里追问会再次派给 worker；
+- **已关闭话题再次被回复** → 固定回复「工单已关闭」；若该工单的 workspace 已被回收，会额外提示「需要的话，我可以帮你新开工单进行处理。」；回复「重新开工」会基于原工单的仓库 / 起点分支创建新工单，并带上之前描述的需求。
 
 **服务启动时不补发闲置通知**：闲置计时以服务启动时刻为基线重新开始。启动前就已经没有进展的工单，不会因为服务重启而被一次性补发提醒、催办或关单通知；它们会在启动后满 `idleHours` 时照常提醒，再满 `closeGraceHours` 后自动关闭。启动前已经提醒过、但还没到关单时间的工单同样不重复提醒，只把关单时间按新基线顺延。
 
@@ -397,7 +406,7 @@ ra config set retention.sweepMinutes 5       # 扫描间隔
 - **定时任务**：关单后保留满 `keepHours`（默认 24 小时）后，由扫描任务回收；
 - **用户手动回收**：面板「清理工作区」里勾选清理，或在飞书里让 Router 调用 `router_workspace_remove`。
 
-闲置超时自动关单、PR 合并 / 关闭自动关单走的都是「保留后回收」。**人工停止工单**（面板「停止」/ `ra ticket --stop`）是用户明确表示不要这个目录，仍然立即回收。
+闲置超时自动关单走的是「保留后回收」。PR 合并 / 关闭不会关单，工单保持开放、可继续追问；会话只在巡查判定长期无进展或用户主动关闭时才结束。**人工停止工单**（面板「停止」/ `ra ticket --stop`）是用户明确表示不要这个目录，仍然立即回收。
 
 ```bash
 ra config set workspace.enabled false       # 关掉定时回收，只能手动回收

@@ -22,11 +22,13 @@ import { buildWorkerPrompt } from '@router-agent/runtime'
 import { workBranch, worktreeName } from '@router-agent/runtime'
 import { resolveSession } from '@router-agent/runtime'
 import { runtimeOptionDefault } from '@router-agent/runtime'
+import { projectRepoPath } from '@router-agent/runtime'
 import { ORCA_RUNTIME_ID } from '@router-agent/runtime'
-import { noopLogger, type Logger } from '@router-agent/infra/logger.js'
+import { noopLogger, errorMessage, withContext, type Logger } from '@router-agent/infra/logger.js'
 import { dismissCodexUpdatePrompt } from './codex-update.js'
 import {
   agentLaunch,
+  repoAdd,
   terminalClose,
   terminalList,
   terminalRead,
@@ -248,7 +250,8 @@ export class OrcaRuntime implements WorkerRuntime {
     // Orca 的 --prompt 必须配 --agent，没有「不传」这种形态，因此这里必须落到一个具体值。
     this.agent = String(opts.agent || runtimeOptionDefault(ORCA_RUNTIME_ID, 'agent') || '').trim()
     this.claudeProjectsDir = opts.claudeProjectsDir
-    this.logger = opts.logger ?? noopLogger
+    // 套一层固定上下文：适配器写的每条日志都带上 runtime，省得每个调用点重复写。
+    this.logger = withContext(opts.logger ?? noopLogger, { runtime: this.id })
     this.env = opts.env ?? process.env
   }
 
@@ -275,6 +278,9 @@ export class OrcaRuntime implements WorkerRuntime {
       ...(this.home ? { home: this.home } : {}),
     })
     this.prepareAgentStart(ctx.ticket.id)
+    // 项目清单统一写本地绝对路径：Orca 侧未必登记过这个目录，先自动登记成 Orca 项目。
+    const repoPath = projectRepoPath(repo)
+    if (repoPath) await this.ensureRepoRegistered(repoPath, ctx.ticket.id)
     const res = await this.run(worktreeCreate({
       repo,
       name,
@@ -315,7 +321,7 @@ export class OrcaRuntime implements WorkerRuntime {
         // 这种提示 Router 代答不了，重投多少次都一样，必须转人工。
         if (isAgentPromptBlocked(error)) {
           const detail = promptBlockedReason(error)
-          this.logger.warn('orca:agent-prompt-blocked', { handle, inputId: input.id, reason: detail })
+          this.logger.warn('orca:agent-prompt-blocked', { ticketId: this.ticketOf(ref), handle, inputId: input.id, reason: detail })
           return {
             status: 'rejected',
             inputIds: accepted,
@@ -351,7 +357,7 @@ export class OrcaRuntime implements WorkerRuntime {
     } catch (error) {
       // 探活撞上交互式提示：记下来交给 status() 转人工，不让巡检整轮挂掉。
       if (!isAgentPromptBlocked(error)) throw error
-      this.logger.warn('orca:agent-prompt-blocked', { handle, reason: promptBlockedReason(error) })
+      this.logger.warn('orca:agent-prompt-blocked', { ticketId: this.ticketOf(ref), handle, reason: promptBlockedReason(error) })
     }
   }
 
@@ -503,6 +509,35 @@ export class OrcaRuntime implements WorkerRuntime {
     return typeof ref === 'string' ? ref : ref.handle
   }
 
+  /** 工单 ID：日志要能直接落到工单上，光有终端句柄还得回查。 */
+  private ticketOf(ref: WorkerRef | string): string {
+    return typeof ref === 'string' ? '' : ref.ticketId
+  }
+
+  /**
+   * 自动把项目登记成 Orca 项目。
+   *
+   * 项目清单统一写本地绝对路径，Orca 侧不一定登记过这个目录；
+   * `orca repo add` 对已登记的目录是幂等的，直接调一次最省事。
+   * 登记失败不阻断派工：真正失败的原因会由后面的 worktree create 报出来。
+   */
+  private async ensureRepoRegistered(path: string, ticketId: string): Promise<void> {
+    try {
+      const res = await this.runner.run(repoAdd(path))
+      if (res.code !== 0) {
+        this.logger.warn('orca:project-register-failed', {
+          ticketId,
+          path,
+          reason: (res.stderr || res.stdout).trim().slice(0, 300),
+        })
+        return
+      }
+      this.logger.info('orca:project-registered', { ticketId, path, displayName: parseRepoDisplayName(res.stdout) })
+    } catch (error) {
+      this.logger.warn('orca:project-register-failed', { ticketId, path, reason: errorMessage(error) })
+    }
+  }
+
   /**
    * 启动 Agent 前的准备工作。
    *
@@ -596,6 +631,17 @@ function renderContext(items: ContextItem[]): string {
     else lines.push(`# 目录 ${item.path}`)
   }
   return lines.join('\n\n')
+}
+
+/** 从 `orca repo add --json` 的返回里取 displayName；取不到返回空串。 */
+export function parseRepoDisplayName(stdout: string): string {
+  try {
+    const parsed = JSON.parse(stdout) as Record<string, any>
+    const result = (parsed.result ?? parsed) as Record<string, any>
+    return String(result?.repo?.displayName ?? result?.displayName ?? '')
+  } catch {
+    return ''
+  }
 }
 
 function parseJsonOrThrow(stdout: string): unknown {

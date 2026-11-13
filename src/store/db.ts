@@ -456,6 +456,9 @@ type Row = Record<string, unknown>
 
 /** SQLite 存储层。只负责读写，不做业务判断。 */
 export class Store {
+  /** 工单来源上下文缓存：群名与发起人不会变。 */
+  private originCache = new Map<string, { chat: string; chatName: string; actor: string; actorName: string; actorType: 'user' | 'bot' } | null>()
+
   readonly db: DatabaseSync
 
   constructor(path: string) {
@@ -1124,6 +1127,71 @@ export class Store {
     }
   }
 
+  /**
+   * 工单来源的上下文：群、群名、发起人、发起人类型。
+   *
+   * 工单表里只有 chat_id，群名与「是用户还是机器人」都在来源消息上；
+   * 工单日志要能回答「这是哪个群、谁提的需求」，只能从这里回捞。
+   */
+  ticketOrigin(ticketId: string): {
+    chat: string
+    chatName: string
+    actor: string
+    actorName: string
+    actorType: 'user' | 'bot'
+  } | null {
+    // 群与发起人不会变，查一次就缓存住；日志写得勤，不该每行都回查库。
+    const cached = this.originCache.get(ticketId)
+    if (cached !== undefined) return cached
+    const origin = this.readTicketOrigin(ticketId)
+    if (this.originCache.size > 500) this.originCache.clear()
+    this.originCache.set(ticketId, origin)
+    return origin
+  }
+
+  private readTicketOrigin(ticketId: string): {
+    chat: string
+    chatName: string
+    actor: string
+    actorName: string
+    actorType: 'user' | 'bot'
+  } | null {
+    const ticket = this.getTicket(ticketId)
+    if (!ticket) return null
+    const mandate = this.getMandate(ticket.mandateId)
+    const source = this.db
+      .prepare('SELECT chat_id, chat_name, actor_id, actor_name, is_bot FROM triggers WHERE thread_id = ? ORDER BY received_at ASC LIMIT 1')
+      .get(ticket.threadId) as Row | undefined
+    const chat = mandate?.chatId || ticket.chatId || String(source?.chat_id ?? '')
+    return {
+      chat,
+      chatName: String(source?.chat_name ?? ''),
+      // 授权人优先：工单可能由管理员指派给别人，那个人才是这条链路的负责人。
+      actor: mandate?.actorId || String(source?.actor_id ?? ''),
+      actorName: mandate?.actorName || String(source?.actor_name ?? ''),
+      actorType: source?.is_bot ? 'bot' : 'user',
+    }
+  }
+
+  /**
+   * 工单日志上下文：群、群名、发起人、发起人类型、运行时。
+   *
+   * 日志行要能直接回答「哪个群、谁提的、哪个运行时在动」，
+   * 所以这里把工单能查到的维度一次性拼齐。
+   */
+  ticketLogContext(ticketId: string): Record<string, unknown> {
+    const origin = this.ticketOrigin(ticketId)
+    const runtime = this.latestAssignment(ticketId)?.runtimeId ?? ''
+    return {
+      ...(origin?.chat ? { chat: origin.chat } : {}),
+      ...(origin?.chatName ? { chatName: origin.chatName } : {}),
+      ...(origin?.actor ? { actor: origin.actor } : {}),
+      ...(origin?.actorName ? { actorName: origin.actorName } : {}),
+      ...(origin?.actorType ? { actorType: origin.actorType } : {}),
+      ...(runtime ? { runtime } : {}),
+    }
+  }
+
   // ---------- Assignment / Report / Input ----------
 
   insertAssignment(a: Assignment): void {
@@ -1254,8 +1322,21 @@ export class Store {
     this.db.prepare("UPDATE inputs SET assignment_id = ? WHERE ticket_id = ? AND assignment_id = ''").run(assignmentId, ticketId)
   }
 
-  markInputsDelivered(ticketId: string, at: string): void {
-    this.db.prepare("UPDATE inputs SET status = 'delivered', delivered_at = ? WHERE ticket_id = ? AND status = 'pending'").run(at, ticketId)
+  /**
+   * 标记这批输入已投递。
+   *
+   * 只标记真正送出去的那些：没送出的输入不能算送达，否则它会被当成「已投递等 ack」，
+   * 既不会再重投，也查不出到底有没有送到 worker 终端。
+   */
+  markInputsDelivered(ticketId: string, ids: string[], at: string): void {
+    if (ids.length === 0) return
+    const update = this.db.prepare("UPDATE inputs SET status = 'delivered', delivered_at = ? WHERE id = ? AND ticket_id = ? AND status = 'pending'")
+    for (const id of ids) update.run(at, id, ticketId)
+  }
+
+  /** 重投到上限仍未送达：标成 expired，不再重投，也不代表用户请求已被完成。 */
+  expireInput(ticketId: string, id: string): number {
+    return Number(this.db.prepare("UPDATE inputs SET status = 'expired' WHERE id = ? AND ticket_id = ? AND status = 'pending'").run(id, ticketId).changes)
   }
 
   /**
@@ -1402,6 +1483,18 @@ export class Store {
 
   deleteCursor(key: string): void {
     this.db.prepare('DELETE FROM cursors WHERE key = ?').run(key)
+  }
+
+  // ---------- workspace 回收标记 ----------
+
+  /** 记下「这张工单的 workspace 已被回收」，用于关单后的话题提示。 */
+  markWorkspaceRemoved(ticketId: string, at: string): void {
+    this.setCursor(`workspace:removed:${ticketId}`, at, at)
+  }
+
+  /** workspace 是否已经被回收（目录已删）。 */
+  isWorkspaceRemoved(ticketId: string): boolean {
+    return this.getCursor(`workspace:removed:${ticketId}`) !== null
   }
 
   // ---------- 自增计数器 ----------
