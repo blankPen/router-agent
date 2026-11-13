@@ -177,6 +177,26 @@ describe('项目登记 API', () => {
     }
   })
 
+  it('扫描本地项目：失败时返回 500 并记 project:scan-failed', async () => {
+    const warns: Array<{ message: string; extra?: Record<string, unknown> }> = []
+    const server = await createApiServer({
+      engine,
+      store,
+      config,
+      logger: { info: () => {}, error: () => {}, warn: (message, extra) => warns.push({ message, extra }) },
+      projectScan: { scan: async () => { throw new Error('会话目录读不了') } },
+    })
+    try {
+      const res = await call(server, 'POST', '/api/projects/scan', {})
+      expect(res.status).toBe(500)
+      expect(res.json.error).toBe('project-scan-failed')
+      expect(warns[0]?.message).toBe('project:scan-failed')
+      expect(warns[0]?.extra?.detail).toBe('会话目录读不了')
+    } finally {
+      await server.close()
+    }
+  })
+
   it('扫描本地项目：返回候选清单并记录事件', async () => {
     const events: any[] = []
     const server = await createApiServer({
