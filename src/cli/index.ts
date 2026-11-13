@@ -35,7 +35,7 @@ import { simulate } from './simulate.js'
 import { runReport, readContentArg, type ReportOptions } from './report.js'
 import type { Prompter } from './prompts.js'
 import { realRunner, type CommandRunner } from '#infra/process.js'
-import { errorMessage } from '#infra/logger.js'
+import { errorMessage, withFieldContext } from '#infra/logger.js'
 import { resolveImageModelConfig, resolvePiModelConfig, type PiModelConfig } from '../router/model-config.js'
 import { createDecisionEngine, createIntakeEngine } from '../router/engine-factory.js'
 import type { DecisionAudit } from '../router/decision-engine.js'
@@ -1334,7 +1334,8 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       t3: t3Runner,
     },
     claudeBin: output.claudeBin ?? 'claude',
-    logger,
+    // 运行时适配器的日志同样按工单补上下文：面板上要能看出是哪个工单、哪个群、哪个运行时。
+    logger: withFieldContext(logger, 'ticketId', ticketId => store.ticketLogContext(ticketId)),
   })
   config.runtime.loadedIds = runtimePlugins.ids
   config.runtime.optionSpecs = runtimePlugins.specs
@@ -1936,6 +1937,7 @@ export function createLogger(home: string, output: CliIo, echo = true): Logger {
       level,
       domain: dimensions.domain,
       event: dimensions.event,
+      category: dimensions.category,
       message,
       // 记下写入时的版本号：排查助手靠它判断这条日志是不是当前版本还在报。
       version: PACKAGE_VERSION,

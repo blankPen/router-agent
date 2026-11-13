@@ -26,6 +26,7 @@ function entry(at: string, level: string, message: string, data?: Record<string,
     level,
     domain: dimensions.domain,
     event: dimensions.event,
+    category: dimensions.category,
     ...(dimensions.trace ? { trace: dimensions.trace } : {}),
     message,
     ...(data ? { data } : {}),
@@ -37,6 +38,7 @@ function jsonResponse(payload: unknown, status = 200): Response {
 }
 
 describe('tokenize', () => {
+
   it('中文按二元组切，英文数字按整词切', () => {
     const tokens = tokenize('飞书消息没反应 codex timeout')
     expect(tokens).toContain('飞书')
@@ -103,6 +105,33 @@ describe('selectEvidence', () => {
   it('错误优先于普通信息', () => {
     const evidence = selectEvidence(entries, { question: '消息没发出去' })
     expect(evidence[0]?.message).toBe('outbox:failed')
+  })
+
+  it('证据里带上群、发起人与运行时等结构维度', () => {
+    const evidence = selectEvidence([
+      {
+        at: '2026-11-09T10:00:00.000Z',
+        level: 'error',
+        message: 'worker:status-failed',
+        domain: 'worker',
+        event: 'status-failed',
+        category: 'event',
+        chat: 'oc_1',
+        chatName: '研发群',
+        actor: 'ou_alice',
+        actorName: '林薇',
+        actorType: 'user',
+        runtime: 'orca',
+        ticket: 'tk-1',
+        trace: 'tk-1',
+        data: { reason: '超时' },
+      },
+    ], { question: 'worker 状态' })
+
+    // 维度已经单独成列，但排查证据里不能丢：群和发起人正是要回答的问题。
+    expect(evidence[0]?.detail).toContain('chatName=研发群')
+    expect(evidence[0]?.detail).toContain('actorType=user')
+    expect(evidence[0]?.detail).toContain('runtime=orca')
   })
 
   it('级别过滤生效', () => {

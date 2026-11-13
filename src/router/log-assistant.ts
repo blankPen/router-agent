@@ -546,9 +546,8 @@ export function distinctIssues(errors: LogEntry[]): LogOverviewIssue[] {
 export function overviewIssueOf(entry: LogEntry): LogOverviewIssue {
   const hit = matchSymptoms([entry])[0]
   const symptom = hit?.symptom
-  const detail = entry.data
-    ? Object.entries(entry.data).map(([key, value]) => `${key}=${formatValue(value)}`).join(' ')
-    : ''
+  const fields = evidenceData(entry)
+  const detail = Object.entries(fields).map(([key, value]) => `${key}=${formatValue(value)}`).join(' ')
   return {
     event: entry.message,
     // 标题说「这是什么情况」，不是内部的知识库分类名。
@@ -629,11 +628,31 @@ function levelWeight(level: string): number {
 }
 
 function haystack(entry: LogEntry): string {
-  return `${entry.message} ${entry.data ? JSON.stringify(entry.data) : ''}`.toLowerCase()
+  return `${entry.message} ${JSON.stringify(evidenceData(entry))}`.toLowerCase()
+}
+
+/**
+ * 证据里的字段：结构维度 + 业务字段。
+ *
+ * 群、发起人、运行时这些已经单独成列，但排查时它们恰恰是最关键的证据，
+ * 不能因为分了列就从证据里丢掉。
+ */
+function evidenceData(entry: LogEntry): Record<string, unknown> {
+  return {
+    ...(entry.chat ? { chat: entry.chat } : {}),
+    ...(entry.chatName ? { chatName: entry.chatName } : {}),
+    ...(entry.actor ? { actor: entry.actor } : {}),
+    ...(entry.actorName ? { actorName: entry.actorName } : {}),
+    ...(entry.actorType ? { actorType: entry.actorType } : {}),
+    ...(entry.runtime ? { runtime: entry.runtime } : {}),
+    ...(entry.ticket ? { ticket: entry.ticket } : {}),
+    ...(entry.trace ? { trace: entry.trace } : {}),
+    ...(entry.data ?? {}),
+  }
 }
 
 function toEvidence(entry: LogEntry): LogEvidence {
-  const data = entry.data ?? {}
+  const data = evidenceData(entry)
   const detail = Object.entries(data)
     .map(([key, value]) => `${key}=${formatValue(value)}`)
     .join(' ')
