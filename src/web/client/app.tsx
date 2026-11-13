@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
+  ALL_FILTER,
+  facetCounts,
+  filterLogLines,
+  isFilterActive,
+  type LogFilter,
+} from './log-filters.js'
+import {
   LLM_FIELDS,
   allRuntimeOptionFields,
   blockEffect,
@@ -160,6 +167,12 @@ interface ServiceStatus {
 interface LogEntry {
   at: string
   level: string
+  /** 事件域（事件名第一段），日志页按它过滤。 */
+  domain?: string
+  /** 事件动作（事件名冒号后的部分）。 */
+  event?: string
+  /** 链路 ID：把同一条链路的日志串起来。 */
+  trace?: string
   message: string
   data?: Record<string, unknown>
 }
@@ -2963,6 +2976,9 @@ function LogsView(): JSX.Element {
   const [meta, setMeta] = useState<{ path: string; exists: boolean; size: number } | null>(null)
   const [live, setLive] = useState(true)
   const [level, setLevel] = useState<string>('all')
+  const [domain, setDomain] = useState<string>(ALL_FILTER)
+  const [event, setEvent] = useState<string>(ALL_FILTER)
+  const [trace, setTrace] = useState<string>(ALL_FILTER)
   const [keyword, setKeyword] = useState('')
   const [syncedAt, setSyncedAt] = useState<Date | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -3043,21 +3059,24 @@ function LogsView(): JSX.Element {
     setFollowing(true)
   }, [])
 
-  const counts = useMemo(() => {
-    const map: Record<string, number> = { all: lines.length }
-    for (const line of lines) map[line.level] = (map[line.level] ?? 0) + 1
-    return map
-  }, [lines])
+  const filter = useMemo<LogFilter>(
+    () => ({ level, domain, event, trace, keyword }),
+    [level, domain, event, trace, keyword],
+  )
+  // 各维度候选按「其它维度」的条件统计：选中 tk-84 后，级别按钮上的「全部」就是这条链路的条数。
+  const levelOptions = useMemo(() => facetCounts(lines, filter, 'level'), [lines, filter])
+  const domainOptions = useMemo(() => facetCounts(lines, filter, 'domain'), [lines, filter])
+  // 动作按选中的域级联，选中的值不在候选里就退回「全部」。
+  const eventOptions = useMemo(() => facetCounts(lines, filter, 'event'), [lines, filter])
+  const traceOptions = useMemo(() => facetCounts(lines, filter, 'trace'), [lines, filter])
+  const domainValue = domainOptions.some(option => option.value === domain) ? domain : ALL_FILTER
+  const eventValue = eventOptions.some(option => option.value === event) ? event : ALL_FILTER
+  const traceValue = traceOptions.some(option => option.value === trace) ? trace : ALL_FILTER
 
-  const visible = useMemo(() => {
-    const query = keyword.trim().toLowerCase()
-    return lines.filter(line => {
-      if (level !== 'all' && line.level !== level) return false
-      if (!query) return true
-      const haystack = `${line.message} ${JSON.stringify(line.data ?? {})}`
-      return haystack.toLowerCase().includes(query)
-    })
-  }, [lines, level, keyword])
+  const visible = useMemo(
+    () => filterLogLines(lines, { ...filter, domain: domainValue, event: eventValue, trace: traceValue }),
+    [lines, filter, domainValue, eventValue, traceValue],
+  )
 
   // 行元素按过滤结果缓存：轮询没有新内容时不再重建整张列表。
   const rows = useMemo(() => visible.map(line => (
@@ -3092,11 +3111,21 @@ function LogsView(): JSX.Element {
   }
 
   const clearFilters = useCallback((): void => {
-    setLevel('all')
+    setLevel(ALL_FILTER)
+    setDomain(ALL_FILTER)
+    setEvent(ALL_FILTER)
+    setTrace(ALL_FILTER)
     setKeyword('')
   }, [])
 
-  const levels = LOG_LEVELS.filter(item => item !== 'raw' || (counts.raw ?? 0) > 0)
+  const levelCounts = useMemo(() => {
+    const map: Record<string, number> = {}
+    for (const option of levelOptions) map[option.value] = option.count
+    // 「全部」是不限级别时的条数：其它维度都算上。
+    map.all = levelOptions.reduce((sum, option) => sum + option.count, 0)
+    return map
+  }, [levelOptions])
+  const levels = LOG_LEVELS.filter(item => item !== 'raw' || (levelCounts.raw ?? 0) > 0)
   const loading = meta === null
   const subtitle = meta ? (
     <>
@@ -3145,7 +3174,7 @@ function LogsView(): JSX.Element {
               >
                 <span className="log-chip-dot" style={{ background: LOG_LEVEL_COLOR[item] }} />
                 <span>{LOG_LEVEL_LABEL[item]}</span>
-                <span className="log-chip-count">{counts[item] ?? 0}</span>
+                <span className="log-chip-count">{levelCounts[item] ?? 0}</span>
               </button>
             ))}
           </div>
@@ -3160,6 +3189,59 @@ function LogsView(): JSX.Element {
           </div>
           {notice && <span className="log-notice" role="status">{notice}</span>}
           <button className="btn ghost tiny" onClick={() => setLines([])} disabled={lines.length === 0}>清空视图</button>
+          {/* 多维过滤：级别之外再按域 / 动作 / 链路 ID 收窄，维度之间取交集。 */}
+          <div className="log-dims">
+            <label className="log-dim">
+              <span className="log-dim-label">域</span>
+              <select
+                className="log-select"
+                value={domainValue}
+                onChange={change => {
+                  setDomain(change.target.value)
+                  setEvent(ALL_FILTER)
+                }}
+                aria-label="按事件域过滤"
+              >
+                <option value={ALL_FILTER}>全部</option>
+                {domainOptions.map(option => (
+                  <option key={option.value} value={option.value}>{option.value}（{option.count}）</option>
+                ))}
+              </select>
+            </label>
+            <label className="log-dim">
+              <span className="log-dim-label">动作</span>
+              <select
+                className="log-select"
+                value={eventValue}
+                onChange={change => setEvent(change.target.value)}
+                aria-label="按事件动作过滤"
+                disabled={eventOptions.length === 0}
+              >
+                <option value={ALL_FILTER}>全部</option>
+                {eventOptions.map(option => (
+                  <option key={option.value} value={option.value}>{option.value}（{option.count}）</option>
+                ))}
+              </select>
+            </label>
+            <label className="log-dim">
+              <span className="log-dim-label">追踪</span>
+              <select
+                className="log-select"
+                value={traceValue}
+                onChange={change => setTrace(change.target.value)}
+                aria-label="按追踪 ID 过滤"
+                disabled={traceOptions.length === 0}
+              >
+                <option value={ALL_FILTER}>全部</option>
+                {traceOptions.map(option => (
+                  <option key={option.value} value={option.value}>{option.value}（{option.count}）</option>
+                ))}
+              </select>
+            </label>
+            {isFilterActive(filter) && (
+              <button className="btn ghost tiny" onClick={clearFilters}>清除筛选</button>
+            )}
+          </div>
         </div>
 
         {error && (
@@ -3199,8 +3281,8 @@ function LogsView(): JSX.Element {
             <div className="log-empty">
               <Icon name="file-text" size={22} />
               <p>{lines.length === 0 ? '暂无日志' : '没有匹配的日志'}</p>
-              <small>{lines.length === 0 ? '服务产生新日志后会自动出现在这里。' : '换个级别或关键字试试。'}</small>
-              {(level !== 'all' || keyword.trim()) && (
+              <small>{lines.length === 0 ? '服务产生新日志后会自动出现在这里。' : '换个级别、域或关键字试试。'}</small>
+              {isFilterActive(filter) && (
                 <button className="btn ghost tiny" onClick={clearFilters}>清除筛选</button>
               )}
             </div>

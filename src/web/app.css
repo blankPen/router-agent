@@ -2436,3 +2436,20 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
   .provider-picker .modal-foot { flex-wrap: wrap; }
   .provider-pick-spacer { display: none; }
 }
+
+/* 维度筛选：域 / 动作 / 追踪 ID，与级别筛选同属一条工具栏，维度之间取交集。 */
+.log-dims { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; width: 100%; }
+.log-dim { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--faint); }
+.log-select {
+  height: 26px;
+  max-width: 220px;
+  padding: 0 6px;
+  border: 1px solid var(--control);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 12px;
+}
+.log-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.log-select:disabled { color: var(--faint); }
