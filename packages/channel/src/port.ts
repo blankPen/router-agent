@@ -133,7 +133,7 @@ export interface ChannelAdapter {
   send(message: OutboundMessage): Promise<SendReceipt>
 
   /** 启动卡片按钮回调消费；不支持时由内核走序号回复。 */
-  startCardActions?(sink: (action: CardAction) => void): Promise<void> | void
+  startCardActions?(sink: (action: CardAction) => void, opts?: { onError?: (error: Error) => void }): Promise<void> | void
   stopCardActions?(): void
 
   /** 用户点选后把卡片回写成已选 / 已过期状态。 */

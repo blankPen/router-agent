@@ -458,7 +458,7 @@ ra config set runtime.options.t3code.model group/never-stuck
 
 ## Worker 规范注入
 
-默认 `worker.skill.mode: path`：首轮只发 ≤25 行的短引导（`buildWorkerBrief`），包含工单事实、研判结论 `mandate.scope`、用户原话（最多 2000 字，超出时给 `request.md` 全文路径）和技能入口。冲突时以用户原话为准，并要求 Worker 在 `ra reply --summary` 里写明差异。
+默认 `worker.skill.mode: path`：首轮只发 ≤25 行的短引导（`buildWorkerBrief`），包含工单事实、研判结论 `mandate.scope`、用户原话（最多 2000 字，超出时给 `request.md` 全文路径）和技能入口。授权范围内以用户原话细节为准；原话要求超出授权范围时 Worker 不得自行执行，用 `blocked` 上报并请人确认。
 
 技能文件随运行时包发布，源码在 `packages/runtime/src/spec/worker/`（`SKILL.md` + `references/`），构建时复制进 `dist/`。用户覆盖固定放在 `<RA_HOME>/specs/worker/<相对路径>`，读取时覆盖文件优先；Web 面板「配置 → 规范文件」按文件列出，旧 `prompt-mode.md` / `contract.md` 只读留存，并标注「已并入 SKILL.md」。技能文件不会写进项目仓库，也不改项目自己的 `AGENTS.md`。
 

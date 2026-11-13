@@ -190,7 +190,7 @@ export class FeishuChannel implements ChannelAdapter {
     return this.sender.createDocument(title, markdown)
   }
 
-  async startCardActions(sink: (action: CardAction) => void): Promise<void> {
+  async startCardActions(sink: (action: CardAction) => void, opts?: { onError?: (error: Error) => void }): Promise<void> {
     if (this.cardConsumer || !this.opts.cardActions) return
     this.cardConsumer = new FeishuConsumer({
       ...(this.opts.bin ? { bin: this.opts.bin } : {}),
@@ -200,9 +200,18 @@ export class FeishuChannel implements ChannelAdapter {
         const action = normalizeCardAction(raw)
         if (action) sink({ ...action, channelId: this.id })
       },
-      ...(this.opts.hooks?.onError ? { onError: this.opts.hooks.onError } : {}),
+      onError: error => {
+        this.logger.warn('feishu:card-consumer-error', { detail: error.message })
+        opts?.onError?.(error)
+      },
     })
-    this.cardConsumer.start()
+    try {
+      this.cardConsumer.start()
+    } catch (error) {
+      this.cardConsumer = null
+      opts?.onError?.(error instanceof Error ? error : new Error(String(error)))
+      throw error
+    }
   }
 
   stopCardActions(): void {

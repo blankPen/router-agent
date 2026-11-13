@@ -94,6 +94,8 @@ function isReplyBlock(value: unknown): value is ReplyBlock {
     }
     case 'card':
       return typeof (value as { title?: unknown }).title === 'string'
+        && isOptionalArray((value as { fields?: unknown }).fields, isReplyField)
+        && isOptionalArray((value as { actions?: unknown }).actions, isReplyAction)
     case 'choices': {
       const choices = value as { questionId?: unknown; prompt?: unknown; options?: unknown }
       return typeof choices.questionId === 'string'
@@ -121,4 +123,20 @@ function isReplyOption(value: unknown): value is ReplyOption {
   if (!value || typeof value !== 'object') return false
   const option = value as ReplyOption
   return typeof option.id === 'string' && typeof option.label === 'string'
+}
+
+function isOptionalArray<T>(value: unknown, guard: (item: unknown) => item is T): boolean {
+  return value === undefined || value === null || (Array.isArray(value) && value.every(guard))
+}
+
+function isReplyField(value: unknown): value is ReplyField {
+  if (!value || typeof value !== 'object') return false
+  const field = value as ReplyField
+  return typeof field.label === 'string' && typeof field.value === 'string'
+}
+
+function isReplyAction(value: unknown): value is ReplyAction {
+  if (!value || typeof value !== 'object') return false
+  const action = value as ReplyAction
+  return typeof action.label === 'string' && typeof action.url === 'string'
 }

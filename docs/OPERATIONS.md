@@ -196,6 +196,7 @@ Router 不做对话，只在必要时说话：
 | `spec:migrated` / `spec:migration-failed` | Service | `source` `spec` / `detail` | 旧版 `router.soul` 规范迁移结果 |
 | `feishu:reconnecting` | Source | `attempt` `delayMs` | 事件消费者断开，已安排退避重连 |
 | `feishu:spawn-failed` | Source | `detail` | lark-cli 无法拉起（未安装 / 无权限），会继续重试 |
+| `feishu:card-consumer-error` | Source | `detail` | 卡片按钮回调消费失败（spawn / stderr / 非法 JSON），已通知装配层降级为序号回复 |
 | `feishu:card-fallback` | Sender | `target` `key` `code` `detail` | 互动卡片发送失败，已自动降级为富文本 |
 | `feishu:reply-card-fallback` | Sender | `target` `key` `code` `message` | 结构化回复卡片失败，已按 fallbackText 降级 |
 | `feishu:doc-fallback` | Sender | `title` `message` | 文档块创建失败，已保留正文并内联回复 |

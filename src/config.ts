@@ -1179,7 +1179,8 @@ export function writeConfig(home: string, config: AppConfig): void {
       keepHours: config.workspace.keepHours,
       sweepMinutes: config.workspace.sweepMinutes,
     },
-    worker: { tools: config.worker.tools, evidence: config.worker.evidence },
+    worker: { tools: config.worker.tools, evidence: config.worker.evidence, skill: config.worker.skill },
+    reply: config.reply,
     runtime: {
       default: config.runtime.default,
       ...(config.runtime.options ? { options: config.runtime.options } : {}),

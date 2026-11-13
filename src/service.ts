@@ -20,7 +20,7 @@ import { ReportPoller, appendEvent, readWorkerMeta, type WorkerMeta, type Worker
 import { classifyAgentStatus } from '#runtime/status.js'
 import { RuntimeRegistry } from '#runtime/registry.js'
 import { normalizeRuntimeId, ORCA_RUNTIME_ID } from '#runtime/runtimes/catalog.js'
-import { buildNeutralContract, buildWorkerBrief, buildWorkerPrompt, workerSkillDir, workerSkillSnapshot, type WorkerSkillSnapshot } from '#runtime/spec/index.js'
+import { buildNeutralContract, buildWorkerBrief, buildWorkerPrompt, ensureWorkerSkillDir, workerSkillDir, workerSkillSnapshot, type WorkerSkillSnapshot } from '#runtime/spec/index.js'
 import { migrateLegacySoul } from './specs/index.js'
 import { workBranch } from '#runtime/naming.js'
 import { buildResumeHint } from '#runtime/resume.js'
@@ -530,6 +530,8 @@ export class RouterService {
   private readonly channels?: ChannelRegistry
   /** 卡片回调事件流没启动成功的通道；auto 模式下选择题退化为序号回复。 */
   private readonly cardActionsUnavailable = new Set<string>()
+  /** tick 与卡片回调共用一条投递队列，避免同一 Input 被并发投递两次。 */
+  private deliveryQueue: Promise<void> = Promise.resolve()
   private timers: NodeJS.Timeout[] = []
   private running = false
   private idleAfterMs: number
@@ -1031,7 +1033,7 @@ export class RouterService {
     this.poller.scan()
     await this.effects.tick()
     await this.launchPending()
-    await this.deliverPendingInputs()
+    await this.serializedDeliverPendingInputs()
   }
 
   async start(): Promise<void> {
@@ -1195,7 +1197,8 @@ export class RouterService {
     const mandate = this.store.getMandate(ticket.mandateId)
     const scope = mandate?.scope?.trim() || ticket.title
     const skillMode = this.config.worker.skill.mode
-    const skill = skillMode === 'path' ? workerSkillSnapshot(this.config.home) : undefined
+    const skillDir = skillMode === 'path' ? ensureWorkerSkillDir(this.config.home) : undefined
+    const skill = skillDir ? workerSkillSnapshot(this.config.home) : undefined
     // inline 是回滚开关：旧会话仍能拿到完整手册，行为与拆分前一致。
     const contract = skillMode === 'path'
       ? buildWorkerBrief({
@@ -1210,7 +1213,7 @@ export class RouterService {
           workBranch: branchName,
           workdir: '',
           workerDir,
-          skillDir: workerSkillDir(this.config.home),
+          skillDir: skillDir ?? workerSkillDir(this.config.home),
           ...(skill ? { skill: { name: skill.name, version: skill.version, sha256: skill.sha256 } } : {}),
           ...(ticket.request ? { requestPath: join(workerDir, 'request.md') } : {}),
           attachments: ticket.attachments ?? [],
@@ -1402,6 +1405,12 @@ export class RouterService {
 
   private activeWorkers(): number {
     return this.store.listOpenTickets().filter(t => t.stage === 'running').length
+  }
+
+  private serializedDeliverPendingInputs(): Promise<void> {
+    const run = this.deliveryQueue.then(() => this.deliverPendingInputs())
+    this.deliveryQueue = run.catch(() => undefined)
+    return run
   }
 
   async deliverPendingInputs(): Promise<void> {
@@ -2180,7 +2189,7 @@ export class RouterService {
       operator: action.operatorId,
     })
     // 用户正在等：立刻把答案投给 worker，不等下一轮 tick。
-    void this.deliverPendingInputs().catch(error => {
+    void this.serializedDeliverPendingInputs().catch(error => {
       this.logger.warn('question:deliver-failed', { ticketId: ticket.id, questionId, detail: errorMessage(error) })
     })
   }
@@ -2266,6 +2275,14 @@ export class RouterService {
     }
     const replyPayload = state.replyPayload
     const reply = state.reply?.trim() || replyPayload?.fallbackText.trim() || ''
+    // progress 里的富块（图片 / 卡片 / 文档）不能等文本摘要：立即发结构化载荷，
+    // 同时不把同一段正文再塞进 progress 摘要，避免重复。
+    const richProgress = Boolean(
+      replyPayload
+      && state.state === 'progress'
+      && replyPayload.blocks.some(block => block.type !== 'markdown'),
+    )
+    const reportReply = richProgress ? '' : reply
     const { report, ackedInputs } = this.engine.report(assignment.id, {
       ticketId: ticket.id,
       turn: state.turn,
@@ -2274,7 +2291,7 @@ export class RouterService {
       ...(state.humanAction ? { humanAction: state.humanAction } : {}),
       ...(state.prNumber ? { prNumber: state.prNumber } : {}),
       ...(state.prUrl ? { prUrl: state.prUrl } : {}),
-      ...(reply ? { reply } : {}),
+      ...(reportReply ? { reply: reportReply } : {}),
       ackedInputs: state.ackedInputs,
     })
     // 只清真正落成 acked 的输入：worker 声称 ack 了但库里没匹配到时，
@@ -2288,12 +2305,12 @@ export class RouterService {
       summary: preview(state.summary),
       ...(state.humanAction ? { humanAction: preview(state.humanAction) } : {}),
       ...(state.prNumber ? { pr: state.prNumber } : {}),
-      ...(reply ? { replyChars: reply.length } : {}),
+      ...(reportReply ? { replyChars: reportReply.length } : {}),
       ...(replyPayload ? { replyBlocks: replyPayload.blocks.length } : {}),
     })
 
     // 追问的回答（ackedInputs 非空）用户正在等，立即发送；其余 progress 交给定时轮询合并。
-    const answersInput = state.state === 'progress' && report.ackedInputs.length > 0 && Boolean(reply)
+    const answersInput = state.state === 'progress' && report.ackedInputs.length > 0 && Boolean(reportReply)
     if (answersInput) rememberProgress(this.seenProgress(ticket.id), progressSignature([report]))
     // 发送终态或追问回答前，先把更早的进展补同步掉，保证话题里的先后顺序。
     if (state.state !== 'progress' || answersInput) {
@@ -2305,7 +2322,7 @@ export class RouterService {
     }
 
     const reportKey = `${state.turn}:${state.updatedAt}`
-    if ((reply || replyPayload) && (state.state !== 'progress' || answersInput)) {
+    if ((reply || replyPayload) && (state.state !== 'progress' || answersInput || richProgress)) {
       // Worker 给了完整回复就原样发；正文里带文档链接 / PR 链接都照发，Router 不改写。
       const text = state.prUrl && !reply.includes(state.prUrl) ? `${reply}\n\nPR：${state.prUrl}` : reply
       if (replyPayload) {
@@ -2871,9 +2888,19 @@ let repo = ticket.repo
   private prepareQuestion(ticket: Ticket, payload: ReplyPayload, turn: number): ReplyPayload {
     const choice = choiceBlockOf(payload)
     if (!choice) return payload
-    const mode = this.askModeOf(ticket)
+    // 按钮一次只能提交一个 optionId；多选必须走序号文本，避免第一次点击就关闭问题。
+    const mode = choice.multi ? 'text' : this.askModeOf(ticket)
     const questionId = choice.questionId || `q_${ticket.id}_${turn}`
     if (mode === 'text') return { ...payload, blocks: payload.blocks.map(block => block === choice ? { ...block, questionId, mode } : block) }
+    const owner = this.store.getQuestion(questionId)
+    if (owner && owner.ticketId !== ticket.id) {
+      this.logger.warn('question:rejected', {
+        ticketId: ticket.id,
+        questionId,
+        reason: 'id-owned-by-other-ticket',
+      })
+      return { ...payload, blocks: payload.blocks.map(block => block === choice ? { ...block, mode: 'text' } : block) }
+    }
 
     const now = this.clock.now()
     const created = Date.parse(now)

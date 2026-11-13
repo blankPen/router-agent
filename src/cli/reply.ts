@@ -156,7 +156,11 @@ async function buildReply(deps: ReplyDeps, opts: ReplyOptions, kind: string): Pr
   const body = readContentArg(deps, opts.body ?? opts.reply).trim()
   // 兼容旧用法：只给 summary 的 `ra report` 仍然可以上报，Router 会提示交付不完整。
   if (!body && !hasStructuredInput(opts)) {
-    return { reply: '', summary: summaryOf(opts, opts.summary ?? opts.ticket) }
+    const summary = opts.summary?.trim() ?? ''
+    if (kind !== 'auto' || !summary) {
+      throw new Error('回复不能为空：用 --body / --image / --ask 或 --kind doc 指定内容')
+    }
+    return { reply: '', summary }
   }
   const resolvedKind = kind === 'auto' ? inferKind(opts, body) : kind
   const images = normalizeImageArgs(opts)
@@ -292,8 +296,7 @@ function imageBlocks(images: LabeledImage[]): ReplyBlock[] {
     })
   }
   for (const image of images) {
-    if (before && image === before) continue
-    if (after && image === after) continue
+    if (before && after && (image === before || image === after)) continue
     const caption = image.label === 'before' ? 'Before（基线）' : image.label === 'after' ? 'After（本分支）' : undefined
     blocks.push({
       type: 'image',

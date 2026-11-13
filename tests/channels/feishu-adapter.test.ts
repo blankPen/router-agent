@@ -68,6 +68,32 @@ function channel(sender = new FakeSender()) {
 }
 
 describe('飞书通道适配器', () => {
+  it('卡片回调消费者启动失败时回调 onError 并记 warn，便于降级按钮', async () => {
+    const logs: { message: string; extra?: Record<string, unknown> }[] = []
+    const errors: Error[] = []
+    const ch = new FeishuChannel({
+      config: cfg,
+      runner,
+      sender: new FakeSender(),
+      cardActions: true,
+      bin: '/nonexistent/lark-cli-for-test',
+      logger: {
+        info: () => {},
+        warn: (message, extra) => logs.push({ message, ...(extra ? { extra } : {}) }),
+        error: () => {},
+      },
+    })
+    await ch.startCardActions(() => {}, { onError: error => errors.push(error) })
+    await new Promise(resolve => setImmediate(resolve))
+    ch.stopCardActions()
+
+    expect(errors.some(error => error.message.includes('spawn-failed'))).toBe(true)
+    expect(logs).toContainEqual({
+      message: 'feishu:card-consumer-error',
+      extra: { detail: expect.stringContaining('spawn-failed') },
+    })
+  })
+
   it('归一化后带上通道实例 ID', () => {
     const { channel: ch } = channel()
     const result = ch.normalize(evt())
@@ -153,6 +179,26 @@ describe('飞书富回复', () => {
     })
     const elements = card.elements as Record<string, unknown>[]
     expect(elements.some(element => String(element.content ?? '').includes('图片上传失败'))).toBe(true)
+  })
+
+  it('卡片字段用 div 容器渲染，fields 数组不被拆散', () => {
+    const card = buildReplyCard({
+      payload: {
+        blocks: [{
+          type: 'card',
+          title: '部署结果',
+          fields: [{ label: '环境', value: 'staging' }],
+        }],
+        fallbackText: '部署结果',
+      },
+      images: new Map(),
+    })
+    const field = (card.elements as Record<string, unknown>[]).find(element => Array.isArray(element.fields))
+    expect(field?.tag).toBe('div')
+    expect(field?.fields).toEqual([{
+      is_short: false,
+      text: { tag: 'lark_md', content: '**环境**\nstaging' },
+    }])
   })
 
   it('回调模式的选择题生成按钮，value 里带 questionId 与 optionId', () => {

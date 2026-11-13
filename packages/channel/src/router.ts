@@ -28,7 +28,7 @@ export class ChannelRouter {
 
   async send(item: ChannelOutboxItem): Promise<void> {
     const text = item.text.trim()
-    if (!text) return
+    if (!text && !item.blocks?.length) return
     const adapter = this.registry.get(item.channelKind)
     if (!adapter) {
       this.logger.warn('channel:not-registered', { channel: item.channelKind, target: item.channelId, key: item.key })

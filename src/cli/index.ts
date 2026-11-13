@@ -1677,7 +1677,8 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   if (service) {
     for (const adapter of channels.list()) {
       if (!adapter.startCardActions) continue
-      void Promise.resolve(adapter.startCardActions(action => {
+      const startCardActions = adapter.startCardActions
+      void Promise.resolve().then(() => startCardActions.call(adapter, action => {
         void service.handleCardAction(action).catch(error => {
           logger.warn('question:handle-failed', {
             channel: adapter.id,
@@ -1685,6 +1686,11 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
             detail: errorMessage(error),
           })
         })
+      }, {
+        onError: error => {
+          service.markCardActionsUnavailable(adapter.id)
+          logger.warn('channel:card-actions-failed', { channel: adapter.id, detail: errorMessage(error) })
+        },
       }))
         .then(() => logger.info('channel:card-actions-started', { channel: adapter.id }))
         .catch(error => {

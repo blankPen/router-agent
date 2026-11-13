@@ -3,6 +3,7 @@ import { readWorkerSpec, workerSkillDir } from './reader.js'
 
 /** 用户原始请求在首轮引导里的字数上限；超出时只给开头并指向落盘全文。 */
 const REQUEST_MAX_CHARS = 2000
+const BRIEF_MAX_LINES = 25
 
 export interface WorkerPromptInput {
   ticket: Ticket
@@ -131,7 +132,7 @@ export interface WorkerBriefInput {
 
 export function buildWorkerBrief(input: WorkerBriefInput): string {
   const skillDir = input.skillDir ?? '(由 Router 给出)'
-  const lines: string[] = [
+  const head: string[] = [
     `# RA Worker｜工单 ${input.ticketId}｜${input.title}`,
     '',
     '开工前必须先读技能文件（交付形态、上报命令、截图规范都在里面）：',
@@ -143,32 +144,45 @@ export function buildWorkerBrief(input: WorkerBriefInput): string {
     `- 授权范围（研判结论，可直接执行）：${input.scope}`,
     ...(input.workerDir ? [`- 状态与报告目录：${input.workerDir}`] : []),
   ]
-  const request = requestSection(input)
-  if (request.length > 0) lines.push('', ...request)
-  const attachments = attachmentsSection(input.attachments ?? [])
-  if (attachments) lines.push('', attachments)
-  lines.push(
+  const tail = [
     '',
     '只对上面的请求负责；超出范围用 blocked 上报。',
     '每轮结束必须 ra reply（用法见 reply-protocol）。',
-  )
+  ]
+  const remaining = BRIEF_MAX_LINES - head.length - tail.length
+  const requestMaxBody = Math.max(1, remaining - 4)
+  const request = requestSection(input, requestMaxBody)
+  const usedByRequest = request.length > 0 ? request.length + 1 : 0
+  const attachmentMax = Math.max(0, remaining - usedByRequest - 7)
+  const attachments = attachmentsSection((input.attachments ?? []).slice(0, attachmentMax))
+  const lines = [...head]
+  if (request.length > 0) lines.push('', ...request)
+  if (attachments.length > 0) lines.push('', ...attachments)
+  lines.push(...tail)
   return lines.join('\n')
 }
 
 /** 用户原始请求段：原话优先，冲突时以原话为准。 */
-function requestSection(input: WorkerBriefInput): string[] {
+function requestSection(input: WorkerBriefInput, maxBodyLines: number): string[] {
   const raw = (input.request ?? '').trim()
   if (!raw) return []
   const who = input.requestActorName ?? ''
   const when = input.requestAt ?? ''
-  const body = raw.length > REQUEST_MAX_CHARS
+  let body = raw.length > REQUEST_MAX_CHARS
     ? `${raw.slice(0, REQUEST_MAX_CHARS)}\n…（已截断，全文见 ${input.requestPath ?? 'request.md'}）`
     : raw
+  const bodyLines = body.split('\n')
+  if (bodyLines.length > maxBodyLines) {
+    body = [
+      ...bodyLines.slice(0, Math.max(0, maxBodyLines - 1)),
+      `…（已截断，全文见 ${input.requestPath ?? 'request.md'}）`,
+    ].join('\n')
+  }
   return [
     `## 用户原始请求（${who}${when ? `，${when}` : ''}）`,
     body,
-    '（与上方结论冲突时以原文为准，并把差异写进 ra reply --summary。）',
+    '（原话要求超出授权范围时用 blocked 上报；授权范围内的细节以原话为准。）',
   ]
 }
 
-export { workerSkillDir, workerSkillSnapshot, type WorkerSkillSnapshot } from './reader.js'
+export { ensureWorkerSkillDir, workerSkillDir, workerSkillSnapshot, type WorkerSkillSnapshot } from './reader.js'

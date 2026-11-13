@@ -64,7 +64,7 @@ export function buildReplyCard(input: ReplyCardInput): Record<string, unknown> {
         if (block.markdown) pushMarkdown(elements, block.markdown)
         if (block.fields?.length) {
           elements.push({
-            tag: 'fields',
+            tag: 'div',
             fields: block.fields.map(field => ({
               is_short: false,
               text: { tag: 'lark_md', content: `**${field.label}**\n${field.value}` },

@@ -898,6 +898,39 @@ describe('RouterService 编排', () => {
     expect(digests[0]?.threadId).toBe('om_root')
   })
 
+  it('progress 携带非文本块时立即发送结构化载荷，摘要不重复同一段正文', async () => {
+    engine.ingest(makeTrigger())
+    await service.runOnce()
+    const ticket = store.listTickets()[0]!
+    const assignment = store.latestAssignment(ticket.id)!
+    const sender = new FakeSender()
+    const svc = new RouterService({
+      config, store, engine, runtime, decisionEngine: new AcceptEngine(), prTracker,
+      clock: { now: () => '2026-11-06T10:00:10.000Z' },
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      sender,
+    })
+
+    svc.onWorkerState({
+      ticketId: ticket.id, assignmentId: assignment.id, turn: 2, state: 'progress',
+      summary: '已截到对比图', prNumber: 0, prUrl: '', ackedInputs: [],
+      replyPayload: {
+        blocks: [{ type: 'image', image: { url: 'https://example.com/shot.png' }, caption: 'After' }],
+        fallbackText: '进展截图',
+      },
+      updatedAt: '2026-11-06T10:02:00.000Z',
+    })
+    svc.syncProgress()
+
+    const items = store.claimOutbox('2026-11-06T10:10:00.000Z', 50)
+    const rich = items.find(item => item.key.startsWith('reply:') && item.blocks?.length)
+    expect(rich?.text).toBe('进展截图')
+    const digests = items.filter(item => item.text.includes('工单「测试工单」进展'))
+    expect(digests).toHaveLength(1)
+    expect(digests[0]?.text).toContain('已截到对比图')
+    expect(digests[0]?.text).not.toContain('进展截图')
+  })
+
   it('内容相同的进展不会重复同步', async () => {
     engine.ingest(makeTrigger())
     await service.runOnce()
@@ -1382,7 +1415,11 @@ describe('会话文件清理', () => {
       return { svc, updates, advance: (iso: string) => { now = iso } }
     }
 
-    function ask(svc: RouterService, turn = 2): { ticketId: string; questionId: string } {
+    function ask(
+      svc: RouterService,
+      turn = 2,
+      over: { questionId?: string; multi?: boolean } = {},
+    ): { ticketId: string; questionId: string } {
       engine.ingest(makeTrigger())
       const { ticket } = engine.decide({ triggerId: 't1', decision: 'accept', strength: 'explicit', reason: 'ok', scope: '测试' })
       const assignment = engine.startAssignment(ticket!.id, { runtimeId: 'orca', handle: 'term-1', workdir: '/tmp/wt' })
@@ -1399,15 +1436,16 @@ describe('会话文件清理', () => {
         replyPayload: {
           blocks: [{
             type: 'choices',
-            questionId: '',
+            questionId: over.questionId ?? '',
             prompt: '选哪个方案？',
             options: [{ id: 'A', label: '方案 A' }, { id: 'B', label: '方案 B' }],
+            ...(over.multi ? { multi: true } : {}),
           }],
           fallbackText: '选哪个方案？',
         },
         updatedAt: '2026-11-06T10:00:10.000Z',
       })
-      return { ticketId: ticket!.id, questionId: `q_${ticket!.id}_${turn}` }
+      return { ticketId: ticket!.id, questionId: over.questionId ?? `q_${ticket!.id}_${turn}` }
     }
 
     it('ask 生成问题卡片；点选后落成 Input、回写卡片并立即投递', async () => {
@@ -1440,6 +1478,52 @@ describe('会话文件清理', () => {
       expect(outbox?.blocks?.[0]).toMatchObject({ type: 'choices', questionId, mode: 'text' })
       expect(store.getQuestion(questionId)).toBeNull()
       expect(ticketId).toBeTruthy()
+    })
+
+    it('多选题强制走文本序号，不会生成只能提交一个选项的按钮', async () => {
+      const { svc } = questionService()
+      const { ticketId, questionId } = ask(svc, 2, { multi: true })
+
+      const outbox = store.listOutbox(10).find(item => item.key.startsWith('reply:'))
+      expect(outbox?.blocks?.[0]).toMatchObject({ type: 'choices', questionId, mode: 'text', multi: true })
+      expect(store.getQuestion(questionId)).toBeNull()
+      expect(ticketId).toBeTruthy()
+    })
+
+    it('别的工单已占用的 questionId 不会被复用，降级为文本', async () => {
+      const { svc } = questionService()
+      const first = ask(svc)
+      const shared = first.questionId
+      engine.ingest(makeTrigger({ id: 't2', externalId: 'om_2' }))
+      const { ticket } = engine.decide({ triggerId: 't2', decision: 'accept', strength: 'explicit', reason: 'ok', scope: '测试' })
+      const assignment = engine.startAssignment(ticket!.id, { runtimeId: 'orca', handle: 'term-2', workdir: '/tmp/wt' })
+      runtime.handles.set('term-2', true)
+
+      svc.onWorkerState({
+        ticketId: ticket!.id,
+        assignmentId: assignment.id,
+        turn: 2,
+        state: 'ready',
+        summary: '等待选择',
+        prNumber: 0,
+        prUrl: '',
+        ackedInputs: [],
+        replyPayload: {
+          blocks: [{
+            type: 'choices',
+            questionId: shared,
+            prompt: '选哪个方案？',
+            options: [{ id: 'A', label: '方案 A' }, { id: 'B', label: '方案 B' }],
+          }],
+          fallbackText: '选哪个方案？',
+        },
+        updatedAt: '2026-11-06T10:00:12.000Z',
+      })
+
+      const outbox = store.listOutbox(20).find(item => item.text === '选哪个方案？' && item.key.includes(ticket!.id))
+      expect(outbox?.blocks?.[0]).toMatchObject({ type: 'choices', mode: 'text' })
+      expect(store.getQuestion(shared)?.ticketId).toBe(first.ticketId)
+      expect(logs.some(entry => entry.message === 'question:rejected' && entry.extra?.reason === 'id-owned-by-other-ticket')).toBe(true)
     })
 
     it('重复点击不再产生第二条 Input', async () => {

@@ -5,7 +5,7 @@
  * 用户覆盖文件固定放在 `<home>/specs/worker/<相对路径>`。
  * 读取顺序：覆盖文件优先，读不到就用随包内置文件。
  */
-import { existsSync, readFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -51,17 +51,46 @@ export function readWorkerSpec(home: string | undefined, file: string): string {
  * 不能被替换成真实工单号。
  */
 export function readWorkerSkill(home: string | undefined, relative: string): string {
+  return readWorkerSkillWithPath(home, relative).content
+}
+
+function readWorkerSkillWithPath(home: string | undefined, relative: string): { content: string; path: string } {
   if (home) {
     const path = join(workerSkillDir(home), relative)
     if (existsSync(path)) {
       try {
-        return readFileSync(path, 'utf8')
+        return { content: readFileSync(path, 'utf8'), path }
       } catch {
         // 覆盖文件被并发删除 / 权限异常时不要阻塞派工，回落到内置文件。
       }
     }
   }
-  return readFileSync(join(bundledWorkerSkillRoot(), relative), 'utf8')
+  const path = join(bundledWorkerSkillRoot(), relative)
+  return { content: readFileSync(path, 'utf8'), path }
+}
+
+/**
+ * 派工前把缺失的内置技能文件补到用户目录；已有的覆盖文件一律不动。
+ *
+ * 引导里给的是 `<home>/specs/worker` 目录路径，只补 SKILL.md 会让 references 仍不可读。
+ */
+export function ensureWorkerSkillDir(home: string): string {
+  const target = workerSkillDir(home)
+  mkdirSync(target, { recursive: true })
+  const copyMissing = (source: string, relative: string): void => {
+    for (const entry of readdirSync(source, { withFileTypes: true })) {
+      const from = join(source, entry.name)
+      const to = join(target, relative, entry.name)
+      if (entry.isDirectory()) {
+        mkdirSync(to, { recursive: true })
+        copyMissing(from, join(relative, entry.name))
+      } else if (!existsSync(to)) {
+        copyFileSync(from, to)
+      }
+    }
+  }
+  copyMissing(bundledWorkerSkillRoot(), '')
+  return target
 }
 
 export interface WorkerSkillSnapshot {
@@ -78,7 +107,7 @@ export interface WorkerSkillSnapshot {
  * 「这张工单当时用的是哪版交付规范」；覆盖文件改了也会得到不同的 sha。
  */
 export function workerSkillSnapshot(home: string | undefined): WorkerSkillSnapshot {
-  const content = readWorkerSkill(home, 'SKILL.md')
+  const { content, path } = readWorkerSkillWithPath(home, 'SKILL.md')
   const sha256 = createHash('sha256').update(content).digest('hex')
   const header = content.match(/^---\n([\s\S]*?)\n---/)
   const field = (key: string): string => {
@@ -89,6 +118,6 @@ export function workerSkillSnapshot(home: string | undefined): WorkerSkillSnapsh
     name: field('name') || 'router-agent-worker',
     version: field('version') || '0',
     sha256,
-    path: home ? join(workerSkillDir(home), 'SKILL.md') : join(bundledWorkerSkillRoot(), 'SKILL.md'),
+    path,
   }
 }

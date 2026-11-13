@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { buildWorkerBrief } from '#runtime/spec/index.js'
-import { workerSkillSnapshot, workerSpecPath } from '#runtime/spec/reader.js'
+import { bundledWorkerSkillRoot, ensureWorkerSkillDir, readWorkerSkill, workerSkillSnapshot, workerSpecPath } from '#runtime/spec/reader.js'
 
 const base = {
   ticketId: 'tk-14',
@@ -30,7 +30,7 @@ describe('Worker 首轮短引导', () => {
     expect(brief).toContain(base.scope)
     expect(brief).toContain(base.request)
     expect(brief).toContain('用户原始请求（发起人，2026-11-13T09:00:00.000Z）')
-    expect(brief).toContain('与上方结论冲突时以原文为准')
+    expect(brief).toContain('超出授权范围时用 blocked 上报')
     expect(brief).not.toContain('## 工作方式')
   })
 
@@ -47,6 +47,13 @@ describe('Worker 首轮短引导', () => {
 
     expect(brief).toContain('需'.repeat(2000))
     expect(brief).not.toContain('需'.repeat(2001))
+    expect(brief).toContain('全文见 /tmp/workers/tk-14/request.md')
+  })
+
+  it('原话行数过多时按整份引导的 25 行预算截断', () => {
+    const brief = buildWorkerBrief({ ...base, request: 'x\n'.repeat(30), requestPath: '/tmp/workers/tk-14/request.md' })
+
+    expect(brief.split('\n').length).toBeLessThanOrEqual(25)
     expect(brief).toContain('全文见 /tmp/workers/tk-14/request.md')
   })
 })
@@ -68,5 +75,23 @@ describe('Worker 技能指纹', () => {
     expect(snapshot).toMatchObject({ name: 'custom', version: '9' })
     expect(snapshot.path).toBe(workerSpecPath(home, 'SKILL.md'))
     expect(snapshot.sha256).not.toBe(workerSkillSnapshot(undefined).sha256)
+  })
+
+  it('home 没有覆盖文件时指纹记录随包路径', () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-skill-empty-'))
+    const snapshot = workerSkillSnapshot(home)
+
+    expect(snapshot.path).toBe(join(bundledWorkerSkillRoot(), 'SKILL.md'))
+  })
+
+  it('派工前补全缺失技能文件且不覆盖用户已有覆盖', () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-skill-ensure-'))
+    mkdirSync(join(home, 'specs', 'worker'), { recursive: true })
+    writeFileSync(workerSpecPath(home, 'SKILL.md'), '---\nname: custom\nversion: 9\n---\n自定义\n', 'utf8')
+
+    ensureWorkerSkillDir(home)
+
+    expect(readWorkerSkill(home, 'SKILL.md')).toContain('自定义')
+    expect(readWorkerSkill(home, 'references/reply-protocol.md')).toContain('## 退出码')
   })
 })

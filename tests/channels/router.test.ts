@@ -74,6 +74,21 @@ describe('通道注册表与出站分发', () => {
     expect(logs[0]?.extra).toMatchObject({ channel: 'slack' })
   })
 
+  it('正文为空但有结构化块时仍交给通道渲染', async () => {
+    const a = adapter()
+    const registry = new ChannelRegistry()
+    registry.register(a)
+    await new ChannelRouter(registry).send({
+      channelKind: 'feishu',
+      channelId: 'oc_dev',
+      threadId: '',
+      text: '',
+      blocks: [{ type: 'image', image: { path: './shot.png' } }],
+      key: 'k2',
+    })
+    expect(a.sent[0]?.blocks).toEqual([{ type: 'image', image: { path: './shot.png' } }])
+  })
+
   it('重复注册同一实例只保留最后一次并记 warn', () => {
     const logs: { message: string; extra?: Record<string, unknown> }[] = []
     const registry = new ChannelRegistry(logger(logs))
