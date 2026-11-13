@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -26,6 +26,25 @@ function home(): string {
 
 async function initHome(dir: string): Promise<void> {
   await runCli(['init', '--home', dir, '--yes'], io())
+}
+
+/**
+ * 在 `<home>/node_modules` 下放一个运行时插件包。
+ *
+ * declaredId 省略时表示这个包没有 meta.id，用来验证「装完必须能读出 id」的失败路径。
+ */
+function writeRuntimePlugin(homeDir: string, packageName: string, declaredId?: string): void {
+  const pkgDir = join(homeDir, 'node_modules', packageName)
+  mkdirSync(pkgDir, { recursive: true })
+  writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({
+    name: packageName,
+    version: '1.0.0',
+    type: 'module',
+    main: './index.js',
+    exports: { '.': './index.js' },
+  }), 'utf8')
+  const meta = declaredId ? `, meta: { id: "${declaredId}", name: "Demo" }` : ''
+  writeFileSync(join(pkgDir, 'index.js'), `export default { kind: "runtime"${meta} }\n`, 'utf8')
 }
 
 describe('ra CLI', () => {
@@ -225,13 +244,52 @@ describe('ra runtime add / uninstall 插件运行时', () => {
     expect(output.out.join('\n')).toContain('本地路径插件不需要下载')
   })
 
-  it('只给入口时按包名 / 路径推导 runtime id', async () => {
+  it('按插件包声明的 id 写入 runtime.plugins', async () => {
     const dir = home()
     await initHome(dir)
+    writeRuntimePlugin(dir, '@acme/whatever-name', 'demo')
     const output = io(dir)
-    expect(await runCli(['runtime', 'add', './runtime-demo', '--home', dir], output)).toBe(0)
-    expect(loadConfig(dir).runtime.plugins?.demo).toBe('./runtime-demo')
-    expect(output.out.join('\n')).toContain('runtime id 自动识别为 demo')
+    expect(await runCli(['runtime', 'add', '@acme/whatever-name', '--home', dir], output)).toBe(0)
+    expect(loadConfig(dir).runtime.plugins?.demo).toBe('@acme/whatever-name')
+    expect(output.out.join('\n')).toContain('runtime id 来自插件包声明：demo')
+  })
+
+  it('插件没有声明 meta.id 时不写配置并返回非零', async () => {
+    const dir = home()
+    await initHome(dir)
+    writeRuntimePlugin(dir, '@acme/no-id')
+    const output = io(dir)
+    expect(await runCli(['runtime', 'add', '@acme/no-id', '--home', dir], output)).toBe(1)
+    expect(loadConfig(dir).runtime.plugins).toBeUndefined()
+    expect(output.err.join('\n')).toContain('meta.id')
+  })
+
+  it('声明的 id 与内置运行时重名时拒绝写入', async () => {
+    const dir = home()
+    await initHome(dir)
+    writeRuntimePlugin(dir, '@acme/builtin-clash', 'orca')
+    const output = io(dir)
+    expect(await runCli(['runtime', 'add', '@acme/builtin-clash', '--home', dir], output)).toBe(1)
+    expect(loadConfig(dir).runtime.plugins?.orca).toBeUndefined()
+    expect(output.err.join('\n')).toContain('内置运行时')
+  })
+
+  it('本地路径插件按它声明的 id 写入', async () => {
+    const dir = home()
+    await initHome(dir)
+    const pluginDir = join(dir, 'plugins', 'my-runtime')
+    mkdirSync(pluginDir, { recursive: true })
+    writeFileSync(join(pluginDir, 'package.json'), JSON.stringify({
+      name: 'my-runtime',
+      version: '1.0.0',
+      type: 'module',
+      main: './index.js',
+    }), 'utf8')
+    writeFileSync(join(pluginDir, 'index.js'), 'export default { kind: "runtime", meta: { id: "my-runtime" } }\n', 'utf8')
+    const output = io(dir)
+    expect(await runCli(['runtime', 'add', './plugins/my-runtime', '--home', dir], output)).toBe(0)
+    expect(loadConfig(dir).runtime.plugins?.['my-runtime']).toBe('./plugins/my-runtime')
+    expect(output.out.join('\n')).toContain('runtime id 来自插件包声明：my-runtime')
   })
 
   it('拒绝非法 id、内置 id 与不是包名/路径的入口', async () => {
@@ -246,10 +304,6 @@ describe('ra runtime add / uninstall 插件运行时', () => {
     const builtin = io(dir)
     expect(await runCli(['runtime', 'add', 'orca', '@acme/runtime-x', '--home', dir], builtin)).toBe(1)
     expect(builtin.err.join('\n')).toContain('内置运行时')
-
-    const derivedBuiltin = io(dir)
-    expect(await runCli(['runtime', 'add', '@acme/runtime-orca', '--home', dir], derivedBuiltin)).toBe(1)
-    expect(derivedBuiltin.err.join('\n')).toContain('内置运行时')
 
     const badEntry = io(dir)
     expect(await runCli(['runtime', 'add', 'demo-runtime', 'not a package', '--home', dir], badEntry)).toBe(2)

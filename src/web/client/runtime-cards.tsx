@@ -4,7 +4,7 @@
  * 选中状态由父级 draft 控制；探测轮询、检测、安装、日志等临时状态收在组件内部。
  */
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react'
-import { ACP_RUNTIME_ID, isWorkerRuntimeId, normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
+import { ACP_RUNTIME_ID, normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
 import { getJson, sendJson } from './api.js'
 import { Icon } from './icons.js'
 import {
@@ -21,7 +21,6 @@ import {
 } from './runtime-model.js'
 import { RuntimeLogo, runtimeLogoOf } from './runtime-logos.js'
 import { runtimeOptionFields } from './fields.js'
-import { runtimeIdFromPluginSource } from '#runtime/plugins/id.js'
 import { RuntimeSettingsDialog } from './runtime-settings.js'
 import type { PluginView } from './api.js'
 
@@ -62,8 +61,8 @@ interface RuntimeCardsProps {
   onPendingRestart?: () => void
   /** 标题由外层配置块承担时关掉自带表头，避免同一屏出现两层标题。 */
   showHead?: boolean
-  /** 添加自定义运行时：入口写入配置草稿，runtime id 由包名 / 路径推导。 */
-  onAddRuntime?: (entry: string) => void
+  /** 添加自定义运行时：把已安装插件的 id 与入口写入配置草稿。 */
+  onAddRuntime?: (id: string, entry: string) => void
   /** 配置草稿与默认值：运行时选项弹窗直接读写父级 draft。 */
   draft?: unknown
   defaults?: unknown
@@ -464,15 +463,17 @@ interface PluginInstallJobView {
   packageName: string
   version: string
   installedVersion?: string
+  /** 插件包自己声明的 id；装完并加载校验通过后才有值。 */
+  declaredId?: string
   lines?: string[]
   error?: string
   startedAt: string
   finishedAt?: string
 }
 
-/** 添加自定义运行时弹窗：按 npm 包或本地路径推导 runtime id，npm 包可先装依赖。 */
+/** 添加自定义运行时弹窗：填 npm 包，装好后用插件包声明的 id 登记。 */
 function AddRuntimeDialog({ onAdd, onClose, onNotice, onPendingRestart }: {
-  onAdd: (entry: string) => void
+  onAdd: (id: string, entry: string) => void
   onClose: () => void
   onNotice: (notice: RuntimeNotice | null) => void
   onPendingRestart?: () => void
@@ -481,9 +482,6 @@ function AddRuntimeDialog({ onAdd, onClose, onNotice, onPendingRestart }: {
   const [install, setInstall] = useState<{ busy: boolean; job?: PluginInstallJobView } | null>(null)
 
   const packageName = npmPackageOf(entry)
-  const pluginId = runtimeIdFromPluginSource(entry)
-  const reserved = pluginId ? isWorkerRuntimeId(pluginId) : false
-  const canAdd = Boolean(pluginId) && !reserved
 
   const pollInstall = async (pluginId: string, jobId: string): Promise<void> => {
     for (let attempt = 0; attempt < 300; attempt += 1) {
@@ -493,11 +491,21 @@ function AddRuntimeDialog({ onAdd, onClose, onNotice, onPendingRestart }: {
         setInstall({ busy: job.status === 'running', job })
         if (job.status === 'running') continue
         if (job.status === 'ok') {
+          const declaredId = job.declaredId
+          if (!declaredId) {
+            onNotice({
+              kind: 'warn',
+              text: '插件包没有声明 meta.id，无法确定它是什么运行时；请确认包默认导出 kind=runtime 并声明 meta.id',
+            })
+            return
+          }
+          onAdd(declaredId, entry.trim())
           onNotice({
             kind: 'ok',
-            text: `${pluginId} 依赖安装完成（${job.installedVersion ?? job.packageName}），保存配置并重启后生效`,
+            text: `已添加运行时 ${declaredId}（id 来自插件包声明）；保存配置并重启后生效`,
           })
           onPendingRestart?.()
+          onClose()
         } else {
           onNotice({ kind: 'error', text: `${pluginId} 依赖安装失败：${job.error ?? '未知错误'}` })
         }
@@ -521,32 +529,23 @@ function AddRuntimeDialog({ onAdd, onClose, onNotice, onPendingRestart }: {
 
   const installPackage = async (): Promise<void> => {
     const pkg = npmPackageOf(entry)
-    if (!pkg || !pluginId) return
+    if (!pkg) return
     if (!window.confirm(`安装 ${pkg} 到 <RA_HOME>/node_modules？需要联网下载 npm 包。`)) return
     setInstall({ busy: true })
     try {
       const data = await sendJson<{ jobId: string }>('/api/plugins/install', 'POST', {
         kind: 'runtime',
-        id: pluginId,
         packageName: pkg,
       })
       setInstall({
         busy: true,
         job: { id: data.jobId, status: 'running', phase: 'queued', packageName: pkg, version: 'latest', lines: [], startedAt: new Date().toISOString() },
       })
-      void pollInstall(pluginId, data.jobId)
+      void pollInstall(pkg, data.jobId)
     } catch (error) {
       setInstall(null)
       onNotice({ kind: 'error', text: `启动安装失败：${errorText(error)}` })
     }
-  }
-
-  const add = (): void => {
-    const value = entry.trim()
-    if (!pluginId || !value) return
-    onAdd(value)
-    onNotice({ kind: 'ok', text: `已添加运行时 ${pluginId}；保存配置并重启后，它会出现在「自定义插件」分组` })
-    onClose()
   }
 
   return (
@@ -565,22 +564,12 @@ function AddRuntimeDialog({ onAdd, onClose, onNotice, onPendingRestart }: {
         <div className="modal-body">
           <label className="modal-field">
             <span>npm 包名或本地路径</span>
-            <input className="input" value={entry} placeholder="例如 @scope/runtime-x 或 ./path/to/runtime-x" onChange={event => setEntry(event.target.value)} />
+            <input className="input" value={entry} placeholder="例如 @scope/whatever 或 ./path/to/runtime-x" onChange={event => setEntry(event.target.value)} />
           </label>
-          {entry.trim().length > 0 && (
-            <p className={`modal-hint ${pluginId && !reserved ? '' : 'field-error'}`}>
-              <Icon name={pluginId && !reserved ? 'check' : 'alert'} size={13} />
-              {reserved
-                ? <>识别为 <code>{pluginId}</code>，与内置运行时重名；请把包名改成 <code>runtime-&lt;其它 id&gt;</code>。</>
-                : pluginId
-                  ? <>runtime id 自动识别为 <code>{pluginId}</code>。</>
-                  : <>无法从入口识别合法的 runtime id；包名用 <code>@scope/runtime-&lt;id&gt;</code>，本地路径取目录名。</>}
-            </p>
-          )}
           {packageName && (
             <p className="modal-hint">
               <Icon name="download" size={13} />
-              npm 包会先下载到 <code>&lt;RA_HOME&gt;/node_modules</code>，再在重启服务时加载。
+              安装后按插件包声明的 meta.id 登记运行时。
             </p>
           )}
           {!packageName && entry.trim().length > 0 && (
@@ -594,13 +583,8 @@ function AddRuntimeDialog({ onAdd, onClose, onNotice, onPendingRestart }: {
           )}
         </div>
         <footer className="modal-foot">
-          {packageName && (
-            <button className="btn" onClick={() => void installPackage()} disabled={install?.busy || !pluginId || reserved}>
-              <Icon name="download" size={12} />{install?.busy ? '安装中…' : '安装依赖'}
-            </button>
-          )}
-          <button className="btn primary" onClick={add} disabled={!canAdd}>
-            <Icon name="plus" size={12} />添加
+          <button className="btn primary" onClick={() => void installPackage()} disabled={install?.busy || !packageName}>
+            <Icon name="download" size={12} />{install?.busy ? '安装中…' : '安装并添加'}
           </button>
         </footer>
       </div>

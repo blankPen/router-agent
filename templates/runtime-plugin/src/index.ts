@@ -3,7 +3,7 @@ import type { RuntimePlugin } from '@router-agent/runtime'
 /**
  * 最小运行时插件。
  *
- * 安装后把包名或本地路径写进 config.yaml 的 runtime.plugins.<id>（id 由包名自动识别），
+ * 安装后 ra 会读这里的 meta.id 作为 runtime id，写进 config.yaml 的 runtime.plugins.<id>，
  * 重启 ra 即可在「配置 → 派工与服务」里看到。
  */
 const plugin: RuntimePlugin = {

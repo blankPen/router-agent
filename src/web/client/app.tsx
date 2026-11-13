@@ -1543,7 +1543,7 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
             onDetecting={setDetecting}
             onNotice={setNotice}
             onPendingRestart={() => setPendingRestart(true)}
-            onAddRuntime={entry => setDraft(current => (current ? applyRuntimePluginDraft(current, entry) : current))}
+            onAddRuntime={(id, entry) => setDraft(current => (current ? applyRuntimePluginDraft(current, id, entry) : current))}
           />
         )
       }
@@ -2316,7 +2316,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
           onDetecting={setDetecting}
           onNotice={setNotice}
           onPendingRestart={() => setPendingRestart(true)}
-          onAddRuntime={entry => setDraft(current => (current ? applyRuntimePluginDraft(current, entry) : current))}
+          onAddRuntime={(id, entry) => setDraft(current => (current ? applyRuntimePluginDraft(current, id, entry) : current))}
           draft={draft}
           defaults={defaults}
           onOptionChange={(path, value) => setField(path, value)}
