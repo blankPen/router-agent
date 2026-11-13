@@ -119,6 +119,32 @@ Herdr 的 `agent` 取值是 Herdr 自己的 kind（`claude` / `codex` / `opencod
 > 目录信任按**真实路径**登记：软链目录要写 `/private/tmp/...` 而不是 `/tmp/...`，
 > 否则 Claude Code 认不出来。适配器用 `realpath` 换算。
 
+## Orca 运行时（`orca`）里的 Codex：版本更新浮层
+
+用 Orca 派工、Agent 选 Codex 时，Codex 启动会弹一个**只能用键盘选**的浮层：
+
+```
+A new version of Codex is available.
+› 1. Update now (runs `npm i -g @openai/codex@latest`)
+  2. Skip
+  3. Skip until next version
+```
+
+浮层会挡住输入：工单停在第一步不动，Router 只能看着超时。
+
+**规避办法（默认已生效）**：Orca 适配器在 `worktree create` 之前把这一版的更新提示记成已忽略——
+写 `$CODEX_HOME/version.json`（缺省 `~/.codex/version.json`）的 `dismissed_version`，
+和用户在浮层里选「Skip until next version」完全等价。成功记 `orca:codex-update-dismissed`。
+新版发布后浮层会再出现，Router 会在下次启动时再消一次。
+
+> 想彻底关掉更新检查，自己在 `~/.codex/config.toml` 里加 `check_for_update_on_startup = false`；
+> Router 不改这个文件（用户自己的配置，不该被程序悄悄改写）。
+
+**兜底检测**：万一还是弹出来了（例如浮层类型不是版本更新），Orca 会拒收输入并返回
+`agent_prompt_blocked`。适配器把它记成 `orca:agent-prompt-blocked`，
+Router 立刻转人工：工单标记为「等待人工处理」并在话题里通知，
+提示去 Orca 终端手动选一下——**这类提示 Router 代答不了，只能人工处理**。
+
 ## Codex App Server 运行时（`codex-app`）
 
 `codex-app` 直接启动 `codex app-server --stdio`，用 Codex 原生 JSON-RPC 承载工单：

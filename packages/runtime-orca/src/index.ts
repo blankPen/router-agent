@@ -24,6 +24,8 @@ const plugin: RuntimePlugin = {
       ...(ctx.claudeProjectsDir ? { claudeProjectsDir: ctx.claudeProjectsDir } : {}),
       agent: runtimeOptionString(ctx.config.runtime.options, 'orca', 'agent')
         || String(runtimeOptionDefault('orca', 'agent') ?? ''),
+      logger: ctx.logger,
+      env: ctx.env,
     })
   },
 }
@@ -33,3 +35,4 @@ export * from './orca/index.js'
 export * from './orca/options.js'
 export * from './orca/report-poller.js'
 export * from './orca/commands.js'
+export * from './orca/codex-update.js'

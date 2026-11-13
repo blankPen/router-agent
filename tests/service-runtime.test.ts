@@ -72,6 +72,8 @@ class FakeRuntime implements WorkerRuntime {
   deliverError = ''
   /** 模拟运行时在投递时切换了会话。 */
   deliverHandle = ''
+  /** 模拟 Agent 停在交互式提示上：运行时要求转人工。 */
+  deliverNeedsHuman = false
   handles = new Map<string, { lastOutputAt: string }>()
   linkedPr: Record<string, unknown> | null = null
   /** 主动巡检读取的终端渲染屏幕。 */
@@ -88,6 +90,16 @@ class FakeRuntime implements WorkerRuntime {
   }
   async deliver(ref: WorkerRef | string, inputs: { text: string; id: string }[]): Promise<DeliveryReceipt> {
     if (this.deliverQueue) return { status: 'queued', inputIds: inputs.map(input => input.id), reason: 'acp:busy' }
+    if (this.deliverNeedsHuman) {
+      return {
+        status: 'rejected',
+        inputIds: [],
+        reason: 'orca:agent-prompt-blocked',
+        retryable: true,
+        needsHuman: true,
+        detail: 'agent_prompt_blocked The agent is showing a permission or trust prompt',
+      }
+    }
     if (this.deliverError) throw new Error(this.deliverError)
     const handle = typeof ref === 'string' ? ref : ref.handle
     for (const input of inputs) this.delivered.push({ handle, text: input.text })
@@ -255,6 +267,20 @@ describe('运行时机制', () => {
     }
     expect(logs.some(item => item.message === 'input:redeliver-giveup')).toBe(true)
     expect(store.getAttention(ticketId)?.question ?? '').toContain('5 次')
+  })
+
+  it('Agent 停在交互式提示上时转人工并通知话题，不再静默重投', async () => {
+    const { ticketId } = await launchOne()
+    runtime.deliverNeedsHuman = true
+    engine.deliverInput(ticketId, { kind: 'followup', text: '继续' })
+
+    await service.deliverPendingInputs()
+
+    expect(store.getAttention(ticketId)?.question ?? '').toContain('交互式提示')
+    const texts = store.listOutbox(50).map(item => item.text).join('\n')
+    expect(texts).toContain('交互式提示')
+    expect(texts).toContain('Orca 终端')
+    expect(logs.some(item => item.message === 'input:prompt-blocked')).toBe(true)
   })
 
   it('运行时投递时接管了新会话，Assignment 的 handle 同步更新', async () => {
