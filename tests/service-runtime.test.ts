@@ -70,6 +70,8 @@ class FakeRuntime implements WorkerRuntime {
   deliverQueue = false
   /** 模拟投递抛错（例如 Claude resume fork 但没有拿到新 id）。 */
   deliverError = ''
+  /** 只让这些输入投递失败：用于验证一条输入卡住不拖累其它输入。 */
+  failInputIds = new Set<string>()
   /** 模拟运行时在投递时切换了会话。 */
   deliverHandle = ''
   /** 模拟 Agent 停在交互式提示上：运行时要求转人工。 */
@@ -102,7 +104,10 @@ class FakeRuntime implements WorkerRuntime {
     }
     if (this.deliverError) throw new Error(this.deliverError)
     const handle = typeof ref === 'string' ? ref : ref.handle
-    for (const input of inputs) this.delivered.push({ handle, text: input.text })
+    for (const input of inputs) {
+      if (this.failInputIds.has(input.id)) throw new Error('deliver-failed')
+      this.delivered.push({ handle, text: input.text })
+    }
     return {
       status: 'accepted',
       inputIds: inputs.map(input => input.id),
@@ -309,7 +314,7 @@ describe('运行时机制', () => {
     expect(store.getAttention(ticketId)?.question ?? '').not.toContain('仍未 ack')
   })
 
-  it('有新输入时，把未 ack 的旧输入一并重投（去重靠 id）', async () => {
+  it('有新输入时只投新输入，未 ack 的旧输入不重复投', async () => {
     const { ticketId, handle } = await launchOne()
     const first = engine.deliverInput(ticketId, { kind: 'followup', text: '第一件事' })
     await service.runOnce()
@@ -317,11 +322,59 @@ describe('运行时机制', () => {
 
     const second = engine.deliverInput(ticketId, { kind: 'followup', text: '第二件事' })
     await service.runOnce()
-    const lastTwo = runtime.delivered.slice(-2).map(d => d.text)
-    expect(lastTwo).toEqual(['第一件事', '第二件事'])
+    expect(runtime.delivered.map(d => d.text)).toEqual(['第一件事', '第二件事'])
     expect(handle).toBeTruthy()
     expect(first.seq).toBe(1)
     expect(second.seq).toBe(2)
+  })
+
+  it('已送达未 ack 的输入不会因为退避到期被重复投递', async () => {
+    const { ticketId } = await launchOne()
+    engine.deliverInput(ticketId, { kind: 'followup', text: '第一件事' })
+    await service.runOnce()
+    expect(runtime.delivered).toHaveLength(1)
+
+    // 远超退避窗口也不该再投第二次：同一段话重复灌进 worker 上下文只会污染它的判断。
+    now += 10 * 60_000
+    await service.runOnce()
+    await service.runOnce()
+    expect(runtime.delivered).toHaveLength(1)
+  })
+
+  it('已投递未 ack 超时记一条 warn 提示人工确认，且不重复投递', async () => {
+    const { ticketId } = await launchOne()
+    engine.deliverInput(ticketId, { kind: 'followup', text: '第一件事' })
+    await service.runOnce()
+    now += 31 * 60_000
+    await service.runOnce()
+
+    const warned = logs.filter(item => item.message === 'input:unacked-timeout')
+    expect(warned).toHaveLength(1)
+    expect(warned[0]?.extra).toMatchObject({ ticketId })
+    expect(runtime.delivered).toHaveLength(1)
+
+    // 同一批输入只提醒一次，不反复刷日志。
+    now += 31 * 60_000
+    await service.runOnce()
+    expect(logs.filter(item => item.message === 'input:unacked-timeout')).toHaveLength(1)
+  })
+
+  it('重投到上限的输入转人工，且不再阻塞后续输入', async () => {
+    const { ticketId } = await launchOne()
+    const first = engine.deliverInput(ticketId, { kind: 'followup', text: '第一件事' })
+    runtime.failInputIds.add(first.id)
+    engine.deliverInput(ticketId, { kind: 'followup', text: '第二件事' })
+
+    for (let i = 0; i < 6; i++) {
+      now += 10 * 60_000
+      await service.deliverPendingInputs()
+    }
+
+    const giveup = logs.filter(item => item.message === 'input:redeliver-giveup')
+    expect(giveup.at(-1)?.extra).toMatchObject({ inputId: first.id })
+    expect(store.getAttention(ticketId)?.question ?? '').toContain('5 次')
+    // 第一条卡住不再拖累第二条。
+    expect(runtime.delivered.map(d => d.text)).toEqual(['第二件事'])
   })
 
   it('ack 过的输入不会重投', async () => {
