@@ -143,7 +143,7 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
     })
 
   withHome(program.command('runtime [action] [id] [entry]')
-    .description('Worker 运行时：list / check / add / install / uninstall / login（含 ACP、codex-app 与 npm 插件）'))
+    .description('Worker 运行时：list / check / add / install / uninstall / login（含 ACP、codex-app 与 npm 插件；add 按包名自动识别 id）'))
     .option('--json', 'list / check 以 JSON 输出')
     .option('--version <version>', 'add / install 指定 npm 版本（默认 latest；ACP Agent 默认用目录里 pinned 的版本）')
     .action(async (action: string | undefined, id: string | undefined, entry: string | undefined, opts: { home?: string; json?: boolean; version?: string }) => {
@@ -155,12 +155,14 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
           setCode(await cmdRuntimeList(home, opts, io))
           return
         case 'add':
-          if (!id || !entry) {
-            output.stderr('用法：ra runtime add <id> <npm 包名 | 本地路径> [--version <v>]')
+          if (!id && !entry) {
+            output.stderr('用法：ra runtime add <npm 包名 | 本地路径> [--version <v>]')
             setCode(2)
             return
           }
-          setCode(await cmdRuntimeAdd(home, id, entry, opts, io))
+          // 兼容旧写法：两个位置参数时第一个仍按显式 id。
+          if (id && entry) setCode(await cmdRuntimeAdd(home, entry, { ...opts, id }, io))
+          else setCode(await cmdRuntimeAdd(home, id!, opts, io))
           return
         case 'check':
           if (!id) {

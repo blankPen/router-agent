@@ -83,24 +83,29 @@ runtime:
 
 ## 按 npm 包名添加运行时（插件）
 
-内置运行时之外的运行时以插件形式接入。`runtime.plugins.<id>` 可以写 npm 包名，也可以写本地路径：
+内置运行时之外的运行时以插件形式接入。`runtime.plugins.<runtime id>` 可以写 npm 包名，也可以写本地路径。
+**runtime id 不由包名推导**：npm 包名没有格式约定，只有装好并成功加载的包才知道自己是什么，
+所以 id 取自插件包声明的 `meta.id`：
 
 ```yaml
 runtime:
-  default: my-runtime
+  default: demo
   plugins:
-    my-runtime: '@acme/router-agent-runtime'
+    demo: '@acme/runtime-demo'
 ```
 
-插件包是普通 npm 包，默认导出 `kind: 'runtime'` 的对象，模板见 `templates/runtime-plugin`。加载器以 `<RA_HOME>/config.yaml` 为锚点解析包名，所以 ra 会把声明的包下载到 `<RA_HOME>/node_modules`：
+插件包是普通 npm 包，默认导出 `kind: 'runtime'` 的对象，并在 `meta.id` 里声明自己的 id，模板见 `templates/runtime-plugin`。加载器以 `<RA_HOME>/config.yaml` 为锚点解析包名，所以 ra 会把声明的包下载到 `<RA_HOME>/node_modules`：
 
 ```bash
-ra runtime add my-runtime @acme/router-agent-runtime   # 写 runtime.plugins + 下载 npm 包
-ra runtime install my-runtime                          # 已声明但还没下载时补装（可加 --version）
-ra runtime list                                        # 「插件运行时」一节标出已安装 / 未安装
+ra runtime add @acme/whatever      # 装到 <RA_HOME>/node_modules，读出 meta.id=demo，写 runtime.plugins.demo
+ra runtime add ./plugins/my-demo   # 本地路径：直接读声明的 id=demo，不需要下载
+ra runtime install demo             # 已声明但还没下载时补装（可加 --version）
+ra runtime list                        # 「插件运行时」一节标出 id、包名 / 路径与是否已安装
 ```
 
-面板路径是运行时卡片右上角的「添加运行时」（初始化页与「配置 → 运行时配置」都有）：填 id 与 npm 包名（或本地路径）后添加，npm 包可在弹窗里直接点「安装依赖」。保存配置并重启 ra 后，插件会作为一张卡片出现在「自定义插件」分组，和 demo runtime 并排。`runtime.default` 填插件创建的运行时 id，插件 `meta.id` 建议与配置 id 保持一致（不一致会记 `plugin:id-mismatch`，运行时 id 以插件声明为准）。
+面板路径是运行时卡片右上角的「添加运行时」（初始化页与「配置 → 运行时配置」都有）：只填 npm 包名，点「安装并添加」——下载完成并成功加载后，面板用插件包声明的 id 写入配置。包没装上、不是 runtime 插件或没有声明 `meta.id` 时都不会写配置，只提示原因。保存配置并重启 ra 后，插件会作为一张卡片出现在「自定义插件」分组。`runtime.default` 填这个 id；插件 `meta.id` 与配置 id 不一致会记 `plugin:id-mismatch`。
+
+旧写法 `ra runtime add <id> <npm 包名 | 本地路径>` 仍兼容：显式给了 id 就按 id 写，不读包的声明。手写的 `runtime.plugins.<id>` 老配置继续按原 id 加载。
 
 本地路径插件（`./my-runtime`、`/abs/path`）不需要下载，重启后按路径加载。安装过程看 `plugin:install-started` / `plugin:install-succeeded` / `plugin:install-failed`；重启后加载失败看 `plugin:load-failed`（常见原因：包没装上、装到了别的 node_modules、导出对象不是 `kind: 'runtime'`）。
 

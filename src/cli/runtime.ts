@@ -8,7 +8,10 @@ import { resolveAgentCommand, resolveExecutable } from '@router-agent/runtime-ac
 import { installAcpAgent, uninstallAcpAgent } from '@router-agent/runtime-acp'
 import type { RuntimeChoice } from '@router-agent/runtime-acp'
 import { pluginSpecifier, type PluginEntry } from '#infra/plugin-loader.js'
+import { readPluginDeclaration } from '#infra/plugin-loader.js'
 import { installPluginPackage, installedPluginVersion, npmPackageNameOf } from '#infra/plugin-install.js'
+import { errorMessage } from '#infra/logger.js'
+import { runtimeIdFromPluginSource } from '#runtime/plugins/id.js'
 
 export interface RuntimeCliIo {
   stdout(line: string): void
@@ -200,34 +203,65 @@ function isLocalPluginEntry(value: string): boolean {
 /**
  * 按 npm 包名（或本地路径）添加一个运行时插件。
  *
- * 写 `runtime.plugins.<id>` 后立即下载 npm 包；本地路径只写配置。
+ * runtime id 不由包名推导：装好并成功加载后，从插件包声明的 `meta.id` 读出来。
+ * 显式给了 id（兼容旧写法 `ra runtime add <id> <入口>`）时按 id 写配置。
  * 不自动切换 `runtime.default`，避免误改正在派工的运行时。
  */
 export async function cmdRuntimeAdd(
   home: string,
-  id: string,
   entry: string,
-  opts: { version?: string },
+  opts: { version?: string; id?: string },
   io: RuntimeCliIo,
 ): Promise<number> {
-  const pluginId = id.trim()
   const target = entry.trim()
-  if (!PLUGIN_ID_PATTERN.test(pluginId)) {
-    io.stderr(`插件 id 只能是小写字母、数字与连字符：${id}`)
-    return 2
-  }
-  if (isWorkerRuntimeId(pluginId)) {
-    io.stderr(`${pluginId} 是内置运行时；如需替换插件包，用 ra config set runtime.plugins.${pluginId} <包名>`)
-    return 1
-  }
   if (!target) {
-    io.stderr('用法：ra runtime add <id> <npm 包名 | 本地路径>')
+    io.stderr('用法：ra runtime add <npm 包名 | 本地路径>')
     return 2
   }
   const packageName = npmPackageNameOf(target)
   if (!packageName && !isLocalPluginEntry(target)) {
     io.stderr(`入口只能是 npm 包名（如 @scope/runtime-x）或本地路径（如 ./my-runtime）：${target}`)
     return 2
+  }
+  const explicitId = opts.id?.trim()
+  if (packageName && !explicitId) {
+    const installedVersion = installedPluginVersion(home, packageName)
+    if (installedVersion) {
+      io.stdout(`${packageName}@${installedVersion} 已安装，直接读取它的声明`)
+    } else {
+      const installed = await installPluginPackage({
+        home,
+        packageName,
+        ...(opts.version ? { version: opts.version } : {}),
+        env: envOf(io),
+        onLine: line => io.stdout(line),
+      })
+      if (!installed.ok) {
+        io.stderr(`安装失败：${installed.error ?? '未知错误'}`)
+        return 1
+      }
+    }
+  }
+  // 只有真正能加载的包才知道自己是什么运行时：id 取自插件包的 meta.id。
+  let pluginId = explicitId
+  if (!pluginId) {
+    try {
+      const declaration = await readPluginDeclaration({ kind: 'runtime', home, specifier: target })
+      pluginId = declaration.id
+      io.stdout(`runtime id 来自插件包声明：${pluginId}`)
+    } catch (error) {
+      io.stderr(`读不出插件声明：${errorMessage(error)}`)
+      io.stderr('插件包需要默认导出 kind=runtime 的对象，并在 meta.id 里声明自己的 id')
+      return 1
+    }
+  }
+  if (!PLUGIN_ID_PATTERN.test(pluginId)) {
+    io.stderr(`插件 id 只能是小写字母、数字与连字符：${pluginId}`)
+    return 2
+  }
+  if (isWorkerRuntimeId(pluginId)) {
+    io.stderr(`${pluginId} 是内置运行时；如需替换插件包，用 ra config set runtime.plugins.${pluginId} <包名>`)
+    return 1
   }
   const config = loadConfig(home)
   const existed = config.runtime.plugins?.[pluginId] !== undefined
@@ -238,18 +272,6 @@ export async function cmdRuntimeAdd(
   if (!packageName) {
     io.stdout('本地路径插件不需要下载；重启 ra 后生效。')
     return 0
-  }
-  const result = await installPluginPackage({
-    home,
-    packageName,
-    ...(opts.version ? { version: opts.version } : {}),
-    env: envOf(io),
-    onLine: line => io.stdout(line),
-  })
-  if (!result.ok) {
-    io.stderr(`安装失败：${result.error ?? '未知错误'}`)
-    io.stderr(`配置已保存；修复后重跑 ra runtime install ${pluginId}`)
-    return 1
   }
   io.stdout(`提示：重启 ra 后插件运行时才会加载；插件声明的运行时 id 以它自己的 meta.id 为准。`)
   io.stdout('切换默认运行时：ra config set runtime.default <运行时 id>')

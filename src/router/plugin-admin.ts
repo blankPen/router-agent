@@ -7,7 +7,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { errorMessage, noopLogger, type Logger } from '#infra/logger.js'
-import { pluginSpecifier, type PluginEntry, type PluginKind } from '#infra/plugin-loader.js'
+import { pluginSpecifier, readPluginDeclaration, type PluginEntry, type PluginKind } from '#infra/plugin-loader.js'
 import { installPluginPackage, npmPackageNameOf, type NpmRunner } from '#infra/plugin-install.js'
 import { preview } from '#core/events.js'
 import { DEFAULT_RUNTIME_PLUGINS } from '#runtime/plugins/loader.js'
@@ -24,6 +24,8 @@ export interface PluginInstallJob {
   startedAt: string
   finishedAt?: string
   installedVersion?: string
+  /** 插件包自己声明的 id；装完并加载校验通过后才有值。 */
+  declaredId?: string
   lines: string[]
   error?: string
 }
@@ -80,26 +82,31 @@ export class PluginPackageAdmin {
   /**
    * 启动一次安装任务。
    *
-   * 面板「添加运行时」会在配置还没保存时带着包名来安装，所以允许用
-   * `opts.packageName` 直接指定 npm 包；否则按配置里声明的入口解析。
-   * 本地路径插件重启即可生效，不存在「下载」这一步，直接报错让调用方引导用户。
+   * 面板「添加运行时」会在配置还没保存时带着入口来安装，所以允许用
+   * `opts.entry` 直接指定入口（npm 包名或本地路径）；否则按配置里声明的入口解析。
+   * id 不由入口推导：装完并成功加载后，从插件包声明的 `meta.id` 读出来。
    */
-  startInstall(kind: PluginKind, id: string, opts: { version?: string; packageName?: string } = {}): PluginInstallJob {
+  startInstall(kind: PluginKind, id: string, opts: { version?: string; packageName?: string; entry?: string } = {}): PluginInstallJob {
     const pluginId = id.trim()
-    if (!pluginId) throw new PluginInstallStartError('unknown-plugin', '缺少插件 id')
-    const requested = opts.packageName?.trim()
+    const entry = opts.entry?.trim()
     let packageName: string | undefined
-    if (requested) {
-      packageName = npmPackageNameOf(requested)
+    let specifier = entry ?? ''
+    if (entry) {
+      packageName = npmPackageNameOf(entry)
+    } else if (opts.packageName?.trim()) {
+      // packageName 语义严格：必须是 npm 包名，本地路径走 entry。
+      packageName = npmPackageNameOf(opts.packageName)
       if (!packageName) {
         throw new PluginInstallStartError(
           'not-a-package',
-          `${pluginId} 提供的不是 npm 包名：${preview(requested, 120)}；本地路径不需要下载，重启服务后按路径加载`,
+          `提供的不是 npm 包名：${preview(opts.packageName, 120)}；本地路径请用 entry 参数`,
         )
       }
+      specifier = packageName
     } else {
-      const entry = this.entryOf(kind, pluginId)
-      if (entry === undefined) {
+      if (!pluginId) throw new PluginInstallStartError('unknown-plugin', '缺少插件 id')
+      const configured = this.entryOf(kind, pluginId)
+      if (configured === undefined) {
         const builtin = kind === 'runtime' && DEFAULT_RUNTIME_PLUGINS[pluginId]
         throw new PluginInstallStartError(
           'unknown-plugin',
@@ -108,20 +115,21 @@ export class PluginPackageAdmin {
             : `配置里没有 ${kind} 插件 ${pluginId} 的入口；先添加 ${entryPath(kind, pluginId)} 再安装`,
         )
       }
-      const specifier = pluginSpecifier(entry)
-      if (!specifier) {
+      const configuredSpecifier = pluginSpecifier(configured)
+      if (!configuredSpecifier) {
         throw new PluginInstallStartError('unknown-plugin', `${pluginId} 在配置里被禁用（enabled: false）`)
       }
-      packageName = npmPackageNameOf(specifier)
+      packageName = npmPackageNameOf(configuredSpecifier)
       if (!packageName) {
         throw new PluginInstallStartError(
           'not-a-package',
-          `${pluginId} 配置的是本地路径 ${preview(specifier, 120)}，不需要下载；重启服务后按路径加载`,
+          `${pluginId} 配置的是本地路径 ${preview(configuredSpecifier, 120)}，不需要下载；重启服务后按路径加载`,
         )
       }
+      specifier = configuredSpecifier
     }
 
-    const key = `${kind}:${pluginId}`
+    const key = `${kind}:${pluginId || specifier}`
     const activeJob = this.activeByPlugin.get(key)
     if (activeJob) throw new PluginInstallStartError('busy', `${pluginId} 正在安装（任务 ${activeJob}）`)
 
@@ -129,8 +137,8 @@ export class PluginPackageAdmin {
     const job: PluginInstallJob = {
       id: randomUUID(),
       kind,
-      pluginId,
-      packageName,
+      pluginId: pluginId || specifier,
+      packageName: packageName ?? '',
       version,
       status: 'running',
       phase: 'queued',
@@ -144,29 +152,43 @@ export class PluginPackageAdmin {
     void (async () => {
       job.phase = 'installing'
       try {
-        const result = await installPluginPackage({
-          home: this.opts.home,
-          packageName,
-          version,
-          env: this.opts.env,
-          logger: this.logger,
-          ...(this.opts.runNpm ? { runNpm: this.opts.runNpm } : {}),
-          onLine: line => {
-            job.lines.push(line)
-            if (job.lines.length > MAX_LINES) job.lines.splice(0, job.lines.length - MAX_LINES)
-          },
+        if (packageName) {
+          const result = await installPluginPackage({
+            home: this.opts.home,
+            packageName,
+            version,
+            env: this.opts.env,
+            logger: this.logger,
+            ...(this.opts.runNpm ? { runNpm: this.opts.runNpm } : {}),
+            onLine: line => {
+              job.lines.push(line)
+              if (job.lines.length > MAX_LINES) job.lines.splice(0, job.lines.length - MAX_LINES)
+            },
+          })
+          if (!result.ok) {
+            job.status = 'failed'
+            job.phase = 'failed'
+            job.error = result.error
+            return
+          }
+          if (result.version) job.installedVersion = result.version
+        }
+        // 装好只是第一步：能真正导入并读出 meta.id，才知道它是什么运行时。
+        const declaration = await readPluginDeclaration({ kind, home: this.opts.home, specifier })
+        job.declaredId = declaration.id
+        this.logger.info('plugin:id-detected', {
+          kind,
+          id: declaration.id,
+          package: packageName ?? specifier,
         })
-        job.status = result.ok ? 'ok' : 'failed'
-        job.phase = result.ok ? 'succeeded' : 'failed'
-        if (result.version) job.installedVersion = result.version
-        if (result.error) job.error = result.error
+        job.status = 'ok'
+        job.phase = 'succeeded'
       } catch (error) {
-        // 安装器自己会兜住异常；这里再兜一层，保证任务不会永远停在 running。
         const detail = errorMessage(error)
         job.status = 'failed'
         job.phase = 'failed'
         job.error = detail
-        this.logger.error('plugin:install-failed', { kind, id: pluginId, package: packageName, detail })
+        this.logger.error('plugin:install-failed', { kind, id: pluginId || specifier, package: packageName ?? specifier, detail })
       } finally {
         job.finishedAt = this.clock.now()
         this.activeByPlugin.delete(key)

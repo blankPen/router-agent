@@ -61,9 +61,9 @@ core  ←  infra  ←  runtime / channel  ←  src/
 
 ```yaml
 runtime:
-  default: my-runtime
+  default: demo
   plugins:
-    my-runtime: "@acme/router-runtime"
+    demo: "@acme/runtime-demo"
     local-runtime:
       path: ./plugins/local-runtime
       entry: dist/index.js
@@ -79,6 +79,7 @@ channels:
 - 加载失败只记录 `plugin:load-failed` / `plugin:create-failed` 并继续启动其它插件，
   面板与 `GET /api/config` 的 `plugins` 字段会显示失败原因与实际尝试的 `specifier`；
 - 一个插件包可以实现 `createAll()` 一次注册多个实例（ACP 就按 Agent 目录注册多个 runtime）。
+- 插件包的 id 来自它自己的 `meta.id`：npm 包名没有格式约定，只有装好并成功加载的包才知道自己是什么。
 
 ### runtime 插件
 

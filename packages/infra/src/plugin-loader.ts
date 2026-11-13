@@ -231,6 +231,51 @@ export async function importPluginModule<T>(
   return await loader.import(target) as T
 }
 
+/** 插件包自己声明的身份；runtime / channel 通用。 */
+export interface PluginDeclaration {
+  /** 插件声明的 id；runtime 插件即 runtime id。 */
+  id: string
+  name?: string
+  label?: string
+  hint?: string
+}
+
+/**
+ * 读取插件包声明的 id。
+ *
+ * 这是「装完才知道 id」的唯一可靠来源：包名没有格式约定，
+ * 只有包真正能被导入、并声明 `meta.id` 时才知道它是什么运行时。
+ */
+export async function readPluginDeclaration(opts: {
+  kind: PluginKind
+  home: string
+  specifier: string
+  entry?: string
+  loader?: PluginModuleLoader
+}): Promise<PluginDeclaration> {
+  const loader = opts.loader ?? defaultPluginLoader()
+  const target = resolvePluginSpecifier(opts.specifier, opts.home, loader, opts.entry)
+  const mod = await loader.import(target)
+  const plugin = (mod as { default?: { kind?: unknown; meta?: { id?: unknown; name?: unknown; label?: unknown; hint?: unknown } } }).default
+    ?? mod as { kind?: unknown; meta?: { id?: unknown; name?: unknown; label?: unknown; hint?: unknown } }
+  if (!plugin || typeof plugin !== 'object' || plugin.kind !== opts.kind) {
+    throw new Error(`插件 ${opts.specifier} 没有导出 kind=${opts.kind} 的默认对象`)
+  }
+  const id = plugin.meta?.id
+  if (typeof id !== 'string' || !id.trim()) {
+    throw new Error(`插件 ${opts.specifier} 没有声明 meta.id，无法确定它的 ${opts.kind} id`)
+  }
+  const name = typeof plugin.meta?.name === 'string' ? plugin.meta.name : undefined
+  const label = typeof plugin.meta?.label === 'string' ? plugin.meta.label : undefined
+  const hint = typeof plugin.meta?.hint === 'string' ? plugin.meta.hint : undefined
+  return {
+    id: id.trim(),
+    ...(name ? { name } : {}),
+    ...(label ? { label } : {}),
+    ...(hint ? { hint } : {}),
+  }
+}
+
 /** 插件自行创建 runner 时用；宿主不假设具体 CLI。 */
 export function throwRunner(kind: PluginKind, bin: string): CommandRunner {
   return {
