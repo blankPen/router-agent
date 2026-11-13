@@ -35,6 +35,5 @@ export { decidePermission, isAllowed, shellAllowed, commandOf } from './permissi
 export type { AcpPermissionOption, AcpToolCallInfo, AcpToolKind } from './permissions.js'
 export * from './errors.js'
 export * from './plugins/types.js'
-export { runtimeIdFromPluginSource } from './plugins/id.js'
 export { DEFAULT_RUNTIME_PLUGINS, describePluginLoadError, loadRuntimePlugins, pluginEntryOf } from './plugins/loader.js'
 export type { LoadedRuntimePlugins, RuntimePluginConfigView, RuntimePluginDeps } from './plugins/loader.js'

@@ -11,7 +11,6 @@ import { pluginSpecifier, type PluginEntry } from '#infra/plugin-loader.js'
 import { readPluginDeclaration } from '#infra/plugin-loader.js'
 import { installPluginPackage, installedPluginVersion, npmPackageNameOf } from '#infra/plugin-install.js'
 import { errorMessage } from '#infra/logger.js'
-import { runtimeIdFromPluginSource } from '#runtime/plugins/id.js'
 
 export interface RuntimeCliIo {
   stdout(line: string): void
