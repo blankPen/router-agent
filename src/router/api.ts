@@ -9,6 +9,7 @@ import { InstallStartError, type AcpRuntimeAdmin } from '@router-agent/runtime-a
 import { normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
 import { ReportRejectedError } from '#runtime/evidence-gate.js'
 import { ProjectSetupError, type ProjectSetupPort } from './project-setup.js'
+import type { ProjectScanPort } from './project-scan.js'
 import type { ChannelAdmin } from '#channel/port.js'
 import type { ChannelRegistry } from '#channel/registry.js'
 import type { AcceptMode } from '#core/policy.js'
@@ -118,6 +119,8 @@ export interface ApiServerOptions {
   logPath?: string
   /** 项目登记：目录选择、Git 探测、clone 与 Orca 仓库登记；缺省时端点返回 404。 */
   projectSetup?: ProjectSetupPort
+  /** 扫描本机会话日志里的候选项目；缺省时端点返回 404。 */
+  projectScan?: ProjectScanPort
   /** 面板「停止」：由服务层关单并排 workspace 回收；缺省时只停 worker（Web-only 模式）。 */
   onStopTicket?: (ticketId: string, reason: string) => Ticket
   /** 工单页「批量清理工作区」：按运行时列出与回收遗留 worktree；缺省时端点返回 501。 */
@@ -734,6 +737,18 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       }
     }
 
+    if (path === '/api/projects/scan' && req.method === 'POST') {
+      if (!opts.projectScan) return respond(res, 404, { error: 'project-scan-not-available' })
+      try {
+        const projects = await opts.projectScan.scan()
+        onEvent({ event: 'project:scanned', count: projects.length })
+        return respond(res, 200, { projects })
+      } catch (error) {
+        logger.warn('project:scan-failed', { detail: errorMessage(error) })
+        return respond(res, 500, { error: 'project-scan-failed', message: errorMessage(error) })
+      }
+    }
+
     if (path === '/api/projects/inspect' && req.method === 'POST') {
       if (!opts.projectSetup) return respond(res, 404, { error: 'project-setup-not-available' })
       const body = await readJson(req)
@@ -866,6 +881,18 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       const id = typeof body.id === 'string' ? body.id.trim() : ''
       if (!id) return respond(res, 400, { error: 'id-required' })
       const result = await opts.runtimeAdmin.check(id)
+      if (!result.ok) logger.warn('runtime:check-failed', { runtimeId: id, detail: result.detail })
+      return respond(res, 200, result)
+    }
+
+    // 轻量探测：命令 / 版本 / 依赖；不做 ACP 握手。面板的「检测」按钮走这里。
+    if (path === '/api/runtimes/probe' && req.method === 'POST') {
+      if (!opts.runtimeAdmin) return respond(res, 404, { error: 'runtime-admin-not-available' })
+      const body = await readJson(req)
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      if (!id) return respond(res, 400, { error: 'id-required' })
+      const result = await opts.runtimeAdmin.probe(id)
+      if (!result.ok) logger.warn('runtime:probe-failed', { runtimeId: id, detail: result.detail })
       return respond(res, 200, result)
     }
 

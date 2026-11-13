@@ -88,7 +88,7 @@ ra start                      # 启动，就绪后自动打开 http://127.0.0.1:
 
 1. **LLM Provider**：Base URL / 模型 / API Key，三项必填；OpenAI 兼容与 Anthropic 兼容协议都支持。密钥只写入 `config.yaml`，保存后不回显；环境变量 `RA_LLM_*` 可覆盖。右上角「从本地配置导入」会打开选择弹窗，从 Claude Code、CCSwitch、Pi、OpenCode、Magpie 的已有 Provider 里选一份导入（只读原配置，密钥不回显）。
 2. **选择运行时**：Orca / Claude Code / ACP Agent 卡片平铺，自动检测 CLI、版本、ACP 依赖与登录状态，支持安装引导和真实握手试启动。运行时自己的选项在卡片的「设置」弹窗里改（例如 Orca 的「执行 Agent」：默认 Claude Code，也可指定 codex 等）。
-3. **登记项目**：添加本地项目（系统目录选择 + 自动识别 Git）或 Git 项目（自动 clone 到 `~/.router-agent/repos`，可用 `RA_HOME` 改根目录）。
+3. **项目配置**：扫描本地项目（读 Claude Code / Codex / OpenCode 的会话日志列出候选目录，默认勾选最近活跃的 5 个）、添加本地项目（系统目录选择 + 自动识别 Git）或 Git 项目（自动 clone 到 `~/.router-agent/repos`，可用 `RA_HOME` 改根目录）。
 4. **飞书机器人**：填 App ID / App Secret（Secret 只写入 lark-cli 加密存储），固定使用 `~/.router-agent-lark` profile；保存后可检查授权状态并完成 Device Flow 授权。
 5. **群与绑定**：至少添加一个监控群；可把群固定到某个项目，之后开工不再追问。
 
@@ -166,9 +166,10 @@ Worker 不在 Router 进程里跑。Router 按 `runtime.default` 选择适配器
 | `claude-code` | `git worktree` + `claude --bg` 后台会话 | 不用 Orca，直接跑 Claude Code |
 | `codex-app` | `git worktree` + `codex app-server`，优先用 Codex App 内置 CLI | 用 Codex，且希望 Router 创建的 thread 在 Codex 桌面端可见 |
 | `herdr` | ra 用 git worktree 建检出，Herdr 开终端窗口跑 Agent | 本机已用 Herdr 管终端，想在 Herdr 侧栏里看到工单 |
+| `t3code` | ra 用 git worktree 建检出，T3 Code 在检出里开线程跑 Agent | 本机已装 T3 Code，想在 T3 手机端 / 桌面端看到工单 |
 | `acp` / `acp-*` | ACP 子进程（Claude / Codex / Gemini / OpenCode / Copilot / Cursor / Goose） | 想接其它 ACP Agent |
 
-换运行时只加一个 adapter，内核与 Router 一行不改。项目清单按运行时分开维护：Orca 用仓库选择器，其它运行时用本地仓库绝对路径；切换默认运行时只影响新工单。完整的运行时对比、ACP Agent 目录、工具策略与规范注入见 [docs/RUNTIME.md](docs/RUNTIME.md)。
+换运行时只加一个 adapter，内核与 Router 一行不改。项目清单按运行时分开维护，但清单里的项目路径口径统一：所有运行时都填本地仓库绝对路径，Orca 侧由适配器翻译成 `path:` 选择器并在派工前自动登记成 Orca 项目；切换默认运行时只影响新工单。完整的运行时对比、ACP Agent 目录、工具策略与规范注入见 [docs/RUNTIME.md](docs/RUNTIME.md)。
 
 ![运行时选择：Orca、Claude Code 与 ACP Agent 卡片](docs/assets/readme/runtime-cards.png)
 
@@ -216,7 +217,7 @@ Router（AgentLoop + DecisionEngine(Pi) + HTTP API + Web）
 领域内核（TS 零依赖：Ticket / Mandate / Assignment / Stage / Policy）
         │ Assignment
         ▼
-WorkerRuntime 端口 ── OrcaRuntime（默认）/ ClaudeCodeRuntime / HerdrRuntime / AcpRuntime（acp 与 7 个 acp-*）
+WorkerRuntime 端口 ── OrcaRuntime（默认）/ ClaudeCodeRuntime / HerdrRuntime / T3CodeRuntime / AcpRuntime（acp 与 7 个 acp-*）
 ```
 
 开启需求识别后，`IntakeCoordinator + PiIntakeEngine` 作为并行的前置链路接入同一个 AgentLoop：初筛 → 只读项目代码澄清 → 结构化需求单 → 管理员终审，才回到上面的派工主链路。
@@ -252,7 +253,7 @@ policy:
 
 projects:
   - name: router-agent
-    repo: name:dsh/router-agent
+    repo: /Users/me/router-agent
     defaultBranch: main
 ```
 
@@ -264,7 +265,7 @@ projects:
 
 ```bash
 ra config set policy.acceptMode observe          # 先观察，不开工
-ra config set project.router-agent "name:dsh/router-agent@main"
+ra config set project.router-agent "/Users/me/router-agent@main"
 ra config set chatBinding.oc_xxx "router-agent@main"
 ra config set runtime.default claude-code
 ra config set runtime.options.orca.agent codex   # Orca 派工时用 Codex；不配 = 默认 Claude Code
@@ -321,6 +322,7 @@ RA_PI_VERIFY=1 npx vitest run tests/verify-pi-live.test.ts   # 真实 Pi + 真�
 packages/core/     领域内核：Ticket / Mandate / Stage / Policy 与共享类型
 packages/infra/    日志、子进程、对话模型、图片识别
 packages/runtime/  WorkerRuntime 端口、RuntimeRegistry、Orca / Claude Code / Codex / ACP / Herdr adapter
+packages/runtime-t3code/  T3 Code 运行时插件（t3 thread 封装 + 服务端探测）
 packages/channel/  ChannelAdapter 端口、ChannelRegistry、飞书 adapter 与 lark-cli 封装
 src/               宿主：Engine / Store、Router、HTTP API、Web 面板、CLI 与装配
 ```
@@ -348,6 +350,7 @@ src/               宿主：Engine / Store、Router、HTTP API、Web 面板、CL
 | [docs/API.md](docs/API.md) | 本地 HTTP API |
 | [docs/COMPARISON.md](docs/COMPARISON.md) | 与 dsh-superagent 原型的差距分析与可迁移机制 |
 | [docs/AGENT-ADAPTER-DESIGN.md](docs/AGENT-ADAPTER-DESIGN.md) | Agent 工具适配器接口设计：Orca / Claude Code / Codex 的契约与迁移方案 |
+| [docs/DIAGNOSIS-REDESIGN.md](docs/DIAGNOSIS-REDESIGN.md) | 智能诊断工具改造设计：doctor 自检 → 日志扫描 → 结论分流的诊断管线 |
 | [docs/VERIFICATION.md](docs/VERIFICATION.md) | 真实环境验证记录与需要人工执行的剩余步骤 |
 | [docs/show-me-router-flow.html](docs/show-me-router-flow.html) | 消息 → 研判 → 派工 → 上报 → 闭环的可视化流程 |
 | [README.en.md](README.en.md) | English version |

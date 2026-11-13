@@ -95,7 +95,7 @@ The page only covers the five things needed to get running, with a completion ch
 
 1. **LLM Provider**: Base URL / model / API key — all three are required; both OpenAI-compatible and Anthropic-compatible APIs are supported. The key is written only to `config.yaml` and never echoed back; `RA_LLM_*` environment variables can override it. **Import from local config** in the card header opens a picker to import an existing provider from Claude Code, CCSwitch, Pi, OpenCode or Magpie (the source files are read-only and the key is never sent back to the page).
 2. **Worker runtime**: Orca / Claude Code / ACP Agent cards, with automatic checks for the CLI, version, ACP dependencies and login state, plus install guidance and a real handshake test. The runtime's own options show up under the cards (for Orca: which **Agent** to launch — leave it empty to follow Orca's own default, or pick `codex` etc.).
-3. **Projects**: add a local project (system directory picker + Git detection) or a Git project (cloned into `~/.router-agent/repos`; `RA_HOME` changes the root).
+3. **Projects**: scan local projects (reads Claude Code / Codex / OpenCode session logs and offers the directories they touched, with the 5 most recently active ones checked by default), add a local project (system directory picker + Git detection) or a Git project (cloned into `~/.router-agent/repos`; `RA_HOME` changes the root).
 4. **Feishu bot**: enter App ID / App Secret (the secret is written only to lark-cli's encrypted store); router-agent always uses the fixed `~/.router-agent-lark` profile. After saving you can check authorization status and complete the Device Flow login from the same page.
 5. **Chats and bindings**: at least one monitored chat; bind it to a project so dispatch stops asking.
 
@@ -182,9 +182,10 @@ Workers don't run inside the Router process. The Router picks an adapter from `r
 | `claude-code` | `git worktree` + background `claude --bg` session | You don't use Orca and just want Claude Code |
 | `codex-app` | `git worktree` + `codex app-server`, preferring the CLI bundled with the Codex app | Use Codex and want Router-created threads visible in the Codex desktop app |
 | `herdr` | ra creates the worktree with git, Herdr opens a terminal pane for the agent | You already drive terminals with Herdr and want tickets visible in its sidebar |
+| `t3code` | ra creates the worktree with git, T3 Code runs the agent in a thread there | You already use T3 Code and want tickets visible from its phone or desktop app |
 | `acp` / `acp-*` | ACP child process (Claude / Codex / Gemini / OpenCode and friends) | You want to plug in another ACP agent |
 
-Project lists are kept per runtime: Orca uses repository selectors, other runtimes need absolute local paths. Switching the default only affects new tickets. The full comparison, ACP agent catalog, tool policy and spec injection are in [docs/RUNTIME.md](docs/RUNTIME.md) (Chinese).
+Project lists are kept per runtime, but the path format is unified: every runtime stores the absolute local repository path, and the Orca adapter turns it into a `path:` selector and registers the directory as an Orca project before dispatching. Switching the default only affects new tickets. The full comparison, ACP agent catalog, tool policy and spec injection are in [docs/RUNTIME.md](docs/RUNTIME.md) (Chinese).
 
 ## Configuration
 
@@ -209,7 +210,7 @@ policy:
 
 projects:
   - name: router-agent
-    repo: name:dsh/router-agent
+    repo: /Users/me/router-agent
     defaultBranch: main
 ```
 
@@ -219,7 +220,7 @@ Common tweaks don't require editing the whole file:
 
 ```bash
 ra config set policy.acceptMode observe          # observe first, no dispatch
-ra config set project.router-agent "name:dsh/router-agent@main"
+ra config set project.router-agent "/Users/me/router-agent@main"
 ra config set chatBinding.oc_xxx "router-agent@main"
 ra config set runtime.default claude-code
 ra config set runtime.options.orca.agent codex   # Orca dispatches with Codex; default is Claude Code
@@ -276,6 +277,7 @@ Source layout (pnpm workspace with pluggable adapter packages):
 packages/core/     domain core: Ticket / Mandate / Stage / Policy and shared types
 packages/infra/    logger, subprocess runner, chat model, image transcription
 packages/runtime/  WorkerRuntime port, RuntimeRegistry, Orca / Claude Code / Codex / ACP / Herdr adapters
+packages/runtime-t3code/  T3 Code runtime plugin (t3 thread wrapper + server probe)
 packages/channel/  ChannelAdapter port, ChannelRegistry, Feishu adapter and lark-cli wrapper
 src/               host: Engine / Store, Router, HTTP API, web dashboard, CLI and wiring
 ```
@@ -304,6 +306,7 @@ The detailed docs are currently Chinese-only.
 | [docs/API.md](docs/API.md) | Local HTTP API |
 | [docs/COMPARISON.md](docs/COMPARISON.md) | Gap analysis against the dsh-superagent prototype and transferable mechanisms |
 | [docs/AGENT-ADAPTER-DESIGN.md](docs/AGENT-ADAPTER-DESIGN.md) | Agent tool adapter contract design: Orca / Claude Code / Codex |
+| [docs/DIAGNOSIS-REDESIGN.md](docs/DIAGNOSIS-REDESIGN.md) | Smart diagnosis redesign: doctor probe → log scan → finding triage |
 | [docs/VERIFICATION.md](docs/VERIFICATION.md) | Real-environment verification records and remaining manual steps |
 | [docs/show-me-router-flow.html](docs/show-me-router-flow.html) | Visual flow: message → triage → dispatch → report → closure |
 | [README.md](README.md) | 简体中文版 |

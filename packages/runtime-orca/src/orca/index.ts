@@ -22,9 +22,13 @@ import { buildWorkerPrompt } from '@router-agent/runtime'
 import { workBranch, worktreeName } from '@router-agent/runtime'
 import { resolveSession } from '@router-agent/runtime'
 import { runtimeOptionDefault } from '@router-agent/runtime'
+import { projectRepoPath } from '@router-agent/runtime'
 import { ORCA_RUNTIME_ID } from '@router-agent/runtime'
+import { noopLogger, errorMessage, type Logger } from '@router-agent/infra/logger.js'
+import { dismissCodexUpdatePrompt } from './codex-update.js'
 import {
   agentLaunch,
+  repoAdd,
   terminalClose,
   terminalList,
   terminalRead,
@@ -46,6 +50,9 @@ export interface OrcaRuntimeOptions {
   agent?: string
   /** Claude Code 会话记录目录；默认 ~/.claude/projects，测试可注入临时目录。 */
   claudeProjectsDir?: string
+  logger?: Logger
+  /** Agent 看到的环境变量；决定 CODEX_HOME 等路径，测试可注入。 */
+  env?: NodeJS.ProcessEnv
 }
 
 export interface OrcaTerminalInfo {
@@ -103,6 +110,24 @@ export function formatCommandFailure(detail: OrcaCommandFailure): string {
   if (!detail.orcaCode && !detail.orcaMessage && detail.stdoutTail) parts.push(`stdout=${detail.stdoutTail}`)
   if (detail.stderrTail) parts.push(`stderr=${detail.stderrTail}`)
   return parts.join(' | ')
+}
+
+/**
+ * Orca 判定「Agent 正停在交互式提示上」的错误码。
+ * 触发场景：Codex 的版本更新浮层、Claude 的权限确认等，Agent 不收输入。
+ */
+const AGENT_PROMPT_BLOCKED_CODE = 'agent_prompt_blocked'
+
+/** 判断失败是否来自「Agent 停在交互式提示上」。 */
+export function isAgentPromptBlocked(error: unknown): boolean {
+  return error instanceof OrcaCommandError && error.detail.orcaCode === AGENT_PROMPT_BLOCKED_CODE
+}
+
+/** 取给用户看的原因说明：Orca 的错误正文里带请求 id，方便人工回终端核对。 */
+export function promptBlockedReason(error: unknown): string {
+  if (!(error instanceof OrcaCommandError)) return ''
+  const detail = error.detail
+  return (detail.orcaMessage || detail.orcaCause || detail.stderrTail || '').slice(0, 300)
 }
 
 /** 从 argv 生成脱敏摘要：跳过长文本参数，保留可复现的关键选项。 */
@@ -213,6 +238,10 @@ export class OrcaRuntime implements WorkerRuntime {
   private home?: string
   private agent: string
   private claudeProjectsDir?: string
+  private logger: Logger
+  private env: NodeJS.ProcessEnv
+  /** 停在交互式提示上的终端：handle -> 原因；发成功一次就清掉。 */
+  private blocked = new Map<string, string>()
 
   constructor(opts: OrcaRuntimeOptions) {
     this.runner = opts.runner
@@ -221,6 +250,8 @@ export class OrcaRuntime implements WorkerRuntime {
     // Orca 的 --prompt 必须配 --agent，没有「不传」这种形态，因此这里必须落到一个具体值。
     this.agent = String(opts.agent || runtimeOptionDefault(ORCA_RUNTIME_ID, 'agent') || '').trim()
     this.claudeProjectsDir = opts.claudeProjectsDir
+    this.logger = opts.logger ?? noopLogger
+    this.env = opts.env ?? process.env
   }
 
   async start(ctx: WorkerContext): Promise<StartResult> {
@@ -245,6 +276,10 @@ export class OrcaRuntime implements WorkerRuntime {
       workdir: ctx.workdir,
       ...(this.home ? { home: this.home } : {}),
     })
+    this.prepareAgentStart(ctx.ticket.id)
+    // 项目清单统一写本地绝对路径：Orca 侧未必登记过这个目录，先自动登记成 Orca 项目。
+    const repoPath = projectRepoPath(repo)
+    if (repoPath) await this.ensureRepoRegistered(repoPath, ctx.ticket.id)
     const res = await this.run(worktreeCreate({
       repo,
       name,
@@ -278,7 +313,26 @@ export class OrcaRuntime implements WorkerRuntime {
     const accepted: string[] = []
     for (const input of inputs) {
       if (!input.text.trim()) continue
-      await this.run(terminalSend(handle, renderInput(input)))
+      try {
+        await this.sendText(handle, renderInput(input))
+      } catch (error) {
+        // Agent 停在交互式提示上（Codex 的版本更新浮层、权限确认等）时 Orca 会拒收输入。
+        // 这种提示 Router 代答不了，重投多少次都一样，必须转人工。
+        if (isAgentPromptBlocked(error)) {
+          const detail = promptBlockedReason(error)
+          this.logger.warn('orca:agent-prompt-blocked', { handle, inputId: input.id, reason: detail })
+          return {
+            status: 'rejected',
+            inputIds: accepted,
+            reason: 'orca:agent-prompt-blocked',
+            retryable: true,
+            retryAfterMs: 60_000,
+            needsHuman: true,
+            detail,
+          }
+        }
+        throw error
+      }
       accepted.push(input.id)
     }
     return { status: 'accepted', inputIds: accepted }
@@ -287,7 +341,7 @@ export class OrcaRuntime implements WorkerRuntime {
   async registerContext(ref: WorkerRef | string, items: ContextItem[]): Promise<void> {
     const text = renderContext(items)
     if (!text) return
-    await this.run(terminalSend(this.handleOf(ref), text))
+    await this.sendText(this.handleOf(ref), text)
   }
 
   async stop(ref: WorkerRef | string, reason: string): Promise<void> {
@@ -296,7 +350,14 @@ export class OrcaRuntime implements WorkerRuntime {
   }
 
   async nudge(ref: WorkerRef | string): Promise<void> {
-    await this.run(terminalSend(this.handleOf(ref), 'status?'))
+    const handle = this.handleOf(ref)
+    try {
+      await this.sendText(handle, 'status?')
+    } catch (error) {
+      // 探活撞上交互式提示：记下来交给 status() 转人工，不让巡检整轮挂掉。
+      if (!isAgentPromptBlocked(error)) throw error
+      this.logger.warn('orca:agent-prompt-blocked', { handle, reason: promptBlockedReason(error) })
+    }
   }
 
   /** 中立活性：把 Orca 终端字段映射成 AgentStatus；查询失败返回 null。 */
@@ -311,6 +372,19 @@ export class OrcaRuntime implements WorkerRuntime {
     if (!info) return { alive: false, phase: 'lost', acceptingInput: false, detail: { source: 'orca' } }
     if (!info.connected) {
       return { alive: false, phase: 'lost', acceptingInput: false, detail: { source: 'orca', connected: false, orphaned: info.orphaned } }
+    }
+    const blocked = this.blocked.get(handle)
+    if (blocked) {
+      return {
+        alive: true,
+        phase: 'blocked',
+        acceptingInput: false,
+        ...(info.lastOutputAt ? { lastActivityAt: info.lastOutputAt } : {}),
+        detail: {
+          source: 'orca',
+          waitingFor: `交互式提示，需要人工在 Orca 终端里选一下（例如 Codex 的版本更新）：${blocked}`,
+        },
+      }
     }
     if (info.orphaned && !info.writable) {
       return {
@@ -434,6 +508,70 @@ export class OrcaRuntime implements WorkerRuntime {
     return typeof ref === 'string' ? ref : ref.handle
   }
 
+  /**
+   * 自动把项目登记成 Orca 项目。
+   *
+   * 项目清单统一写本地绝对路径，Orca 侧不一定登记过这个目录；
+   * `orca repo add` 对已登记的目录是幂等的，直接调一次最省事。
+   * 登记失败不阻断派工：真正失败的原因会由后面的 worktree create 报出来。
+   */
+  private async ensureRepoRegistered(path: string, ticketId: string): Promise<void> {
+    try {
+      const res = await this.runner.run(repoAdd(path))
+      if (res.code !== 0) {
+        this.logger.warn('orca:project-register-failed', {
+          ticketId,
+          path,
+          reason: (res.stderr || res.stdout).trim().slice(0, 300),
+        })
+        return
+      }
+      this.logger.info('orca:project-registered', { ticketId, path, displayName: parseRepoDisplayName(res.stdout) })
+    } catch (error) {
+      this.logger.warn('orca:project-register-failed', { ticketId, path, reason: errorMessage(error) })
+    }
+  }
+
+  /**
+   * 启动 Agent 前的准备工作。
+   *
+   * Codex 启动时会弹「有新版本」的选择浮层，必须用键盘选，
+   * 无人值守的工单会直接卡在这里。启动前把这个版本的更新提示消掉，
+   * 消不掉只告警，交给后面的检测转人工。
+   */
+  private prepareAgentStart(ticketId: string): void {
+    if (this.agent !== 'codex') return
+    const dismissal = dismissCodexUpdatePrompt(this.env)
+    if (dismissal.status === 'dismissed') {
+      this.logger.info('orca:codex-update-dismissed', {
+        ticketId,
+        version: dismissal.latestVersion || '',
+        path: dismissal.path,
+      })
+      return
+    }
+    if (dismissal.status === 'failed') {
+      this.logger.warn('orca:codex-update-dismiss-failed', {
+        ticketId,
+        reason: dismissal.reason || 'unknown',
+        path: dismissal.path,
+      })
+    }
+  }
+
+  /** 发文本给终端；Agent 停在交互式提示上时记下来，等 status() 转人工。 */
+  private async sendText(handle: string, text: string): Promise<void> {
+    try {
+      await this.run(terminalSend(handle, text))
+    } catch (error) {
+      if (isAgentPromptBlocked(error)) {
+        this.blocked.set(handle, promptBlockedReason(error))
+      }
+      throw error
+    }
+    this.blocked.delete(handle)
+  }
+
   private async run(argv: string[]): Promise<CommandResult> {
     const res = await this.runner.run(argv)
     if (res.code !== 0) {
@@ -487,6 +625,17 @@ function renderContext(items: ContextItem[]): string {
     else lines.push(`# 目录 ${item.path}`)
   }
   return lines.join('\n\n')
+}
+
+/** 从 `orca repo add --json` 的返回里取 displayName；取不到返回空串。 */
+export function parseRepoDisplayName(stdout: string): string {
+  try {
+    const parsed = JSON.parse(stdout) as Record<string, any>
+    const result = (parsed.result ?? parsed) as Record<string, any>
+    return String(result?.repo?.displayName ?? result?.displayName ?? '')
+  } catch {
+    return ''
+  }
 }
 
 function parseJsonOrThrow(stdout: string): unknown {

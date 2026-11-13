@@ -44,6 +44,7 @@ import { EffectsProcessor } from '../core/effects.js'
 import { createApiServer, emptyIdentityStatus, type IdentityPort } from '../router/api.js'
 import { PluginPackageAdmin } from '../router/plugin-admin.js'
 import { ProjectSetup } from '../router/project-setup.js'
+import { scanLocalProjects } from '../router/project-scan.js'
 import { createLogAssistant } from '../router/log-assistant.js'
 import { createDiagnosisTools } from '../router/diagnosis-tools.js'
 import { createIssueReporter } from '../router/issue-report.js'
@@ -76,6 +77,8 @@ export interface CliIo {
   git?: CommandRunner
   /** Herdr CLI；默认用真实 herdr。 */
   herdr?: CommandRunner
+  /** T3 Code CLI；默认用真实 t3。 */
+  t3?: CommandRunner
   /** 已绑定固定 lark-cli profile 的 runner（测试注入点）。 */
   lark?: CommandRunner
   /** npm 命令（测试注入点）；默认用系统 npm。 */
@@ -122,7 +125,7 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
   ra init
   ra tickets --stage blocked
   ra config set policy.acceptMode observe
-  ra config set project.router-agent "name:dsh/router-agent@main"
+  ra config set project.router-agent "/Users/me/router-agent@main"
   ra config set chatBinding.oc_xxx "router-agent@main"
   ra config --edit`)
 
@@ -289,7 +292,7 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
 示例:
   ra config                      查看全部配置
   ra config set policy.acceptMode observe
-  ra config set project.router-agent "name:dsh/router-agent@main"
+  ra config set project.router-agent "/Users/me/router-agent@main"
   ra config set chatBinding.oc_xxx "router-agent@main"
   ra config edit                 用 $EDITOR 打开`)
     .action(async (action: string | undefined, key: string | undefined, value: string | undefined, opts: { home?: string }) => {
@@ -344,6 +347,7 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
         claude: output.claude ?? realRunner('claude'),
         git: output.git ?? realRunner('git'),
         herdr: output.herdr ?? realRunner('herdr'),
+        t3: output.t3 ?? realRunner('t3'),
       },
       claudeBin: output.claudeBin ?? 'claude',
       logger: createLogger(home, output, false),
@@ -1272,6 +1276,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   const claudeRunner = output.claude ?? realRunner('claude')
   const gitRunner = output.git ?? realRunner('git')
   const herdrRunner = output.herdr ?? realRunner('herdr')
+  const t3Runner = output.t3 ?? realRunner('t3')
   const larkRunner = output.lark ?? createLarkRunner()
   const ghRunner = realRunner('gh')
   const glabRunner = realRunner('glab')
@@ -1325,6 +1330,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       claude: claudeRunner,
       git: gitRunner,
       herdr: herdrRunner,
+      t3: t3Runner,
     },
     claudeBin: output.claudeBin ?? 'claude',
     logger,
@@ -1583,6 +1589,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     logAssistant,
     issueReporter,
     projectSetup: new ProjectSetup({ home, git: gitRunner, orca: orcaRunner }),
+    projectScan: { scan: () => scanLocalProjects() },
     // Web-only 模式没有 RouterService，工作区清理端点按「不支持」返回。
     ...(service
       ? {

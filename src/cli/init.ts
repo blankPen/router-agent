@@ -113,7 +113,7 @@ async function pickRepo(
   out: (line: string) => void,
 ): Promise<void> {
   const existingRepo = projectsForRuntime(config)[0]?.repo ?? ''
-  // 非 Orca 运行时（claude-code / acp-*）都用 git worktree，需要本地仓库绝对路径。
+  // 项目路径统一写本地绝对路径，所有 runtime 口径一致。
   if (normalizeRuntimeId(config.runtime.default) !== ORCA_RUNTIME_ID) {
     const repo = await prompts.input({
       message: '本地仓库绝对路径（例如 /Users/me/project）',
@@ -133,7 +133,7 @@ async function pickRepo(
 
   if (repos.length === 0) {
     const repo = await prompts.input({
-      message: 'Orca 仓库名（orca repo list 里的 displayName）',
+      message: '本地仓库绝对路径（例如 /Users/me/project）',
       default: existingRepo,
     })
     await registerProject(config, repo, prompts, out)
@@ -142,32 +142,38 @@ async function pickRepo(
 
   out('')
   const choice = await prompts.select<string>({
-    message: '选择 Orca 仓库（用于创建 worktree，只列 git 类型）',
+    message: '选择 Orca 仓库（存本地路径，派工时自动登记成 Orca 项目）',
     choices: [
-      ...repos.map(repo => ({ name: `${repo.name}  ${repo.path}`, value: repo.name })),
+      ...repos.map(repo => ({ name: `${repo.name}  ${repo.path}`, value: repo.path })),
       { name: '稍后设置', value: '' },
     ],
-    default: existingRepo || repos[0]!.name,
+    default: existingRepo || repos[0]!.path,
   })
-  await registerProject(config, choice, prompts, out)
+  await registerProject(config, choice, prompts, out, repos.find(repo => repo.path === choice)?.name)
 }
 
 /** 把仓库登记成一个项目，并问清默认起始分支。 */
-async function registerProject(config: AppConfig, repo: string, prompts: Prompter, out: (line: string) => void): Promise<void> {
+async function registerProject(
+  config: AppConfig,
+  repo: string,
+  prompts: Prompter,
+  out: (line: string) => void,
+  name?: string,
+): Promise<void> {
   if (!repo) return
-  const name = projectNameOf(repo)
+  const projectName = name?.trim() || projectNameOf(repo)
   const projects = projectsForRuntime(config)
-  const existing = projects.find(project => project.name === name)
+  const existing = projects.find(project => project.name === projectName)
   const defaultBranch = await prompts.input({
-    message: `项目「${name}」的默认起始分支（工单没指定时使用；留空则每次开工前问你）`,
+    message: `项目「${projectName}」的默认起始分支（工单没指定时使用；留空则每次开工前问你）`,
     default: existing?.defaultBranch || '',
   })
   const project: ProjectConfig = {
-    name,
+    name: projectName,
     repo,
     defaultBranch: defaultBranch.trim(),
   }
-  const index = projects.findIndex(item => item.name === name)
+  const index = projects.findIndex(item => item.name === projectName)
   if (index >= 0) projects[index] = project
   else projects.push(project)
   setProjectsForRuntime(config, config.runtime.default, projects)

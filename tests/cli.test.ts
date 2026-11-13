@@ -154,7 +154,7 @@ describe('ra CLI', () => {
       '  botOpenIds: [ou_bot, cli_bot]',
       'projects:',
       '  - name: teamwork-repos',
-      '    repo: teamwork-repos',
+      `    repo: ${process.cwd()}`,
       '    defaultBranch: main',
       'policy:',
       '  acceptMode: observe',

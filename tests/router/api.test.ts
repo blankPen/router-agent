@@ -344,6 +344,7 @@ describe('HTTP 管理 API', () => {
         return { jobId: 'job-1' }
       },
       check: async () => ({ ok: true, detail: 'ok', choice }),
+      probe: async () => ({ ok: true, detail: '版本探测通过', choice }),
       installJob: (id: string) => (id === 'job-1' ? job : null),
     }
     const runtimeServer = await createApiServer({ engine, store, config, runtimeAdmin: admin as never })
@@ -365,6 +366,11 @@ describe('HTTP 管理 API', () => {
       expect(checked.status).toBe(200)
       expect(checked.json).toMatchObject({ ok: true, choice: { id: 'acp-codex', status: 'ready' } })
 
+      const probed = await call(runtimeServer, 'POST', '/api/runtimes/probe', { id: 'acp-codex' })
+      expect(probed.status).toBe(200)
+      expect(probed.json).toMatchObject({ ok: true, choice: { id: 'acp-codex', status: 'ready' } })
+      expect((await call(runtimeServer, 'POST', '/api/runtimes/probe', {})).status).toBe(400)
+
       const installed = await call(runtimeServer, 'POST', '/api/runtimes/install', { id: 'acp-codex' })
       expect(installed.status).toBe(202)
       expect(installed.json.jobId).toBe('job-1')
@@ -385,6 +391,34 @@ describe('HTTP 管理 API', () => {
     }
   })
 
+  it('运行时检测失败时记录 runtime:check-failed / runtime:probe-failed', async () => {
+    const logs: { message: string; extra?: Record<string, unknown> }[] = []
+    const admin = {
+      snapshot: () => null,
+      isDetecting: () => false,
+      detect: async () => ({ detectedAt: '2026-11-06T10:00:00.000Z', choices: [] }),
+      check: async () => ({ ok: false, detail: '未知 ACP Agent: herdr' }),
+      probe: async () => ({ ok: false, detail: '未找到 t3 CLI' }),
+      startInstall: () => ({ jobId: 'job-1' }),
+      installJob: () => null,
+    }
+    const runtimeServer = await createApiServer({
+      engine, store, config,
+      runtimeAdmin: admin as never,
+      logger: { info: () => {}, warn: (message, extra) => logs.push({ message, ...(extra ? { extra } : {}) }), error: () => {} },
+    })
+    try {
+      await call(runtimeServer, 'POST', '/api/runtimes/check', { id: 'herdr' })
+      await call(runtimeServer, 'POST', '/api/runtimes/probe', { id: 't3code' })
+      const checked = logs.find(log => log.message === 'runtime:check-failed')
+      expect(checked?.extra).toMatchObject({ runtimeId: 'herdr', detail: '未知 ACP Agent: herdr' })
+      const probed = logs.find(log => log.message === 'runtime:probe-failed')
+      expect(probed?.extra).toMatchObject({ runtimeId: 't3code', detail: '未找到 t3 CLI' })
+    } finally {
+      await runtimeServer.close()
+    }
+  })
+
   it('GET /api/sources/feishu/chats 返回配置的群', async () => {
     const res = await call(server, 'GET', '/api/sources/feishu/chats')
     expect(res.json.chats).toEqual([chatEntry('oc_dev')])
@@ -395,7 +429,7 @@ describe('HTTP 管理 API', () => {
     const res = await call(server, 'PUT', '/api/config', {
       patch: {
         'runtime.default': 'claude-code',
-        'projects': [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }],
+        'projects': [{ name: 'router-agent', repo: '/Users/me/router-agent', defaultBranch: 'main' }],
         'runtime.projects.claude-code': [{ name: 'router-agent', repo: '/Users/me/router-agent', defaultBranch: 'main' }],
       },
     })
@@ -403,11 +437,11 @@ describe('HTTP 管理 API', () => {
     expect(res.json.config.runtime.projects['claude-code']).toHaveLength(1)
     const saved = loadConfig(config.home!)
     expect(saved.runtime.default).toBe('claude-code')
-    expect(saved.projects[0]?.repo).toBe('name:dsh/router-agent')
+    expect(saved.projects[0]?.repo).toBe('/Users/me/router-agent')
     expect(projectsForRuntime(saved, 'claude-code')[0]?.repo).toBe('/Users/me/router-agent')
   })
 
-  it('PUT /api/config 拒绝 claude-code 清单里的 Orca 选择器', async () => {
+  it('PUT /api/config 拒绝清单里的 Orca 选择器（所有 runtime 统一要本地绝对路径）', async () => {
     config.home = mkdtempSync(join(tmpdir(), 'ra-api-config-'))
     const res = await call(server, 'PUT', '/api/config', {
       patch: {
@@ -416,6 +450,17 @@ describe('HTTP 管理 API', () => {
     })
     expect(res.status).toBe(400)
     expect(res.json.errors[0].path).toBe('runtime.projects.claude-code')
+  })
+
+  it('PUT /api/config 拒绝 orca 清单里的 name: 选择器', async () => {
+    config.home = mkdtempSync(join(tmpdir(), 'ra-api-config-'))
+    const res = await call(server, 'PUT', '/api/config', {
+      patch: {
+        'projects': [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }],
+      },
+    })
+    expect(res.status).toBe(400)
+    expect(res.json.errors[0].path).toBe('projects')
   })
 
   it('GET /api/status 汇总活跃工单与运行时状态', async () => {

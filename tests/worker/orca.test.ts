@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { OrcaRuntime, OrcaCommandError, parseCreateResult, summarizeArgs } from '@router-agent/runtime-orca'
 import { claudeProjectSlug, describeToolInfo, describeToolUse } from '#runtime/agents/claude.js'
-import { worktreeCreate, terminalSend, terminalClose, terminalList, terminalRead, worktreeRemove, agentLaunch } from '@router-agent/runtime-orca'
+import { worktreeCreate, terminalSend, terminalClose, terminalList, terminalRead, worktreeRemove, agentLaunch, repoAdd } from '@router-agent/runtime-orca'
 import type { CommandRunner, CommandResult } from '@router-agent/runtime-orca'
 import type { Assignment, Ticket } from '#core/model.js'
 import { buildNeutralContract, buildWorkerPrompt } from '#runtime/spec/index.js'
@@ -71,6 +71,16 @@ describe('Orca 命令构造', () => {
     expect(worktreeCreate({ repo: 'path:/Users/me/repo', name: 'n', prompt })[3]).toBe('path:/Users/me/repo')
     expect(worktreeCreate({ repo: 'name:my-repo', name: 'n', prompt })[3]).toBe('name:my-repo')
     expect(worktreeCreate({ repo: 'my-repo', name: 'n', prompt })[3]).toBe('name:my-repo')
+  })
+
+  it('本地绝对路径统一翻成 Orca 的 path: 选择器', () => {
+    const prompt = 'x'
+    expect(worktreeCreate({ repo: '/Users/me/repo', name: 'n', prompt })[3]).toBe('path:/Users/me/repo')
+    expect(worktreeCreate({ repo: 'path:/Users/me/repo', name: 'n', prompt })[3]).toBe('path:/Users/me/repo')
+  })
+
+  it('repo add 按本地路径登记项目', () => {
+    expect(repoAdd('/Users/me/repo')).toEqual(['repo', 'add', '--path', '/Users/me/repo', '--kind', 'git', '--json'])
   })
 
   it('terminal send 追加 Enter 并请求 JSON', () => {
@@ -183,6 +193,72 @@ describe('OrcaRuntime', () => {
     expect(meta.assignmentId).toBe('as_1')
   })
 
+  it('派工前自动把项目路径登记成 Orca 项目，并用 path: 选择器建 worktree', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ra-workers-'))
+    const logs: { level: string; message: string; extra?: Record<string, unknown> }[] = []
+    const runner = new FakeRunner([
+      { code: 0, stdout: JSON.stringify({ ok: true, result: { repo: { displayName: 'router-agent' } } }), stderr: '' },
+      { code: 0, stdout: JSON.stringify({ ok: true, result: { launch: { outcome: { handle: 'term-9' } }, worktree: { path: '/tmp/wt-9' } } }), stderr: '' },
+    ])
+    const adapter = new OrcaRuntime({
+      runner,
+      workersDir: dir,
+      logger: {
+        info: (message, extra) => { logs.push({ level: 'info', message, extra: extra as Record<string, unknown> }) },
+        warn: (message, extra) => { logs.push({ level: 'warn', message, extra: extra as Record<string, unknown> }) },
+        error: (message, extra) => { logs.push({ level: 'error', message, extra: extra as Record<string, unknown> }) },
+      },
+    })
+
+    await adapter.start({ ticket: { ...ticket, repo: '/Users/me/router-agent' }, assignment, workdir: '/tmp/wt-9' })
+
+    expect(runner.calls[0]!.argv).toEqual(['repo', 'add', '--path', '/Users/me/router-agent', '--kind', 'git', '--json'])
+    expect(runner.calls[1]!.argv.slice(0, 4)).toEqual(['worktree', 'create', '--repo', 'path:/Users/me/router-agent'])
+    expect(logs.find(item => item.message === 'orca:project-registered')?.extra).toMatchObject({
+      ticketId: 'tk_1',
+      path: '/Users/me/router-agent',
+      displayName: 'router-agent',
+    })
+  })
+
+  it('登记失败只告警，派工继续（真正的失败由 worktree create 报）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ra-workers-'))
+    const logs: { level: string; message: string; extra?: Record<string, unknown> }[] = []
+    const runner = new FakeRunner([
+      { code: 1, stdout: '', stderr: 'Orca runtime not reachable' },
+      { code: 0, stdout: JSON.stringify({ ok: true, result: { launch: { outcome: { handle: 'term-9' } } } }), stderr: '' },
+    ])
+    const adapter = new OrcaRuntime({
+      runner,
+      workersDir: dir,
+      logger: {
+        info: (message, extra) => { logs.push({ level: 'info', message, extra: extra as Record<string, unknown> }) },
+        warn: (message, extra) => { logs.push({ level: 'warn', message, extra: extra as Record<string, unknown> }) },
+        error: (message, extra) => { logs.push({ level: 'error', message, extra: extra as Record<string, unknown> }) },
+      },
+    })
+
+    const started = await adapter.start({ ticket: { ...ticket, repo: '/Users/me/router-agent' }, assignment, workdir: '/tmp/wt-9' })
+
+    expect(started.handle).toBe('term-9')
+    expect(runner.calls[1]!.argv.slice(0, 2)).toEqual(['worktree', 'create'])
+    expect(logs.find(item => item.message === 'orca:project-register-failed')?.extra).toMatchObject({
+      ticketId: 'tk_1',
+      path: '/Users/me/router-agent',
+      reason: 'Orca runtime not reachable',
+    })
+  })
+
+  it('遗留的 name: 选择器不登记（路径未知，登记不了）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ra-workers-'))
+    const runner = new FakeRunner([
+      { code: 0, stdout: JSON.stringify({ ok: true, result: { launch: { outcome: { handle: 'term-9' } } } }), stderr: '' },
+    ])
+    await new OrcaRuntime({ runner, workersDir: dir }).start({ ticket, assignment, workdir: '/tmp/wt-9' })
+
+    expect(runner.calls.map(call => call.argv.slice(0, 2).join(' '))).toEqual(['worktree create'])
+  })
+
   it('未配置时用声明默认 claude；配置后按配置传', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'ra-workers-'))
     const stdout = JSON.stringify({ ok: true, result: { launch: { outcome: { handle: 'term-9' } } } })
@@ -225,6 +301,85 @@ describe('OrcaRuntime', () => {
       terminalSend('term-1', '【Router 输入 in_1】\n第一件事'),
       terminalSend('term-1', '【Router 输入 in_2】\nCI 失败了'),
     ])
+  })
+
+  it('用 codex 启动时先消掉版本更新提示，避免会话卡在只能手选的浮层上', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ra-workers-'))
+    const codexHome = mkdtempSync(join(tmpdir(), 'ra-codex-'))
+    const versionPath = join(codexHome, 'version.json')
+    writeFileSync(versionPath, JSON.stringify({ latest_version: '0.167.2', dismissed_version: '0.167.1' }))
+    const logs: { level: string; message: string; extra?: Record<string, unknown> }[] = []
+    const runner = new FakeRunner([{ code: 0, stdout: JSON.stringify({ ok: true, result: { launch: { outcome: { handle: 'term-9' } } } }), stderr: '' }])
+    const adapter = new OrcaRuntime({
+      runner,
+      workersDir: dir,
+      agent: 'codex',
+      env: { CODEX_HOME: codexHome },
+      logger: {
+        info: (message, extra) => { logs.push({ level: 'info', message, extra: extra as Record<string, unknown> }) },
+        warn: (message, extra) => { logs.push({ level: 'warn', message, extra: extra as Record<string, unknown> }) },
+        error: (message, extra) => { logs.push({ level: 'error', message, extra: extra as Record<string, unknown> }) },
+      },
+    })
+
+    await adapter.start({ ticket, assignment, workdir: '/tmp/wt-9' })
+
+    expect(JSON.parse(readFileSync(versionPath, 'utf8'))).toMatchObject({ dismissed_version: '0.167.2' })
+    expect(logs.find(item => item.message === 'orca:codex-update-dismissed')?.extra).toMatchObject({ version: '0.167.2' })
+  })
+
+  it('Agent 停在交互式提示上时回执标记为需要人工处理', async () => {
+    const runner = new FakeRunner([{
+      code: 1,
+      stdout: JSON.stringify({
+        ok: false,
+        error: {
+          code: 'agent_prompt_blocked',
+          message: 'agent_prompt_blocked The agent is showing a permission or trust prompt',
+        },
+      }),
+      stderr: '',
+    }])
+    const adapter = new OrcaRuntime({ runner, workersDir: '/tmp' })
+
+    const receipt = await adapter.deliver('term-1', [{ id: 'in_1', kind: 'followup', text: '继续' }])
+
+    expect(receipt).toMatchObject({
+      status: 'rejected',
+      reason: 'orca:agent-prompt-blocked',
+      needsHuman: true,
+      retryable: true,
+    })
+    expect(receipt.status === 'rejected' ? receipt.detail : '').toContain('permission or trust prompt')
+  })
+
+  it('探活撞上交互式提示后，status 报 blocked 让 Router 转人工', async () => {
+    const runner = new FakeRunner([
+      {
+        code: 1,
+        stdout: JSON.stringify({
+          ok: false,
+          error: { code: 'agent_prompt_blocked', message: 'agent_prompt_blocked The agent is showing a permission or trust prompt' },
+        }),
+        stderr: '',
+      },
+      {
+        code: 0,
+        stdout: JSON.stringify({
+          ok: true,
+          result: { terminals: [{ handle: 'term-1', connected: true, writable: true, orphaned: false, lastOutputAt: '2026-11-06T10:00:00.000Z', worktreePath: '/tmp/wt', branch: 'main' }] },
+        }),
+        stderr: '',
+      },
+    ])
+    const adapter = new OrcaRuntime({ runner, workersDir: '/tmp' })
+
+    await adapter.nudge('term-1')
+    const status = await adapter.status('term-1')
+
+    expect(status?.phase).toBe('blocked')
+    expect(status?.acceptingInput).toBe(false)
+    expect(String(status?.detail?.waitingFor ?? '')).toContain('交互式提示')
   })
 
   it('registerContext 把上下文拼成一段发送', async () => {

@@ -134,7 +134,7 @@ describe('项目登记：本地目录探测', () => {
     })))
     const prepared = await new ProjectSetup({ home: join(root, 'home'), orca: existing })
       .prepareLocal(repo, 'orca')
-    expect(prepared.repo).toBe(`path:${real(repo)}`)
+    expect(prepared.repo).toBe(real(repo))
     expect(prepared.orca).toMatchObject({ registered: true, displayName: 'repo' })
     expect(existing.calls.map(argv => argv.slice(0, 2).join(' '))).toEqual(['repo list'])
 
@@ -147,11 +147,11 @@ describe('项目登记：本地目录探测', () => {
     expect(adding.calls.some(argv => argv[0] === 'repo' && argv[1] === 'add')).toBe(true)
   })
 
-  it('Orca 不可用时仍返回 path: 草稿并带失败原因', async () => {
+  it('Orca 不可用时仍返回本地路径草稿并带失败原因', async () => {
     const repo = initRepo(join(root, 'repo'))
     const orca = fakeRunner(() => result('', 1, 'Orca runtime not reachable'))
     const prepared = await new ProjectSetup({ home: join(root, 'home'), orca }).prepareLocal(repo, 'orca')
-    expect(prepared.repo).toBe(`path:${real(repo)}`)
+    expect(prepared.repo).toBe(real(repo))
     expect(prepared.orca).toMatchObject({ registered: false })
     expect(prepared.orca?.error).toContain('not reachable')
   })

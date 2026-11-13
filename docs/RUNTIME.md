@@ -2,7 +2,7 @@
 
 Worker 不在 Router 进程里跑。每张工单开工时，Router 按 `runtime.default` 选一个 **WorkerRuntime** 适配器，由它负责：创建隔离 workspace、拉起 Agent、投递工单、读取状态、接住追问。内核与 Router 只依赖 `WorkerRuntime` 端口，换运行时不需要改业务代码。
 
-一份配置只有一个默认运行时，但**项目清单按运行时分开维护**：Orca 用仓库选择器（`name:` / `id:` / `path:`），Claude Code 与 ACP 用本地仓库绝对路径。切换运行时不会把 Orca 的选择器当成文件路径；旧工单也不会被新的默认运行时接管，而是继续用 Assignment 里记录的运行时。
+一份配置只有一个默认运行时，**项目清单按运行时分开维护**，但清单里的 `repo` 口径统一：所有运行时都填**本地仓库绝对路径**（`/Users/me/project`，`path:/Users/me/project` 是兼容写法）。Orca 运行时把它翻译成 `path:` 选择器，并在派工前自动把目录登记成 Orca 项目（`orca repo add`，幂等）；其它运行时直接拿它做 `git worktree`。切换运行时不会把一个运行时的路径当成另一个运行时的选择器；旧工单也不会被新的默认运行时接管，而是继续用 Assignment 里记录的运行时。
 
 ## 内置运行时
 
@@ -12,6 +12,7 @@ Worker 不在 Router 进程里跑。每张工单开工时，Router 按 `runtime.
 | `claude-code` | `git worktree` + `claude --bg` 后台会话 | 本地 git 仓库绝对路径 | `claude agents --json --all` | 本轮进行中用 `claude attach <id>` 插话（TUI 排队语义）；本轮结束后先 `claude stop <id>` 再 `claude --bg --resume <完整 sessionId> <prompt>`（不带任何新参数），保证一个话题只对应一个会话；进程退出不自动 resume | 不用 Orca，直接跑 Claude Code |
 | `codex-app` | `git worktree` + `codex app-server --stdio` | 本地 git 仓库绝对路径 | Codex `thread/status/changed`、`turn/*`、`item/*` 事件 | `thread/resume` 接回；执行中 `turn/steer`；停止用 `turn/interrupt` | 想用 Codex，且希望 Router 创建的 thread 能在 Codex 桌面端看到 |
 | `herdr` | ra 用 git worktree 建检出，Herdr 开终端窗口跑 Agent | `git worktree add` + `herdr workspace create --cwd …` | Herdr `agent get`（`idle` / `working` / `done` / `blocked` / `unknown`） | 终端常驻，追问直接投递；巡检优先读 Agent 自己的会话记录 | 本机已用 Herdr 管终端，想在 Herdr 侧栏里看到工单 |
+| `t3code` | ra 用 git worktree 建检出，`t3 thread start` 在检出里开线程 | `git worktree add` + `t3 project add` | `t3 thread show`（`running` / `waiting` / `completed` / `failed`） | `t3 thread send`（忙时排队，不打断当前轮）；CLI 没有中止线程的命令，停止只登记本地状态 | 本机已装 T3 Code，想在 T3 手机端 / 桌面端看到同一个线程 |
 | `acp` / `acp-*` | ACP 子进程：`initialize` → `session/new` → `session/prompt` | `git worktree`（本地绝对路径） | ACP `session/update` | Agent 声明 `loadSession` 时用 `session/load` 恢复 | 想接 Codex / Gemini / OpenCode 等 |
 
 `acp` 是自定义命令入口；`acp-*` 是内置 ACP Agent，共用同一套 `AcpRuntime`。
@@ -22,7 +23,8 @@ Worker 不在 Router 进程里跑。每张工单开工时，Router 按 `runtime.
 
 - 自动检测 CLI 是否安装、版本、来源（PATH / ra 托管）、ACP 扩展依赖与登录状态；
 - **安装 CLI** 跳转该 Agent 的官方安装页；**安装 ACP 扩展** 由 ra 把 npm 适配包装到 `~/.router-agent/runtimes/<agent>`；
-- **检测 / 试启动** 做一次真实 ACP 握手（`initialize` + `session/new`），避免只看版本号；
+- **检测** 重新探一次这张卡片：命令在不在、版本多少、依赖齐不齐（不启动 Agent）；
+- **试启动**（只有 ACP Agent 卡片有）做一次真实 ACP 握手（`initialize` + `session/new`），避免只看版本号；
 - 点卡片即切换 `runtime.default`，只影响新工单；已开工的工单保留原运行时。
 - 运行时声明了自己的选项时，选项卡片会出现在运行时卡片下方（例如 Orca 的「执行 Agent」）。
 
@@ -57,6 +59,10 @@ runtime:
       permissions: full        # full=danger-full-access；workspace=workspace-write
       approvalPolicy: never    # never / on-request / untrusted
       network: true
+    t3code:
+      provider: codex       # T3 的 provider 实例 id；留空用 T3 项目的默认模型
+      model: gpt-5.4        # 模型；ra 建的项目没有默认模型，一般要连 provider 一起填
+      # baseDir: ~/.t3      # T3 数据目录（等价 T3CODE_HOME）
     acp:                    # 自定义 ACP 命令
       command: opencode
       args: [acp]
@@ -65,7 +71,7 @@ runtime:
   projects:
     claude-code:
       - name: router-agent
-        repo: /Users/me/router-agent   # 本地仓库绝对路径
+        repo: /Users/me/router-agent   # 所有 runtime 统一是本地仓库绝对路径
         defaultBranch: main
     acp-codex:
       - name: router-agent
@@ -118,8 +124,57 @@ ra config set runtime.options.herdr.model sonnet # 可选；留空用 Agent 自�
 默认值都是 `claude`。Orca 的 `worktree create --prompt` 必须同时给 `--agent`，没有「不传」这种形态，所以 ra 总是显式传一个 Agent；没配置时用选项声明里的默认值。选定的 Agent 会记进工单 meta，人工恢复会话时用它的 CLI 语法（`claude --resume` / `codex resume`）。
 
 Herdr 的 `agent` 取值是 Herdr 自己的 kind（`claude` / `codex` / `opencode`）；每个 kind 的无人值守启动参数由适配器按目录给出，声明里只暴露「选哪个 Agent」与「用哪个模型」。
+派工成功后会写一条 `herdr:agent-launched` 日志，带上实际传给 `herdr agent start --kind` 的 `agent` 与 `model`；
+排查「配了 codex 却在跑 claude」时先看这条。
 
 进展巡检读的是 Agent 自己的结构化会话记录：Claude 读 `~/.claude/projects/<cwd>/`，Codex 读 `~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl`。没指定 Agent 时按默认值 `claude` 读，读不到就退回终端屏幕渲染。
+
+## Claude Code 运行时（`claude-code`）
+
+`claude-code` 用 `git worktree` + `claude --bg` 后台会话承载工单，无人值守跑。
+
+### 启动前要先满足 Claude 的两个确认
+
+`claude --bg` 在拉起后台会话前会检查两件事，**任何一件没过就直接退出、不返回会话 id**：
+
+| 检查 | CLI 的原话 | 存在哪 |
+| --- | --- | --- |
+| 工作目录是否被信任 | `Workspace not trusted. Run \`claude\` in <目录> once and accept the trust prompt, then retry.` | `~/.claude.json` 的 `projects[目录真实路径].hasTrustDialogAccepted` |
+| 是否接受过「跳过权限确认」免责提示 | `--bg with bypassPermissions requires accepting the disclaimer first.` | `~/.claude.json` 的 `bypassPermissionsModeAccepted`（Claude 自己会转存到 `~/.claude/settings.json` 的 `skipDangerousModePermissionPrompt`） |
+
+这两项平时只能由交互式确认写入，所以每张工单都会卡在「请手动运行一次 claude」上，Router 只能转人工。
+适配器在启动前把两项补齐（`ensureClaudeBackgroundReady`，写进子进程看到的同一个 `~/.claude.json`），
+补写成功记 `claude:workspace-trusted`，补不上（配置损坏或不可写）记 `claude:workspace-untrusted` 并仍然尝试启动——
+这时失败信息会被翻成一句能照着做的话（见 `docs/OPERATIONS.md` 的事件表）。
+
+> 目录信任按**真实路径**登记：软链目录要写 `/private/tmp/...` 而不是 `/tmp/...`，
+> 否则 Claude Code 认不出来。适配器用 `realpath` 换算。
+
+## Orca 运行时（`orca`）里的 Codex：版本更新浮层
+
+用 Orca 派工、Agent 选 Codex 时，Codex 启动会弹一个**只能用键盘选**的浮层：
+
+```
+A new version of Codex is available.
+› 1. Update now (runs `npm i -g @openai/codex@latest`)
+  2. Skip
+  3. Skip until next version
+```
+
+浮层会挡住输入：工单停在第一步不动，Router 只能看着超时。
+
+**规避办法（默认已生效）**：Orca 适配器在 `worktree create` 之前把这一版的更新提示记成已忽略——
+写 `$CODEX_HOME/version.json`（缺省 `~/.codex/version.json`）的 `dismissed_version`，
+和用户在浮层里选「Skip until next version」完全等价。成功记 `orca:codex-update-dismissed`。
+新版发布后浮层会再出现，Router 会在下次启动时再消一次。
+
+> 想彻底关掉更新检查，自己在 `~/.codex/config.toml` 里加 `check_for_update_on_startup = false`；
+> Router 不改这个文件（用户自己的配置，不该被程序悄悄改写）。
+
+**兜底检测**：万一还是弹出来了（例如浮层类型不是版本更新），Orca 会拒收输入并返回
+`agent_prompt_blocked`。适配器把它记成 `orca:agent-prompt-blocked`，
+Router 立刻转人工：工单标记为「等待人工处理」并在话题里通知，
+提示去 Orca 终端手动选一下——**这类提示 Router 代答不了，只能人工处理**。
 
 ## Codex App Server 运行时（`codex-app`）
 
@@ -128,6 +183,10 @@ Herdr 的 `agent` 取值是 Herdr 自己的 kind（`claude` / `codex` / `opencod
 - `thread/start` + `turn/start` 首轮；`thread/resume` 重启后接回；`turn/steer` 执行中追加输入；`turn/interrupt` 停止；
 - 原生处理 `item/commandExecution/requestApproval`、`item/fileChange/requestApproval`、`item/permissions/requestApproval` 等审批请求；
 - threadId 同时写入 `meta.handle` / `meta.sessionId`，Web 面板会显示「Codex 打开」按钮，用 `codex://threads/<threadId>` 在 Codex 桌面端打开同一 thread。
+
+> 启动握手（`initialize`）超时时报错里会带上 app-server 在 stdout 上打印的**非协议输出**：
+> Codex 若在启动时打印交互式提示，提示原文会出现在 `codex:launch-failed` 的 `reason` 里，
+> 不会只剩一句没有线索的「请求超时」。
 
 ### 重启后被中断的任务怎么恢复
 
@@ -230,7 +289,7 @@ ra config set runtime.options.herdr.agent claude   # claude / codex / opencode
 ra config set runtime.options.herdr.model sonnet    # 可选；留空用 Agent 自己的默认
 ```
 
-项目清单按运行时隔离，与 `claude-code` / `codex-app` 一样填**本地仓库绝对路径**：
+项目清单按运行时隔离，与 `claude-code` / `codex-app` 一样填**本地仓库绝对路径**（所有运行时口径一致）：
 
 ```yaml
 runtime:
@@ -292,6 +351,57 @@ Herdr 的全局仓库表；仓库目录一旦被删（例如临时目录被清�
 - PR 关联（`inspectWorkspace` 返回 `linkedPr`）不支持：Herdr 不跟踪 PR，PR 跟踪仍走 GitHub / GitLab 侧。
 - 检出目录不在 `runtime.projects` 里登记，而是跟 `claude-code` 一样放在 `<RA_HOME>/worktrees/` 下。
 - 回收检出**不会删分支**（与其它运行时一致：分支只在启动失败回滚时删）。
+
+## T3 Code 运行时（`t3code`）
+
+[T3 Code](https://github.com/pingdotgg/t3code) 是编码 Agent 的**控制面**：本机跑一个 server，
+手机 / 网页 / 桌面端连它，Agent（Claude Code / Codex / Cursor / OpenCode … 任意 ACP Agent）在 server 里跑。
+`t3code` 运行时用它承载工单 —— ra 负责隔离检出，T3 负责在检出里跑 Agent。
+
+```bash
+ra config set runtime.default t3code
+ra config set runtime.options.t3code.provider codex
+ra config set runtime.options.t3code.model gpt-5.4
+```
+
+### 职责切分：检出归 ra，线程归 T3
+
+| 运行时动作 | 谁来做 | 具体命令 |
+| --- | --- | --- |
+| 建隔离检出 | **ra 自己**（`GitWorktreeProvider`） | `git worktree add -b <workBranch> -- <workdir> <baseBranch>` |
+| 登记项目 | ra（幂等） | `t3 project add <workdir>` |
+| 拉起 Agent | T3 | `t3 thread start <workdir> "<契约正文>" --json` |
+| 投递追问 | T3 | `t3 thread send <threadId> "<正文>" --json` |
+| 读状态 / 输出 | T3 | `t3 thread show <threadId> --json` |
+| 回收检出 | **ra 自己** | `t3 project remove <workdir> --force` + `git worktree remove -- <workdir>` |
+
+工单契约**直接作为线程的第一条消息**发进去（不是「读某个文件」）：T3 的 Agent 只看得到项目目录，
+把正文留在消息里最省事，也不会因为路径权限读不到。
+
+### 五个必须知道的差异
+
+1. **服务端不用手动管**。`t3 thread` 的每条命令都要本机有 T3 server 在跑；服务端没起时统一报
+   `No running T3 Code server`。适配器在派工前会探一次，没在跑就用 detached 方式把 `t3 serve` 拉起来
+   再等它就绪；拉不起来才报 `runtime:unavailable`（可重试）。面板探测只探不拉，避免开面板就起服务。
+2. **派工不阻塞**。`t3 thread start` **立即返回**（Agent 在 server 侧继续跑），所以 Router 不会卡在派工上；
+   进度靠 `t3 thread show` 巡检。
+3. **状态是线程状态**。`thread.status` 取值 `preparing` / `queued` / `starting` / `running` / `waiting` /
+   `completed` / `interrupted` / `failed` / `cancelled` / `rolled_back` / `idle`，映射成中立的
+   `AgentPhase`；`waiting` 且有挂起请求时判 `blocked`（等人批准），线程跑完判 `exited` 且**仍可接收追问**。
+4. **停止不真的中止**。T3 CLI 只有 `thread list/start/send/show`，没有中止线程的命令；
+   `stop` 只登记本地状态并记 `t3code:stop-no-cancel`，正在跑的那一轮会跑完。
+5. **项目要 ra 自己登记**。T3 只认「已登记的项目」；ra 把 worktree 目录 `t3 project add` 进去，
+   线程的工作目录就是它。工单收尾时 `t3 project remove --force` 连线程一起清掉。
+
+### 能力边界
+
+- **provider / model 要显式配**。ra 建的项目没有默认模型，`t3 thread start` 会报
+  `the project has no default model`；所以 `runtime.options.t3code.provider` 与 `model` 一般要一起填。
+  provider 是 T3 的实例 id（`codex` / `claude` / `opencode` 等），不是模型名。
+- **仓库发现（`listRepos`）不支持**：T3 没有仓库清单接口，项目按本地绝对路径登记。
+- **PR 关联不支持**：PR 跟踪仍走 GitHub / GitLab 侧。
+- **回收检出不删分支**（与其它运行时一致：分支只在启动失败回滚时删）。
+- **不接管 T3 自己的权限弹窗**：线程卡在等人批准时状态是 `blocked`，需要人在 T3 端点确认。
 
 ## ACP Agent 目录
 

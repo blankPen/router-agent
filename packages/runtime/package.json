@@ -1,6 +1,6 @@
 {
   "name": "@router-agent/runtime",
-  "version": "0.3.31",
+  "version": "0.3.34",
   "type": "module",
   "description": "Worker 运行时 SDK：端口、注册表、插件协议与共享工具",
   "license": "MIT",
@@ -31,8 +31,8 @@
     "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
-    "@router-agent/core": "0.3.31",
-    "@router-agent/infra": "0.3.31",
+    "@router-agent/core": "0.3.34",
+    "@router-agent/infra": "0.3.34",
     "zod": "4.4.3"
   }
 }

@@ -19,6 +19,7 @@ const alias = {
   '@router-agent/runtime-codex': resolve(import.meta.dirname, 'packages/runtime-codex/src'),
   '@router-agent/runtime-herdr': resolve(import.meta.dirname, 'packages/runtime-herdr/src'),
   '@router-agent/runtime-acp': resolve(import.meta.dirname, 'packages/runtime-acp/src'),
+  '@router-agent/runtime-t3code': resolve(import.meta.dirname, 'packages/runtime-t3code/src'),
   '@router-agent/channel': resolve(import.meta.dirname, 'packages/channel/src'),
   '@router-agent/channel-feishu': resolve(import.meta.dirname, 'packages/channel-feishu/src'),
 }

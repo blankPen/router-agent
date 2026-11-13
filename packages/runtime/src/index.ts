@@ -2,6 +2,7 @@ export * from './port.js'
 export { RuntimeRegistry, createRuntimes } from './registry.js'
 export { parseVersion, resolveExecutable } from './runtimes/acp-detect-utils.js'
 export * from './runtimes/catalog.js'
+export * from './runtimes/repo-path.js'
 export * from './runtimes/acp-agents.js'
 export * from './runtimes/options.js'
 export * from './status.js'
@@ -19,6 +20,7 @@ export {
   readTranscriptSince,
   transcriptSize,
 } from './agents/claude.js'
+export { ensureClaudeBackgroundReady } from './agents/claude-trust.js'
 export { decidePermission, isAllowed, shellAllowed, commandOf } from './permissions.js'
 export type { AcpPermissionOption, AcpToolCallInfo, AcpToolKind } from './permissions.js'
 export * from './errors.js'

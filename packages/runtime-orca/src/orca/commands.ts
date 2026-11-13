@@ -1,3 +1,5 @@
+import { projectRepoPath } from '@router-agent/runtime'
+
 export interface CommandResult {
   code: number
   stdout: string
@@ -38,13 +40,21 @@ export function worktreeCreate(opts: CreateOptions): string[] {
 }
 
 /**
- * 配置里可以写 Orca 的 displayName（如 `teamwork-repos`），
- * 也可以直接写完整选择器（`id:xxx` / `name:xxx` / `path:/abs`）。
+ * Orca 的仓库选择器。
+ *
+ * 项目清单统一写本地仓库绝对路径，这里翻译成 Orca 的 `path:` 选择器；
+ * 历史的 `name:` / `id:` 选择器（Orca 的 displayName / 项目 id）原样透传。
  */
 export function repoSelector(repo: string): string {
   const trimmed = repo.trim()
   if (/^(id|name|path):/.test(trimmed)) return trimmed
-  return `name:${trimmed}`
+  const path = projectRepoPath(trimmed)
+  return path ? `path:${path}` : `name:${trimmed}`
+}
+
+/** 把本地目录登记成 Orca 项目；目录已登记时 Orca 直接返回原项目，幂等。 */
+export function repoAdd(path: string): string[] {
+  return ['repo', 'add', '--path', path, '--kind', 'git', '--json']
 }
 
 export function terminalSend(handle: string, text: string): string[] {

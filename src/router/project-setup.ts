@@ -254,24 +254,23 @@ export class ProjectSetup implements ProjectSetupPort {
   }
 
   /**
-   * Orca 运行时用 `orca repo add` 把目录登记成项目，配置里写 `path:<abs>`
-   * （避免 displayName 重名）；其它运行时直接写本地绝对路径。
+   * 项目路径统一写本地绝对路径（所有 runtime 口径一致）。
+   * Orca 运行时顺手把目录登记成 Orca 项目，登记结果只作提示，不影响配置写法。
    */
   private async withRuntimeRepo(inspection: RepoInspection, runtimeId: string): Promise<PreparedProject> {
     if (normalizeRuntimeId(runtimeId) !== ORCA_RUNTIME_ID) {
       return { ...inspection, repo: inspection.path }
     }
     const orca = await this.registerOrcaRepo(inspection.path)
-    return { ...inspection, repo: orca.repo, orca }
+    return { ...inspection, repo: inspection.path, orca }
   }
 
   private async registerOrcaRepo(path: string): Promise<OrcaRegistration> {
-    const selector = `path:${path}`
     const listed = await this.orca.run(['repo', 'list', '--json'])
     if (listed.code !== 0) {
       return {
         registered: false,
-        repo: selector,
+        repo: path,
         displayName: basename(path),
         error: (listed.stderr || listed.stdout).trim() || 'orca repo list 执行失败',
       }
@@ -279,19 +278,19 @@ export class ProjectSetup implements ProjectSetupPort {
 
     const existing = parseOrcaRepos(listed.stdout).find(repo => repo.path && canonicalPath(repo.path) === path)
     if (existing) {
-      return { registered: true, repo: selector, displayName: existing.name }
+      return { registered: true, repo: path, displayName: existing.name }
     }
 
     const added = await this.orca.run(['repo', 'add', '--path', path, '--kind', 'git', '--json'])
     if (added.code !== 0) {
       return {
         registered: false,
-        repo: selector,
+        repo: path,
         displayName: basename(path),
         error: (added.stderr || added.stdout).trim() || 'orca repo add 执行失败',
       }
     }
-    return { registered: true, repo: selector, displayName: parseOrcaAddedName(added.stdout) || basename(path) }
+    return { registered: true, repo: path, displayName: parseOrcaAddedName(added.stdout) || basename(path) }
   }
 
   private normalizeLocalPath(input: string): string {

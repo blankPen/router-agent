@@ -10,6 +10,7 @@ export const CLAUDE_CODE_RUNTIME_ID = 'claude-code'
 export const ACP_RUNTIME_ID = 'acp'
 export const CODEX_APP_RUNTIME_ID = 'codex-app'
 export const HERDR_RUNTIME_ID = 'herdr'
+export const T3CODE_RUNTIME_ID = 't3code'
 
 export interface WorkerRuntimeMeta {
   id: string
@@ -28,7 +29,7 @@ export const WORKER_RUNTIMES: readonly WorkerRuntimeMeta[] = [
     id: ORCA_RUNTIME_ID,
     name: 'Orca',
     label: 'orca · Orca worktree + 终端',
-    hint: '通过 Orca 创建 worktree 并启动 Agent 终端（默认跟随 Orca 配置），交互与状态读取走 Orca',
+    hint: '通过 Orca 创建 worktree 并启动 Agent 终端（默认跟随 Orca 配置）；项目填本地仓库绝对路径，派工时自动登记成 Orca 项目',
     installHint: '从 Orca 官方发布页下载安装，并确保 orca CLI 在 PATH 中',
     installUrl: 'https://github.com/stablyai/orca/releases',
   },
@@ -36,7 +37,7 @@ export const WORKER_RUNTIMES: readonly WorkerRuntimeMeta[] = [
     id: CLAUDE_CODE_RUNTIME_ID,
     name: 'Claude Code',
     label: 'claude-code · git worktree + claude --bg',
-    hint: '直接调用 Claude Code CLI 的后台会话；项目 repo 需要填本地仓库绝对路径',
+    hint: '直接调用 Claude Code CLI 的后台会话；项目 repo 填本地仓库绝对路径（所有运行时口径一致）',
     installHint: '参考 Claude Code 官方安装说明',
     installUrl: 'https://docs.claude.com/en/docs/claude-code/setup',
   },
@@ -62,6 +63,14 @@ export const WORKER_RUNTIMES: readonly WorkerRuntimeMeta[] = [
     hint: '检出由 ra 用 git worktree 建，Herdr 只开终端窗口跑 Agent；状态来自 Herdr 的 Agent 检测',
     installHint: '从 Herdr 官方发布页下载安装，并确保 herdr CLI 在 PATH 中',
     installUrl: 'https://github.com/herdrdev/herdr/releases',
+  },
+  {
+    id: T3CODE_RUNTIME_ID,
+    name: 'T3 Code',
+    label: 't3code · git worktree + T3 Code 线程',
+    hint: '用 T3 Code 的线程承载工单；Agent 在 ra 建的 worktree 里跑，手机端能看到同一个线程',
+    installHint: '安装 T3 Code 桌面端，或 npm i -g t3；并确保 t3 CLI 在 PATH 中',
+    installUrl: 'https://t3.codes/download',
   },
 ]
 

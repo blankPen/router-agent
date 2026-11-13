@@ -20,6 +20,7 @@ export const DEFAULT_RUNTIME_PLUGINS: Readonly<Record<string, string>> = {
   'codex-app': '@router-agent/runtime-codex',
   acp: '@router-agent/runtime-acp',
   herdr: '@router-agent/runtime-herdr',
+  t3code: '@router-agent/runtime-t3code',
 }
 
 export interface RuntimePluginConfigView extends RuntimeConfigView {
@@ -51,6 +52,7 @@ export interface RuntimePluginDeps {
     claude?: CommandRunner
     git?: CommandRunner
     herdr?: CommandRunner
+    t3?: CommandRunner
   }
   claudeBin?: string
   claudeProjectsDir?: string
@@ -102,6 +104,7 @@ export async function loadRuntimePlugins(
       claude: deps.runners?.claude ?? missingRunner('claude'),
       git: deps.runners?.git ?? missingRunner('git'),
       herdr: deps.runners?.herdr ?? missingRunner('herdr'),
+      t3: deps.runners?.t3 ?? missingRunner('t3'),
     },
     ...(deps.claudeBin ? { claudeBin: deps.claudeBin } : {}),
     ...(deps.claudeProjectsDir ? { claudeProjectsDir: deps.claudeProjectsDir } : {}),

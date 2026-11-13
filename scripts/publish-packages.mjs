@@ -25,6 +25,7 @@ export const PUBLISH_ORDER = [
   'runtime-herdr',
   'runtime-claude-code',
   'runtime-orca',
+  'runtime-t3code',
   'runtime-acp',
   'channel-feishu',
 ]
@@ -91,14 +92,14 @@ export function assertPackable(name, pkg) {
   if (typeof dir === 'object' && dir?.types !== './dist/index.d.ts') {
     throw new Error(`@router-agent/${name} 缺少 exports["."].types，安装后无法获得类型声明`)
   }
+  if (!pkg.repository) {
+    throw new Error(`@router-agent/${name} 缺少 repository，npm provenance 无法关联源码仓库`)
+  }
   if (!existsSync(join(packageDir(name), 'dist', 'index.js'))) {
     throw new Error(`@router-agent/${name} 缺少 dist/index.js，请先运行 pnpm build`)
   }
   if (!existsSync(join(packageDir(name), 'dist', 'index.d.ts'))) {
     throw new Error(`@router-agent/${name} 缺少 dist/index.d.ts，请先运行 pnpm build`)
-  }
-  if (!pkg.repository) {
-    throw new Error(`@router-agent/${name} 缺少 repository，npm provenance 无法关联源码仓库`)
   }
   const externals = undeclaredDependencies(packageDir(name))
   if (externals.length > 0) {
