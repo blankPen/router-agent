@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import herdrPlugin from '@router-agent/runtime-herdr'
 import {
   HerdrRuntime,
   agentNameFor,
@@ -345,6 +346,32 @@ describe('Herdr 服务端自启', () => {
 })
 
 describe('Herdr 运行时', () => {
+  it('插件把 runtime.options.herdr 的 agent 与 model 传给 Herdr', async () => {
+    const herdr = new FakeHerdr()
+    const home = tempHome()
+    const events: Array<{ message: string; fields?: Record<string, unknown> }> = []
+    const runtime = await herdrPlugin.create({
+      home,
+      workersDir: join(home, 'workers'),
+      config: { runtime: { default: 'herdr', options: { herdr: { agent: 'codex', model: 'gpt-5' } } } },
+      env: {},
+      logger: {
+        info: (message, fields) => events.push({ message, ...(fields ? { fields } : {}) }),
+        warn: (message, fields) => events.push({ message, ...(fields ? { fields } : {}) }),
+        error: (message, fields) => events.push({ message, ...(fields ? { fields } : {}) }),
+      },
+      runners: { herdr, git: new FakeGit(), orca: herdr, claude: herdr },
+    })
+    await runtime!.start({ ticket, assignment, workdir: '' } as never)
+    const started = herdr.calls.find(call => call[0] === 'agent' && call[1] === 'start')!
+    expect(started[started.indexOf('--kind') + 1]).toBe('codex')
+    expect(started.slice(started.indexOf('--') + 1)).toEqual(['--dangerously-bypass-approvals-and-sandbox', '--model', 'gpt-5'])
+    expect(events).toContainEqual({
+      message: 'herdr:agent-launched',
+      fields: { ticketId: 'tk-1', paneId: 'w2:p1', agent: 'codex', model: 'gpt-5' },
+    })
+  })
+
   it('start 用 git worktree 建检出、用 Herdr 开窗口起 Agent', async () => {
     const { runtime, herdr, git, home } = makeRuntime()
     const result = await runtime.start({

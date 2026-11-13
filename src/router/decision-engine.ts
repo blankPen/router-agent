@@ -80,6 +80,15 @@ export interface DecisionEngineResult {
   proposal?: DecisionProposal
   unavailableReason?: string
   /**
+   * unavailable 的来源，决定 Router 怎么回复用户。
+   *
+   * - `engine`：模型调用本身失败（没额度 / 限流 / 超时 / 鉴权失败……），要把原因告诉用户。
+   * - `model`：模型成功返回了 `unavailable` 决定（判断不了就不猜），按礼貌追问处理。
+   *
+   * 缺省按 `engine` 处理：模型层报出来的失败绝大多数是调用失败。
+   */
+  unavailableSource?: 'engine' | 'model'
+  /**
    * 研判过程中直接面向用户的一句话。
    * 查询/清理类工具执行完后，Pi 的最终 assistant 文本放在这里，AgentLoop 原样发出去，
    * 不再额外消耗一次回复模型调用。
@@ -91,7 +100,7 @@ export interface DecisionEngineResult {
 export interface DecisionEngine {
   /** 对一个 Trigger 做研判。 */
   assess(req: DecisionRequest): Promise<DecisionEngineResult>
-  /** 生成一句礼貌回复（普通消息）。失败抛错，由调用方退回固定话术。 */
+  /** 生成一句礼貌回复（普通消息）。失败抛错，由调用方按真实原因回话。 */
   reply(req: ReplyRequest): Promise<string>
   /** /new：只重置这个会话；旧 session 文件交给清理任务。 */
   resetSession?(session: SessionKeyParts, by: string): Promise<void>

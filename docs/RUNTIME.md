@@ -75,6 +75,29 @@ runtime:
 
 `allowedTools` / `permissionMode` / `sandbox` / `shellAllow` / `allowNetwork` / `fileAccess` 这些安全字段不允许写在 `runtime.options` 里，写了会直接启动失败。Worker 权限统一由 `worker.tools` 与 adapter 内置基线决定。
 
+## 按 npm 包名添加运行时（插件）
+
+内置运行时之外的运行时以插件形式接入。`runtime.plugins.<id>` 可以写 npm 包名，也可以写本地路径：
+
+```yaml
+runtime:
+  default: my-runtime
+  plugins:
+    my-runtime: '@acme/router-agent-runtime'
+```
+
+插件包是普通 npm 包，默认导出 `kind: 'runtime'` 的对象，模板见 `templates/runtime-plugin`。加载器以 `<RA_HOME>/config.yaml` 为锚点解析包名，所以 ra 会把声明的包下载到 `<RA_HOME>/node_modules`：
+
+```bash
+ra runtime add my-runtime @acme/router-agent-runtime   # 写 runtime.plugins + 下载 npm 包
+ra runtime install my-runtime                          # 已声明但还没下载时补装（可加 --version）
+ra runtime list                                        # 「插件运行时」一节标出已安装 / 未安装
+```
+
+面板路径是运行时卡片右上角的「添加运行时」（初始化页与「配置 → 运行时配置」都有）：填 id 与 npm 包名（或本地路径）后添加，npm 包可在弹窗里直接点「安装依赖」。保存配置并重启 ra 后，插件会作为一张卡片出现在「自定义插件」分组，和 demo runtime 并排。`runtime.default` 填插件创建的运行时 id，插件 `meta.id` 建议与配置 id 保持一致（不一致会记 `plugin:id-mismatch`，运行时 id 以插件声明为准）。
+
+本地路径插件（`./my-runtime`、`/abs/path`）不需要下载，重启后按路径加载。安装过程看 `plugin:install-started` / `plugin:install-succeeded` / `plugin:install-failed`；重启后加载失败看 `plugin:load-failed`（常见原因：包没装上、装到了别的 node_modules、导出对象不是 `kind: 'runtime'`）。
+
 ## 运行时选项：各运行时自己声明
 
 `runtime.options.<运行时 id>.<键>` 是通用的扩展点。每个运行时在自己的 `options.ts` 里声明「能配什么、取值有哪些、默认是什么」，于是：
@@ -95,6 +118,8 @@ ra config set runtime.options.herdr.model sonnet # 可选；留空用 Agent 自�
 默认值都是 `claude`。Orca 的 `worktree create --prompt` 必须同时给 `--agent`，没有「不传」这种形态，所以 ra 总是显式传一个 Agent；没配置时用选项声明里的默认值。选定的 Agent 会记进工单 meta，人工恢复会话时用它的 CLI 语法（`claude --resume` / `codex resume`）。
 
 Herdr 的 `agent` 取值是 Herdr 自己的 kind（`claude` / `codex` / `opencode`）；每个 kind 的无人值守启动参数由适配器按目录给出，声明里只暴露「选哪个 Agent」与「用哪个模型」。
+派工成功后会写一条 `herdr:agent-launched` 日志，带上实际传给 `herdr agent start --kind` 的 `agent` 与 `model`；
+排查「配了 codex 却在跑 claude」时先看这条。
 
 进展巡检读的是 Agent 自己的结构化会话记录：Claude 读 `~/.claude/projects/<cwd>/`，Codex 读 `~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl`。没指定 Agent 时按默认值 `claude` 读，读不到就退回终端屏幕渲染。
 

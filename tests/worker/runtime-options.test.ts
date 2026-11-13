@@ -18,7 +18,8 @@ import {
   fieldValue,
   runtimeOptionFields,
   runtimeOptionPatchValue,
-  sectionsFor,
+  groupFields,
+  groupsFor,
 } from '../../src/web/client/fields.js'
 
 describe('运行时选项：通用声明与路径', () => {
@@ -105,8 +106,8 @@ describe('运行时选项：面板渲染', () => {
   })
 
   it('选项不在页面上平铺：走卡片上的「设置」弹窗', () => {
-    const sections = sectionsFor(undefined, 'orca')
-    const paths = sections.flatMap(section => section.fields.map(field => field.path))
+    const groups = groupsFor(undefined, 'orca')
+    const paths = groupFields(groups).map(field => field.path)
     expect(paths).not.toContain('runtime.options.orca.agent')
   })
 

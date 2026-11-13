@@ -879,7 +879,7 @@ describe('关键链路日志', () => {
     expect(entry?.extra?.message).toBe('llm down')
   })
 
-  it('回复模型失败时记 chat:reply-failed，并回固定话术', async () => {
+  it('回复模型失败时记 chat:reply-failed，并把真实原因回给用户', async () => {
     const { logs, logger } = recorder()
     const { engine, loop, llm, store } = setup([], undefined, undefined, false, undefined, logger)
     llm.reply = async () => { throw new Error('reply down') }
@@ -890,7 +890,78 @@ describe('关键链路日志', () => {
     const entry = logs.find(log => log.message === 'chat:reply-failed')
     expect(entry?.level).toBe('warn')
     expect(entry?.extra?.message).toBe('reply down')
-    expect(store.claimOutbox('2026-11-06T10:00:20.000Z', 10)[0]?.text).toBe('收到。我还没看出具体要做什么，能说一下要改哪个模块、期望的结果吗？')
+    const text = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)[0]?.text ?? ''
+    expect(text).toContain('模型')
+    expect(text).toContain('reply down')
+    expect(text).not.toContain('还没看出具体要做什么')
+  })
+
+  it('模型没额度时明确告诉用户没额度，而不是说没看出要做什么', async () => {
+    const { logs, logger } = recorder()
+    const { engine, loop, llm, store } = setup([], undefined, undefined, false, undefined, logger)
+    const quotaError = 'pi:error:429: {"type":"rate_limit_error","message":"已达到 Token Plan 用量上限：请升级 Token Plan 套餐或购买积分补充用量。 (2056)","http_code":"429"}'
+    loop.decisionEngine = {
+      async assess() { throw new Error(quotaError) },
+      async reply() { throw new Error(quotaError) },
+    }
+    engine.ingest(trigger({ text: '帮我排查下 herdr 运行时', addressed: 'mention' }))
+
+    const result = await loop.tick()
+    expect(result.unavailable).toBe(1)
+
+    const text = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)[0]?.text ?? ''
+    expect(text).toContain('额度')
+    expect(text).not.toContain('还没看出具体要做什么')
+
+    // 原因也要留在日志里，方便排查。
+    const entry = logs.find(log => log.message === 'decision:engine-failed')
+    expect(entry?.extra?.message).toContain('Token Plan')
+  })
+
+  it('模型调用失败时不建单，但决策里记的是真实原因', async () => {
+    const { engine, loop } = setup([])
+    loop.decisionEngine = {
+      async assess() { throw new Error('pi:error:429: {"message":"额度不足"}') },
+      async reply() { throw new Error('pi:error:429: {"message":"额度不足"}') },
+    }
+    engine.ingest(trigger({ addressed: 'mention' }))
+
+    await loop.tick()
+
+    expect(engine.store.listOpenTickets()).toHaveLength(0)
+    const decision = engine.store.getDecision(engine.store.listTriggers()[0]!.decisionId!)
+    expect(decision?.decision).toBe('unavailable')
+    expect(decision?.reason).toContain('额度不足')
+  })
+
+  it('模型自己给出 unavailable 决定时按礼貌追问处理，不当成模型故障', async () => {
+    const { engine, loop, store } = setup([SAY('这个我还需要确认一下你想改什么。')])
+    // 第一条响应被当成模型给出的 unavailable 决定。
+    loop.decisionEngine = {
+      async assess() {
+        return {
+          unavailableReason: '信息不足，判断不了',
+          unavailableSource: 'model' as const,
+          audit: {
+            engine: 'pi' as const,
+            triggerId: 't1',
+            durationMs: 1,
+            toolCalls: [],
+            tokens: { input: 0, output: 0, total: 0 },
+            promptChars: { system: 0, user: 0 },
+          },
+        }
+      },
+      async reply() { return '这个我还需要确认一下你想改什么。' },
+    }
+    engine.ingest(trigger({ addressed: 'mention' }))
+
+    const result = await loop.tick()
+    expect(result.unavailable).toBe(1)
+    const text = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)[0]?.text ?? ''
+    expect(text).toBe('这个我还需要确认一下你想改什么。')
+    expect(text).not.toContain('额度')
+    expect(text).not.toContain('模型这次调用失败')
   })
 
   it('会话转录失败记 session:transcript-failed，不影响正常回复', async () => {
@@ -945,7 +1016,7 @@ describe('已绑定工单的话题：名单内成员不 @ 也触发回复', () =
     }
   }
 
-  it('话题里没 @ 的名单内消息被投给绑定的工单；名单外的人照旧丢弃', async () => {
+  it('话题里没 @ 的名单内消息投给绑定的工单，不再发「已转给工单」回执；名单外的人照旧丢弃', async () => {
     const { engine, loop, store } = setup([ACCEPT()])
     // 第一条 @ 机器人：正常研判开单
     engine.ingest(trigger({ id: 't0', externalId: 'om_1', threadId: 'feishu:oc_dev:om_1' }))
@@ -969,14 +1040,10 @@ describe('已绑定工单的话题：名单内成员不 @ 也触发回复', () =
     const result = await loop.tick()
     expect(result.fannedOut).toBe(1)
     expect(store.pendingInputs(ticket.id)[0]?.text).toContain('60 秒')
-    // 未 @ 放行的消息要有一句话题回执：否则用户既没有表情也等不到回应。
+    // 未 @ 放行的消息只加确认表情、投给 worker；不再发文字回执，避免追问时刷屏。
     const outbox = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)
-    const admitted = outbox.find(item => item.key === `admitted:${ticket.id}`)
-    expect(admitted?.text).toContain('已转给工单')
-    expect(admitted?.text).toContain(ticket.id)
-    expect(admitted?.threadId).toBe('om_1')
-    expect(admitted?.originMessageId).toBe('om_2')
-    expect(result.replied).toBe(1)
+    expect(outbox.some(item => item.key.startsWith('admitted:'))).toBe(false)
+    expect(result.replied).toBe(0)
 
     // 名单外的人不 @ 依旧被丢弃
     const outsider = normalizeFeishuEventDetailed(
@@ -988,7 +1055,7 @@ describe('已绑定工单的话题：名单内成员不 @ 也触发回复', () =
     expect(outsider.dropped).toBe('mention:required')
   })
 
-  it('同一张工单的话题里，后续追问不再重复发「已转给工单」回执', async () => {
+  it('同一话题里未 @ 的追问只投给 worker，始终不发「已转给工单」回执', async () => {
     const { engine, loop, store } = setup([ACCEPT()])
     engine.ingest(trigger({ id: 't0', externalId: 'om_1', threadId: 'feishu:oc_dev:om_1' }))
     await loop.tick()
@@ -1002,14 +1069,14 @@ describe('已绑定工单的话题：名单内成员不 @ 也触发回复', () =
       return allowed.includes(actorId) && store.hasLiveTicketForThreadKeys('feishu', threadKeys)
     }
 
-    // 第一条未 @ 的追问：回执一条。
+    // 未 @ 的追问：只投给 worker，不发回执。
     const first = normalizeFeishuEventDetailed(feishuEvent(), mentionCfg, '研发群', admit)
     engine.ingest(first.trigger!)
     await loop.tick()
     const outbox = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)
-    expect(outbox.filter(item => item.key.startsWith('admitted:'))).toHaveLength(1)
+    expect(outbox.some(item => item.key.startsWith('admitted:'))).toBe(false)
 
-    // 后续追问：消息照样投给 worker，但不再冒第二条一模一样的回执。
+    // 后续追问：消息照样投给 worker，回执同样不发。
     const second = normalizeFeishuEventDetailed(
       feishuEvent({ message_id: 'om_3', content: '那超时再放宽到 90 秒呢' }),
       mentionCfg,
@@ -1047,32 +1114,6 @@ describe('已绑定工单的话题：名单内成员不 @ 也触发回复', () =
     expect(result.fannedOut).toBe(1)
     const outbox = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)
     expect(outbox.some(item => item.key.startsWith('admitted:'))).toBe(false)
-  })
-
-  it('放行回执留痕：记 loop:admitted-replied，能追到是哪张工单', async () => {
-    const logs: { level: string; message: string; extra?: Record<string, unknown> }[] = []
-    const logger = {
-      info: (message: string, extra?: Record<string, unknown>) => logs.push({ level: 'info', message, ...(extra ? { extra } : {}) }),
-      warn: (message: string, extra?: Record<string, unknown>) => logs.push({ level: 'warn', message, ...(extra ? { extra } : {}) }),
-      error: (message: string, extra?: Record<string, unknown>) => logs.push({ level: 'error', message, ...(extra ? { extra } : {}) }),
-    }
-    const { engine, loop, store } = setup([ACCEPT()], undefined, undefined, false, undefined, logger)
-    engine.ingest(trigger({ id: 't0', externalId: 'om_1', threadId: 'feishu:oc_dev:om_1' }))
-    await loop.tick()
-    const ticket = store.listTickets()[0]!
-    engine.startAssignment(ticket.id, { runtimeId: 'orca', handle: 'h', workdir: '/tmp/wt' })
-
-    const admit = ({ actorId, threadKeys }: UnaddressedContext) => {
-      return effectiveAllowed(engine.policy()).includes(actorId) && store.hasLiveTicketForThreadKeys('feishu', threadKeys)
-    }
-    const normalized = normalizeFeishuEventDetailed(feishuEvent(), mentionCfg, '研发群', admit)
-    engine.ingest(normalized.trigger!)
-    await loop.tick()
-
-    const entry = logs.find(log => log.message === 'loop:admitted-replied')
-    expect(entry?.level).toBe('info')
-    expect(entry?.extra?.ticketId).toBe(ticket.id)
-    expect(entry?.extra?.chat).toBe('oc_dev')
   })
 
   it('名单存邮箱时按解析出的 open_id 放行，不能拿原始条目去比', async () => {
