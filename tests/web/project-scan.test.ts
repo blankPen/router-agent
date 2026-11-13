@@ -7,7 +7,6 @@ function candidate(overrides: Partial<ScanCandidate> = {}): ScanCandidate {
     name: 'project',
     sources: ['claude'],
     lastActiveAt: '2026-01-01T00:00:00.000Z',
-    isGit: true,
     ...overrides,
   }
 }
@@ -26,12 +25,6 @@ describe('扫描本地项目', () => {
       '/Users/me/p4',
       '/Users/me/p3',
     ])
-  })
-
-  it('非 Git 目录不默认勾选', () => {
-    const candidates = [candidate({ path: '/Users/me/plain', isGit: false })]
-
-    expect(defaultSelectedPaths(candidates)).toEqual([])
   })
 
   it('Git 项目不足 5 个时全部勾选', () => {

@@ -25,8 +25,20 @@ describe('扫描本地项目', () => {
     rmSync(root, { recursive: true, force: true })
   })
 
-  /** 造一个真实存在的项目目录。 */
+  /** 扫描参数：夹具建在系统临时目录里，所以默认关掉临时目录过滤。 */
+  function opts(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return { claudeProjectsDir: claudeDir, codexHome, opencodeDataDir: opencodeDir, tempRoots: [], ...overrides }
+  }
+
+  /** 造一个真实存在的 Git 项目目录。 */
   function makeProject(name: string): string {
+    const path = join(root, 'workspaces', name)
+    mkdirSync(join(path, '.git'), { recursive: true })
+    return path
+  }
+
+  /** 造一个普通目录（不是 Git 仓库）。 */
+  function makePlainDir(name: string): string {
     const path = join(root, 'workspaces', name)
     mkdirSync(path, { recursive: true })
     return path
@@ -74,7 +86,7 @@ describe('扫描本地项目', () => {
     const alpha = makeProject('alpha')
     claudeSession(alpha, 'sess-1', '2026-01-02T00:00:00.000Z')
 
-    const projects = await scanLocalProjects({ claudeProjectsDir: claudeDir, codexHome, opencodeDataDir: opencodeDir })
+    const projects = await scanLocalProjects(opts() as never)
 
     expect(projects.map(item => item.path)).toEqual([alpha])
     expect(projects[0]?.sources).toEqual(['claude'])
@@ -85,7 +97,7 @@ describe('扫描本地项目', () => {
     const beta = makeProject('beta')
     codexSession(beta, '2026-01-03T00:00:00.000Z')
 
-    const projects = await scanLocalProjects({ claudeProjectsDir: claudeDir, codexHome, opencodeDataDir: opencodeDir })
+    const projects = await scanLocalProjects(opts() as never)
 
     expect(projects.map(item => item.path)).toEqual([beta])
     expect(projects[0]?.sources).toEqual(['codex'])
@@ -95,7 +107,7 @@ describe('扫描本地项目', () => {
     const gamma = makeProject('gamma')
     opencodeDb([[gamma, Date.parse('2026-01-05T00:00:00.000Z')]])
 
-    const projects = await scanLocalProjects({ claudeProjectsDir: claudeDir, codexHome, opencodeDataDir: opencodeDir })
+    const projects = await scanLocalProjects(opts() as never)
 
     expect(projects.map(item => item.path)).toEqual([gamma])
     expect(projects[0]?.sources).toEqual(['opencode'])
@@ -107,7 +119,7 @@ describe('扫描本地项目', () => {
     codexSession(delta, '2026-01-02T00:00:00.000Z')
     opencodeDb([[delta, Date.parse('2026-01-09T00:00:00.000Z')]])
 
-    const projects = await scanLocalProjects({ claudeProjectsDir: claudeDir, codexHome, opencodeDataDir: opencodeDir })
+    const projects = await scanLocalProjects(opts() as never)
 
     expect(projects).toHaveLength(1)
     expect(projects[0]?.sources).toEqual(['claude', 'codex', 'opencode'])
@@ -120,7 +132,7 @@ describe('扫描本地项目', () => {
     claudeSession(older, 'sess-old', '2026-01-01T00:00:00.000Z')
     claudeSession(newer, 'sess-new', '2026-01-05T00:00:00.000Z')
 
-    const projects = await scanLocalProjects({ claudeProjectsDir: claudeDir, codexHome, opencodeDataDir: opencodeDir })
+    const projects = await scanLocalProjects(opts() as never)
 
     expect(projects.map(item => item.name)).toEqual(['newer', 'older'])
   })
@@ -128,21 +140,59 @@ describe('扫描本地项目', () => {
   it('跳过目录已不存在的会话记录', async () => {
     claudeSession(join(root, 'workspaces', 'gone'), 'sess-gone', '2026-01-02T00:00:00.000Z')
 
-    const projects = await scanLocalProjects({ claudeProjectsDir: claudeDir, codexHome, opencodeDataDir: opencodeDir })
+    const projects = await scanLocalProjects(opts() as never)
 
     expect(projects).toEqual([])
   })
 
-  it('标记是否 Git 仓库', async () => {
-    const plain = makeProject('plain')
+  it('worktree 归并到主仓库，worktree 自己不出现在候选里', async () => {
     const repo = makeProject('repo')
-    mkdirSync(join(repo, '.git'), { recursive: true })
-    claudeSession(plain, 'sess-plain', '2026-01-02T00:00:00.000Z')
+    const worktree = join(root, 'worktrees', 'repo-wt')
+    mkdirSync(worktree, { recursive: true })
+    writeFileSync(join(worktree, '.git'), `gitdir: ${join(repo, '.git', 'worktrees', 'repo-wt')}\n`)
+    claudeSession(worktree, 'sess-wt', '2026-01-06T00:00:00.000Z')
+
+    const projects = await scanLocalProjects(opts() as never)
+
+    expect(projects.map(item => item.path)).toEqual([repo])
+  })
+
+  it('主仓库与它的 worktree 合并成一个候选，活跃时间取最新', async () => {
+    const repo = makeProject('repo2')
+    const worktree = join(root, 'worktrees', 'repo2-wt')
+    mkdirSync(worktree, { recursive: true })
+    writeFileSync(join(worktree, '.git'), `gitdir: ${join(repo, '.git', 'worktrees', 'repo2-wt')}\n`)
     claudeSession(repo, 'sess-repo', '2026-01-02T00:00:00.000Z')
+    claudeSession(worktree, 'sess-wt', '2026-01-08T00:00:00.000Z')
+
+    const projects = await scanLocalProjects(opts() as never)
+
+    expect(projects).toHaveLength(1)
+    expect(projects[0]?.path).toBe(repo)
+    expect(projects[0]?.lastActiveAt).toBe('2026-01-08T00:00:00.000Z')
+  })
+
+  it('系统临时目录不进候选', async () => {
+    // macOS 的 os.tmpdir() 落在 /var/folders 下，Unix 系的临时区是 /tmp，两个都要拦。
+    const macTemp = mkdtempSync(join(tmpdir(), 'ra-scan-mac-'))
+    const unixTemp = mkdtempSync(join('/tmp', 'ra-scan-unix-'))
+    claudeSession(macTemp, 'sess-mac-temp', '2026-01-04T00:00:00.000Z')
+    claudeSession(unixTemp, 'sess-unix-temp', '2026-01-04T00:00:00.000Z')
 
     const projects = await scanLocalProjects({ claudeProjectsDir: claudeDir, codexHome, opencodeDataDir: opencodeDir })
 
-    expect(projects.find(item => item.path === plain)?.isGit).toBe(false)
-    expect(projects.find(item => item.path === repo)?.isGit).toBe(true)
+    expect(projects.map(item => item.path)).not.toContain(macTemp)
+    expect(projects.map(item => item.path)).not.toContain(unixTemp)
+  })
+
+  it('非 Git 目录不进候选（面板用不了，也建不了 worktree）', async () => {
+    const plain = makePlainDir('plain')
+    const repo = makeProject('repo')
+    claudeSession(plain, 'sess-plain', '2026-01-02T00:00:00.000Z')
+    claudeSession(repo, 'sess-repo', '2026-01-02T00:00:00.000Z')
+
+    const projects = await scanLocalProjects(opts() as never)
+
+    expect(projects.map(item => item.path)).toEqual([repo])
   })
 })

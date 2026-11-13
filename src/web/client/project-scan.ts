@@ -5,19 +5,17 @@
  */
 import type { ProjectDraft } from './config-shared.js'
 
-/** 服务端扫出来的候选项目。 */
+/** 服务端扫出来的候选项目（都是 Git 仓库）。 */
 export interface ScanCandidate {
   path: string
   name: string
   sources: string[]
   lastActiveAt: string
-  isGit: boolean
 }
 
-/** 默认勾选最近活跃的 N 个 Git 项目；非 Git 目录不能创建 worktree，不进默认勾选。 */
+/** 默认勾选最近活跃的 N 个项目。 */
 export function defaultSelectedPaths(candidates: ScanCandidate[], limit = 5): string[] {
   return [...candidates]
-    .filter(candidate => candidate.isGit)
     .sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt))
     .slice(0, limit)
     .map(candidate => candidate.path)

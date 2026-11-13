@@ -2832,10 +2832,7 @@ function ProjectsEditor({ runtimeId, projects, error, onChange }: {
                           : current))}
                       />
                       <span className="scan-item-main">
-                        <strong>
-                          {candidate.name}
-                          {!candidate.isGit && <em className="scan-tag warn">非 Git</em>}
-                        </strong>
+                        <strong>{candidate.name}</strong>
                         <code>{candidate.path}</code>
                       </span>
                       <span className="scan-item-meta">

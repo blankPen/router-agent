@@ -6,7 +6,7 @@
  * 直接在会话记录里带 cwd / directory。
  */
 import { DatabaseSync } from 'node:sqlite'
-import { existsSync, statSync, realpathSync } from 'node:fs'
+import { existsSync, readFileSync, statSync, realpathSync } from 'node:fs'
 import { open, readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
@@ -15,7 +15,7 @@ import { basename, join } from 'node:path'
 export type ProjectScanSource = 'claude' | 'codex' | 'opencode'
 
 export interface ScannedProject {
-  /** 本地绝对路径。 */
+  /** 本地绝对路径（Git 仓库根目录）。 */
   path: string
   /** 目录名，作为默认项目名。 */
   name: string
@@ -23,8 +23,6 @@ export interface ScannedProject {
   sources: ProjectScanSource[]
   /** 最近一次活跃时间（ISO）。 */
   lastActiveAt: string
-  /** 目录里有没有 .git；没有的话不能创建 worktree。 */
-  isGit: boolean
 }
 
 export interface ProjectScanOptions {
@@ -34,6 +32,8 @@ export interface ProjectScanOptions {
   codexHome?: string
   /** OpenCode 数据目录，默认 ~/.local/share/opencode。 */
   opencodeDataDir?: string
+  /** 当作临时目录、丢掉候选的根目录；默认是系统临时区。 */
+  tempRoots?: string[]
 }
 
 /** API 层只依赖这一组能力，方便用假实现写测试。 */
@@ -56,24 +56,31 @@ interface Hit {
 
 /**
  * 扫描三个来源的会话日志，返回按最近活跃时间倒序的候选项目。
- * 目录已不存在的记录会被跳过，重复目录合并来源。
+ *
+ * 两条收敛规则：
+ * - worktree 不算项目，会话落在 worktree 上时归并到它所属的主仓库；
+ * - 系统临时目录（/tmp、/var/folders 等）直接丢弃。
  */
 export async function scanLocalProjects(opts: ProjectScanOptions = {}): Promise<ScannedProject[]> {
   const claudeDir = opts.claudeProjectsDir ?? join(homedir(), '.claude', 'projects')
   const codexHome = opts.codexHome ?? join(homedir(), '.codex')
   const opencodeDir = opts.opencodeDataDir ?? join(homedir(), '.local', 'share', 'opencode')
 
+  const tempRoots = opts.tempRoots ?? TEMP_ROOTS
+
   const merged = new Map<string, { path: string; at: number; sources: Set<ProjectScanSource> }>()
   const collect = (source: ProjectScanSource, hits: Hit[]): void => {
     for (const hit of hits) {
-      const key = canonicalPath(hit.path)
+      const root = resolveProjectRoot(hit.path)
+      if (isTemporaryPath(root, tempRoots)) continue
+      const key = canonicalPath(root)
       const current = merged.get(key)
       if (current) {
         current.at = Math.max(current.at, hit.at)
         current.sources.add(source)
         continue
       }
-      merged.set(key, { path: hit.path, at: hit.at, sources: new Set([source]) })
+      merged.set(key, { path: root, at: hit.at, sources: new Set([source]) })
     }
   }
 
@@ -82,7 +89,8 @@ export async function scanLocalProjects(opts: ProjectScanOptions = {}): Promise<
   collect('opencode', await scanOpenCode(opencodeDir))
 
   return [...merged.values()]
-    .filter(item => isDirectory(item.path))
+    // 只有 Git 仓库能创建 worktree，面板也只接受 Git 目录，其它目录直接不进候选。
+    .filter(item => isGitRepo(item.path))
     .sort((a, b) => b.at - a.at)
     .slice(0, MAX_PROJECTS)
     .map(item => ({
@@ -90,7 +98,6 @@ export async function scanLocalProjects(opts: ProjectScanOptions = {}): Promise<
       name: basename(item.path),
       sources: [...item.sources],
       lastActiveAt: new Date(item.at).toISOString(),
-      isGit: existsSync(join(item.path, '.git')),
     }))
 }
 
@@ -268,6 +275,57 @@ function parseJson(text: string): Record<string, any> | null {
   } catch {
     return null
   }
+}
+
+/** 临时目录：系统临时区里的目录不是项目。 */
+const TEMP_ROOTS = ['/tmp', '/private/tmp', '/var/folders', '/private/var/folders']
+
+/**
+ * 归并项目根目录：`.git` 是文件说明这是 git worktree（`.git` 里写着主仓库的
+ * `.git/worktrees/<名字>`），归并到主仓库；worktree 本身不是项目，不单独出现。
+ */
+function resolveProjectRoot(path: string): string {
+  const dotGit = join(path, '.git')
+  let info: ReturnType<typeof statSync>
+  try {
+    info = statSync(dotGit)
+  } catch {
+    return path
+  }
+  if (info.isDirectory() || !info.isFile()) return path
+  const gitdir = readGitdir(dotGit)
+  return (gitdir ? mainRepoOf(gitdir) : null) ?? path
+}
+
+/** 读 `.git` 文件里的 `gitdir:` 指向。 */
+function readGitdir(dotGit: string): string {
+  try {
+    const match = /^gitdir:\s*(.+)$/m.exec(readFileSync(dotGit, 'utf8'))
+    return match ? match[1]!.trim() : ''
+  } catch {
+    return ''
+  }
+}
+
+/** 从 `<主仓库>/.git/worktrees/<名字>` 推出主仓库路径。 */
+function mainRepoOf(gitdir: string): string | null {
+  const match = /^(.*)\/\.git\/worktrees\/[^/]+$/.exec(gitdir)
+  return match ? match[1]! : null
+}
+
+/** 是不是 git 仓库：`.git` 是目录才算（worktree 的 `.git` 是文件）。 */
+function isGitRepo(path: string): boolean {
+  try {
+    return statSync(join(path, '.git')).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+/** 系统临时目录下的路径直接丢弃。 */
+function isTemporaryPath(path: string, roots: string[]): boolean {
+  const value = path.replace(/\/+$/, '')
+  return roots.some(root => value === root || value.startsWith(`${root.replace(/\/+$/, '')}/`))
 }
 
 /** Claude Code 的项目目录名：cwd 里非字母数字字符全换成 '-'。 */
