@@ -29,6 +29,13 @@ export interface LogEntry {
   /** 链路 ID：把同一条链路的日志串起来。 */
   trace?: string
   message: string
+  /**
+   * 写入这条日志时的 router-agent 版本号。
+   *
+   * 排查助手靠它判断「这条错误是不是当前版本还在报」：
+   * 版本对不上的旧日志视为已修复，不再纳入排查范围。
+   */
+  version?: string
   /** at / level / message / 结构字段之外的业务字段。 */
   data?: Record<string, unknown>
 }
@@ -176,8 +183,8 @@ function parseLine(line: string): LogEntry {
       const data: Record<string, unknown> = {}
       for (const [key, value] of Object.entries(record)) {
         if (key === 'at' || key === 'level' || key === 'message') continue
-        // domain / event / trace 单独成字段，不混进业务字段里。
-        if (key === 'domain' || key === 'event' || key === 'trace') continue
+        // domain / event / trace / version 单独成字段，不混进业务字段里。
+        if (key === 'domain' || key === 'event' || key === 'trace' || key === 'version') continue
         data[key] = value
       }
       const message = typeof record.message === 'string' ? record.message : ''
@@ -190,6 +197,7 @@ function parseLine(line: string): LogEntry {
         event: dimensions.event,
         ...(dimensions.trace ? { trace: dimensions.trace } : {}),
         message,
+        ...(typeof record.version === 'string' && record.version ? { version: record.version } : {}),
         ...(Object.keys(data).length > 0 ? { data } : {}),
       }
     }

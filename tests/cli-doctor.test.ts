@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatChecks, runDoctor, type DoctorDeps } from '../src/cli/doctor.js'
+import { formatChecks, runConfigDoctor, runDoctor, type DoctorDeps } from '../src/cli/doctor.js'
 import { defaultConfig, type AppConfig, chatEntry } from '../src/config.js'
 import type { CommandRunner } from '#infra/process.js'
 
@@ -183,5 +183,36 @@ describe('ra doctor', () => {
     const lines = formatChecks(await runDoctor(deps({ config: { ...healthyConfig(), projects: [] } })))
     expect(lines.join('\n')).toContain('❌')
     expect(lines.join('\n')).toContain('→')
+  })
+})
+
+describe('面板用的配置自检', () => {
+  it('缺配置时指出缺什么、去哪改', () => {
+    const config = healthyConfig()
+    config.feishu.allowed = []
+    const checks = runConfigDoctor({ config, llm: () => ({ ok: true, detail: 'model' }) })
+
+    const required = checks.find(item => item.name === '配置必填项')!
+    expect(required.status).toBe('fail')
+    expect(required.detail).toContain('feishu.allowed')
+    expect(required.section).toBe('channels')
+  })
+
+  it('模型没配时指向模型配置分组', () => {
+    const checks = runConfigDoctor({
+      config: healthyConfig(),
+      llm: () => ({ ok: false, detail: '缺 baseUrl' }),
+    })
+
+    const llm = checks.find(item => item.name === '模型配置')!
+    expect(llm.status).toBe('fail')
+    expect(llm.section).toBe('llm')
+  })
+
+  it('配齐时全部通过，不给出修改入口', () => {
+    const checks = runConfigDoctor({ config: healthyConfig(), llm: () => ({ ok: true, detail: 'model' }) })
+
+    expect(checks.every(item => item.status === 'ok')).toBe(true)
+    expect(checks.some(item => item.section)).toBe(false)
   })
 })

@@ -22,7 +22,7 @@ import type { ResumeHint } from '#runtime/port.js'
 import type { WorkspaceAdminPort } from '#runtime/workspaces/overview.js'
 import { PluginInstallStartError, type PluginPackageAdmin } from './plugin-admin.js'
 import { readLogs } from './log-tail.js'
-import type { LogAssistantQuestion, LogDiagnosis, LogSuggestion } from './log-assistant.js'
+import type { LogAssistantQuestion, LogAssistantOverview, LogDiagnosis } from './log-assistant.js'
 import { buildIssueBody, type IssueReporter } from './issue-report.js'
 import { getSpec, listSpecs, resetSpec, saveSpec, SpecError } from '../specs/index.js'
 import { PACKAGE_VERSION, type UpdateSnapshot } from '../update/index.js'
@@ -82,8 +82,8 @@ export function emptyIdentityStatus(): IdentityStatusView {
 export interface LogAssistantPort {
   /** 模型是否配齐；面板据此提示「去配置模型」。 */
   llmConfigured(): boolean
-  /** 常见问题快捷入口。 */
-  suggestions(): LogSuggestion[]
+  /** 面板打开时展示的当前状态摘要（异常 + 配置问题）。 */
+  overview(): LogAssistantOverview
   /** 基于最近日志给出排查结论。 */
   diagnose(question: LogAssistantQuestion): Promise<LogDiagnosis>
 }
@@ -638,7 +638,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       if (req.method === 'GET') {
         return respond(res, 200, {
           llmConfigured: opts.logAssistant.llmConfigured(),
-          suggestions: opts.logAssistant.suggestions(),
+          overview: opts.logAssistant.overview(),
         })
       }
       if (req.method === 'POST') {

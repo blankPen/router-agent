@@ -28,7 +28,7 @@ import { createLarkRunner, larkEnv } from '@router-agent/channel-feishu'
 import { parseMessageThreadIds, type UnaddressedAdmission } from '@router-agent/channel-feishu'
 import { createVisionTranscriber, type ImageTranscriber } from '#infra/vision.js'
 import { runInitWizard } from './init.js'
-import { formatChecks, runDoctor } from './doctor.js'
+import { formatChecks, runConfigDoctor, runDoctor } from './doctor.js'
 import { cmdRuntimeAdd, cmdRuntimeCheck, cmdRuntimeInstall, cmdRuntimeList, cmdRuntimeLogin, cmdRuntimeUninstall } from './runtime.js'
 import { PACKAGE_NAME, PACKAGE_VERSION, UpdateService, runNpmUpgrade } from '../update/index.js'
 import { simulate } from './simulate.js'
@@ -1530,12 +1530,25 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   // 助手还能读本机装的 router-agent 代码与当前配置，用来判断「是不是 ra 的 bug」。
   const logAssistant = createLogAssistant({
     logPath: join(home, 'logs', 'router-agent.log'),
+    version: PACKAGE_VERSION,
     model,
     tools: createDiagnosisTools({
       codeRoot: packageRoot(),
       config: publicConfig(config),
       configPath: join(home, 'config.yaml'),
       version: PACKAGE_VERSION,
+    }),
+    // 面板打开时先给「配置缺了什么」：只跑不联网的那部分自检，不等飞书与 Orca。
+    configChecks: () => runConfigDoctor({
+      config,
+      llm: () => {
+        try {
+          const resolved = resolvePiModelConfig({ configPath: join(home, 'config.yaml') })
+          return { ok: true, detail: `${resolved.model} @ ${resolved.baseUrl}` }
+        } catch (error) {
+          return { ok: false, detail: errorMessage(error) }
+        }
+      },
     }),
     logger,
   })
@@ -1924,6 +1937,8 @@ export function createLogger(home: string, output: CliIo, echo = true): Logger {
       domain: dimensions.domain,
       event: dimensions.event,
       message,
+      // 记下写入时的版本号：排查助手靠它判断这条日志是不是当前版本还在报。
+      version: PACKAGE_VERSION,
       ...(detail === undefined ? {} : { detail }),
       ...(dimensions.trace ? { trace: dimensions.trace } : {}),
       ...rest,

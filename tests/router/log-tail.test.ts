@@ -100,6 +100,15 @@ describe('日志增量读取', () => {
     expect(empty.cursor).toBe(next.cursor)
   })
 
+  it('版本号单独解析出来，不混进业务字段', () => {
+    setup(jsonLine({ at: '2026-11-09T10:00:00.000Z', level: 'info', message: 'api:listening', version: '1.2.3', port: 8787 }))
+
+    const result = readLogs(path)
+
+    expect(result.entries[0]?.version).toBe('1.2.3')
+    expect(result.entries[0]?.data).toEqual({ port: 8787 })
+  })
+
   it('末尾写了一半的行不下发，补全后能读到', () => {
     setup(jsonLine({ at: '2026-11-09T10:00:00.000Z', level: 'info', message: 'complete' }))
     const first = readLogs(path)
