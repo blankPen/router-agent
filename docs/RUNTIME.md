@@ -80,6 +80,29 @@ runtime:
 
 `allowedTools` / `permissionMode` / `sandbox` / `shellAllow` / `allowNetwork` / `fileAccess` 这些安全字段不允许写在 `runtime.options` 里，写了会直接启动失败。Worker 权限统一由 `worker.tools` 与 adapter 内置基线决定。
 
+## 按 npm 包名添加运行时（插件）
+
+内置运行时之外的运行时以插件形式接入。`runtime.plugins.<id>` 可以写 npm 包名，也可以写本地路径：
+
+```yaml
+runtime:
+  default: my-runtime
+  plugins:
+    my-runtime: '@acme/router-agent-runtime'
+```
+
+插件包是普通 npm 包，默认导出 `kind: 'runtime'` 的对象，模板见 `templates/runtime-plugin`。加载器以 `<RA_HOME>/config.yaml` 为锚点解析包名，所以 ra 会把声明的包下载到 `<RA_HOME>/node_modules`：
+
+```bash
+ra runtime add my-runtime @acme/router-agent-runtime   # 写 runtime.plugins + 下载 npm 包
+ra runtime install my-runtime                          # 已声明但还没下载时补装（可加 --version）
+ra runtime list                                        # 「插件运行时」一节标出已安装 / 未安装
+```
+
+面板路径是运行时卡片右上角的「添加运行时」（初始化页与「配置 → 运行时配置」都有）：填 id 与 npm 包名（或本地路径）后添加，npm 包可在弹窗里直接点「安装依赖」。保存配置并重启 ra 后，插件会作为一张卡片出现在「自定义插件」分组，和 demo runtime 并排。`runtime.default` 填插件创建的运行时 id，插件 `meta.id` 建议与配置 id 保持一致（不一致会记 `plugin:id-mismatch`，运行时 id 以插件声明为准）。
+
+本地路径插件（`./my-runtime`、`/abs/path`）不需要下载，重启后按路径加载。安装过程看 `plugin:install-started` / `plugin:install-succeeded` / `plugin:install-failed`；重启后加载失败看 `plugin:load-failed`（常见原因：包没装上、装到了别的 node_modules、导出对象不是 `kind: 'runtime'`）。
+
 ## 运行时选项：各运行时自己声明
 
 `runtime.options.<运行时 id>.<键>` 是通用的扩展点。每个运行时在自己的 `options.ts` 里声明「能配什么、取值有哪些、默认是什么」，于是：
@@ -100,8 +123,57 @@ ra config set runtime.options.herdr.model sonnet # 可选；留空用 Agent 自�
 默认值都是 `claude`。Orca 的 `worktree create --prompt` 必须同时给 `--agent`，没有「不传」这种形态，所以 ra 总是显式传一个 Agent；没配置时用选项声明里的默认值。选定的 Agent 会记进工单 meta，人工恢复会话时用它的 CLI 语法（`claude --resume` / `codex resume`）。
 
 Herdr 的 `agent` 取值是 Herdr 自己的 kind（`claude` / `codex` / `opencode`）；每个 kind 的无人值守启动参数由适配器按目录给出，声明里只暴露「选哪个 Agent」与「用哪个模型」。
+派工成功后会写一条 `herdr:agent-launched` 日志，带上实际传给 `herdr agent start --kind` 的 `agent` 与 `model`；
+排查「配了 codex 却在跑 claude」时先看这条。
 
 进展巡检读的是 Agent 自己的结构化会话记录：Claude 读 `~/.claude/projects/<cwd>/`，Codex 读 `~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl`。没指定 Agent 时按默认值 `claude` 读，读不到就退回终端屏幕渲染。
+
+## Claude Code 运行时（`claude-code`）
+
+`claude-code` 用 `git worktree` + `claude --bg` 后台会话承载工单，无人值守跑。
+
+### 启动前要先满足 Claude 的两个确认
+
+`claude --bg` 在拉起后台会话前会检查两件事，**任何一件没过就直接退出、不返回会话 id**：
+
+| 检查 | CLI 的原话 | 存在哪 |
+| --- | --- | --- |
+| 工作目录是否被信任 | `Workspace not trusted. Run \`claude\` in <目录> once and accept the trust prompt, then retry.` | `~/.claude.json` 的 `projects[目录真实路径].hasTrustDialogAccepted` |
+| 是否接受过「跳过权限确认」免责提示 | `--bg with bypassPermissions requires accepting the disclaimer first.` | `~/.claude.json` 的 `bypassPermissionsModeAccepted`（Claude 自己会转存到 `~/.claude/settings.json` 的 `skipDangerousModePermissionPrompt`） |
+
+这两项平时只能由交互式确认写入，所以每张工单都会卡在「请手动运行一次 claude」上，Router 只能转人工。
+适配器在启动前把两项补齐（`ensureClaudeBackgroundReady`，写进子进程看到的同一个 `~/.claude.json`），
+补写成功记 `claude:workspace-trusted`，补不上（配置损坏或不可写）记 `claude:workspace-untrusted` 并仍然尝试启动——
+这时失败信息会被翻成一句能照着做的话（见 `docs/OPERATIONS.md` 的事件表）。
+
+> 目录信任按**真实路径**登记：软链目录要写 `/private/tmp/...` 而不是 `/tmp/...`，
+> 否则 Claude Code 认不出来。适配器用 `realpath` 换算。
+
+## Orca 运行时（`orca`）里的 Codex：版本更新浮层
+
+用 Orca 派工、Agent 选 Codex 时，Codex 启动会弹一个**只能用键盘选**的浮层：
+
+```
+A new version of Codex is available.
+› 1. Update now (runs `npm i -g @openai/codex@latest`)
+  2. Skip
+  3. Skip until next version
+```
+
+浮层会挡住输入：工单停在第一步不动，Router 只能看着超时。
+
+**规避办法（默认已生效）**：Orca 适配器在 `worktree create` 之前把这一版的更新提示记成已忽略——
+写 `$CODEX_HOME/version.json`（缺省 `~/.codex/version.json`）的 `dismissed_version`，
+和用户在浮层里选「Skip until next version」完全等价。成功记 `orca:codex-update-dismissed`。
+新版发布后浮层会再出现，Router 会在下次启动时再消一次。
+
+> 想彻底关掉更新检查，自己在 `~/.codex/config.toml` 里加 `check_for_update_on_startup = false`；
+> Router 不改这个文件（用户自己的配置，不该被程序悄悄改写）。
+
+**兜底检测**：万一还是弹出来了（例如浮层类型不是版本更新），Orca 会拒收输入并返回
+`agent_prompt_blocked`。适配器把它记成 `orca:agent-prompt-blocked`，
+Router 立刻转人工：工单标记为「等待人工处理」并在话题里通知，
+提示去 Orca 终端手动选一下——**这类提示 Router 代答不了，只能人工处理**。
 
 ## Codex App Server 运行时（`codex-app`）
 
@@ -110,6 +182,10 @@ Herdr 的 `agent` 取值是 Herdr 自己的 kind（`claude` / `codex` / `opencod
 - `thread/start` + `turn/start` 首轮；`thread/resume` 重启后接回；`turn/steer` 执行中追加输入；`turn/interrupt` 停止；
 - 原生处理 `item/commandExecution/requestApproval`、`item/fileChange/requestApproval`、`item/permissions/requestApproval` 等审批请求；
 - threadId 同时写入 `meta.handle` / `meta.sessionId`，Web 面板会显示「Codex 打开」按钮，用 `codex://threads/<threadId>` 在 Codex 桌面端打开同一 thread。
+
+> 启动握手（`initialize`）超时时报错里会带上 app-server 在 stdout 上打印的**非协议输出**：
+> Codex 若在启动时打印交互式提示，提示原文会出现在 `codex:launch-failed` 的 `reason` 里，
+> 不会只剩一句没有线索的「请求超时」。
 
 ### 重启后被中断的任务怎么恢复
 

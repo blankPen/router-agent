@@ -158,7 +158,7 @@ ra stop && ra start
 - 删除自研 `CustomDecisionEngine`、`OpenAiCompatClient`、影子模式、`decision_shadows` 表与 `/api/decisions/shadow`；
 - `router_decide` 只产出 proposal，`Engine.decide()` 仍由 AgentLoop 统一调用；
 - 关单走 `Engine.closeTicket/stopTicket`，workspace 回收只排 `Effects`；写工具只对准入名单内、明确 @ 或私聊的用户开放；
-- 两个通道共用 60s 硬超时 + 32k token 预算，超时/超预算落 `unavailable` 或退回固定话术。
+- 两个通道共用 60s 硬超时 + 32k token 预算，超时/超预算落 `unavailable`；模型调用失败时按失败原因回话（额度 / 限流 / 超时 / 鉴权 / 网络），不再退回统一兜底话术。
 
 ### 5.2 自动化验证
 

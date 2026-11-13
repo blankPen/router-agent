@@ -128,7 +128,20 @@ export type DeliveryReceipt =
       sessionId?: string
     }
   | { status: 'queued'; inputIds: string[]; reason?: string }
-  | { status: 'rejected'; inputIds: string[]; reason: string; retryable?: boolean; retryAfterMs?: number }
+  | {
+      status: 'rejected'
+      inputIds: string[]
+      reason: string
+      retryable?: boolean
+      retryAfterMs?: number
+      /**
+       * 需要人工介入：Agent 停在交互式提示上（如 Codex 的版本更新选择），
+       * Router 代答不了，必须立刻转人工而不是按退避静默重投。
+       */
+      needsHuman?: boolean
+      /** 给用户看的原因说明（运行时拿到的原始错误）。 */
+      detail?: string
+    }
 
 export interface DeliverOptions {
   /** 第几次投递（从 1 开始）；同一 attempt 的并发调用必须幂等。 */

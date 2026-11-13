@@ -245,7 +245,8 @@ Every field, the `ra config set` allowlist, runtime options, environment variabl
 | `ra logs [--follow]` | Last 50 log lines; `--follow` keeps tailing |
 | `ra update [--check]` | Check and upgrade to the latest npm version: runs `npm install -g router-agent@latest` and restarts the running service; `--no-restart` installs only, `--registry` picks a registry, `--force` installs globally even from a source / linked checkout, `--json` for machines |
 | `ra runtime [list]` | Probe local ACP agents: status / version / source (`--json` for machines) |
-| `ra runtime install <id>` | Install an ACP adapter into `~/.router-agent/runtimes/<agent>` |
+| `ra runtime add <id> <npm-package | path>` | Declare a custom runtime plugin (`runtime.plugins.<id>`); npm packages are downloaded into `~/.router-agent/node_modules` |
+| `ra runtime install <id>` | Install an ACP adapter into `~/.router-agent/runtimes/<agent>`, or download a declared npm plugin package |
 | `ra runtime uninstall <id>` | Remove an ra-managed ACP adapter |
 | `ra runtime check <id>` | Full ACP handshake (`initialize` + `session/new`) |
 | `ra runtime login <id>` | Interactive login (provided by the agent: `acp-claude` runs `claude`, `acp-codex` runs `codex-acp login`) |
@@ -305,6 +306,7 @@ The detailed docs are currently Chinese-only.
 | [docs/API.md](docs/API.md) | Local HTTP API |
 | [docs/COMPARISON.md](docs/COMPARISON.md) | Gap analysis against the dsh-superagent prototype and transferable mechanisms |
 | [docs/AGENT-ADAPTER-DESIGN.md](docs/AGENT-ADAPTER-DESIGN.md) | Agent tool adapter contract design: Orca / Claude Code / Codex |
+| [docs/DIAGNOSIS-REDESIGN.md](docs/DIAGNOSIS-REDESIGN.md) | Smart diagnosis redesign: doctor probe → log scan → finding triage |
 | [docs/VERIFICATION.md](docs/VERIFICATION.md) | Real-environment verification records and remaining manual steps |
 | [docs/show-me-router-flow.html](docs/show-me-router-flow.html) | Visual flow: message → triage → dispatch → report → closure |
 | [README.md](README.md) | 简体中文版 |

@@ -259,7 +259,7 @@ projects:
 
 `allowed` 推荐填邮箱（解析成 open_id 后匹配，换应用也不会失效），也兼容 `ou_xxx`。机器人身份默认按 `feishu.appId` 自动识别，`botOpenIds` 只作为高级手动覆盖；自动识别失败时 `ra doctor` 会报 fail 并给出原因。`allowed` 为空时 `ra doctor` 也会报必填缺失。
 
-例外：**已绑定工单的话题内**，名单内的成员（`allowed`，或该群自己的 `chats[].allowed`）不 @ 机器人也会触发处理——消息会直接投给该工单的 worker，不会新开工单；这类消息同样会加确认表情，并在话题里回一句「已转给工单…」。这句回执**每张工单只发一次**，同单话题里的后续追问不会重复刷屏。
+例外：**已绑定工单的话题内**，名单内的成员（`allowed`，或该群自己的 `chats[].allowed`）不 @ 机器人也会触发处理——消息会直接投给该工单的 worker，不会新开工单；这类消息同样会加确认表情，但**不再发「已转给工单」文字回执**（避免追问时刷屏），进展由 worker 直接挂在同一条话题里。
 
 常用调整不必编辑整份文件：
 
@@ -290,7 +290,8 @@ ra config edit                                   # 用 $EDITOR 编辑全文
 | `ra logs [--follow]` | 最近 50 行日志；`--follow` 持续跟踪 |
 | `ra update [--check]` | 检查并升级到 npm 最新版：默认执行 `npm install -g router-agent@latest`，服务在跑时自动重启；`--no-restart` 只安装、`--registry` 指定源、`--force` 在源码 / link 运行时仍装全局版、`--json` 机器可读 |
 | `ra runtime [list]` | 探测本机 ACP Agent：状态、版本、来源；`--json` 机器可读 |
-| `ra runtime install <id>` | 按需安装 ACP 适配器到 `~/.router-agent/runtimes/<agent>` |
+| `ra runtime add <id> <npm 包名 | 路径>` | 声明自定义运行时插件（`runtime.plugins.<id>`），npm 包同时下载到 `~/.router-agent/node_modules` |
+| `ra runtime install <id>` | 按需安装 ACP 适配器到 `~/.router-agent/runtimes/<agent>`，或下载已声明的 npm 插件包 |
 | `ra runtime uninstall <id>` | 卸载 ra 托管的 ACP 适配器 |
 | `ra runtime check <id>` | 完整 ACP 握手（`initialize` + `session/new`） |
 | `ra runtime login <id>` | 交互式登录（由 Agent 自己提供：`acp-claude` 走 `claude`，`acp-codex` 走 `codex-acp login`，`codex-app` 走 `codex login`） |
@@ -349,6 +350,7 @@ src/               宿主：Engine / Store、Router、HTTP API、Web 面板、CL
 | [docs/API.md](docs/API.md) | 本地 HTTP API |
 | [docs/COMPARISON.md](docs/COMPARISON.md) | 与 dsh-superagent 原型的差距分析与可迁移机制 |
 | [docs/AGENT-ADAPTER-DESIGN.md](docs/AGENT-ADAPTER-DESIGN.md) | Agent 工具适配器接口设计：Orca / Claude Code / Codex 的契约与迁移方案 |
+| [docs/DIAGNOSIS-REDESIGN.md](docs/DIAGNOSIS-REDESIGN.md) | 智能诊断工具改造设计：doctor 自检 → 日志扫描 → 结论分流的诊断管线 |
 | [docs/VERIFICATION.md](docs/VERIFICATION.md) | 真实环境验证记录与需要人工执行的剩余步骤 |
 | [docs/show-me-router-flow.html](docs/show-me-router-flow.html) | 消息 → 研判 → 派工 → 上报 → 闭环的可视化流程 |
 | [README.en.md](README.en.md) | English version |

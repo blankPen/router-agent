@@ -9,7 +9,7 @@ Router 不做对话，只在必要时说话：
 | 场景 | 行为 |
 |-|-|
 | **会被处理的已寻址消息**（@ / 私聊 / 全量接收群） | 收到后**立即**加一个确认表情（默认 `Typing` ⌨️），回复发出后自动取消；被准入拦截的消息不加 |
-| **未 @ 但话题已绑定在办工单的消息**（名单内成员，tk-59） | 照样加确认表情，并在话题里回一句「收到，已转给工单…（id）的 worker」；**每张工单只回一次**，同单话题里的后续追问不再重复回执；消息直接投给该工单的 worker，不新开工单 |
+| **未 @ 但话题已绑定在办工单的消息**（名单内成员，tk-59） | 照样加确认表情；消息直接投给该工单的 worker，不新开工单，**不再发「已转给工单」文字回执**（避免追问时刷屏），进展由 worker 直接挂在同一条话题里 |
 | 群里 @机器人，但只是寒暄 / 试探 | **Pi 生成**一句礼貌回复，作为**普通消息**发出；不建单 |
 | 群里 @机器人，是真需求 | 只发一条**话题**消息：「工单「标题」（id）已开始执行。后续进展会在这个话题里更新。」，不再额外回「我帮你创建了工单」之类的普通消息 ack |
 | 未 @ 的群消息 | 走 Pi 研判；判为闲聊则**完全静默**（不刷屏） |
@@ -36,10 +36,10 @@ Router 不做对话，只在必要时说话：
 
 `ra start` 自动打开、`ra web` 也可随时打开的面板分五块：
 
-- **初始化**：只放启动必需的五件事——LLM Provider、运行时、项目、飞书机器人、群与绑定，顶部有完成度清单；LLM Provider 的 Base URL / 模型 / API Key 三项必填（密钥只写入 `config.yaml`，保存后不回显），可选 OpenAI / Anthropic 两种接口协议，并支持从 Claude Code、CCSwitch、Pi、OpenCode、Magpie 的本地 Provider 配置一键导入；飞书 App ID / App Secret 与授权也直接在本页完成（固定 `~/.router-agent-lark` profile）。逐项说明见 [README · 快速开始](../README.md#快速开始)；运行时的卡片检测与安装引导见 [RUNTIME.md](RUNTIME.md)。
+- **初始化**：只放启动必需的五件事——LLM Provider、运行时、项目、渠道接入、监控群，顶部有完成度清单；LLM Provider 的 Base URL / 模型 / API Key 三项必填（密钥只写入 `config.yaml`，保存后不回显），可选 OpenAI / Anthropic 两种接口协议，并支持从 Claude Code、CCSwitch、Pi、OpenCode、Magpie 的本地 Provider 配置一键导入；渠道那一步走渠道注册表：先选渠道（当前内置飞书），再填它的接入项（应用凭据 / 机器人与授权 / 群与绑定 + 接收私聊），App Secret 与授权也直接在本页完成（固定 `~/.router-agent-lark` profile）。新增渠道只需补一份描述与表单，初始化页不用改。逐项说明见 [README · 快速开始](../README.md#快速开始)；运行时的卡片检测与安装引导见 [RUNTIME.md](RUNTIME.md)。
 - **工单**：按阶段分组 + 计数、关键字搜索（标题 / 工单号 / 仓库 / PR）、自动刷新开关与手动刷新；详情页有阶段、派工、PR、授权范围、上报时间线（含完整回复与 `humanAction`）、投递记录，可直接投递 follow-up 或停止工单。**人工停止工单会立即回收对应的 workspace**（先停 worker，再删 worktree）；而闲置超时、PR 合并等**自动关单只停 worker，workspace 会保留一段时间（默认 24 小时）后由定时任务回收**，也可以随时在「清理工作区」里手动回收。页头还有「清理工作区」入口：按 Worker 运行时分组列出仍在磁盘上的工单工作区，可勾选多个工单批量清理。清理动作按工单各自的运行时执行——Orca 关闭 worktree 并删除目录，Claude Code 删除 `claude agents` 视图与 worktree 目录，ACP 直接删除 worktree 目录；在办工单与有未提交改动的目录会被跳过，并在结果里说明原因。
 - **日志**：直接看 `~/.router-agent/logs/router-agent.log`，默认 2 秒增量拉取（只读游标之后的新字节，不重复读整个文件），可开「实时刷新」；按 INFO / WARN / ERROR 过滤、按消息或字段搜索、复制当前结果；停在底部时自动跟随新日志，往上翻后不再打断，点「最新」回到底部。文件不存在或还没写入时给出空状态提示。
-- **配置**：按「LLM Provider / 准入策略 / 研判与人格 / 会话复用 / 进展同步 / 闲置治理 / 工作区回收 / 飞书消息 / 派工与服务 / 项目与群绑定」分组；飞书分组的顶部是「飞书机器人」区块，可直接写入 App Secret、刷新授权状态并引导完成飞书授权。每个字段带说明与默认值提示，改动逐项标脏，保存前做前端 + 后端双重校验，保存后写回 `config.yaml`。「派工与服务」里的 Worker 运行时是与初始化页相同的卡片平铺组件（`orca` / `claude-code` / `codex-app` / `acp` / `acp-*`），卡片标题是首字母大写的运行时名（`Orca` / `Claude Code` / `Codex App`），可检测安装状态、分别跳转官方文档安装 CLI 或由 ra 安装 ACP 扩展，并做 ACP 握手试启动；已有原生运行时替代品的 `acp-claude` / `acp-codex` 不再出现在可选列表里（当前正选中的仍保留，老配置继续可用）；项目清单按运行时隔离，切换运行时后「项目与群绑定」里的项目清单会切换到该运行时自己的一套（Orca 用仓库选择器，Claude Code / ACP 必须是本地仓库绝对路径）；「添加本地项目」支持系统目录选择并自动识别 Git / 分支，「添加 Git 项目」支持填写 ssh / http(s) 地址后自动 clone 并登记。群绑定的项目只能从当前清单里选，分支自动跟随项目的默认分支，不能单独自定义。
+- **配置**：按「LLM Provider / 运行时配置 / 渠道配置 / 项目配置 / 消息准入 / 其他设置」六层分组，每层再拆成可折叠的配置块。分组名与初始化页用词一致，按「先能跑起来、再看细节」排列：**LLM Provider**（模型接入 / 研判预算 / 人格 / 规范文件 / 会话复用）、**运行时配置**（Worker 运行时卡片 + 并发上限）、**渠道配置**（先选渠道，当前内置飞书，再配该渠道自己的「应用凭据 / 机器人与授权 / 接收范围 / 群与绑定 / 消息处理」，低频的「高级」项默认折叠）、**项目配置**（项目清单）、**消息准入**（接单方式 / 谁能叫醒机器人，立即生效）、**其他设置**（进展同步 / 闲置治理 / 工作区回收 / 服务与门禁）。渠道不是写死的分支：面板从 `GET /api/channels` 拿内核已注册的通道，按 id 与前端的渠道描述（`src/web/client/channels.ts`）合并，新增渠道只要再加一份描述与表单。每个配置块标注生效方式（立即生效 / 重启生效 / 部分立即生效），改动逐项标脏，保存前做前端 + 后端双重校验，保存后写回 `config.yaml`。「Worker 运行时」是与初始化页相同的卡片平铺组件（`orca` / `claude-code` / `codex-app` / `acp` / `acp-*`，卡片标题是首字母大写的运行时名 `Orca` / `Claude Code` / `Codex App`），已有原生运行时替代品的 `acp-claude` / `acp-codex` 不再出现在可选列表里（当前正选中的仍保留，老配置继续可用），可检测安装状态、分别跳转官方文档安装 CLI 或由 ra 安装 ACP 扩展，并做 ACP 握手试启动；项目清单按运行时隔离，切换运行时后项目清单会切换到该运行时自己的一套（Orca 用仓库选择器，Claude Code / ACP 必须是本地仓库绝对路径）；「添加本地项目」支持系统目录选择并自动识别 Git / 分支，「添加 Git 项目」支持填写 ssh / http(s) 地址后自动 clone 并登记。群绑定的项目只能从当前清单里选，分支自动跟随项目的默认分支，不能单独自定义。左侧导航随滚动高亮当前分组；顶部搜索框可按名称 / 路径筛配置项。
 - **来源**：服务状态、监控群、接收范围概览。
 
 侧栏品牌行末尾有全局主题切换图标：**跟随系统 / 亮色 / 暗色** 三态循环，默认跟随系统；选择只存在浏览器本地，不写入 `config.yaml`，所有页签即时生效。
@@ -57,6 +57,7 @@ Router 不做对话，只在必要时说话：
 | `feishu:ready` | 事件消费者 | — | 事件流已连上 |
 | `trigger:ingested` | Source | `id` `chat` `addressed` `admitted` `threadKeys` `topic` | 用户消息进入系统；`topic=true` 表示事件带了话题 ID（omt_）；`admitted=true` 表示没 @ 但因话题已绑定在办工单被放行（tk-59） |
 | `trigger:dropped` | Source | `reason` `chat` `actor` | 收到但被过滤 |
+| `trigger:ingest-failed` | Channel Ingress | `channel` `detail` | 富化或入库抛错，消息没能进入系统；重试依赖飞书重投兜底 |
 | `trigger:admitted-unaddressed` | CLI | `chat` `actor` `keys` | 已绑定工单的话题里，名单内成员没 @ 机器人也放行处理（tk-59） |
 | `intake:screen` | AgentLoop | `triggerId` `chat` `kind` `reason` | 需求识别初筛结论：chat / question / issue（`reason` 已截断到 120 字） |
 | `intake:screen-failed` / `intake:screen-invalid` | AgentLoop | `triggerId` `detail` / `triggerId` | 初筛模型失败或输出不合法；消息按原准入规则继续处理 |
@@ -74,34 +75,60 @@ Router 不做对话，只在必要时说话：
 | `intake:decision-failed` | AgentLoop | `triggerId` `detail` | 落决策失败（例如同一轮已落过决定） |
 | `intake:abort-failed` / `intake:dispose-failed` | IntakeEngine | `stage` `detail` | 分析会话超时中断或释放失败；已拿到的结果不受影响 |
 | `intake:tool-failed` | IntakeEngine | `stage` `detail` | 只读代码工具读写失败（code_read / code_ls / code_grep）；读不到不等于没有匹配 |
+| `intake:ran` | IntakeEngine | `readCode` `cwd` `chars` | 分析 Agent 完成一轮生成；`readCode` 表示这轮是否读了代码 |
 | `thread:created` | Engine | `threadId` `source` `chat` | 首次见到某条线程，登记规范 ID |
 | `thread:resolved` | Engine | `threadId` `rawThreadId` `triggerId` `source` | 消息自带线程标识没对上，靠别名收敛到了已有线程（排查「消息没进工单」先看这条） |
 | `thread:backfilled` / `thread:backfill-failed` | CLI | `filled` `failed` / `batch` `code` `detail` | `ra migrate threads --apply` 的回填结果 |
+| `thread:backfill-incomplete` | CLI | `total` `pending` | 回填后仍有线程缺话题 ID 别名，命令以非零退出 |
 | `router:decision` | Engine | `triggerId` `decision` `strength` `reason` `ticketId` `title` `scope` | Router 的研判结论 |
 | `launch` | Service | `ticketId` `handle` `workdir` | 派工到 Orca worktree |
+| `launch:queued` | Service | `maxWorkers` `capacity` `waiting` `ticketIds` | 并发已满，工单排队等待派工 |
+| `launch:queued-input` | Service | `ticketId` `pending` `maxWorkers` | 有新输入但并发满，暂不重建 worker |
+| `launch:failed` | Service | `ticketId` `title` `repo` `branch` `attempt` `reason` | 派工失败，已转人工并通知发起人 |
 | `input:queued` | Engine | `ticketId` `seq` `text` | Router 准备发给 worker 的内容 |
 | `input:deduped` | Engine | `ticketId` `inputId` `seq` `kind` `sourceKey` | 同一条来源消息重复到达（飞书重投 / 面板再点一次），复用已有输入，没有重复投给 worker |
 | `input:delivered` | Service | `ticketId` `count` `text` | 实际投递进 worker 终端 |
+| `input:deliver-failed` | Service | `ticketId` `attempt` `detail` | 投递进 worker 终端失败，按指数退避重试 |
+| `input:redeliver-giveup` | Service | `ticketId` `inputId` `attempt` | 同一条输入重投到上限仍未成功，已标 attention 转人工 |
+| `input:rejected` | Service | `ticketId` `reason` | 运行时明确拒绝输入（busy 等），按退避重试 |
 | `worker:lost` | Service | `ticketId` `handle` `reason` `lastSeq` `expired` | 执行会话已不存在；已投递未 ack 的输入标为 `expired`，不再参与重投 |
 | `input:relaunch` | Service | `ticketId` `pending` | 因新消息重建 worker；同一批积压输入只触发一次 |
 | `input:adopted-handle` | Service | `ticketId` `from` `to` `sessionId` | 运行时投递时接管了新会话（Claude resume fork），Assignment 已切换到新 handle |
 | `worker:stop-stale` | Service | `ticketId` `handle` | 终端句柄已失效（`terminal_handle_stale`），停止动作不再重试 |
+| `worker:stopped` | Service | `ticketId` `handle` | 停止 worker 成功（关单 / 清理收尾） |
 | `report` | Service | `ticketId` `state` `turn` `summary` `reply` `humanAction` `pr` | worker 的 `ra report` 上报 |
 | `report:evidence-missing` | Service | `ticketId` `mode` `action` `source` `reason` `missing` | UI 工单缺 Before / After 证据；`enforce` 时 action=reject，`warn` 时只记录 |
 | `report:evidence-unverified` | Service | `ticketId` `mode` `unverified` `source` | 无法判断是否有证据（workdir 丢失、git / PR 查询失败），降级放行 |
 | `report:ingest-failed` | Service | `ticketId` `message` | 兜底通道处理上报时的非门禁异常 |
+| `report:invalid` | Service | `ticketId` `detail` | 上报载荷非法（poller 兜底通道读到坏文件） |
+| `report:unknown-ticket` | Service | `ticketId` | 上报的工单不存在，忽略 |
+| `report:no-assignment` | Service | `ticketId` | 工单没有派工记录，无法确认归属，忽略 |
+| `report:stale-ignored` | Service | `ticketId` `incoming` `latest` | 上报时间早于最后一条已入库报告，重放被忽略 |
 | `progress:synced` / `progress:dedup` | Service | `ticketId` `count` / `skipped` | 进展定时合并同步，或内容重复被跳过 |
 | `progress:probed` | Service | `ticketId` `minutes` `count` `unchanged` | 主动巡检读会话记录 / 终端并把语义摘要同步到话题 |
+| `progress:sync-failed` | Service | `ticketId` `detail` | 进展合并同步抛错，不影响当轮回复 |
+| `progress:probe-failed` | Service | `ticketId` `detail` | 主动巡检单个工单失败 |
 | `outbox:sent` / `outbox:failed` | Outbox | `key` `text` / `error` | 对外通知结果 |
+| `outbox:repaired` | CLI | `count` | 启动时修复 N 条进程中断残留的 outbox 记录 |
 | `api:input` / `api:stop` / `api:policy` / `api:config` | HTTP API | — | 面板 / CLI 的操作 |
 | `idle:nudge` / `idle:stale` | Service | — | 空闲唤醒与失联标记 |
+| `idle:transfer` | Service | `ticketId` | worker 已退出且无法恢复，转人工并通知发起人 |
+| `idle:blocked` | Service | `ticketId` `detail` | worker 正在等待人工处理（权限 / 输入），已通知发起人 |
 | `retention:baseline` | Service | `baselineAt` `openTickets` | 服务启动时重置闲置治理计时基线：启动前就已无进展的工单不补发提醒 |
+| `retention:zombie` | Service | `ticketId` `handle` | 闲置工单的 worker 已失联，标记为僵尸待回收 |
+| `retention:reminded` | Service | `ticketId` `closeAt` | 已提醒发起人工单即将自动关闭 |
+| `retention:pr-urge` | Service | `ticketId` `pr` | 有未合并 PR 的闲置工单已催办 |
+| `retention:closed` | Service | `ticketId` `reason` | 闲置超时自动关单 |
+| `retention:sweep-failed` | Service | `ticketId` `detail` | 单个工单的闲置治理检查失败 |
 | `pr:linked` / `pr:state` | Service | — | PR / MR 跟踪 |
 | `pr:track-failed` | Service | `ticketId` `prNumber` `repo` `detail` | PR / MR 状态查询无结果；同一工单 + PR 只记一次 |
 | `recover:*` | Service | — | 重启对账 |
 | `recover:interrupted` | Service | `ticketId` `turnId` `mode` `autoRecovered` | 发现 worker 上一轮被服务重启打断，按 `policy.interruptedRecovery` 处置 |
 | `recover:auto-resume` | Service | `ticketId` `turnId` | 自动补了一条 `kind=retry` 的输入，worker 从中断处接着做 |
 | `recover:auto-resume-failed` | Service | `ticketId` `turnId` `message` | 自动恢复投递失败；已提示用户回复「继续」手动接着做 |
+| `recover:reattach` | Service | `ticketId` `attached` | 重启后重新接回旧 worker 会话 |
+| `recover:reuse` | Service | `ticketId` `handle` `phase` | 重启后直接复用仍存活的 worker |
+| `recover:relaunch` | Service | `ticketId` | 重启后发现工单没在跑，重新派工 |
 
 消息、配置与异常三类关键链路的补充事件（都遵循同一套 `at` / `level` / `message` + 业务字段格式）：
 
@@ -115,16 +142,31 @@ Router 不做对话，只在必要时说话：
 | `plugin:load-failed` | Plugin loader | `kind` `id` `package` `detail` | 插件包无法解析或导入（路径错、缺依赖、未安装）；服务继续启动，面板与 `/api/config` 会显示失败原因 |
 | `plugin:create-failed` | Runtime / Channel loader | `kind` `id` `detail` | 插件入口已导入，但 `create()` / `createAll()` 抛错；该实例不注册，其它插件不受影响 |
 | `plugin:id-mismatch` | Runtime / Channel loader | `kind` `id` `declared` `detail` | 配置里的插件 id 与插件声明的 `meta.id` 不一致；面板按配置 id 回链，提示用户统一命名 |
+| `plugin:install-started` | Plugin installer | `home` `package` `version` | 开始把配置里的 npm 插件包装到 `<RA_HOME>/node_modules` |
+| `api:plugin-install` | HTTP API | `kind` `id` `package` `version` | 面板「添加运行时 / 安装依赖」启动了插件 npm 安装任务；可在配置保存前按请求体里的包名启动 |
+| `plugin:install-succeeded` | Plugin installer | `home` `package` `version` | npm 安装完成，且加载器按 RA_HOME 能解析到该包；重启后才会加载 |
+| `plugin:install-failed` | Plugin installer | `home` `package` `version` `detail` | npm 退出码非零、超时、包没落盘或加载器解析不到；`detail` 是截断后的 npm 输出 |
 | `channel:consumer-started` / `channel:consumer-start-failed` | CLI | `channel` / `channel` `detail` | 已加载通道的入站消费启动结果；自定义通道启动失败不会阻塞其它通道 |
 | `channel:feishu-missing` | CLI | `detail` | 配置里没有可用的飞书通道；服务继续启动，但飞书消息不会入站 |
 | `channel:unreact-failed` | CLI | `channel` `messageId` `detail` | 回复发送后撤销回执失败；不影响已发出的回复 |
+| `chats:refreshed` | CLI | `count` | 群名目录刷新成功 |
 | `session:migrated` | CLI | `sessions` `resets` | 人工执行 `ra migrate sessions --apply` 完成 |
 | `session:migration-required` | CLI | `pending` | 存在未迁移的历史 sessionKey，服务拒绝启动 |
 | `session:migration-incomplete` / `session:migration-verify-failed` / `session:migration-failed` | CLI | 计数与异常数 / `detail` | 迁移执行失败（已回滚）或迁移后校验未通过 |
+| `session:cleanup` | Service | `removed` | 清理了 N 条超期未用的会话记录 |
+| `session:cleanup:skip` / `session:cleanup:failed` | Service | `file` `root` / `file` `detail` | 会话文件越界跳过或删除失败，不影响其它清理 |
+| `spec:migrated` / `spec:migration-failed` | Service | `source` `spec` / `detail` | 旧版 `router.soul` 规范迁移结果 |
 | `feishu:reconnecting` | Source | `attempt` `delayMs` | 事件消费者断开，已安排退避重连 |
 | `feishu:spawn-failed` | Source | `detail` | lark-cli 无法拉起（未安装 / 无权限），会继续重试 |
 | `feishu:card-fallback` | Sender | `target` `key` `code` `detail` | 互动卡片发送失败，已自动降级为富文本 |
 | `feishu:quote-fetch-failed` / `feishu:quote-parse-failed` | Source | `messageId` `detail` | 引用消息回查失败，按原消息继续 |
+| `feishu:bus-conflict` | CLI | `detail` | 事件总线冲突：同一机器人被多个消费者占用，停止重连 |
+| `feishu:error` | CLI | `detail` | 事件消费传输级错误（stderr / 非法 JSON 等），已安排重连 |
+| `feishu:image-vision-disabled` | CLI | `detail` | 图片转文本的视觉模型装配失败，图片退回纯附件 |
+| `feishu:image-mget-failed` | Source | `id` `code` `detail` | 消息图片 key 列表拉取失败，按纯附件处理 |
+| `feishu:image-download-failed` | Source | `id` `key` `code` `detail` | 图片下载失败，按纯附件处理 |
+| `feishu:image-read-failed` | Source | `id` `key` `path` | 已落盘的图片读不到，按纯附件处理 |
+| `feishu:image-transcribe-failed` | Source | `id` `key` `detail` | 图片转文字失败，原图仍透传 |
 | `chats:refresh-failed` / `chats:parse-failed` / `chats:cache-invalid` | Source | `code` / `detail` / `path` | 群名目录刷新失败或缓存损坏，旧值继续可用 |
 | `identity:resolved` | Identity | `entry`(掩码) `actor` `name` | 允许名单条目（邮箱 / open_id）解析成 open_id 与显示名 |
 | `identity:resolve-failed` | Identity | `entry`(掩码) `detail` | 条目确认解析不出来（格式不对 / 查无此人 / open_id 跨应用），该条目被丢弃 |
@@ -143,18 +185,26 @@ Router 不做对话，只在必要时说话：
 | `feishu:chat-allowlist-empty` | Identity | `chat` `name` `count` | 群级允许名单配了却一个都解析不出来，该群按「拒绝所有人」处理 |
 | `feishu:intake-approver-empty` | Identity | `chat` `name` `count` | 需求分析助手的终审管理员配了却一个都解析不出来，该群没有人能终审（不会退回全局名单） |
 | `loop:trigger-failed` | Agent Loop | `triggerId` `chat` `detail` | 单条消息处理异常，同批其它消息不受影响 |
-| `loop:admitted-replied` | Agent Loop | `triggerId` `chat` `ticketId` `tickets` | 未 @ 放行的消息已投给工单 worker，Router 在话题里回了一句「已转给工单」 |
-| `loop:admitted-suppressed` | Agent Loop | `triggerId` `chat` `ticketId` | 这张工单已经回过执，本次追问不再重复发「已转给工单」（消息照样投给了 worker） |
-| `decision:engine-failed` | Agent Loop | `triggerId` `detail` | 研判引擎调用失败，按 unavailable 处理并留下原因 |
-| `chat:reply-failed` | Agent Loop | `triggerId` `chat` `reason` `detail` | 回复模型失败，已退回固定话术 |
+| `loop:error` | Service | `detail` | 内部定时任务回调抛出的未预期异常，不影响主循环 |
+| `decision:audit` / `decision:audit-write-failed` | CLI | `engine` `triggerId` `durationMs` `tokens` `toolCalls` `decision` / `detail` | 每次研判的审计记录写入 `decisions.jsonl`；写盘失败不影响研判 |
+| `decision:engine-failed` | Agent Loop | `triggerId` `detail` | 研判引擎调用失败（没额度 / 限流 / 超时 / 鉴权失败等），按 unavailable 处理并留下原因；用户侧会收到对应的失败原因文案 |
+| `chat:reply-failed` | Agent Loop | `triggerId` `chat` `reason` `detail` | 回复模型失败（抛错或返回空内容），已按真实原因回话，不再退回「没看出要做什么」这类统一话术 |
 | `session:transcript-failed` / `session:reset-failed` | Agent Loop | `key` `detail` | 会话转录 / `/new` 重置失败，不影响当轮回复 |
 | `config:created` | Config | `path` | 首次启动写入了默认 `config.yaml` |
 | `config:parse-failed` | Config | `path` `detail` | YAML 解析失败，已降级为默认配置启动 |
 | `config:legacy-backend` | Config | `path` | 旧版 `backend` 段已兼容映射到 `runtime` |
 | `config:intake-migrated` | Config | `chats` `enabled` `maxQuestions` | 旧版全局 `intake:` 段已迁移到群级配置（`chats` 是被迁移的群） |
 | `config:invalid-security-override` | Config | `runtime` `keys` | `runtime.options` 试图覆盖安全参数，启动被拒绝 |
+| `config:updated` | CLI | `changed` | 面板保存配置落盘成功并生效 |
+| `policy:updated` | CLI | `version` `acceptMode` | 面板保存后策略版本变化 |
 | `config:patch-rejected` / `config:write-failed` | HTTP API | `errors` / `detail` | 面板保存的配置校验失败或落盘失败 |
 | `api:config` | HTTP API | `changed` `policyChanged` `restartRequired` `identityEffective` | 配置保存成功、是否需要重启、允许名单是否已即时生效 |
+| `api:listening` | CLI | `port` | HTTP API 已监听 |
+| `api:report` | HTTP API | `ticketId` `state` `turn` | HTTP 通道收到的 worker 上报 |
+| `api:spec` | HTTP API | `spec` `action` | 人格 / 规范文本保存或重置 |
+| `api:workspace-cleanup` | HTTP API | `requested` `runtimeId` `removed` `skipped` | 面板批量清理工作区成功 |
+| `api:workspace-cleanup-failed` | HTTP API | `requested` `runtimeId` `detail` | 面板批量清理工作区失败 |
+| `api:channels` | HTTP API | `count` | 面板读取已注册的消息通道（渠道配置的渠道列表来源） |
 | `api:request-failed` | HTTP API | `method` `path` `detail` | 请求级未预期异常（客户端会收到 500） |
 | `logs:assistant-answered` | Log Assistant | `question` `evidence` `source` `tools` | 日志页排查助手给出结论；`source` 为 `llm`（模型总结）或 `rules`（规则降级），`tools` 是这次用到的工具名 |
 | `logs:assistant-model-failed` | Log Assistant | `question` `detail` | 模型总结失败，已退回规则式排查，结论里会写明降级原因 |
@@ -164,18 +214,22 @@ Router 不做对话，只在必要时说话：
 | `api:issue` | HTTP API | `number` `url` | 面板触发的一键上报成功 |
 | `api:issue-create-failed` | HTTP API | `detail` | 一键上报失败（客户端会收到 500） |
 | `ticket:resume-failed` | HTTP API | `ticketId` `detail` | 工单详情里的恢复命令生成失败，详情页仍可打开 |
+| `ticket:closed` | Engine | `ticketId` `by` `reason` `stage` | 工单被关闭（人工停止 / 自动关单） |
 | `effect:done` / `effect:failed` | Effects | `kind` `key` / `error` | 派工、停止、清理等内部动作的执行结果 |
+| `cleanup:stop-failed` | Service | `ticketId` `handle` `detail` | 回收工作区前停 worker 失败 |
 | `worker:stop-queued` | Service | `ticketId` `source` | 自动关单（`idle` / `pr:merged` / `pr:closed`）后排队停 worker，workspace 保留给定时任务回收；同 key 已存在时不重复记录 |
 | `cleanup:queued` | Service | `ticketId` `source` | 排队回收 workspace：人工停止（`stop`）与派工半成功（`launch-failed`）；同 key 已存在时不重复记录 |
 | `workspace:sweep` / `workspace:sweep-failed` | Service | `due` `removed` `skipped` `keepHours` / `message` | 定时任务回收已关闭工单残留工作区的汇总；扫描失败只记一次，不影响主流程 |
 | `cleanup:worktree-removed` / `cleanup:worktree-skipped` / `cleanup:no-remove-capability` | Service | `ticketId` `workdir` / `reason` `attempts` | 自动回收 workspace 的结果；脏目录或不可重试的失败只记录一次并通知发起人 |
 | `workspace:bulk-removed` / `workspace:bulk-skip` / `workspace:bulk-cleanup` | Service | `ticketId` `workdir` / `reason` / `requested` `removed` `skipped` | 面板「清理工作区」逐项回收结果与汇总 |
+| `workspace:bulk-stop-failed` | Service | `runtimeId` `ticketId` `handle` `detail` | 批量清理前停 worker 失败，该项跳过 |
 | `outbox:sent` / `outbox:failed` | Outbox | `key` `channel` `text` / `error` | 对外消息的最终投递结果 |
 | `worker:status-failed` | Service | `ticketId` `handle` `runtime` `detail` | 运行时活性查询失败，按未知状态处理 |
 | `worker:event-log-failed` | Service | `ticketId` `kind` `detail` | 工单 `events.log` 写入失败，不影响主流程 |
 | `pr:inspect-failed` / `pr:repo-slug-failed` | Service | `ticketId` `handle` `detail` | PR 线索获取失败，等待 gh 兜底 |
 | `cursor:invalid` | Service | `key` `detail` | 游标 JSON 损坏，按无游标处理 |
 | `llm:model-config-failed` | CLI | `detail` | 启动时模型配置缺失或不可解析 |
+| `runtime:detected` / `runtime:detect-failed` | CLI | `ready` `unavailable` / `detail` | 启动时后台探测可用运行时 |
 | `llm:import-applied` | HTTP API | `source` `name` `api` `baseUrl` `changed` | 从本地 Claude Code / CCSwitch / Pi / OpenCode / Magpie 配置导入 Provider，已写回 `config.yaml` |
 | `api:llm-import` | HTTP API | `source` `model` `changed` | 面板触发的本地 Provider 导入成功（不记录密钥） |
 | `llm:import-missing` / `llm:import-rejected` / `llm:import-scan-failed` / `llm:import-write-failed` | HTTP API / Import | `id` / `errors` / `detail` | 候选已失效、校验失败、扫描失败或落盘失败（不记录密钥） |
@@ -185,6 +239,10 @@ Router 不做对话，只在必要时说话：
 | `update:service-restarted` / `update:service-stop-failed` / `update:restart-failed` | CLI | `pid` / `pid` `reason` `detail` | `ra update` 自动重启的结果 |
 | `update:restart-scheduled` | Router Tool | `delayMs` | 飞书里让 Router 更新版本后，安排在回复发出后重启服务 |
 | `api:update` | HTTP API | `phase` `from` `to` `reason` | 面板触发的更新结果 |
+| `serve:starting` | CLI | `home` `projects` `runtime` `chats` `decisionEngine` | 服务启动参数快照 |
+| `serve:llm-unconfigured` | CLI | `detail` `mode` | LLM 未配置，只启动 Web 配置面板，Router 不收消息 |
+| `serve:restarting` / `serve:restarted` / `serve:restart-failed` | CLI | `pid` / `pid` / `detail` | 面板触发的服务重启结果 |
+| `serve:stopping` | CLI | — | 服务收到停止信号 |
 | `codex:binary-resolved` | Codex runtime | `ticketId` `source` `path` `version` | 实际使用的 Codex 可执行文件（App 内置 / 环境变量 / PATH） |
 | `codex:codex-home` | Codex runtime | `ticketId` `codexHome` | 子进程使用的 `CODEX_HOME`；与桌面端不一致时桌面端看不到 thread |
 | `codex:full-access` | Codex runtime | `ticketId` `approvalPolicy` `sandboxMode` | Worker 以 full access 运行；没有人工审批闸门 |
@@ -193,6 +251,7 @@ Router 不做对话，只在必要时说话：
 | `codex:turn-started` | Codex runtime | `ticketId` `threadId` `turnId` `inputIds` `preview` | 新 turn 开始；追问也会走这里 |
 | `codex:turn-completed` | Codex runtime | `ticketId` `threadId` `turnId` `status` `durationMs` | turn 正常结束 |
 | `codex:turn-failed` | Codex runtime | `ticketId` `threadId` `turnId` `reason` | turn 失败，转人工 |
+| `codex:turn-start-failed` | Codex runtime | `ticketId` `threadId` `reason` | 新一轮启动失败，转人工 |
 | `codex:turn-steered` / `codex:steer-failed` | Codex runtime | `ticketId` `threadId` `turnId` `inputId` / `reason` | 执行中追加输入成功或失败（失败会排队） |
 | `codex:approval` | Codex runtime | `ticketId` `threadId` `kind` `decision` `command` | 审批请求的处理结果（full + never 下通常不出现） |
 | `codex:resumed` / `codex:resume-failed` | Codex runtime | `ticketId` `threadId` / `reason` | 重启后 `thread/resume` 接回成功或失败 |
@@ -200,13 +259,23 @@ Router 不做对话，只在必要时说话：
 | `codex:interrupted-turn-check-failed` | Codex runtime | `ticketId` `threadId` `reason` | `thread/turns/list` 读不回轮次状态；判定不了有没有被中断，不触发恢复动作 |
 | `codex:error` | Codex runtime | `ticketId` `threadId` `reason` | Codex 返回的警告/错误事件 |
 | `codex:launch-failed` | Codex runtime | `workdir` `branch` `reason` | 派工启动失败 |
+| `claude:workspace-trusted` | Claude Code runtime | `ticketId` `workdir` `added` `configPath` | 启动前补齐 Claude 的目录信任与「跳过权限确认」免责提示；`--bg` 缺这两项会直接退出 |
+| `claude:workspace-untrusted` | Claude Code runtime | `ticketId` `workdir` `reason` `configPath` | 补写失败（Claude 配置损坏或不可写）；仍会尝试启动，失败时按 CLI 的提示转人工 |
+| `orca:codex-update-dismissed` | Orca runtime | `ticketId` `version` `path` | 启动 Codex 前把版本更新提示记成已忽略，等价于用户选「Skip until next version」 |
+| `orca:codex-update-dismiss-failed` | Orca runtime | `ticketId` `reason` `path` | 版本缓存读不到 / 写不进；Codex 仍可能弹更新浮层，随后由 `orca:agent-prompt-blocked` 转人工 |
+| `orca:agent-prompt-blocked` | Orca runtime | `handle` `inputId` `reason` | Agent 停在交互式提示上（Codex 版本更新浮层、权限确认等），Orca 拒收输入；Router 代答不了，转人工 |
+| `input:prompt-blocked` | Router | `ticketId` `reason` `attempt` `detail` | 投递被交互式提示挡住：已转人工并通知话题，不再静默重投 |
+| `claude:resume-forked` | Claude Code runtime | `handle` `sessionId` `copy` `detail` | 后台 worker 被 resume 成副本，已 stop 副本并把本轮输入退避重投回原会话（5 次后转人工） |
+| `claude:inject-skipped` | Claude Code runtime | `handle` `reason` | 轮内插话未注入成功，退回排队等本轮结束 |
+| `claude:stop-original-failed` | Claude Code runtime | `handle` `code` `detail` | 处理副本前停掉原会话失败 |
+| `herdr:agent-launched` | Herdr runtime | `ticketId` `paneId` `agent` `model`（可选） | Herdr 按 `runtime.options.herdr.agent` 选中并拉起 Agent；日志里的 `agent` 就是实际传给 `--kind` 的值 |
 | `t3code:thread-started` | T3 Code runtime | `ticketId` `threadId` `workdir` `branch` | `t3 thread start` 成功，threadId 写入 Assignment |
 | `t3code:input-delivered` | T3 Code runtime | `ticketId` `threadId` `delivery` | 追问已投进线程（`started`=已开跑，`queued`=线程忙排队中） |
 | `t3code:server-down` | T3 Code runtime | `ticketId` / `threadId` `reason` | T3 服务端没起或中途掉了；追问转排队，巡检读不到状态 |
 | `t3code:server-unavailable` | T3 Code runtime | `reason` | 派工前拉不起 T3 服务端（`t3 serve` 失败或超时）；派工中止 |
 | `t3code:send-failed` | T3 Code runtime | `ticketId` `threadId` `reason` | 追问投递失败；已转排队，下一轮重投 |
 | `t3code:show-failed` | T3 Code runtime | `threadId` `reason` | 读线程状态失败；巡检跳过这一路 |
-| `t3code:stop-no-cancel` | T3 Code runtime | `ticketId` `threadId` `reason` | T3 CLI 没有中止线程的命令；停止只登记本地状态，正在跑的那轮会跑完 |
+| `t3code:stop-no-cancel` | T3 Code runtime | `ticketId` `threadId` `reason` | T3 CLI 没有中止线程的命令；停止只登记本地状态，正在跑的那一轮会跑完 |
 | `t3code:project-remove-failed` | T3 Code runtime | `workdir` `reason` | T3 侧项目删除失败；不影响 worktree 回收 |
 
 worker 终端里的原始输出**不进日志**（避免把 TUI 文本当状态）；主动巡检优先读 Agent 自己的会话记录（Claude / Codex，见 [RUNTIME.md](RUNTIME.md#运行时选项各运行时自己声明)），其次才把终端里的语义摘要（助手文本 + 动作概要）发到话题，不逐条回放工具调用。要看它做了什么，读 `report` 的 `summary` 与 `~/.router-agent/workers/<ticketId>/events.log`。
@@ -226,6 +295,8 @@ grep '"message":"trigger:' ~/.router-agent/logs/router-agent.log
 ### 智能问题排查助手
 
 面板右下角常驻一个**智能排查助手悬浮按钮**，不用切到「日志」页也能用：
+
+> 本节的现状与改造方向见 [DIAGNOSIS-REDESIGN.md](DIAGNOSIS-REDESIGN.md)：拟把助手升级成「先自检配置、再扫错误告警、最后按问题性质分流」的诊断管线。
 
 1. 服务日志里出现 `error` 时，按钮变成红色并带上错误条数，同时弹一条「检测到 N 条新的错误日志」的提示；没有错误时是普通状态。
 2. 鼠标移到按钮上会展开快捷菜单：**智能分析异常**（直接分析最近的错误）、**上报 GitHub issue**（打开面板并分析，看完结论再决定要不要报）、**打开排查面板**。

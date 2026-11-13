@@ -9,6 +9,7 @@ import { readRouterPrompt } from '../specs/index.js'
 import { IntakeCoordinator, type IntakeSettingsView } from './intake-flow.js'
 import type { IntakeEngine } from './intake-engine.js'
 import type { SessionKeyParts } from './session-registry.js'
+import { modelFailureMessage } from './model-failure.js'
 import type {
   DecisionAudit,
   DecisionEngine,
@@ -73,6 +74,13 @@ export interface AssessResult {
   clarify?: ClarifyInfo
   /** 研判过程中已经生成好的用户答复（查询 / 清理类工具），直接发送，不再多调一次回复模型。 */
   reply?: string
+  /**
+   * unavailable 的原始原因与来源。
+   *
+   * - `engine`：模型调用失败（没额度 / 限流 / 超时 / 鉴权失败……），要把原因告诉用户。
+   * - `model`：模型自己给出了 `unavailable` 决定（判断不了就不猜），按礼貌追问处理。
+   */
+  unavailable?: { reason: string; source: 'engine' | 'model' }
 }
 
 export interface TickResult {
@@ -84,7 +92,6 @@ export interface TickResult {
 }
 
 const REPLY_ONLY_TEXT = '这条消息我收到了，但当前策略暂不自动开工（acceptMode=off），所以我没有派工。如果需要我做，请直接 @我并说明要改什么。'
-const SMALL_TALK_FALLBACK = '收到。我还没看出具体要做什么，能说一下要改哪个模块、期望的结果吗？'
 const MEDIA_ONLY_TEXT = '收到附件了，但我看不到图片/文件里的内容。请用文字说一下要改什么，或者把关键信息贴成文字。'
 const THREAD_INTRO = (title: string, id: string) => `工单「${title}」已开始执行（${id}）。后续进展会在这个话题里更新。`
 
@@ -250,9 +257,6 @@ export class AgentLoop {
         if (delivered.length > 0) {
           await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}`)
           result.fannedOut += delivered.length
-          // 未 @ 但被放行的消息（tk-59）：Router 自己也要在话题里回一句。
-          // 否则这条消息既没有确认表情、也没有任何回应，用户只看到「消息被吞了」。
-          if (trigger.unaddressedAdmitted) this.replyAdmitted(trigger, delivered, result)
           return
         }
       }
@@ -370,14 +374,22 @@ export class AgentLoop {
           defaultBranch: project.defaultBranch,
         })),
         draft: { task: info.task },
-      }, clarifyFallback(info, this.dispatch?.projects))
+      }, failure => `${failure.message}\n${clarifyFallback(info, this.dispatch?.projects)}`)
       result.replied += 1
       return
     }
     if (assessed.outcome === 'unavailable') {
       result.unavailable += 1
       if (this.shouldReply(trigger)) {
-        await this.converse(trigger, '暂时没判断出来这条消息要做什么')
+        const reason = assessed.unavailable?.reason ?? ''
+        // 模型调用失败（没额度 / 限流 / 超时……）时直接告诉用户真实原因，
+        // 不要再用「没看出要做什么」这种把故障说成需求不明的兜底话术。
+        if (assessed.unavailable?.source === 'engine') {
+          // 回复模型这会儿大概率也调不通，直接用失败原因拼一句，不浪费一次调用。
+          this.reply(trigger, modelFailureMessage(reason, 'assess'), `chat:${trigger.id}`)
+        } else {
+          await this.converse(trigger, '暂时没判断出来这条消息要做什么')
+        }
         result.replied += 1
       }
       return
@@ -392,8 +404,19 @@ export class AgentLoop {
     }
   }
 
-  /** 让 Pi 组织一句礼貌回复（普通消息，不进话题）。失败时退回固定话术。 */
-  async converse(trigger: Trigger, reason: string, extra: Record<string, unknown> = {}, fallback: string = SMALL_TALK_FALLBACK): Promise<string> {
+  /**
+   * 让 Pi 组织一句礼貌回复（普通消息，不进话题）。
+   *
+   * 模型调用失败时不能拿「没看出要做什么」这种话术糊弄：没额度就说没额度，
+   * 超时就说超时，鉴权失败就说鉴权失败。`onFailure` 让调用方按自己的场景决定
+   * 补充说明（例如追问缺哪个项目），不传就只回失败原因。
+   */
+  async converse(
+    trigger: Trigger,
+    reason: string,
+    extra: Record<string, unknown> = {},
+    onFailure?: (failure: { reason: string; message: string }) => string,
+  ): Promise<string> {
     let text = ''
     const session = this.sessionFor(trigger)
     try {
@@ -411,16 +434,34 @@ export class AgentLoop {
       })
       text = text.trim()
     } catch (error) {
-      // 模型回复失败时退回到固定话术；日志记下原因，避免把「模型挂了」误判成「模型不会答」。
+      // 模型回复失败时按真实原因回复用户；日志记下原因，避免把「模型挂了」误判成「模型不会答」。
+      const message = errorMessage(error)
       this.logger.warn('chat:reply-failed', {
         triggerId: trigger.id,
         chat: trigger.chatId,
         reason,
-        message: errorMessage(error),
+        message,
       })
       text = ''
+      const failure = { reason: message, message: modelFailureMessage(message, 'reply') }
+      const failureReply = onFailure ? onFailure(failure) : failure.message
+      this.reply(trigger, failureReply, `chat:${trigger.id}`)
+      return failureReply
     }
-    const reply = text || fallback
+    // 模型回了空内容：同样按失败处理，不要给用户发一条空白消息。
+    if (!text) {
+      this.logger.warn('chat:reply-failed', {
+        triggerId: trigger.id,
+        chat: trigger.chatId,
+        reason,
+        message: 'pi:empty-reply',
+      })
+      const failure = { reason: 'pi:empty-reply', message: modelFailureMessage('pi:empty-reply', 'reply') }
+      const failureReply = onFailure ? onFailure(failure) : failure.message
+      this.reply(trigger, failureReply, `chat:${trigger.id}`)
+      return failureReply
+    }
+    const reply = text
     this.reply(trigger, reply, `chat:${trigger.id}`)
     return reply
   }
@@ -475,8 +516,10 @@ export class AgentLoop {
       })
     this.onAudit?.(result.audit)
 
-    if (result.unavailableReason) return this.markUnavailable(trigger, result.unavailableReason)
-    if (!result.proposal) return this.markUnavailable(trigger, '研判未产出决定')
+    if (result.unavailableReason) {
+      return this.markUnavailable(trigger, result.unavailableReason, result.unavailableSource ?? 'engine')
+    }
+    if (!result.proposal) return this.markUnavailable(trigger, '研判未产出决定', 'engine')
     const applied = this.applyProposal(trigger, result.proposal, strength)
     return result.reply ? { ...applied, reply: result.reply } : applied
   }
@@ -497,7 +540,8 @@ export class AgentLoop {
   /** 只有这里会写库：派工解析 + Engine.decide。 */
   private applyProposal(trigger: Trigger, proposal: DecisionProposal, strength: Strength): AssessResult {
     if (proposal.decision === 'unavailable') {
-      return this.markUnavailable(trigger, proposal.reason || '模型判定未完成')
+      // 模型主动给出的 unavailable 决定：属于模型结论，不是调用失败。
+      return this.markUnavailable(trigger, proposal.reason || '模型判定未完成', 'model')
     }
 
     let repo = proposal.repo ?? ''
@@ -537,13 +581,13 @@ export class AgentLoop {
       : { outcome: 'ignore' }
   }
 
-  private markUnavailable(trigger: Trigger, reason: string): AssessResult {
+  private markUnavailable(trigger: Trigger, reason: string, source: 'engine' | 'model' = 'engine'): AssessResult {
     try {
       this.engine.decide({ triggerId: trigger.id, decision: 'unavailable', strength: 'inferred', reason })
     } catch {
       // Trigger 已被处理时忽略。
     }
-    return { outcome: 'unavailable' }
+    return { outcome: 'unavailable', unavailable: { reason, source } }
   }
 
   private async replyOnly(trigger: Trigger, reason: string): Promise<void> {
@@ -663,48 +707,11 @@ export class AgentLoop {
     return this.replyAlwaysChats.has(trigger.chatId)
   }
 
-  /**
-   * 未 @ 但被放行的消息：在话题里回一句「已转给工单的 worker」。
-   *
-   * 按【工单】去重，不是按【消息】：一张工单的话题里只回一次。
-   * 否则用户在话题里每追问一次，就会收到一条一模一样的「已转给工单…」，
-   * 看起来像消息被反复转发（tk-59 的回执收敛）。
-   *
-   * 只发一条、尽量短：worker 的进展与结论会挂在同一条话题里，
-   * Router 不重复展开，避免同一条消息收到两条回执。
-   */
-  private replyAdmitted(trigger: Trigger, delivered: Ticket[], result: TickResult): void {
-    const ticket = delivered[0]
-    if (!ticket) return
-    const queued = this.reply(
-      trigger,
-      `收到，已转给工单「${ticket.title}」（${ticket.id}）的 worker，后续进展会在这个话题里更新。`,
-      `admitted:${ticket.id}`,
-      { thread: true },
-    )
-    if (!queued) {
-      // 这张工单已经回过执了：追问不再重复刷屏，靠确认表情 + worker 在话题里的进展。
-      this.logger.info('loop:admitted-suppressed', {
-        triggerId: trigger.id,
-        chat: trigger.chatId,
-        ticketId: ticket.id,
-      })
-      return
-    }
-    result.replied += 1
-    this.logger.info('loop:admitted-replied', {
-      triggerId: trigger.id,
-      chat: trigger.chatId,
-      ticketId: ticket.id,
-      tickets: delivered.length,
-    })
-  }
-
   /** 回一句到原会话；key 保证同一件事只发一次。 */
   /** thread=true 时用话题回复（挂到原消息下）；否则发普通消息。 */
-  private reply(trigger: Trigger, text: string, key: string, opts: { thread?: boolean } = {}): boolean {
+  private reply(trigger: Trigger, text: string, key: string, opts: { thread?: boolean } = {}): void {
     const rootId = opts.thread ? (trigger.threadKeys?.[0] ?? trigger.threadId.split(':').at(-1) ?? '') : ''
-    return this.store.enqueueOutbox({
+    this.store.enqueueOutbox({
       id: `ob_${key.replace(/[^a-zA-Z0-9:_-]/g, '_')}`,
       key,
       channelKind: trigger.channelId ?? DEFAULT_CHANNEL_ID,

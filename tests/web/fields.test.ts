@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { runtimeOptions, sectionsFor } from '../../src/web/client/fields.js'
+import { groupsFor, runtimeOptions } from '../../src/web/client/fields.js'
 import type { RuntimeChoiceView } from '../../src/web/client/runtime-model.js'
 
 describe('运行时下拉选项', () => {
@@ -35,10 +35,10 @@ describe('运行时下拉选项', () => {
     expect(options.find(option => option.value === 'acp-codex')).toBeUndefined()
   })
 
-  it('sectionsFor 只替换 runtime.default 的选项', () => {
-    const sections = sectionsFor()
-    const delivery = sections.find(section => section.id === 'delivery')
-    const field = delivery?.fields.find(item => item.path === 'runtime.default')
+  it('groupsFor 只替换 runtime.default 的选项', () => {
+    const groups = groupsFor()
+    const runtimeBlock = groups.flatMap(group => group.blocks).find(block => block.id === 'runtime')
+    const field = runtimeBlock?.fields.find(item => item.path === 'runtime.default')
     expect(field?.kind).toBe('select')
     expect(field?.options?.some(option => option.value === 'orca')).toBe(true)
   })
@@ -51,8 +51,8 @@ describe('运行时下拉选项', () => {
       hint: '插件',
       status: 'pending',
     }
-    const sections = sectionsFor(undefined, 'orca', [custom])
-    const field = sections.find(section => section.id === 'delivery')?.fields.find(item => item.path === 'runtime.default')
+    const groups = groupsFor(undefined, 'orca', [custom])
+    const field = groups.flatMap(group => group.blocks).find(block => block.id === 'runtime')?.fields.find(item => item.path === 'runtime.default')
     expect(field?.options?.some(option => option.value === 'example')).toBe(true)
   })
 })

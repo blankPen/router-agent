@@ -28,7 +28,7 @@ import { parseMessageThreadIds, type UnaddressedAdmission } from '@router-agent/
 import { createVisionTranscriber, type ImageTranscriber } from '#infra/vision.js'
 import { runInitWizard } from './init.js'
 import { formatChecks, runDoctor } from './doctor.js'
-import { cmdRuntimeCheck, cmdRuntimeInstall, cmdRuntimeList, cmdRuntimeLogin, cmdRuntimeUninstall } from './runtime.js'
+import { cmdRuntimeAdd, cmdRuntimeCheck, cmdRuntimeInstall, cmdRuntimeList, cmdRuntimeLogin, cmdRuntimeUninstall } from './runtime.js'
 import { PACKAGE_NAME, PACKAGE_VERSION, UpdateService, runNpmUpgrade } from '../update/index.js'
 import { simulate } from './simulate.js'
 import { runReport, readContentArg, type ReportOptions } from './report.js'
@@ -42,6 +42,7 @@ import type { WorkerStateFile } from '#runtime/report-poller.js'
 import { RouterService, type Logger } from '../service.js'
 import { EffectsProcessor } from '../core/effects.js'
 import { createApiServer, emptyIdentityStatus, type IdentityPort } from '../router/api.js'
+import { PluginPackageAdmin } from '../router/plugin-admin.js'
 import { ProjectSetup } from '../router/project-setup.js'
 import { createLogAssistant } from '../router/log-assistant.js'
 import { createDiagnosisTools } from '../router/diagnosis-tools.js'
@@ -139,17 +140,25 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
       setCode(await cmdDoctor(homeOf(opts, output), opts, output))
     })
 
-  withHome(program.command('runtime [action] [id]')
-    .description('Worker 运行时：list / check / install / uninstall / login（含 ACP 与 codex-app）'))
+  withHome(program.command('runtime [action] [id] [entry]')
+    .description('Worker 运行时：list / check / add / install / uninstall / login（含 ACP、codex-app 与 npm 插件）'))
     .option('--json', 'list / check 以 JSON 输出')
-    .option('--version <version>', 'install 指定版本（默认用目录里 pinned 的版本）')
-    .action(async (action: string | undefined, id: string | undefined, opts: { home?: string; json?: boolean; version?: string }) => {
+    .option('--version <version>', 'add / install 指定 npm 版本（默认 latest；ACP Agent 默认用目录里 pinned 的版本）')
+    .action(async (action: string | undefined, id: string | undefined, entry: string | undefined, opts: { home?: string; json?: boolean; version?: string }) => {
       const home = homeOf(opts, output)
       ensureHome(home)
       const io = { stdout: output.stdout, stderr: output.stderr, env: output.env }
       switch (action ?? 'list') {
         case 'list':
           setCode(await cmdRuntimeList(home, opts, io))
+          return
+        case 'add':
+          if (!id || !entry) {
+            output.stderr('用法：ra runtime add <id> <npm 包名 | 本地路径> [--version <v>]')
+            setCode(2)
+            return
+          }
+          setCode(await cmdRuntimeAdd(home, id, entry, opts, io))
           return
         case 'check':
           if (!id) {
@@ -184,7 +193,7 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
           setCode(await cmdRuntimeLogin(home, id, io))
           return
         default:
-          output.stderr(`未知操作 runtime ${action}；可用：list / check / install / uninstall / login`)
+          output.stderr(`未知操作 runtime ${action}；可用：list / check / add / install / uninstall / login`)
           setCode(2)
       }
     })
@@ -1179,6 +1188,8 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   ensureHome(home)
   // 运行时探测在后台跑：先读缓存，API 立即可用，探测完成后刷新。
   const runtimeAdmin = new AcpRuntimeAdmin({ home, env: process.env, config })
+  // 插件 npm 包安装任务：面板「安装依赖」与 CLI 共用同一套安装逻辑。
+  const pluginAdmin = new PluginPackageAdmin({ home, config, env: process.env, logger })
   // 版本检查也放后台：启动不被 registry 网络拖慢，面板打开时读缓存。
   const updateService = new UpdateService({ current: PACKAGE_VERSION, logger })
   // 重启函数在 service / consumer 就绪后才赋值；更新工具只把重启排进 timer，
@@ -1534,6 +1545,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     store,
     config,
     runtimeAdmin,
+    pluginAdmin,
     plugins: {
       runtimes: runtimePlugins.metas.map(meta => ({
         id: meta.id,
@@ -1558,6 +1570,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     },
     update: updateService,
     ...(feishuChannel?.admin ? { feishuBot: feishuChannel.admin } : {}),
+    channels,
     identity: identityPort,
     logAssistant,
     issueReporter,

@@ -14,7 +14,8 @@ Router 在 `server.port`（默认 3083）上提供本地 HTTP API，供 Web 面�
 | POST | `/api/workspaces/cleanup` | 批量清理工作区（`{ ticketIds }` 按工单；或 `{ runtimeId }` 清理该运行时全部可清理项；脏目录跳过并回报原因） |
 | POST | `/api/reports` | Worker 上报状态与回复（`ra report` 的入口） |
 | GET / PUT | `/api/policy` | 读写策略（保存后落盘） |
-| GET / PUT | `/api/config` | 配置面板：读安全快照 / 按点路径提交补丁（白名单校验 + 落盘） |
+| GET / PUT | `/api/config` | 配置面板：读安全快照 / 按点路径提交补丁（白名单校验 + 落盘）；快照里的 `hotPaths` 说明哪些路径保存后立即生效 |
+| GET | `/api/channels` | 已注册的消息通道（`id` / `kind` / `capabilities`），供配置页的「渠道配置」列出渠道实例 |
 | POST | `/api/restart` | 热重启 daemon：先返回 202，再释放端口并拉起新进程（页面不刷新） |
 | GET | `/api/update` | 版本快照：当前 / 最新版本、是否有更新、检查时间与最近一次失败原因 |
 | POST | `/api/update/check` | 强制重新检查 npm 最新版（跳过服务端 6 小时缓存） |
