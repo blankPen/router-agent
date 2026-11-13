@@ -50,7 +50,21 @@ Router 不做对话，只在必要时说话：
 
 ## 日志
 
-所有关键节点都是结构化 JSON，一行一个事件（`at` / `level` / `message` + 业务字段），写入 `~/.router-agent/logs/router-agent.log`。`message` 固定是事件名（`域:动作`），错误详情等文本一律用 `detail` 字段，不要占用 `message`：
+所有关键节点都是结构化 JSON，一行一个事件，写入 `~/.router-agent/logs/router-agent.log`。`message` 固定是事件名（`域:动作`），错误详情等文本一律用 `detail` 字段，不要占用 `message`。
+
+一行日志的结构：
+
+| 字段 | 含义 |
+|-|-|
+| `at` | 写入时间（ISO 8601） |
+| `level` | `info` / `warn` / `error` |
+| `domain` | 事件域，事件名的第一段（`trigger:ingested` → `trigger`） |
+| `event` | 事件动作，事件名冒号后的部分（`trigger:ingested` → `ingested`） |
+| `message` | 完整事件名，保留是为了兼容 `grep '"message":"trigger:'` 这类用法 |
+| `trace` | 链路 ID：按 `ticketId` → `triggerId` → `intakeId` → `inputId` → `handle` → `threadId` → `id` → `chat` 取第一个存在的可定位字段，把同一条链路的日志串起来 |
+| 其余字段 | 业务字段，平铺在同一层 |
+
+`domain` / `event` / `trace` 由 `createLogger` 自动补齐，业务代码不用自己写；旧日志没有这三个字段时，面板读日志时会按同一套规则补出来，所以历史日志照样能按维度过滤。
 
 | 事件 | 来源 | 关键字段 | 说明 |
 |-|-|-|-|
@@ -295,7 +309,17 @@ ra logs --follow                         # 实时跟随
 grep '"message":"trigger:' ~/.router-agent/logs/router-agent.log
 ```
 
-面板「日志」页支持按 INFO / WARN / ERROR 过滤与关键字搜索。
+面板「日志」页支持多维过滤，维度之间取交集：
+
+| 维度 | 说明 |
+|-|-|
+| 级别 | 全部 / INFO / WARN / ERROR / TEXT（TEXT 是非 JSON 的旧行） |
+| 域 | 事件域，按 `domain` 过滤；下拉里带每条链路的条数 |
+| 动作 | 事件动作，按 `event` 过滤；跟着选中的域级联，只列该域里出现的动作 |
+| 追踪 | 链路 ID，按 `trace` 过滤；选一个工单 ID 就能只看这条链路上的日志 |
+| 关键字 | 命中事件名、维度与任一业务字段 |
+
+各维度上的计数是**分面计数**：只受其它维度影响，不受自身影响——选中 `tk-84` 后，级别上的「全部」是这条链路的条数，而不是缓冲区总数。
 
 ### 智能问题排查助手
 
