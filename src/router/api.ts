@@ -928,7 +928,6 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         : body.kind === 'channel' ? 'channel' as const : null
       if (!kind) return respond(res, 400, { error: 'invalid-kind', message: 'kind 只能是 runtime / channel' })
       const id = typeof body.id === 'string' ? body.id.trim() : ''
-      if (!id) return respond(res, 400, { error: 'id-required' })
       try {
         const installOpts: { version?: string; packageName?: string } = {}
         if (typeof body.version === 'string') installOpts.version = body.version

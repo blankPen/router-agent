@@ -11,6 +11,7 @@ import { pluginSpecifier, type PluginEntry, type PluginKind } from '#infra/plugi
 import { installPluginPackage, npmPackageNameOf, type NpmRunner } from '#infra/plugin-install.js'
 import { preview } from '#core/events.js'
 import { DEFAULT_RUNTIME_PLUGINS } from '#runtime/plugins/loader.js'
+import { runtimeIdFromPluginSource } from '#runtime/plugins/id.js'
 import type { AppConfig } from '../config.js'
 
 export interface PluginInstallJob {
@@ -85,9 +86,9 @@ export class PluginPackageAdmin {
    * 本地路径插件重启即可生效，不存在「下载」这一步，直接报错让调用方引导用户。
    */
   startInstall(kind: PluginKind, id: string, opts: { version?: string; packageName?: string } = {}): PluginInstallJob {
-    const pluginId = id.trim()
-    if (!pluginId) throw new PluginInstallStartError('unknown-plugin', '缺少插件 id')
     const requested = opts.packageName?.trim()
+    const pluginId = id.trim() || (requested ? runtimeIdFromPluginSource(requested) ?? '' : '')
+    if (!pluginId) throw new PluginInstallStartError('unknown-plugin', '缺少插件 id')
     let packageName: string | undefined
     if (requested) {
       packageName = npmPackageNameOf(requested)

@@ -1,10 +1,11 @@
 # Runtime 插件模板
 
-1. 复制目录到仓库外，改 `package.json` 的包名（建议 `@your-scope/runtime-<id>`）与依赖版本。
+1. 复制目录到仓库外，改 `package.json` 的包名（必须是 `@your-scope/runtime-<id>`）与依赖版本；
+   ra 会从包名自动识别 runtime id。
 2. 在 `src/index.ts` 里实现 `RuntimePlugin`；`create()` 返回 `WorkerRuntime`，
-   `meta.id` 必须与配置里的插件 id 一致。
+   `meta.id` 必须与包名里的 `<id>` 一致。
 3. `npm install && npm run build` 产出 `dist/index.js` 与 `dist/index.d.ts`。
-4. 在 `config.yaml` 的 `runtime.plugins` 里声明入口（也可在面板「派工与服务 → 运行时插件」里填）：
+4. 在 `config.yaml` 的 `runtime.plugins` 里声明入口（也可在面板「添加运行时」里只填包名）：
 
 ```yaml
 runtime:

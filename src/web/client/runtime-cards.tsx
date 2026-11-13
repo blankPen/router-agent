@@ -4,7 +4,7 @@
  * 选中状态由父级 draft 控制；探测轮询、检测、安装、日志等临时状态收在组件内部。
  */
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react'
-import { ACP_RUNTIME_ID, normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
+import { ACP_RUNTIME_ID, isWorkerRuntimeId, normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
 import { getJson, sendJson } from './api.js'
 import { Icon } from './icons.js'
 import {
@@ -21,6 +21,7 @@ import {
 } from './runtime-model.js'
 import { RuntimeLogo, runtimeLogoOf } from './runtime-logos.js'
 import { runtimeOptionFields } from './fields.js'
+import { runtimeIdFromPluginSource } from '#runtime/plugins/id.js'
 import { RuntimeSettingsDialog } from './runtime-settings.js'
 import type { PluginView } from './api.js'
 
@@ -61,8 +62,8 @@ interface RuntimeCardsProps {
   onPendingRestart?: () => void
   /** 标题由外层配置块承担时关掉自带表头，避免同一屏出现两层标题。 */
   showHead?: boolean
-  /** 添加自定义运行时：把 runtime.plugins.<id> 写入配置草稿（id / 入口非空）。 */
-  onAddRuntime?: (id: string, entry: string) => void
+  /** 添加自定义运行时：入口写入配置草稿，runtime id 由包名 / 路径推导。 */
+  onAddRuntime?: (entry: string) => void
   /** 配置草稿与默认值：运行时选项弹窗直接读写父级 draft。 */
   draft?: unknown
   defaults?: unknown
@@ -469,19 +470,20 @@ interface PluginInstallJobView {
   finishedAt?: string
 }
 
-/** 添加自定义运行时弹窗：按 npm 包或本地路径写入 runtime.plugins.<id>，npm 包可先装依赖。 */
+/** 添加自定义运行时弹窗：按 npm 包或本地路径推导 runtime id，npm 包可先装依赖。 */
 function AddRuntimeDialog({ onAdd, onClose, onNotice, onPendingRestart }: {
-  onAdd: (id: string, entry: string) => void
+  onAdd: (entry: string) => void
   onClose: () => void
   onNotice: (notice: RuntimeNotice | null) => void
   onPendingRestart?: () => void
 }): JSX.Element {
-  const [id, setId] = useState('')
   const [entry, setEntry] = useState('')
   const [install, setInstall] = useState<{ busy: boolean; job?: PluginInstallJobView } | null>(null)
 
   const packageName = npmPackageOf(entry)
-  const canAdd = id.trim().length > 0 && entry.trim().length > 0
+  const pluginId = runtimeIdFromPluginSource(entry)
+  const reserved = pluginId ? isWorkerRuntimeId(pluginId) : false
+  const canAdd = Boolean(pluginId) && !reserved
 
   const pollInstall = async (pluginId: string, jobId: string): Promise<void> => {
     for (let attempt = 0; attempt < 300; attempt += 1) {
@@ -518,7 +520,6 @@ function AddRuntimeDialog({ onAdd, onClose, onNotice, onPendingRestart }: {
   }
 
   const installPackage = async (): Promise<void> => {
-    const pluginId = id.trim()
     const pkg = npmPackageOf(entry)
     if (!pkg || !pluginId) return
     if (!window.confirm(`安装 ${pkg} 到 <RA_HOME>/node_modules？需要联网下载 npm 包。`)) return
@@ -541,10 +542,9 @@ function AddRuntimeDialog({ onAdd, onClose, onNotice, onPendingRestart }: {
   }
 
   const add = (): void => {
-    const pluginId = id.trim()
     const value = entry.trim()
     if (!pluginId || !value) return
-    onAdd(pluginId, value)
+    onAdd(value)
     onNotice({ kind: 'ok', text: `已添加运行时 ${pluginId}；保存配置并重启后，它会出现在「自定义插件」分组` })
     onClose()
   }
@@ -564,14 +564,19 @@ function AddRuntimeDialog({ onAdd, onClose, onNotice, onPendingRestart }: {
         </header>
         <div className="modal-body">
           <label className="modal-field">
-            <span>id</span>
-            <input className="input" value={id} placeholder="例如 my-runtime" onChange={event => setId(event.target.value)} />
-            <small>配置里的唯一标识，也用于 runtime.options.&lt;id&gt; 的选项路径。</small>
-          </label>
-          <label className="modal-field">
             <span>npm 包名或本地路径</span>
-            <input className="input" value={entry} placeholder="例如 @scope/runtime-x 或 ./path/to/runtime" onChange={event => setEntry(event.target.value)} />
+            <input className="input" value={entry} placeholder="例如 @scope/runtime-x 或 ./path/to/runtime-x" onChange={event => setEntry(event.target.value)} />
           </label>
+          {entry.trim().length > 0 && (
+            <p className={`modal-hint ${pluginId && !reserved ? '' : 'field-error'}`}>
+              <Icon name={pluginId && !reserved ? 'check' : 'alert'} size={13} />
+              {reserved
+                ? <>识别为 <code>{pluginId}</code>，与内置运行时重名；请把包名改成 <code>runtime-&lt;其它 id&gt;</code>。</>
+                : pluginId
+                  ? <>runtime id 自动识别为 <code>{pluginId}</code>。</>
+                  : <>无法从入口识别合法的 runtime id；包名用 <code>@scope/runtime-&lt;id&gt;</code>，本地路径取目录名。</>}
+            </p>
+          )}
           {packageName && (
             <p className="modal-hint">
               <Icon name="download" size={13} />
@@ -590,7 +595,7 @@ function AddRuntimeDialog({ onAdd, onClose, onNotice, onPendingRestart }: {
         </div>
         <footer className="modal-foot">
           {packageName && (
-            <button className="btn" onClick={() => void installPackage()} disabled={install?.busy || !id.trim()}>
+            <button className="btn" onClick={() => void installPackage()} disabled={install?.busy || !pluginId || reserved}>
               <Icon name="download" size={12} />{install?.busy ? '安装中…' : '安装依赖'}
             </button>
           )}

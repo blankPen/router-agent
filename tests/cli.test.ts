@@ -225,6 +225,15 @@ describe('ra runtime add / uninstall 插件运行时', () => {
     expect(output.out.join('\n')).toContain('本地路径插件不需要下载')
   })
 
+  it('只给入口时按包名 / 路径推导 runtime id', async () => {
+    const dir = home()
+    await initHome(dir)
+    const output = io(dir)
+    expect(await runCli(['runtime', 'add', './runtime-demo', '--home', dir], output)).toBe(0)
+    expect(loadConfig(dir).runtime.plugins?.demo).toBe('./runtime-demo')
+    expect(output.out.join('\n')).toContain('runtime id 自动识别为 demo')
+  })
+
   it('拒绝非法 id、内置 id 与不是包名/路径的入口', async () => {
     const dir = home()
     await initHome(dir)
@@ -237,6 +246,10 @@ describe('ra runtime add / uninstall 插件运行时', () => {
     const builtin = io(dir)
     expect(await runCli(['runtime', 'add', 'orca', '@acme/runtime-x', '--home', dir], builtin)).toBe(1)
     expect(builtin.err.join('\n')).toContain('内置运行时')
+
+    const derivedBuiltin = io(dir)
+    expect(await runCli(['runtime', 'add', '@acme/runtime-orca', '--home', dir], derivedBuiltin)).toBe(1)
+    expect(derivedBuiltin.err.join('\n')).toContain('内置运行时')
 
     const badEntry = io(dir)
     expect(await runCli(['runtime', 'add', 'demo-runtime', 'not a package', '--home', dir], badEntry)).toBe(2)

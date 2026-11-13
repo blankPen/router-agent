@@ -83,24 +83,28 @@ runtime:
 
 ## 按 npm 包名添加运行时（插件）
 
-内置运行时之外的运行时以插件形式接入。`runtime.plugins.<id>` 可以写 npm 包名，也可以写本地路径：
+内置运行时之外的运行时以插件形式接入。`runtime.plugins.<runtime id>` 可以写 npm 包名，也可以写本地路径。
+添加时不需要手填 id：包名按 `@scope/runtime-<id>` 约定、本地路径按目录名自动识别：
 
 ```yaml
 runtime:
-  default: my-runtime
+  default: demo
   plugins:
-    my-runtime: '@acme/router-agent-runtime'
+    demo: '@acme/runtime-demo'
 ```
 
 插件包是普通 npm 包，默认导出 `kind: 'runtime'` 的对象，模板见 `templates/runtime-plugin`。加载器以 `<RA_HOME>/config.yaml` 为锚点解析包名，所以 ra 会把声明的包下载到 `<RA_HOME>/node_modules`：
 
 ```bash
-ra runtime add my-runtime @acme/router-agent-runtime   # 写 runtime.plugins + 下载 npm 包
-ra runtime install my-runtime                          # 已声明但还没下载时补装（可加 --version）
-ra runtime list                                        # 「插件运行时」一节标出已安装 / 未安装
+ra runtime add @acme/runtime-demo      # 自动识别 id=demo，写 runtime.plugins.demo 并下载 npm 包
+ra runtime add ./plugins/runtime-demo  # 本地路径：自动识别 id=demo，不需要下载
+ra runtime install demo                # 已声明但还没下载时补装（可加 --version）
+ra runtime list                        # 「插件运行时」一节标出 id、包名 / 路径与是否已安装
 ```
 
-面板路径是运行时卡片右上角的「添加运行时」（初始化页与「配置 → 运行时配置」都有）：填 id 与 npm 包名（或本地路径）后添加，npm 包可在弹窗里直接点「安装依赖」。保存配置并重启 ra 后，插件会作为一张卡片出现在「自定义插件」分组，和 demo runtime 并排。`runtime.default` 填插件创建的运行时 id，插件 `meta.id` 建议与配置 id 保持一致（不一致会记 `plugin:id-mismatch`，运行时 id 以插件声明为准）。
+面板路径是运行时卡片右上角的「添加运行时」（初始化页与「配置 → 运行时配置」都有）：只填 npm 包名或本地路径，弹窗会实时显示自动识别出的 runtime id；npm 包可在弹窗里直接点「安装依赖」。保存配置并重启 ra 后，插件会作为一张卡片出现在「自定义插件」分组。`runtime.default` 填自动识别出的 id，插件 `meta.id` 也必须一致（不一致会记 `plugin:id-mismatch`）。
+
+旧写法 `ra runtime add <id> <npm 包名 | 本地路径>` 仍兼容，用于包名不符合 `runtime-<id>` 约定的第三方插件；手写的 `runtime.plugins.<id>` 老配置继续按原 id 加载。
 
 本地路径插件（`./my-runtime`、`/abs/path`）不需要下载，重启后按路径加载。安装过程看 `plugin:install-started` / `plugin:install-succeeded` / `plugin:install-failed`；重启后加载失败看 `plugin:load-failed`（常见原因：包没装上、装到了别的 node_modules、导出对象不是 `kind: 'runtime'`）。
 

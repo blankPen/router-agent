@@ -9,6 +9,7 @@ import { installAcpAgent, uninstallAcpAgent } from '@router-agent/runtime-acp'
 import type { RuntimeChoice } from '@router-agent/runtime-acp'
 import { pluginSpecifier, type PluginEntry } from '#infra/plugin-loader.js'
 import { installPluginPackage, installedPluginVersion, npmPackageNameOf } from '#infra/plugin-install.js'
+import { runtimeIdFromPluginSource } from '#runtime/plugins/id.js'
 
 export interface RuntimeCliIo {
   stdout(line: string): void
@@ -205,23 +206,13 @@ function isLocalPluginEntry(value: string): boolean {
  */
 export async function cmdRuntimeAdd(
   home: string,
-  id: string,
   entry: string,
-  opts: { version?: string },
+  opts: { version?: string; id?: string },
   io: RuntimeCliIo,
 ): Promise<number> {
-  const pluginId = id.trim()
   const target = entry.trim()
-  if (!PLUGIN_ID_PATTERN.test(pluginId)) {
-    io.stderr(`插件 id 只能是小写字母、数字与连字符：${id}`)
-    return 2
-  }
-  if (isWorkerRuntimeId(pluginId)) {
-    io.stderr(`${pluginId} 是内置运行时；如需替换插件包，用 ra config set runtime.plugins.${pluginId} <包名>`)
-    return 1
-  }
   if (!target) {
-    io.stderr('用法：ra runtime add <id> <npm 包名 | 本地路径>')
+    io.stderr('用法：ra runtime add <npm 包名 | 本地路径>')
     return 2
   }
   const packageName = npmPackageNameOf(target)
@@ -229,11 +220,25 @@ export async function cmdRuntimeAdd(
     io.stderr(`入口只能是 npm 包名（如 @scope/runtime-x）或本地路径（如 ./my-runtime）：${target}`)
     return 2
   }
+  const explicitId = opts.id?.trim()
+  const pluginId = explicitId || runtimeIdFromPluginSource(target) || ''
+  if (!pluginId) {
+    io.stderr(`无法从入口推导 runtime id：${target}；请把包名改成 runtime-<id>，或用旧写法 ra runtime add <id> <入口>`)
+    return 2
+  }
+  if (!PLUGIN_ID_PATTERN.test(pluginId)) {
+    io.stderr(`插件 id 只能是小写字母、数字与连字符：${pluginId}`)
+    return 2
+  }
+  if (isWorkerRuntimeId(pluginId)) {
+    io.stderr(`${pluginId} 是内置运行时；如需替换插件包，用 ra config set runtime.plugins.${pluginId} <包名>`)
+    return 1
+  }
   const config = loadConfig(home)
   const existed = config.runtime.plugins?.[pluginId] !== undefined
   setRuntimePlugin(config, pluginId, target)
   writeConfig(home, config)
-  io.stdout(`已写入 runtime.plugins.${pluginId} = ${target}${existed ? '（覆盖原入口）' : ''}`)
+  io.stdout(`${explicitId ? '' : `runtime id 自动识别为 ${pluginId}；`}已写入 runtime.plugins.${pluginId} = ${target}${existed ? '（覆盖原入口）' : ''}`)
 
   if (!packageName) {
     io.stdout('本地路径插件不需要下载；重启 ra 后生效。')

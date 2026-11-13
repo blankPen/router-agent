@@ -20,6 +20,7 @@ import {
   runtimeOptionPath,
   type RuntimeOptionSpec,
 } from '#runtime/runtimes/options.js'
+import { runtimeIdFromPluginSource } from '#runtime/plugins/id.js'
 import { isDeprecatedRuntime, runtimeOptionLabel, runtimeStatusLabel, type RuntimeChoiceView } from './runtime-model.js'
 
 export type { RuntimeChoiceView } from './runtime-model.js'
@@ -567,11 +568,11 @@ export function fieldValue(doc: unknown, path: string, defaults?: Record<string,
   return value
 }
 
-/** 运行时插件草稿写入：id / 入口都非空才写，返回新草稿。 */
-export function applyRuntimePluginDraft(draft: unknown, id: string, entry: string): unknown {
-  const key = id.trim()
+/** 运行时插件草稿写入：按包名 / 路径推导 id，推导失败返回原草稿。 */
+export function applyRuntimePluginDraft(draft: unknown, entry: string): unknown {
   const value = entry.trim()
-  if (!key || !value) return draft
+  const key = runtimeIdFromPluginSource(value)
+  if (!key) return draft
   return setByPath(draft, `runtime.plugins.${key}`, value)
 }
 

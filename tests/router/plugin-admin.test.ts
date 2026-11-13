@@ -182,6 +182,20 @@ describe('插件安装 API', () => {
     expect(started.json).toMatchObject({ ok: true, packageName: '@acme/runtime-x' })
   })
 
+  it('POST 只带 packageName 时按包名推导插件 id', async () => {
+    const dir = home()
+    const store = new Store(':memory:')
+    const config = defaultConfig()
+    const engine = new Engine({ store, policy: policyOf(config) })
+    const admin = new PluginPackageAdmin({ home: dir, config, env: {}, runNpm: fakeNpm() })
+    const server = await createApiServer({ engine, store, config, pluginAdmin: admin })
+    closers.push(async () => { await server.close(); store.close() })
+
+    const started = await call(server, 'POST', '/api/plugins/install', { kind: 'runtime', packageName: '@acme/runtime-x' })
+    expect(started.status).toBe(202)
+    expect(started.json).toMatchObject({ ok: true, pluginId: 'x', packageName: '@acme/runtime-x' })
+  })
+
   it('未知插件与非法 kind 返回 400', async () => {
     const store = new Store(':memory:')
     const config = defaultConfig()

@@ -61,9 +61,9 @@ core  ←  infra  ←  runtime / channel  ←  src/
 
 ```yaml
 runtime:
-  default: my-runtime
+  default: demo
   plugins:
-    my-runtime: "@acme/router-runtime"
+    demo: "@acme/runtime-demo"
     local-runtime:
       path: ./plugins/local-runtime
       entry: dist/index.js
