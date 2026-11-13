@@ -37,7 +37,7 @@ import { preview } from '#core/events.js'
 import { DEFAULT_CHANNEL_ID } from '#channel/port.js'
 import type { CommandRunner } from '#infra/process.js'
 import { realRunner } from '#infra/process.js'
-import { errorMessage, noopLogger, type Logger } from '#infra/logger.js'
+import { errorMessage, noopLogger, withFieldContext, type Logger } from '#infra/logger.js'
 import type { PrInfo } from './sources/github.js'
 import {
 
@@ -559,7 +559,8 @@ export class RouterService {
     this.config = opts.config
     this.runtimes = opts.runtimes ?? new RuntimeRegistry(new Map([[opts.runtime.id, opts.runtime]]), opts.runtime.id)
     this.clock = opts.clock ?? { now: () => new Date().toISOString() }
-    this.logger = opts.logger ?? noopLogger
+    // 工单日志统一补上下文：任何带 ticketId 的日志都会带上群、发起人与运行时。
+    this.logger = withFieldContext(opts.logger ?? noopLogger, 'ticketId', ticketId => this.contextOf(ticketId))
     this.prTracker = opts.prTracker
     this.git = opts.git ?? realRunner('git')
     this.idleAfterMs = opts.idleAfterMs ?? 120_000
@@ -639,7 +640,7 @@ export class RouterService {
         // 终端句柄属于当时签发它的 Orca 服务；服务重启 / 终端早已关闭时永远关不掉。
         // 这种失败重试再多次也不会成功，只会无限刷 effect:failed，所以吞掉并记一次。
         if (!isStaleHandleError(error)) throw error
-        this.logger.info('worker:stop-stale', { ticketId, handle: assignment.handle })
+        this.logger.info('worker:stop-stale', { ticketId, handle: assignment.handle, runtime: assignment.runtimeId })
         return
       }
       this.log('worker:stopped', ticketId, { handle: assignment.handle })
@@ -2604,6 +2605,25 @@ let repo = ticket.repo
 
   private log(kind: string, ticketId: string, extra: Record<string, unknown>): void {
     this.logger.info(kind, { ticketId, ...extra })
+  }
+
+  /**
+   * 工单日志的统一上下文：群、发起人、运行时。
+   *
+   * 「是 Orca 还是 Codex 在动」「这是哪个群、谁提的需求」这两件事，
+   * 每一行工单日志都要能直接回答，不用再回查别的日志。
+   */
+  private contextOf(ticketId: string): Record<string, unknown> {
+    return {
+      ...this.store.ticketLogContext(ticketId),
+      // 还没派工时退回默认运行时：日志里要能看出「这条链路该由谁跑」。
+      runtime: this.runtimeOf(ticketId),
+    }
+  }
+
+  /** 工单当前用的运行时；还没派工时退回默认运行时。 */
+  private runtimeOf(ticketId: string): string {
+    return this.store.latestAssignment(ticketId)?.runtimeId ?? this.runtimes.default().id
   }
 }
 

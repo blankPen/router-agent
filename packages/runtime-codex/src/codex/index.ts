@@ -2,7 +2,7 @@ import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync, writeFil
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { preview } from '@router-agent/core/events.js'
-import { errorMessage, noopLogger, type Logger } from '@router-agent/infra/logger.js'
+import { errorMessage, noopLogger, withContext, type Logger } from '@router-agent/infra/logger.js'
 import { realRunner, type CommandRunner } from '@router-agent/infra/process.js'
 import { GitWorktreeProvider } from '@router-agent/runtime'
 import { workBranch, worktreeName } from '@router-agent/runtime'
@@ -186,7 +186,8 @@ export class CodexAppRuntime implements WorkerRuntime {
     // Codex 桌面端固定读写 ~/.codex；这里用同一个 HOME，避免服务从别的 CODEX_HOME 启动时
     // thread 落在别处，桌面端侧边栏看不到。显式 env 优先于这个默认值。
     this.env = { CODEX_HOME: join(homedir(), '.codex'), ...this.opts.env }
-    this.logger = opts.logger ?? noopLogger
+    // 套一层固定上下文：适配器写的每条日志都带上 runtime，省得每个调用点重复写。
+    this.logger = withContext(opts.logger ?? noopLogger, { runtime: this.id })
     this.initializeTimeoutMs = opts.initializeTimeoutMs ?? 30_000
     this.args = this.opts.args
     this.prependArgs = opts.prependArgs ?? []

@@ -3,6 +3,7 @@ import type { Clock, Engine } from '../core/engine.js'
 import { effectiveAllowed, effectiveAllowedByChat, gate, type Policy } from '#core/policy.js'
 import type { SourceKind, Strength, Ticket, Trigger } from '#core/model.js'
 import { DEFAULT_CHANNEL_ID } from '#channel/port.js'
+import { messageContext } from '#core/events.js'
 import { noopLogger, errorMessage, type Logger } from '#infra/logger.js'
 import { activeDraft, resolveDispatch, type DispatchMissing, type DispatchSettings } from './dispatch.js'
 import { readRouterPrompt } from '../specs/index.js'
@@ -232,7 +233,7 @@ export class AgentLoop {
         // 这里必须留日志，否则用户只会看到「消息没反应」却查不到原因。
         this.logger.error('loop:trigger-failed', {
           triggerId: trigger.id,
-          chat: trigger.chatId,
+          ...messageContext(trigger),
           thread: trigger.threadId,
           message: errorMessage(error),
         })
@@ -440,7 +441,7 @@ export class AgentLoop {
       const message = errorMessage(error)
       this.logger.warn('chat:reply-failed', {
         triggerId: trigger.id,
-        chat: trigger.chatId,
+        ...messageContext(trigger),
         reason,
         message,
       })
@@ -454,7 +455,7 @@ export class AgentLoop {
     if (!text) {
       this.logger.warn('chat:reply-failed', {
         triggerId: trigger.id,
-        chat: trigger.chatId,
+        ...messageContext(trigger),
         reason,
         message: 'pi:empty-reply',
       })
@@ -513,7 +514,7 @@ export class AgentLoop {
         ...(session ? { session } : {}),
       })
       .catch(error => {
-        this.logger.warn('decision:engine-failed', { triggerId: trigger.id, message: errorMessage(error) })
+        this.logger.warn('decision:engine-failed', { triggerId: trigger.id, ...messageContext(trigger), message: errorMessage(error) })
         return failedResult(trigger.id, error)
       })
     this.onAudit?.(result.audit)

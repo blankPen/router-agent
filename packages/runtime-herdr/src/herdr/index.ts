@@ -48,7 +48,7 @@ import { resolveSession } from '@router-agent/runtime'
 import { GitWorktreeProvider } from '@router-agent/runtime'
 import { runtimeOptionDefault } from '@router-agent/runtime'
 import { HERDR_RUNTIME_ID } from '@router-agent/runtime'
-import { noopLogger, type Logger } from '@router-agent/infra/logger.js'
+import { noopLogger, withContext, type Logger } from '@router-agent/infra/logger.js'
 import { herdrAgentKindOf, type HerdrAgentKind } from './agents.js'
 import { ensureHerdrServer, type HerdrServerSpawner } from './server.js'
 import {
@@ -160,7 +160,8 @@ export class HerdrRuntime implements WorkerRuntime {
       worktreesRoot: this.worktreesRoot,
     })
     this.spawnServer = opts.spawnServer
-    this.logger = opts.logger ?? noopLogger
+    // 套一层固定上下文：适配器写的每条日志都带上 runtime，省得每个调用点重复写。
+    this.logger = withContext(opts.logger ?? noopLogger, { runtime: this.id })
   }
 
   async start(ctx: WorkerContext): Promise<StartResult> {

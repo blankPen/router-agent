@@ -2,7 +2,7 @@ import type { Store } from '../store/db.js'
 import { attachmentsOf, withAttachmentManifest } from './attachments.js'
 import { negotiateAcceptance, type Policy, type Acceptance } from '#core/policy.js'
 import { computeStage } from '#core/stage.js'
-import { noopSink, preview, type EventSink } from '#core/events.js'
+import { messageContext, noopSink, preview, type EventSink } from '#core/events.js'
 import type {
   Assignment,
   Decision,
@@ -167,6 +167,8 @@ export class Engine {
       this.onEvent({
         event: 'router:decision',
         triggerId: trigger.id,
+        // 结论要能落到「哪个群、谁提的」，不然日志里只剩一个 triggerId。
+        ...messageContext(trigger),
         decision: record.decision,
         strength: record.strength,
         wouldAccept: record.wouldAccept,
@@ -215,6 +217,7 @@ export class Engine {
     this.onEvent({
       event: 'router:decision',
       triggerId: trigger.id,
+      ...messageContext(trigger),
       decision: record.decision,
       strength: record.strength,
       wouldAccept: record.wouldAccept,

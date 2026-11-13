@@ -68,6 +68,61 @@ const assignment: Assignment = {
 }
 
 describe('Store', () => {
+  it('工单日志上下文带出群、发起人与运行时', () => {
+    const s = store()
+    s.insertTrigger(trigger())
+    s.insertMandate({
+      id: 'md1',
+      ticketId: 'tk1',
+      policyVersion: 'p1',
+      strength: 'explicit',
+      scope: '修复登录超时',
+      rules: [],
+      actorId: 'ou_alice',
+      actorName: 'Alice',
+      source: 'feishu',
+      chatId: 'oc_chat',
+      threadId: ticket.threadId,
+      createdAt: '2026-11-06T10:00:01.000Z',
+    })
+    s.insertTicket(ticket)
+    s.insertAssignment(assignment)
+
+    // 工单日志要能直接回答「哪个群、谁提的、哪个运行时在动」。
+    expect(s.ticketLogContext('tk1')).toEqual({
+      chat: 'oc_chat',
+      chatName: '研发群',
+      actor: 'ou_alice',
+      actorName: 'Alice',
+      actorType: 'user',
+      runtime: 'orca',
+    })
+    s.close()
+  })
+
+  it('机器人发起的消息记为 bot 发起人', () => {
+    const s = store()
+    s.insertTrigger(trigger({ id: 't-bot', externalId: 'om_bot', isBot: true, actorId: 'ou_bot', actorName: 'Bot' }))
+    s.insertMandate({
+      id: 'md2',
+      ticketId: 'tk2',
+      policyVersion: 'p1',
+      strength: 'explicit',
+      scope: '机器人发起的单',
+      rules: [],
+      actorId: 'ou_bot',
+      actorName: 'Bot',
+      source: 'feishu',
+      chatId: 'oc_chat',
+      threadId: ticket.threadId,
+      createdAt: '2026-11-06T10:00:01.000Z',
+    })
+    s.insertTicket({ ...ticket, id: 'tk2', mandateId: 'md2' })
+
+    expect(s.ticketLogContext('tk2')).toMatchObject({ actorType: 'bot', actor: 'ou_bot', actorName: 'Bot' })
+    s.close()
+  })
+
   it('策略以 JSON 形式存取，并保留版本号', () => {
     const s = store()
     s.setPolicy(policy)

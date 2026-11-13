@@ -84,11 +84,13 @@ core  ←  infra  ←  runtime / channel  ←  src/
 
 ### 格式
 
-- 服务日志一行一个 JSON：`at`（ISO 时间）/ `level` / `message` + 业务字段，由 `src/cli/index.ts` 的 `createLogger` 统一写入 `<RA_HOME>/logs/router-agent.log`。
+- 服务日志一行一个 JSON：`at`（ISO 时间）/ `level` / `domain` / `event` / `category` / `message` / `trace`（链路 ID）+ 维度字段（`chat` / `chatName` / `actor` / `actorName` / `actorType` / `runtime`）+ 业务字段，由 `src/cli/index.ts` 的 `createLogger` 统一写入 `<RA_HOME>/logs/router-agent.log`；`domain` / `event` / `category` / `trace` 由日志实现按事件名与业务字段自动补齐，业务代码不用自己写。
+- `category` 分三类：`message`（用户发来的消息及其处理）/ `action`（Router / Worker 对外做过的动作）/ `event`（内部状态变化）。按事件域推导，特殊事件可用 `category` 字段显式覆盖。
 - `message` 用 `域:动作` 的 kebab-case，例如 `trigger:ingested`、`config:parse-failed`。常用域：`feishu` / `chats` / `trigger` / `loop` / `decision` / `chat` / `session` / `config` / `api` / `ticket` / `outbox` / `effect` / `worker` / `launch` / `input` / `report` / `progress` / `pr` / `retention` / `recover`。
 - `message` 只放事件名，错误详情、stderr 摘要等文本一律用 `detail` 字段；`createLogger` 会把业务字段里的 `message` 自动改写成 `detail`，事件名不会被冲掉。
 - 业务字段**平铺**在同一层，不要塞 `payload` / `data` 嵌套对象；长文本用 `preview()`（`packages/core/src/events.ts`）截断。
 - 每个事件至少带一个可定位字段：`triggerId` / `ticketId` / `inputId` / `key` / `chat` / `path` / `handle`。同一条链路上的事件用同一个 ID 串起来，串不起来就是漏了字段。
+- **能回答「谁在哪个群、这是用户还是机器人、是哪个运行时、这是消息还是事件」的维度要带齐**：写消息链路的事件用 `messageContext(trigger)`（`packages/core/src/events.ts`）补 `chat` / `chatName` / `actor` / `actorName` / `actorType`；写工单链路的事件带 `ticketId`，`RouterService` 与运行时适配器会按工单自动补群、发起人与 `runtime`，不用每个调用点手写。
 
 ### 级别
 
@@ -124,7 +126,7 @@ ra logs --follow                         # 实时跟随
 grep '"message":"trigger:' ~/.router-agent/logs/router-agent.log
 ```
 
-面板「日志」页支持按 INFO / WARN / ERROR 过滤与关键字搜索；读文件实现见 `src/router/log-tail.ts`。
+面板「日志」页是一张表：一行一条事件，列为「时间 / 级别 / 类别 / 事件 / 群 / 发起人 / 运行时 / 工单 / 详情」，点事件名展开看全部字段；支持按级别 / 类别 / 域 / 动作 / 群 / 发起人 / 运行时 / 工单 / 追踪 ID / 关键字多维过滤。读文件实现见 `src/router/log-tail.ts`，过滤逻辑见 `src/web/client/log-filters.ts`。
 
 ## 7. 代码、提交与交付
 

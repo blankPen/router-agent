@@ -24,7 +24,7 @@ import { resolveSession } from '@router-agent/runtime'
 import { runtimeOptionDefault } from '@router-agent/runtime'
 import { projectRepoPath } from '@router-agent/runtime'
 import { ORCA_RUNTIME_ID } from '@router-agent/runtime'
-import { noopLogger, errorMessage, type Logger } from '@router-agent/infra/logger.js'
+import { noopLogger, errorMessage, withContext, type Logger } from '@router-agent/infra/logger.js'
 import { dismissCodexUpdatePrompt } from './codex-update.js'
 import {
   agentLaunch,
@@ -250,7 +250,8 @@ export class OrcaRuntime implements WorkerRuntime {
     // Orca 的 --prompt 必须配 --agent，没有「不传」这种形态，因此这里必须落到一个具体值。
     this.agent = String(opts.agent || runtimeOptionDefault(ORCA_RUNTIME_ID, 'agent') || '').trim()
     this.claudeProjectsDir = opts.claudeProjectsDir
-    this.logger = opts.logger ?? noopLogger
+    // 套一层固定上下文：适配器写的每条日志都带上 runtime，省得每个调用点重复写。
+    this.logger = withContext(opts.logger ?? noopLogger, { runtime: this.id })
     this.env = opts.env ?? process.env
   }
 
@@ -320,7 +321,7 @@ export class OrcaRuntime implements WorkerRuntime {
         // 这种提示 Router 代答不了，重投多少次都一样，必须转人工。
         if (isAgentPromptBlocked(error)) {
           const detail = promptBlockedReason(error)
-          this.logger.warn('orca:agent-prompt-blocked', { handle, inputId: input.id, reason: detail })
+          this.logger.warn('orca:agent-prompt-blocked', { ticketId: this.ticketOf(ref), handle, inputId: input.id, reason: detail })
           return {
             status: 'rejected',
             inputIds: accepted,
@@ -356,7 +357,7 @@ export class OrcaRuntime implements WorkerRuntime {
     } catch (error) {
       // 探活撞上交互式提示：记下来交给 status() 转人工，不让巡检整轮挂掉。
       if (!isAgentPromptBlocked(error)) throw error
-      this.logger.warn('orca:agent-prompt-blocked', { handle, reason: promptBlockedReason(error) })
+      this.logger.warn('orca:agent-prompt-blocked', { ticketId: this.ticketOf(ref), handle, reason: promptBlockedReason(error) })
     }
   }
 
@@ -506,6 +507,11 @@ export class OrcaRuntime implements WorkerRuntime {
 
   private handleOf(ref: WorkerRef | string): string {
     return typeof ref === 'string' ? ref : ref.handle
+  }
+
+  /** 工单 ID：日志要能直接落到工单上，光有终端句柄还得回查。 */
+  private ticketOf(ref: WorkerRef | string): string {
+    return typeof ref === 'string' ? '' : ref.ticketId
   }
 
   /**

@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
+  ALL_FILTER,
+  EMPTY_FILTER,
+  facetCounts,
+  filterLogLines,
+  isFilterActive,
+  type LogFilter,
+} from './log-filters.js'
+import { FilterMenu } from './log-filter-menu.js'
+import {
   LLM_FIELDS,
   allRuntimeOptionFields,
   blockEffect,
@@ -160,6 +169,28 @@ interface ServiceStatus {
 interface LogEntry {
   at: string
   level: string
+  /** 事件域（事件名第一段），日志页按它过滤。 */
+  domain?: string
+  /** 事件动作（事件名冒号后的部分）。 */
+  event?: string
+  /** 类别：message（用户消息）/ event（内部状态）/ action（对外动作）。 */
+  category?: string
+  /** 链路 ID：把同一条链路的日志串起来。 */
+  trace?: string
+  /** 群 / 会话。 */
+  chat?: string
+  /** 群名。 */
+  chatName?: string
+  /** 发起人。 */
+  actor?: string
+  /** 发起人名字。 */
+  actorName?: string
+  /** 发起人类型：user / bot / system。 */
+  actorType?: string
+  /** 运行时：orca / codex-app 等。 */
+  runtime?: string
+  /** 工单 ID。 */
+  ticket?: string
   message: string
   data?: Record<string, unknown>
 }
@@ -216,12 +247,17 @@ const PR_STATE_LABEL: Record<string, string> = {
   closed: '已关闭',
 }
 
+/** 日志类别：面板上用中文说人话，机器值仍写在展开详情里。 */
+const CATEGORY_LABEL: Record<string, string> = { message: '消息', event: '事件', action: '动作' }
+/** 发起人类型：用户、机器人还是 Router 自己。 */
+const ACTOR_LABEL: Record<string, string> = { user: '用户', bot: '机器人', system: '系统' }
+
 const LOG_LEVELS = ['all', 'info', 'warn', 'error', 'raw'] as const
 const LOG_LEVEL_LABEL: Record<string, string> = { all: '全部', info: 'INFO', warn: 'WARN', error: 'ERROR', raw: 'TEXT' }
 const LOG_LEVEL_COLOR: Record<string, string> = {
-  // 颜色只落在状态上：总数用中性灰，其余按级别取语义色。
+  // 颜色只落在状态上：正常态保持中性，WARN / ERROR 才带语义色。
   all: 'var(--muted)',
-  info: 'var(--info)',
+  info: 'var(--faint)',
   warn: 'var(--warning)',
   error: 'var(--negative)',
   raw: 'var(--faint)',
@@ -2962,12 +2998,13 @@ function LogsView(): JSX.Element {
   const [lines, setLines] = useState<LogLine[]>([])
   const [meta, setMeta] = useState<{ path: string; exists: boolean; size: number } | null>(null)
   const [live, setLive] = useState(true)
-  const [level, setLevel] = useState<string>('all')
-  const [keyword, setKeyword] = useState('')
+  const [filter, setFilter] = useState<LogFilter>(EMPTY_FILTER)
   const [syncedAt, setSyncedAt] = useState<Date | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [following, setFollowing] = useState(true)
+  /** 展开完整字段的行；按 seq 记，行滚出缓冲区后自然失效。 */
+  const [expanded, setExpanded] = useState<Set<number>>(() => new Set())
 
   const scrollerRef = useRef<HTMLDivElement | null>(null)
   // 游标用 ref 保存：轮询回调里要读最新值，放进 state 会让定时器拿到旧闭包。
@@ -3043,42 +3080,63 @@ function LogsView(): JSX.Element {
     setFollowing(true)
   }, [])
 
-  const counts = useMemo(() => {
-    const map: Record<string, number> = { all: lines.length }
-    for (const line of lines) map[line.level] = (map[line.level] ?? 0) + 1
-    return map
-  }, [lines])
+  // 各维度候选按「其它维度」的条件统计：选中 tk-84 后，级别上的「全部」就是这条链路的条数。
+  const levelOptions = useMemo(() => facetCounts(lines, filter, 'level'), [lines, filter])
+  // 类别的候选值是机器值（message / event / action），下拉里显示中文。
+  const categoryOptions = useMemo(() => facetCounts(lines, filter, 'category').map(option => ({
+    ...option,
+    label: CATEGORY_LABEL[option.value] ?? option.value,
+  })), [lines, filter])
+  const domainOptions = useMemo(() => facetCounts(lines, filter, 'domain'), [lines, filter])
+  const eventOptions = useMemo(() => facetCounts(lines, filter, 'event'), [lines, filter])
+  const chatOptions = useMemo(() => facetCounts(lines, filter, 'chat'), [lines, filter])
+  const actorOptions = useMemo(() => facetCounts(lines, filter, 'actor'), [lines, filter])
+  const runtimeOptions = useMemo(() => facetCounts(lines, filter, 'runtime'), [lines, filter])
+  const ticketOptions = useMemo(() => facetCounts(lines, filter, 'ticket'), [lines, filter])
+  const traceOptions = useMemo(() => facetCounts(lines, filter, 'trace'), [lines, filter])
 
-  const visible = useMemo(() => {
-    const query = keyword.trim().toLowerCase()
-    return lines.filter(line => {
-      if (level !== 'all' && line.level !== level) return false
-      if (!query) return true
-      const haystack = `${line.message} ${JSON.stringify(line.data ?? {})}`
-      return haystack.toLowerCase().includes(query)
+  // 候选里已经没有的选中值要退回「全部」，否则会出现「筛不出东西也不报错」的死状态。
+  const domainValue = pickValue(domainOptions, filter.domain)
+  const eventValue = pickValue(eventOptions, filter.event)
+  const chatValue = pickValue(chatOptions, filter.chat)
+  const actorValue = pickValue(actorOptions, filter.actor)
+  const runtimeValue = pickValue(runtimeOptions, filter.runtime)
+  const ticketValue = pickValue(ticketOptions, filter.ticket)
+  const traceValue = pickValue(traceOptions, filter.trace)
+  const categoryValue = pickValue(categoryOptions, filter.category)
+
+  const visible = useMemo(
+    () => filterLogLines(lines, {
+      ...filter,
+      category: categoryValue,
+      domain: domainValue,
+      event: eventValue,
+      chat: chatValue,
+      actor: actorValue,
+      runtime: runtimeValue,
+      ticket: ticketValue,
+      trace: traceValue,
+    }),
+    [lines, filter, categoryValue, domainValue, eventValue, chatValue, actorValue, runtimeValue, ticketValue, traceValue],
+  )
+
+  const setDimension = useCallback((key: keyof LogFilter, value: string): void => {
+    setFilter(prev => ({ ...prev, [key]: value }))
+  }, [])
+
+  const toggleRow = useCallback((seq: number): void => {
+    setExpanded(prev => {
+      const next = new Set(prev)
+      if (next.has(seq)) next.delete(seq)
+      else next.add(seq)
+      return next
     })
-  }, [lines, level, keyword])
+  }, [])
 
   // 行元素按过滤结果缓存：轮询没有新内容时不再重建整张列表。
   const rows = useMemo(() => visible.map(line => (
-    <div key={line.seq} className={`log-row level-${line.level}`}>
-      <span className="log-time" title={line.at || undefined}>{logClock(line.at)}</span>
-      <span className="log-level">{LOG_LEVEL_LABEL[line.level] ?? line.level.toUpperCase()}</span>
-      <span className="log-message">
-        {line.message}
-        {line.data && (
-          <span className="log-data">
-            {' '}
-            {Object.entries(line.data).map(([key, value]) => (
-              <span key={key} className="log-pair">
-                <span className="log-key">{key}</span>={formatLogValue(value)}
-              </span>
-            ))}
-          </span>
-        )}
-      </span>
-    </div>
-  )), [visible])
+    <LogRowView key={line.seq} line={line} expanded={expanded.has(line.seq)} onToggle={() => toggleRow(line.seq)} />
+  )), [visible, expanded, toggleRow])
 
   const copyVisible = async (): Promise<void> => {
     try {
@@ -3092,11 +3150,17 @@ function LogsView(): JSX.Element {
   }
 
   const clearFilters = useCallback((): void => {
-    setLevel('all')
-    setKeyword('')
+    setFilter(EMPTY_FILTER)
   }, [])
 
-  const levels = LOG_LEVELS.filter(item => item !== 'raw' || (counts.raw ?? 0) > 0)
+  const levelCounts = useMemo(() => {
+    const map: Record<string, number> = {}
+    for (const option of levelOptions) map[option.value] = option.count
+    // 「全部」是不限级别时的条数：其它维度都算上。
+    map.all = levelOptions.reduce((sum, option) => sum + option.count, 0)
+    return map
+  }, [levelOptions])
+  const levels = LOG_LEVELS.filter(item => item !== 'raw' || (levelCounts.raw ?? 0) > 0)
   const loading = meta === null
   const subtitle = meta ? (
     <>
@@ -3133,33 +3197,51 @@ function LogsView(): JSX.Element {
       />
 
       <section className="log-console" aria-busy={loading || undefined}>
+        {/* 第一行：级别（scope）在左，搜索与工具在右。 */}
         <div className="log-toolbar">
-          <div className="log-filters" role="group" aria-label="按级别过滤">
+          <div className="segmented log-levels" role="group" aria-label="按级别过滤">
             {levels.map(item => (
               <button
                 key={item}
                 type="button"
-                className={`log-chip ${level === item ? 'active' : ''}`}
-                aria-pressed={level === item}
-                onClick={() => setLevel(item)}
+                className={filter.level === item ? 'active' : ''}
+                aria-pressed={filter.level === item}
+                onClick={() => setDimension('level', item)}
               >
-                <span className="log-chip-dot" style={{ background: LOG_LEVEL_COLOR[item] }} />
+                {item !== 'all' && <span className="log-chip-dot" style={{ background: LOG_LEVEL_COLOR[item] }} />}
                 <span>{LOG_LEVEL_LABEL[item]}</span>
-                <span className="log-chip-count">{counts[item] ?? 0}</span>
+                <span className="log-chip-count">{levelCounts[item] ?? 0}</span>
               </button>
             ))}
           </div>
           <div className="search-box log-search">
             <Icon name="search" size={15} />
             <input
-              value={keyword}
-              onChange={event => setKeyword(event.target.value)}
-              placeholder="过滤消息或字段…"
+              value={filter.keyword}
+              onChange={event => setDimension('keyword', event.target.value)}
+              placeholder="搜索事件、字段或群名…"
               aria-label="过滤日志"
             />
           </div>
           {notice && <span className="log-notice" role="status">{notice}</span>}
-          <button className="btn ghost tiny" onClick={() => setLines([])} disabled={lines.length === 0}>清空视图</button>
+          <button className="btn ghost tiny log-toolbar-end" onClick={() => setLines([])} disabled={lines.length === 0}>清空视图</button>
+        </div>
+
+        {/* 第二行：多维过滤。每一维都能单独收窄，维度之间取交集。 */}
+        <div className="log-toolbar log-toolbar-dims">
+          <div className="log-dims" role="group" aria-label="按维度过滤">
+            <FilterMenu label="类别" value={categoryValue} options={categoryOptions} onChange={value => setDimension('category', value)} />
+            <FilterMenu label="域" value={domainValue} options={domainOptions} onChange={value => setDimension('domain', value)} />
+            <FilterMenu label="动作" value={eventValue} options={eventOptions} onChange={value => setDimension('event', value)} />
+            <FilterMenu label="群" value={chatValue} options={chatOptions} onChange={value => setDimension('chat', value)} />
+            <FilterMenu label="发起人" value={actorValue} options={actorOptions} onChange={value => setDimension('actor', value)} />
+            <FilterMenu label="运行时" value={runtimeValue} options={runtimeOptions} onChange={value => setDimension('runtime', value)} />
+            <FilterMenu label="工单" value={ticketValue} options={ticketOptions} onChange={value => setDimension('ticket', value)} />
+            <FilterMenu label="追踪" value={traceValue} options={traceOptions} onChange={value => setDimension('trace', value)} />
+            {isFilterActive(filter) && (
+              <button className="btn ghost tiny" onClick={clearFilters}>清除筛选</button>
+            )}
+          </div>
         </div>
 
         {error && (
@@ -3199,13 +3281,39 @@ function LogsView(): JSX.Element {
             <div className="log-empty">
               <Icon name="file-text" size={22} />
               <p>{lines.length === 0 ? '暂无日志' : '没有匹配的日志'}</p>
-              <small>{lines.length === 0 ? '服务产生新日志后会自动出现在这里。' : '换个级别或关键字试试。'}</small>
-              {(level !== 'all' || keyword.trim()) && (
+              <small>{lines.length === 0 ? '服务产生新日志后会自动出现在这里。' : '换个级别、维度或关键字试试。'}</small>
+              {isFilterActive(filter) && (
                 <button className="btn ghost tiny" onClick={clearFilters}>清除筛选</button>
               )}
             </div>
           ) : (
-            rows
+            <table className="log-table">
+              <colgroup>
+                <col className="log-col-time" />
+                <col className="log-col-level" />
+                <col className="log-col-category" />
+                <col className="log-col-event" />
+                <col className="log-col-chat" />
+                <col className="log-col-actor" />
+                <col className="log-col-runtime" />
+                <col className="log-col-ticket" />
+                <col className="log-col-detail" />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th scope="col">时间</th>
+                  <th scope="col">级别</th>
+                  <th scope="col">类别</th>
+                  <th scope="col">事件</th>
+                  <th scope="col">群</th>
+                  <th scope="col">发起人</th>
+                  <th scope="col">运行时</th>
+                  <th scope="col">工单</th>
+                  <th scope="col">详情</th>
+                </tr>
+              </thead>
+              <tbody>{rows}</tbody>
+            </table>
           )}
         </div>
         {!following && (
@@ -3217,6 +3325,87 @@ function LogsView(): JSX.Element {
       </section>
     </>
   )
+}
+
+/**
+ * 一行日志：左边是能定位的维度，右边是这条事件的业务字段。
+ *
+ * 点事件名展开完整字段——表格里放不下全部字段，展开后能看到原始值。
+ */
+function LogRowView({ line, expanded, onToggle }: { line: LogLine; expanded: boolean; onToggle: () => void }): JSX.Element {
+  const details = line.data ? Object.entries(line.data) : []
+  return (
+    <>
+      <tr className={`log-row level-${line.level}`}>
+        <td className="log-cell-time">{logClock(line.at)}</td>
+        <td className="log-cell-level">
+          <span className="log-chip-dot" style={{ background: LOG_LEVEL_COLOR[line.level] ?? LOG_LEVEL_COLOR.all }} />
+          {LOG_LEVEL_LABEL[line.level] ?? line.level.toUpperCase()}
+        </td>
+        <td className="log-cell-category">{CATEGORY_LABEL[line.category ?? ''] ?? '—'}</td>
+        <td className="log-cell-event">
+          <button type="button" className="log-event-button" onClick={onToggle} aria-expanded={expanded}>
+            <Icon name="chevron" size={11} className={`log-event-chevron${expanded ? ' open' : ''}`} />
+            {line.message}
+          </button>
+        </td>
+        <td className="log-cell-chat" title={line.chatName || line.chat || undefined}>{line.chatName || line.chat || '—'}</td>
+        <td className="log-cell-actor">
+          {line.actorName || line.actor
+            ? <><span className="log-actor-name">{line.actorName || line.actor}</span>{ACTOR_LABEL[line.actorType ?? ''] && <span className="log-actor-type">{ACTOR_LABEL[line.actorType ?? '']}</span>}</>
+            : '—'}
+        </td>
+        <td className="log-cell-runtime">{line.runtime || '—'}</td>
+        <td className="log-cell-ticket">{line.ticket || '—'}</td>
+        <td className="log-cell-detail">
+          {details.length === 0
+            ? '—'
+            : details.map(([key, value]) => (
+              <span key={key} className="log-pair">
+                <span className="log-key">{key}</span>={formatLogValue(value)}
+              </span>
+            ))}
+        </td>
+      </tr>
+      {expanded && (
+        <tr className="log-detail-row">
+          <td colSpan={9}>
+            <div className="log-detail-grid">
+              <LogDetailField label="时间" value={line.at || '—'} />
+              <LogDetailField label="级别" value={line.level} />
+              <LogDetailField label="类别" value={`${CATEGORY_LABEL[line.category ?? ''] ?? '—'}（${line.category ?? '—'}）`} />
+              <LogDetailField label="事件" value={line.message} />
+              <LogDetailField label="域 / 动作" value={`${line.domain || '—'} / ${line.event || '—'}`} />
+              <LogDetailField label="群" value={line.chatName ? `${line.chatName}（${line.chat ?? ''}）` : line.chat || '—'} />
+              <LogDetailField label="发起人" value={line.actorName ? `${line.actorName}（${line.actor ?? ''}）` : line.actor || '—'} />
+              <LogDetailField label="发起人类型" value={ACTOR_LABEL[line.actorType ?? ''] ?? '—'} />
+              <LogDetailField label="运行时" value={line.runtime || '—'} />
+              <LogDetailField label="工单" value={line.ticket || '—'} />
+              <LogDetailField label="链路 ID" value={line.trace || '—'} />
+              {details.map(([key, value]) => (
+                <LogDetailField key={key} label={key} value={formatLogValue(value)} />
+              ))}
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  )
+}
+
+/** 展开行里的一个字段：标签在左、值在右，长值独占一行。 */
+function LogDetailField({ label, value }: { label: string; value: string }): JSX.Element {
+  return (
+    <div className="log-detail-field">
+      <span className="log-detail-label">{label}</span>
+      <span className="log-detail-value">{value}</span>
+    </div>
+  )
+}
+
+/** 选中值不在候选里时退回「全部」，避免筛不出东西也不报错。 */
+function pickValue(options: { value: string }[], current: string): string {
+  return options.some(option => option.value === current) ? current : ALL_FILTER
 }
 
 function logClock(at: string): string {

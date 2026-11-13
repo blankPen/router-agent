@@ -12,7 +12,7 @@
  */
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { errorMessage, noopLogger, type Logger } from '@router-agent/infra/logger.js'
+import { errorMessage, noopLogger, withContext, type Logger } from '@router-agent/infra/logger.js'
 import type { CommandRunner } from '@router-agent/infra/process.js'
 import { GitWorktreeProvider, workBranch, worktreeName } from '@router-agent/runtime'
 import {
@@ -161,7 +161,8 @@ export class T3CodeRuntime implements WorkerRuntime {
     this.serverTimeoutMs = opts.serverTimeoutMs
     this.autoStartServer = opts.autoStartServer !== false
     this.env = buildEnv(opts.env)
-    this.logger = opts.logger ?? noopLogger
+    // 套一层固定上下文：适配器写的每条日志都带上 runtime，省得每个调用点重复写。
+    this.logger = withContext(opts.logger ?? noopLogger, { runtime: this.id })
     this.spawnServer = opts.spawnServer
   }
 

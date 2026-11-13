@@ -6,6 +6,7 @@
  * 既能跟实时日志，又不会每次把整个文件重新读一遍。
  */
 import { closeSync, existsSync, openSync, readSync, statSync } from 'node:fs'
+import { logDimensions } from '#core/events.js'
 
 /** 面板单次回看的最大行数。 */
 export const MAX_LOG_LINES = 1_000
@@ -21,6 +22,28 @@ export interface LogEntry {
   at: string
   /** info / warn / error；无法解析的行记为 raw。 */
   level: string
+  /** 事件域（事件名的第一段），面板按它过滤。 */
+  domain: string
+  /** 事件动作（事件名冒号后的部分）。 */
+  event: string
+  /** 类别：message（一条消息）/ event（内部状态）/ action（对外动作）。 */
+  category: string
+  /** 链路 ID：把同一条链路的日志串起来。 */
+  trace?: string
+  /** 群 / 会话 ID。 */
+  chat?: string
+  /** 群名（比 ID 好认）。 */
+  chatName?: string
+  /** 发起人 ID。 */
+  actor?: string
+  /** 发起人名字。 */
+  actorName?: string
+  /** 发起人类型：user / bot。 */
+  actorType?: string
+  /** 运行时：orca / codex-app / claude-code / t3code / herdr。 */
+  runtime?: string
+  /** 工单 ID（日志里写的是 ticketId）。 */
+  ticket?: string
   message: string
   /**
    * 写入这条日志时的 router-agent 版本号。
@@ -29,9 +52,12 @@ export interface LogEntry {
    * 版本对不上的旧日志视为已修复，不再纳入排查范围。
    */
   version?: string
-  /** at / level / message 之外的结构化字段。 */
+  /** 结构字段之外的业务字段。 */
   data?: Record<string, unknown>
 }
+
+/** 结构字段：单独成列，不混进业务字段里。 */
+const STRUCTURE_KEYS = ['domain', 'event', 'category', 'trace', 'chat', 'chatName', 'actor', 'actorName', 'actorType', 'runtime', 'ticketId', 'version'] as const
 
 export interface LogReadResult {
   path: string
@@ -176,13 +202,31 @@ function parseLine(line: string): LogEntry {
       const data: Record<string, unknown> = {}
       for (const [key, value] of Object.entries(record)) {
         if (key === 'at' || key === 'level' || key === 'message') continue
-        if (key === 'version') continue
+        // 结构字段单独成列，不混进业务字段里。
+        if ((STRUCTURE_KEYS as readonly string[]).includes(key)) continue
         data[key] = value
+      }
+      const message = typeof record.message === 'string' ? record.message : ''
+      // 旧日志没有结构字段时按事件名与业务字段补齐，面板照样能按维度过滤。
+      const dimensions = logDimensions(message, record)
+      const context = {
+        chat: text(record.chat),
+        chatName: text(record.chatName),
+        actor: text(record.actor),
+        actorName: text(record.actorName),
+        actorType: text(record.actorType),
+        runtime: text(record.runtime),
+        ticket: text(record.ticketId),
       }
       return {
         at: typeof record.at === 'string' ? record.at : '',
         level: typeof record.level === 'string' ? record.level : 'info',
-        message: typeof record.message === 'string' ? record.message : '',
+        domain: dimensions.domain,
+        event: dimensions.event,
+        category: dimensions.category,
+        ...(dimensions.trace ? { trace: dimensions.trace } : {}),
+        ...Object.fromEntries(Object.entries(context).filter(([, value]) => value !== undefined)),
+        message,
         ...(typeof record.version === 'string' && record.version ? { version: record.version } : {}),
         ...(Object.keys(data).length > 0 ? { data } : {}),
       }
@@ -190,5 +234,10 @@ function parseLine(line: string): LogEntry {
   } catch {
     // 非 JSON 行（旧日志、异常栈等）按原文展示，不影响后续行。
   }
-  return { at: '', level: 'raw', message: line }
+  return { at: '', level: 'raw', domain: '', event: '', category: '', message: line }
+}
+
+/** 只取非空字符串。 */
+function text(value: unknown): string | undefined {
+  return typeof value === 'string' && value ? value : undefined
 }

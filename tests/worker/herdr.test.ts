@@ -368,7 +368,8 @@ describe('Herdr 运行时', () => {
     expect(started.slice(started.indexOf('--') + 1)).toEqual(['--dangerously-bypass-approvals-and-sandbox', '--model', 'gpt-5'])
     expect(events).toContainEqual({
       message: 'herdr:agent-launched',
-      fields: { ticketId: 'tk-1', paneId: 'w2:p1', agent: 'codex', model: 'gpt-5' },
+      // 适配器的日志统一带上 runtime：面板要能分清是哪个运行时在动。
+      fields: { ticketId: 'tk-1', paneId: 'w2:p1', agent: 'codex', model: 'gpt-5', runtime: 'herdr' },
     })
   })
 
