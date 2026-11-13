@@ -42,6 +42,9 @@ function line(message: string, level = 'info'): string {
   return `${JSON.stringify({ at: '2026-11-09T10:00:00.000Z', level, message })}\n`
 }
 
+/** 固定「现在」，让 fixture 的日志落在排查窗口（3 小时）内。 */
+const NOW = '2026-11-09T10:05:00.000Z'
+
 describe('/api/logs/assistant', () => {
   let store: Store
   let engine: Engine
@@ -63,7 +66,7 @@ describe('/api/logs/assistant', () => {
       store,
       config,
       logPath,
-      logAssistant: createLogAssistant({ logPath }),
+      logAssistant: createLogAssistant({ logPath, now: () => NOW }),
     })
   })
 
@@ -77,8 +80,26 @@ describe('/api/logs/assistant', () => {
     const res = await call(server, '/api/logs/assistant')
     expect(res.status).toBe(200)
     expect(res.json.llmConfigured).toBe(false)
-    expect(res.json.suggestions.length).toBeGreaterThan(0)
-    expect(res.json.suggestions[0].example).toBeTruthy()
+    // 面板打开就拿到现状摘要：窗口、错误条数、配置问题。
+    expect(res.json.overview.errorCount).toBe(0)
+    expect(res.json.overview.configIssues).toEqual([])
+    expect(res.json.overview.window.since).toBeTruthy()
+  })
+
+  it('GET 带上当前版本，面板据此说明看的是哪个版本', async () => {
+    const versioned = await createApiServer({
+      engine,
+      store,
+      config,
+      logPath,
+      logAssistant: createLogAssistant({ logPath, now: () => NOW, version: '1.2.3' }),
+    })
+    try {
+      const res = await call(versioned, '/api/logs/assistant')
+      expect(res.json.overview.window.version).toBe('1.2.3')
+    } finally {
+      await versioned.close()
+    }
   })
 
   it('POST 给出排查结论', async () => {
@@ -130,7 +151,7 @@ describe('/api/logs/assistant/issue', () => {
       store,
       config,
       logPath,
-      logAssistant: createLogAssistant({ logPath }),
+      logAssistant: createLogAssistant({ logPath, now: () => NOW }),
       issueReporter: {
         async create(input) {
           created.push(input)

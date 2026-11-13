@@ -1,5 +1,5 @@
 /**
- * Web 面板「日志」页的智能问题排查助手。
+ * Web 面板的智能问题排查助手。
  *
  * 排障的第一入口是日志，但日志本身只说「发生了什么」，不说「这意味着什么」。
  * 这里做两件事：
@@ -10,12 +10,17 @@
  *
  * 规则式降级不是摆设：现场机器经常还没配好模型，但日志事件名是固定的，
  * 靠知识库照样能指出「消息被 allowed 规则丢掉了」这类结论。
+ *
+ * 结论面向普通用户，所以输出是**结构化**的（结论 / 引导动作 / 补充细节），
+ * 由前端渲染：原始日志与专业术语都放进折叠的补充信息里，
+ * 主交互语句只留「发生了什么」与「现在该做什么」。
  */
 import { preview } from '#core/events.js'
 import { noopLogger, errorMessage, type Logger } from '#infra/logger.js'
 import { createChatClient, type ChatClient, type ChatMessage, type ChatModelConfig } from '#infra/chat.js'
 import { extractJsonObject } from './model-config.js'
 import { readLogTail, type LogEntry } from './log-tail.js'
+import { filterByWindow, logWindow, type LogWindow } from './log-window.js'
 import { toolSpecs, type DiagnosisTool } from './diagnosis-tools.js'
 
 /** 一次排查最多带多少条证据给模型。 */
@@ -52,24 +57,32 @@ export interface LogEvidence {
 }
 
 export interface LogCause {
-  /** 结论标题。 */
+  /** 结论标题（人话，不带事件名）。 */
   title: string
-  /** 为什么得出这个结论。 */
+  /** 为什么得出这个结论；属于补充细节，主界面默认折叠。 */
   detail: string
-  /** 支撑这个结论的日志事件名。 */
+  /** 支撑这个结论的日志事件名；属于补充细节。 */
   events: string[]
   /** 模型给出的处置分类：config = 用户自己能改；defect = 应上报。 */
   category?: 'config' | 'defect'
 }
 
+/**
+ * 一条排查结论。
+ *
+ * 分三段对应普通用户的三件事：
+ * - `summary`：发生了什么（人话）；
+ * - `actions`：现在该做什么（可执行的动作）；
+ * - `details`：原始日志与专业术语（折叠起来，不打扰主流程）。
+ */
 export interface LogDiagnosis {
-  /** 一句话结论。 */
+  /** 一句话结论：面向用户说明当前发生了什么。 */
   summary: string
-  /** 可能的原因。 */
+  /** 可能的原因；每条都带人话标题，detail / events 属于补充细节。 */
   causes: LogCause[]
-  /** 建议的下一步。 */
+  /** 建议的下一步：用户照着做就行。 */
   actions: string[]
-  /** 证据日志。 */
+  /** 证据日志；属于补充细节。 */
   evidence: LogEvidence[]
   /** llm = 模型总结；rules = 规则降级。 */
   source: 'llm' | 'rules'
@@ -79,6 +92,53 @@ export interface LogDiagnosis {
   toolsUsed?: string[]
   /** 处置建议：配置类引导去改配置，缺陷类引导一键上报 issue。 */
   next?: LogNextStep[]
+}
+
+/**
+ * 面板打开时先展示的「当前状态摘要」。
+ *
+ * 不用等用户点「分析」：面板一打开就把当前存在的异常、配置错误与配置遗漏摆出来，
+ * 用户看完再决定要不要发起一次分析。
+ */
+export interface LogAssistantOverview {
+  /** 窗口内的错误日志条数。 */
+  errorCount: number
+  /** 窗口内的警告日志条数。 */
+  warnCount: number
+  /** 窗口内最值得看的错误（人话摘要），同一类问题只列一条。 */
+  issues: LogOverviewIssue[]
+  /** 配置自检结果里不通过的项目。 */
+  configIssues: LogOverviewConfigIssue[]
+  /** 窗口说明：当前看的是哪段时间、哪个版本。 */
+  window: { since: string; version: string }
+}
+
+/** 一条异常摘要：给人看的错误说明。 */
+export interface LogOverviewIssue {
+  /** 事件名。 */
+  event: string
+  /** 人话说明：这个错误意味着什么。 */
+  title: string
+  /** 补充细节：错误详情。 */
+  detail?: string
+  /** 发生时间。 */
+  at: string
+  /** 建议动作：用户下一步该做什么。 */
+  action?: string
+}
+
+/** 一条配置问题：缺什么、去哪改。 */
+export interface LogOverviewConfigIssue {
+  /** 检查项名称。 */
+  name: string
+  /** 缺什么 / 错在哪。 */
+  detail: string
+  /** 改法。 */
+  hint?: string
+  /** 面板配置页分组 id；用户点「去修改」直接跳过去。 */
+  section?: string
+  /** 缺的具体配置项。 */
+  items?: string[]
 }
 
 /** 处置建议。 */
@@ -93,18 +153,10 @@ export interface LogNextStep {
   issueTitle?: string
 }
 
-/** 面板上的常见问题入口。 */
-export interface LogSuggestion {
-  id: string
-  title: string
-  /** 填进输入框的示例问题。 */
-  example: string
-}
-
 export interface LogAssistant {
   diagnose(question: LogAssistantQuestion): Promise<LogDiagnosis>
-  /** 面板展示的常见问题。 */
-  suggestions(): LogSuggestion[]
+  /** 面板打开时展示的当前状态摘要。 */
+  overview(): LogAssistantOverview
   /** 模型是否配齐（决定面板提示「去配置模型」还是「模型总结」）。 */
   llmConfigured(): boolean
 }
@@ -112,6 +164,10 @@ export interface LogAssistant {
 export interface LogAssistantOptions {
   /** 服务日志路径。 */
   logPath: string
+  /** 当前版本号；用于判断日志是不是当前版本还在报。 */
+  version?: string
+  /** 配置自检结果（不联网的那部分）；面板用它指出配置遗漏。 */
+  configChecks?: () => { name: string; status: 'ok' | 'warn' | 'fail'; detail: string; hint?: string; section?: string; items?: string[] }[]
   /** 研判模型配置；缺省时只走规则式降级。 */
   model?: ChatModelConfig | null
   /** 助手的只读工具（读配置 / 读本地代码）；缺省时模型只能看日志。 */
@@ -121,6 +177,8 @@ export interface LogAssistantOptions {
   fetchImpl?: typeof fetch
   /** 模型请求超时，默认 60s。 */
   timeoutMs?: number
+  /** 时钟；测试可注入。 */
+  now?: () => string
 }
 
 /**
@@ -132,27 +190,42 @@ export interface LogAssistantOptions {
 const SYMPTOMS: Array<{
   id: string
   title: string
-  /** 面板快捷入口里预填的示例问题。 */
-  example: string
+  /**
+   * 一句话结论：面向普通用户说明「现在是什么情况」。
+   * 不带事件名与字段名——专业术语属于折叠的补充细节。
+   */
+  conclusion: string
   /**
    * 处置方向：config = 引导去改配置；defect = 缺陷 / 体验问题，适合一键上报 issue。
    */
   kind: 'config' | 'defect'
-  /** kind=config 时的引导目标：配置页的 section id（留空表示只跳到配置页）。 */
+  /**
+   * kind=config 时的引导目标：配置页的分组 id（见 `src/web/client/fields.ts` 的 CONFIG_GROUPS）。
+   * 留空表示只跳到配置页。
+   */
   section?: string
   /** kind=config 时给用户的按钮文案。 */
   fixLabel?: string
   events: string[]
   keywords: string[]
+  /**
+   * 用户该做的事：说清「改哪一项、去哪改」。
+   * 是主界面上的行动指引，不是技术细节。
+   */
+  steps: string[]
+  /**
+   * 技术细节：事件名、字段名、排查手法。
+   * 只作为折叠的补充信息出现，不当主交互语句。
+   */
   advice: string[]
 }> = [
   {
     id: 'message-ignored',
     title: '消息进来了但被过滤 / 机器人没反应',
-    example: '飞书里发消息机器人完全没反应，日志里能看到消息吗？',
+    conclusion: '消息收到了，但没通过「谁可以让机器人干活」这一关，所以机器人一直没回你。',
     kind: 'config',
-    section: 'feishu',
-    fixLabel: '去修改「飞书消息 · 允许名单」',
+    section: 'channels',
+    fixLabel: '去改「允许名单」',
     events: [
       'trigger:dropped', 'trigger:duplicate', 'feishu:bot-identity-failed',
       'feishu:allowlist-empty', 'feishu:chat-allowlist-empty', 'identity:resolve-failed',
@@ -160,6 +233,11 @@ const SYMPTOMS: Array<{
       'config:identity-invalid', 'feishu:consumer-start-failed', 'feishu:reconnecting',
     ],
     keywords: ['没反应', '不理我', '不回', '没收到', '消息丢了', '不响应'],
+    steps: [
+      '打开面板「配置 → 渠道配置 → 飞书 → 接收范围」，确认你的账号在「允许名单」里。',
+      '名单里填邮箱最省事：填上邮箱保存后，系统会自动认出这是谁。',
+      '群聊里需要 @ 机器人：如果连群里的消息也收不到，检查机器人是否在这个群里。',
+    ],
     advice: [
       '看 trigger:dropped 的 reason 字段：allowed 规则挡掉、身份没识别、还是消息类型不支持。',
       '确认允许名单里的邮箱 / open_id 都能解析成 open_id（identity:resolve-failed / identity:retry-exhausted 表示有人没解析出来）。',
@@ -170,7 +248,7 @@ const SYMPTOMS: Array<{
   {
     id: 'config-not-effective',
     title: '配置改了不生效',
-    example: '我在面板上改了配置，保存成功了但行为没变，为什么？',
+    conclusion: '你改的配置没有真正生效：要么没写进配置文件，要么这类改动要重启服务后才生效。',
     kind: 'config',
     fixLabel: '去「配置」页逐项核对',
     events: [
@@ -179,6 +257,11 @@ const SYMPTOMS: Array<{
       'identity:refresh-failed', 'config:identity-invalid',
     ],
     keywords: ['不生效', '没生效', '配置', '保存', '重启'],
+    steps: [
+      '在「配置」页改完后点「保存并重启服务」，大多数设置要重启才生效。',
+      '只有「接单方式」「允许名单」这类是保存即生效，不用重启。',
+      '如果保存时报错，按面板上给出的原因改掉再保存——保存失败等于没改。',
+    ],
     advice: [
       '看 api:config 的 restartRequired：策略类配置立即生效，其余要重启服务（daemon 热重启）后才生效。',
       'config:parse-failed 说明 config.yaml 解析失败，服务已降级用默认配置启动，配置等于没加载。',
@@ -189,14 +272,19 @@ const SYMPTOMS: Array<{
   {
     id: 'ticket-not-created',
     title: '消息没有变成工单 / 没派工',
-    example: '消息被收到了但没有建工单，也没有派工出去，排查一下。',
+    conclusion: '消息收到了，但没有开工单——多半是「接单方式」设成了只观察，或者这条消息还被当成闲聊。',
     kind: 'config',
-    section: 'policy',
-    fixLabel: '去检查「准入策略 · 接单模式」',
+    section: 'admission',
+    fixLabel: '去改「接单方式」',
     events: [
       'decision:engine-failed', 'loop:trigger-failed', 'chat:reply-failed',
     ],
     keywords: ['工单', '派工', '没开始', '没建', '没派'],
+    steps: [
+      '打开面板「配置 → 消息准入 → 接单方式」，确认不是「只记录」或「只研判」。',
+      '要让它自动开工单，把接单方式改成「直接接单」。',
+      '如果只是想看看它怎么判断，先保持「只研判」，在「工单」页确认判断是否合理。',
+    ],
     advice: [
       '先确认 trigger:ingested 出现过：没有这条说明消息根本没进系统，问题在接入层不在研判层。',
       'router:decision 的 decision 字段说明研判结论；ask 之外的决定都要在工单页复核。',
@@ -207,7 +295,7 @@ const SYMPTOMS: Array<{
   {
     id: 'worker-stuck',
     title: 'Worker 卡住 / 执行失败',
-    example: '工单里的 worker 好像卡住了，一直没有进展，帮我看看。',
+    conclusion: '正在干活的那个执行进程出问题了，这一轮没做完——这是系统侧的问题，需要我们修。',
     kind: 'defect',
     events: [
       'worker:status-failed', 'codex:turn-failed', 'codex:process-exit', 'codex:resume-failed',
@@ -215,6 +303,10 @@ const SYMPTOMS: Array<{
       'idle:stale', 'codex:error',
     ],
     keywords: ['卡住', '不动', 'worker', '超时', '没进展', '执行失败'],
+    steps: [
+      '点下面的「上报 GitHub issue」，把这次的日志和结论一起发给我们。',
+      '同时可以在「工单」页停止这张工单，重新发一次同样的话让它重来。',
+    ],
     advice: [
       'worker:status-failed 是活性查询失败，先按「状态未知」处理，别当成 worker 死了。',
       'codex:turn-failed 表示这一轮执行失败，会转人工；detail 里有失败原因。',
@@ -225,7 +317,7 @@ const SYMPTOMS: Array<{
   {
     id: 'service-error',
     title: '服务自身报错 / 面板打不开',
-    example: '面板打不开或者服务在报错，帮我定位一下。',
+    conclusion: '服务自己报错了，不是你的配置问题——需要我们修。',
     kind: 'defect',
     events: [
       'api:request-failed', 'config:parse-failed', 'session:migration-required',
@@ -233,6 +325,10 @@ const SYMPTOMS: Array<{
       'update:service-stop-failed', 'config:invalid-security-override',
     ],
     keywords: ['服务', '启动不了', '报错', '500', '打不开', '崩溃'],
+    steps: [
+      '点下面的「上报 GitHub issue」，把这次的日志和结论一起发给我们。',
+      '如果连面板都打不开，在终端运行 ra logs 看最后几行，把输出一起贴给我们。',
+    ],
     advice: [
       'api:request-failed 带 method / path / detail，先定位是哪个接口挂的。',
       'session:migration-required 表示还有没迁移的历史 sessionKey，服务会拒绝启动，按提示执行迁移。',
@@ -243,13 +339,17 @@ const SYMPTOMS: Array<{
   {
     id: 'reply-not-sent',
     title: '回复 / 通知没发出去',
-    example: '工单处理完了，但飞书那边没有收到回复，消息发出去了吗？',
+    conclusion: '活已经干完了，但结果没发回飞书——投递这一步出了问题，需要我们修。',
     kind: 'defect',
     events: [
       'outbox:failed', 'channel:not-registered', 'feishu:card-fallback',
       'chat:reply-failed', 'channel:ack-failed',
     ],
     keywords: ['没发出去', '没回复', '发送失败', '通知'],
+    steps: [
+      '点下面的「上报 GitHub issue」，把这次的日志和结论一起发给我们。',
+      '临时想看结果，可以直接看「工单」页里的进展记录。',
+    ],
     advice: [
       'outbox:failed 带 error 字段，是对外投递失败的最终结果。',
       'channel:not-registered 表示 Outbox 里的通道没注册（历史脏数据），不会卡住队列。',
@@ -260,13 +360,17 @@ const SYMPTOMS: Array<{
   {
     id: 'pr-tracking',
     title: 'PR / MR 状态查不到',
-    example: '工单关联的 PR 状态一直查不到，帮我看看为什么。',
+    conclusion: '关联的代码改动查不到状态——多半是没关联上仓库或凭据失效了。',
     kind: 'defect',
     events: [
       'pr:track-failed', 'pr:inspect-failed', 'pr:repo-slug-failed',
       'report:evidence-missing', 'report:evidence-unverified', 'report:ingest-failed',
     ],
     keywords: ['pr', 'mr', '合并', '状态', '证据'],
+    steps: [
+      '先确认工单关联的仓库地址写对了：面板「配置 → 项目清单」里的仓库路径。',
+      '然后点下面的「上报 GitHub issue」，把这次的日志和结论一起发给我们。',
+    ],
     advice: [
       'pr:inspect-failed / pr:repo-slug-failed 是取 PR 线索失败，服务会等 gh 兜底。',
       'report:evidence-missing 说明 UI 改动没交 Before / After 证据，enforce 档会被打回。',
@@ -274,11 +378,6 @@ const SYMPTOMS: Array<{
     ],
   },
 ]
-
-/** 常见问题的快捷入口，直接取自知识库，保证面板与后端同步。 */
-export function logSuggestions(): LogSuggestion[] {
-  return SYMPTOMS.map(item => ({ id: item.id, title: item.title, example: item.example }))
-}
 
 /** 创建日志排查助手。 */
 export function createLogAssistant(opts: LogAssistantOptions): LogAssistant {
@@ -304,19 +403,69 @@ export function createLogAssistant(opts: LogAssistantOptions): LogAssistant {
     return next
   }
 
+  const now = opts.now ?? (() => new Date().toISOString())
+  // 没传版本号时不按版本过滤：拿一个猜不到的版本去比，只会把日志全滤光。
+  const version = opts.version ?? ''
+
+  /** 当前排查窗口：最近 3 小时 + 当前版本。 */
+  const currentWindow = (): LogWindow => logWindow({ version, now: now() })
+
+  /** 读日志并按窗口收敛：窗口外与旧版本的日志一律不纳入排查。 */
+  const scopedEntries = (): LogEntry[] => {
+    const entries = readLogTail(opts.logPath, { lines: READ_LIMIT })
+    return filterByWindow(entries, currentWindow())
+  }
+
+  /** 上一次的概览计数：只在变化时记日志，避免面板每次打开都刷一条。 */
+  let lastOverview = ''
+
   return {
     llmConfigured(): boolean {
       return llmReady
     },
 
-    suggestions(): LogSuggestion[] {
-      return logSuggestions()
+    overview(): LogAssistantOverview {
+      const window = currentWindow()
+      const entries = scopedEntries()
+      const errors = entries.filter(entry => entry.level === 'error')
+      const warns = entries.filter(entry => entry.level === 'warn')
+      // 同一个问题重复报了很多次时只列一条：用户要的是「有哪几类问题」，不是日志条数。
+      const issues = distinctIssues(errors)
+      const configIssues = (opts.configChecks?.() ?? [])
+        .filter(check => check.status !== 'ok')
+        .map(check => ({
+          name: check.name,
+          detail: check.detail,
+          ...(check.hint ? { hint: check.hint } : {}),
+          ...(check.section ? { section: check.section } : {}),
+          ...(check.items ? { items: check.items } : {}),
+        }))
+      // 高频路径降噪：同一组计数只记一次，变化时才再记一条。
+      const fingerprint = `${errors.length}/${warns.length}/${configIssues.length}/${window.version}`
+      if (fingerprint !== lastOverview) {
+        lastOverview = fingerprint
+        logger.info('logs:assistant-overview', {
+          errors: errors.length,
+          warns: warns.length,
+          configIssues: configIssues.length,
+          since: window.since,
+          version: window.version,
+        })
+      }
+      return {
+        errorCount: errors.length,
+        warnCount: warns.length,
+        issues,
+        configIssues,
+        window: { since: window.since, version: window.version },
+      }
     },
 
     diagnose(question: LogAssistantQuestion): Promise<LogDiagnosis> {
       return run(async () => {
         const text = question.question.trim().slice(0, MAX_QUESTION_CHARS)
-        const entries = readLogTail(opts.logPath, { lines: READ_LIMIT })
+        // 只看窗口内的日志：3 小时前或旧版本报的错不算「现在的问题」。
+        const entries = scopedEntries()
         // 助手与日志页共用同一套过滤：用户看到的范围就是排查范围。
         const scoped = filterEntries(entries, {
           ...(question.level ? { level: question.level } : {}),
@@ -334,6 +483,7 @@ export function createLogAssistant(opts: LogAssistantOptions): LogAssistant {
               question: preview(text, 120),
               evidence: withEvidence.length,
               source: 'llm',
+              errors: withEvidence.filter(item => item.level === 'error').length,
               ...(answer.toolsUsed?.length ? { tools: answer.toolsUsed.join(',') } : {}),
             })
             return answer
@@ -355,10 +505,58 @@ export function createLogAssistant(opts: LogAssistantOptions): LogAssistant {
           question: preview(text, 120),
           evidence: withEvidence.length,
           source: 'rules',
+          errors: withEvidence.filter(item => item.level === 'error').length,
         })
         return diagnosis
       })
     },
+  }
+}
+
+/**
+ * 把错误压成「有哪几类问题」。
+ *
+ * 同一条错误反复出现（重试、轮询失败）时只保留最新的一条；
+ * 不同事件但命中同一个问题模式时也只留一条——
+ * 否则面板上会是同一句话重复十遍，那不是摘要，是噪音。
+ */
+export function distinctIssues(errors: LogEntry[]): LogOverviewIssue[] {
+  const byProblem = new Map<string, LogEntry>()
+  for (const entry of errors) {
+    // 命中已知模式时按模式去重，没命中时按事件名去重。
+    const key = matchSymptoms([entry])[0]?.symptom.id ?? entry.message
+    const existing = byProblem.get(key)
+    // 日志按时间递增写入，后来的更新：只保留最新那条。
+    if (!existing || Date.parse(entry.at) >= Date.parse(existing.at)) {
+      byProblem.set(key, entry)
+    }
+  }
+  return [...byProblem.values()]
+    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
+    .slice(0, 5)
+    .map(entry => overviewIssueOf(entry))
+}
+
+/**
+ * 把一条错误日志翻成人话摘要。
+ *
+ * 命中已知问题模式时用知识库的说法（这是用户能懂的话）；
+ * 没命中就给事件名与详情，不编造原因。
+ */
+export function overviewIssueOf(entry: LogEntry): LogOverviewIssue {
+  const hit = matchSymptoms([entry])[0]
+  const symptom = hit?.symptom
+  const detail = entry.data
+    ? Object.entries(entry.data).map(([key, value]) => `${key}=${formatValue(value)}`).join(' ')
+    : ''
+  return {
+    event: entry.message,
+    // 标题说「这是什么情况」，不是内部的知识库分类名。
+    title: symptom ? symptom.conclusion : `出现了一个错误：${entry.message}`,
+    ...(detail ? { detail: detail.slice(0, 300) } : {}),
+    at: entry.at,
+    // 行动指引取「用户该做的事」，不是技术细节：事件名与字段名属于补充信息。
+    ...(symptom?.steps[0] ? { action: symptom.steps[0] } : {}),
   }
 }
 
@@ -528,10 +726,13 @@ export function ruleDiagnosis(question: string, evidence: LogEvidence[], hits: S
     events: item.events,
   }))
 
+  // 行动指引只取「用户该做的事」：技术细节（advice）另作折叠的补充信息。
+  // 最可能那类的问题给完整步骤，其余每类只给一条——主区不是清单仓库。
   const actions: string[] = []
-  for (const item of shown) {
-    for (const advice of item.symptom.advice) {
-      if (!actions.includes(advice)) actions.push(advice)
+  for (const [index, item] of shown.entries()) {
+    const steps = index === 0 ? item.symptom.steps : item.symptom.steps.slice(0, 1)
+    for (const step of steps) {
+      if (!actions.includes(step)) actions.push(step)
     }
   }
 
@@ -539,23 +740,22 @@ export function ruleDiagnosis(question: string, evidence: LogEvidence[], hits: S
   for (const symptom of SYMPTOMS) {
     if (hits.some(item => item.symptom.id === symptom.id)) continue
     if (!symptom.keywords.some(keyword => question.includes(keyword))) continue
-    const advice = `你描述的现象属于「${symptom.title}」，但当前日志里没有对应事件，可以确认日志范围是否覆盖了出问题的时间段。`
-    if (!actions.includes(advice)) actions.push(advice)
+    const step = `你描述的现象属于「${symptom.title}」，但当前日志里没有对应记录；先按下面这条排查：${symptom.steps[0] ?? ''}`
+    if (!actions.includes(step)) actions.push(step)
   }
 
-  const summary = causes.length === 0
+  const others = ranked.length > 1 ? `另外还有 ${ranked.length - 1} 个问题，展开下面的补充细节能看到。` : ''
+  const summary = !primary
     ? evidence.length > 0
-      ? `最近 ${evidence.length} 条日志里没有命中已知问题模式，需要人工判断。`
-      : '当前筛选范围内没有可用日志，无法给出结论；放宽级别或关键字过滤再试。'
-    : primary && matchesQuestion(question, primary.symptom)
-      ? `最可能是「${primary.symptom.title}」：日志里出现了 ${primary.events.join('、')}。`
-        + (ranked.length > 1 ? `另外还命中 ${ranked.length - 1} 类已知问题模式，见下方。` : '')
-      : `命中 ${causes.length} 类已知问题模式：${causes.map(cause => cause.title).join('；')}。`
+      ? `最近 ${evidence.length} 条日志里没有找到已知的问题模式，暂时看不出明显故障。`
+      : '最近这段时间的日志里没有可用记录，暂时看不出明显故障。'
+    : primary.symptom.conclusion + others
 
   return {
     summary,
     causes,
-    actions: actions.slice(0, 8),
+    // 行动指引最多 5 条：最可能那类的问题的步骤排在前面。
+    actions: actions.slice(0, 5),
     evidence,
     source: 'rules',
     next: nextStepsFor(ranked, question),
@@ -603,14 +803,9 @@ export function nextStepsFor(hits: SymptomHit[], question: string): LogNextStep[
 function issueStepOf(hit: SymptomHit): LogNextStep {
   return {
     kind: 'issue',
-    label: '一键上报 GitHub issue',
+    label: '上报 GitHub issue',
     issueTitle: `[排查助手] ${hit.symptom.title}`,
   }
-}
-
-/** 问题里是否点名了这一类症状。 */
-function matchesQuestion(question: string, symptom: (typeof SYMPTOMS)[number]): boolean {
-  return symptom.keywords.some(keyword => question.includes(keyword))
 }
 
 /**
@@ -668,13 +863,18 @@ export function ensureEvidence(evidence: LogEvidence[], entries: LogEntry[], eve
 
 const SYSTEM_PROMPT = [
   '你是 router-agent（飞书消息 → 研判 → 派工到 worker 的双层 Agent 系统）的运维排查助手。',
-  '用户会给出遇到的问题和相关的服务日志（每行一条 JSON 事件，事件名形如 域:动作）。',
+  '回答的对象是普通用户，不是运维工程师：他们只知道「机器人没反应」，不知道 open_id、worktree、事件名。',
+  '用户会给出相关的服务日志（每行一条 JSON 事件，事件名形如 域:动作）。',
   '请只依据给出的日志判断，不要编造日志里没有的事实；信息不足时明确说「日志里看不到」。',
   '可以调用工具查看本机的 router-agent 配置与安装目录下的代码来核实判断；工具是只读的，只能读不能改。',
+  '写给用户看的话要像客服说明，不要像日志分析报告：不要出现事件名、字段名、代码标识符。',
   '输出严格的 JSON，不要加解释性文字或代码块围栏：',
   '{"summary":"一句话结论","causes":[{"title":"可能原因","detail":"为什么","events":["支撑的事件名"],"category":"config|defect"}],"actions":["建议的下一步操作"]}',
   'causes 最多 3 条，actions 最多 5 条；没有证据支撑的原因不要写。',
   'category 填 config 表示这是配置问题、用户自己能改，填 defect 表示这是缺陷或体验问题、应该上报。',
+  'summary 用一句普通话说清「现在是什么情况、要不要紧」，例如「机器人收不到消息是因为允许名单里少了两个人」。',
+  'causes[].title 是人话原因；causes[].detail 与 events 是补充细节，可以出现事件名。',
+  'actions 每条都是用户能直接照做的动作，写清「改哪一项、去哪改」；不要写「查看日志」这种没有落点的动作。',
 ].join('\n')
 
 /** 模型最多能连着调几轮工具。 */
@@ -785,11 +985,11 @@ export function nextStepsFromCauses(causes: LogCause[]): LogNextStep[] {
     steps.push({ kind: 'config', label: '去「配置」页按建议修改' })
     // 还有缺陷类原因就一并给上报入口，别让缺陷被配置引导挡住。
     if (causes.some(cause => cause.category === 'defect')) {
-      steps.push({ kind: 'issue', label: '一键上报 GitHub issue' })
+      steps.push({ kind: 'issue', label: '上报 GitHub issue' })
     }
     return steps
   }
-  steps.push({ kind: 'issue', label: '一键上报 GitHub issue' })
+  steps.push({ kind: 'issue', label: '上报 GitHub issue' })
   return steps
 }
 
