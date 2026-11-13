@@ -16,6 +16,7 @@ import type {
   AgentStatus,
   WorkspaceInfo,
 } from '#runtime/port.js'
+import { WorkerRuntimeError } from '#runtime/port.js'
 import type { DecisionEngine, DecisionEngineResult, DecisionRequest } from '../src/router/decision-engine.js'
 import type { Trigger } from '#core/model.js'
 
@@ -288,6 +289,32 @@ describe('RouterService 编排', () => {
     const notice = outbox.find(item => item.text.includes('执行环境创建失败'))
     expect(notice?.text).toContain('起始分支：main')
     expect(notice?.text).toContain('回复任意内容')
+  })
+
+  it('派工失败：运行时给了 hint 就用它，不再一律说「确认项目与分支存在」', async () => {
+    const hinted = new FakeRuntime()
+    hinted.start = async () => {
+      throw new WorkerRuntimeError('agent:launch-failed', 't3 thread start 失败: --provider and --model go together.', {
+        detail: { hint: 'T3 要求 provider 与 model 同时配置，请补上 runtime.options.t3code.model' },
+      })
+    }
+    service = new RouterService({
+      config, store, engine, runtime: hinted, decisionEngine: new AcceptEngine(), prTracker,
+      clock: { now: () => '2026-11-06T10:00:10.000Z' },
+      logger: {
+        info: (message, extra) => logs.push({ level: 'info', message, ...(extra ? { extra } : {}) }),
+        warn: (message, extra) => logs.push({ level: 'warn', message, ...(extra ? { extra } : {}) }),
+        error: (message, extra) => logs.push({ level: 'error', message, ...(extra ? { extra } : {}) }),
+      },
+      agentLoopOptions: { batchWindowMs: 0 },
+    })
+    engine.ingest(makeTrigger())
+    await service.runOnce()
+
+    const outbox = store.claimOutbox('2026-11-06T10:10:00.000Z', 20)
+    const notice = outbox.find(item => item.text.includes('执行环境创建失败'))
+    expect(notice?.text).toContain('runtime.options.t3code.model')
+    expect(notice?.text).not.toContain('请确认项目')
   })
 
   it('派工失败不会永久占用并发，后续工单能正常派出去', async () => {

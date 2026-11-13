@@ -108,7 +108,7 @@ Router 不做对话，只在必要时说话：
 | `launch` | Service | `ticketId` `runtime` `chat` `actor` `handle` `workdir` | 派工到 Orca worktree |
 | `launch:queued` | Service | `maxWorkers` `capacity` `waiting` `ticketIds` | 并发已满，工单排队等待派工 |
 | `launch:queued-input` | Service | `ticketId` `pending` `maxWorkers` | 有新输入但并发满，暂不重建 worker |
-| `launch:failed` | Service | `ticketId` `title` `repo` `branch` `attempt` `reason` | 派工失败，已转人工并通知发起人 |
+| `launch:failed` | Service | `ticketId` `title` `repo` `branch` `attempt` `reason` `hint` | 派工失败，已转人工并通知发起人；`hint` 是给用户的处置建议（运行时没给就退回通用的仓库/分支兜底） |
 | `input:queued` | Engine | `ticketId` `seq` `text` | Router 准备发给 worker 的内容 |
 | `input:deduped` | Engine | `ticketId` `inputId` `seq` `kind` `sourceKey` | 同一条来源消息重复到达（飞书重投 / 面板再点一次），复用已有输入，没有重复投给 worker |
 | `input:delivered` | Service | `ticketId` `count` `inputIds` `text` | 实际投递进 worker 终端的输入；`inputIds` 是这轮真正送出的输入 id |

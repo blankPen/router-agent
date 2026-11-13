@@ -172,6 +172,13 @@ export class T3CodeRuntime implements WorkerRuntime {
     const baseBranch = ticket.branch
     if (!repo) throw new WorkerRuntimeError('workspace:missing-repo', '工单没有指定仓库，拒绝创建 worktree')
     if (!baseBranch) throw new WorkerRuntimeError('workspace:missing-branch', '工单没有指定起始分支，拒绝创建 worktree')
+    // T3 的 --provider 与 --model 必须成对出现，只给一个会被 CLI 直接拒绝。
+    if (Boolean(this.provider) !== Boolean(this.model)) {
+      const missing = this.provider ? 'runtime.options.t3code.model' : 'runtime.options.t3code.provider'
+      throw new WorkerRuntimeError('agent:launch-failed', `T3 的 provider 与 model 必须成对配置，缺 ${missing}`, {
+        detail: { hint: `请在配置里同时填 runtime.options.t3code.provider 与 runtime.options.t3code.model（当前缺 ${missing}）` },
+      })
+    }
     const name = worktreeName(ticket)
     const branch = workBranch(ticket)
     const workdir = ctx.workdir || join(this.home, 'worktrees', name)
@@ -243,8 +250,9 @@ export class T3CodeRuntime implements WorkerRuntime {
       }
     } catch (error) {
       // launch 半成功：回滚本次新建的 worktree/branch，避免重试撞名。
-      await this.bestEffortRollback(workspace.workdir, workspace.branch, repo)
+      // 先删 T3 侧项目再回收 worktree：反过来 CLI 会因为目录没了而 spawn 失败，残留一个孤儿项目。
       await this.removeProject(workspace.workdir)
+      await this.bestEffortRollback(workspace.workdir, workspace.branch, repo)
       if (error instanceof WorkerRuntimeError) {
         throw new WorkerRuntimeError(error.code, error.reason, {
           retryable: error.retryable,
