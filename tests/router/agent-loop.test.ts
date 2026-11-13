@@ -1005,6 +1005,61 @@ describe('关键链路日志', () => {
     expect(entry?.extra?.message).toBe('reset down')
     expect(store.claimOutbox('2026-11-06T10:00:20.000Z', 10)[0]?.text).toContain('重置没成功')
   })
+
+  it('接单开票时记 router:action=open_ticket，带上工单 ID', async () => {
+    const { logs, logger } = recorder()
+    const { engine, loop } = setup([ACCEPT()], undefined, undefined, false, undefined, logger)
+    engine.ingest(trigger())
+
+    const result = await loop.tick()
+    expect(result.accepted).toHaveLength(1)
+
+    const entry = logs.find(log => log.message === 'router:action')
+    expect(entry?.level).toBe('info')
+    expect(entry?.extra?.action).toBe('open_ticket')
+    expect(entry?.extra?.ticketId).toBe(result.accepted[0]?.id)
+    expect(entry?.extra?.triggerId).toBe('t1')
+  })
+
+  it('查询 / 清理工具答复时记 router:action=ticket_tool，不再重复记 ignore', async () => {
+    const { logs, logger } = recorder()
+    const { engine, loop } = setup([{
+      content: JSON.stringify({ decision: 'ignore', reason: 'ops:closed-tk-1' }),
+      toolCalls: [],
+      reply: '已关闭工单 tk-1，workspace 正在回收。',
+    }], undefined, undefined, false, undefined, logger)
+    engine.ingest(trigger({ text: '把 tk-1 关掉' }))
+
+    await loop.tick()
+
+    const actionEntries = logs.filter(log => log.message === 'router:action')
+    expect(actionEntries).toHaveLength(1)
+    expect(actionEntries[0]?.extra?.action).toBe('ticket_tool')
+  })
+
+  it('明显寒暄时记 router:action=reply，不重复记 ignore', async () => {
+    const { logs, logger } = recorder()
+    const { engine, loop } = setup([SAY('你好呀，需要我帮你改点什么？')], undefined, undefined, false, undefined, logger)
+    engine.ingest(trigger({ text: '你好，在吗' }))
+
+    await loop.tick()
+
+    const actionEntries = logs.filter(log => log.message === 'router:action')
+    expect(actionEntries).toHaveLength(1)
+    expect(actionEntries[0]?.extra?.action).toBe('reply')
+  })
+
+  it('名单内未 @ 的消息判 ignore 时记 router:action=ignore', async () => {
+    const { logs, logger } = recorder()
+    const { engine, loop } = setup([IGNORE('闲聊')], undefined, undefined, false, undefined, logger)
+    engine.ingest(trigger({ addressed: 'none' }))
+
+    const result = await loop.tick()
+    expect(result.ignored).toBe(1)
+
+    const entry = logs.find(log => log.message === 'router:action')
+    expect(entry?.extra?.action).toBe('ignore')
+  })
 })
 
 describe('已绑定工单的话题：名单内成员不 @ 也触发回复', () => {

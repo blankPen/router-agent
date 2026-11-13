@@ -338,6 +338,7 @@ export class IntakeCoordinator {
       intakeId: intake.id,
       ...messageContext(trigger),
       kind,
+      action: kind === 'question' ? 'reply' : 'analysis',
       project: intake.project,
     })
     return intake

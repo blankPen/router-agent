@@ -87,7 +87,8 @@ Router 不做对话，只在必要时说话：
 | `intake:screen-failed` / `intake:screen-invalid` | AgentLoop | `triggerId` `detail` / `triggerId` | 初筛模型失败或输出不合法；消息按原准入规则继续处理 |
 | `intake:decision-dropped` | AgentLoop | `triggerId` `chat` `rule` | 决策层确定性准入命中（bot / 媒体 / 口令 / 噪声），直接忽略 |
 | `intake:decision-ignore` | AgentLoop | `triggerId` `chat` `msgType` `action` `confidence` | 决策层判定无需跟进（chitchat / grumble 等），忽略该消息 |
-| `intake:opened` | AgentLoop | `intakeId` `chat` `chatName` `actor` `actorName` `actorType` `kind` `project` | 为一条疑似问题创建需求识别会话 |
+| `intake:opened` | AgentLoop | `intakeId` `chat` `chatName` `actor` `actorName` `actorType` `kind` `action` `project` | 为一条疑似问题创建需求识别会话；`action` 是路由层落地的动作（reply / analysis） |
+| `router:action` | AgentLoop | `triggerId` `action` `ticketId`（open_ticket 时）`stage`（澄清中）`missing` | 路由层为这条消息选出的唯一动作：reply / ticket_tool / open_ticket / analysis / ignore；同一条 trigger 只记一次 |
 | `intake:clarify` | AgentLoop | `intakeId` `questions` | 分析 Agent 发起追问 |
 | `intake:answered` | AgentLoop | `intakeId` `chat` | 分析 Agent 直接给出结论，会话结束，不产出需求单 |
 | `intake:ready` | AgentLoop | `intakeId` `chat` `title` `approvers` | 需求单整理完成，已 @管理员终审 |

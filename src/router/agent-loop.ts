@@ -317,6 +317,7 @@ export class AgentLoop {
         return
       }
       if (verdict.action === 'reply-only') {
+        this.routerAction(trigger, 'reply', { reason: verdict.reason })
         await this.replyOnly(trigger, verdict.reason)
         result.replied += 1
         return
@@ -324,6 +325,7 @@ export class AgentLoop {
       if (verdict.action === 'explicit') {
         if (isSmallTalk(trigger.text)) {
           // 明显寒暄不必再花一次研判，直接让模型组织一句礼貌回复。
+          this.routerAction(trigger, 'reply', { reason: 'explicit:small-talk' })
           await this.converse(trigger, '这条消息是寒暄或试探，没有具体工作请求')
           this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'explicit', reason: 'explicit:small-talk' })
           result.replied += 1
@@ -345,12 +347,19 @@ export class AgentLoop {
       // 派工信息已经凑齐并开单，草稿使命结束。
       this.store.clearDispatchDraft(trigger.chatId, trigger.actorId)
       result.accepted.push(assessed.ticket)
+      this.routerAction(trigger, 'open_ticket', { ticketId: assessed.ticket.id })
       // 只发一条：话题开场同时承担开单确认，后续 worker 进展都挂在这条原消息下。
       this.reply(trigger, THREAD_INTRO(assessed.ticket.title, assessed.ticket.id), `thread:${assessed.ticket.id}`, { thread: true })
       return
     }
     if (assessed.outcome === 'clarify' && assessed.clarify) {
       const info = assessed.clarify
+      // 路由层判定可以开单但派工信息不全：动作仍是 open_ticket，先向用户补齐 repo / branch。
+      this.routerAction(trigger, 'open_ticket', {
+        stage: 'clarify',
+        missing: info.missing,
+        ...(info.rejectedRepo ? { rejectedRepo: info.rejectedRepo } : {}),
+      })
       // 不在「全量接收」的会话里时，未 @ 的消息不追问，避免群里刷屏。
       if (!this.shouldReply(trigger)) {
         this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength, reason: `clarify:unaddressed:missing-${info.missing.join('+')}` })
@@ -401,6 +410,9 @@ export class AgentLoop {
       return
     }
     result.ignored += 1
+    // 查询 / 清理类工具已在研判阶段生成答复：动作是 ticket_tool；否则是 ignore。
+    if (assessed.reply) this.routerAction(trigger, 'ticket_tool')
+    else this.routerAction(trigger, 'ignore')
     // 全量接收的会话（mode: all）里，不接单也要正常回一句，只是不开单。
     if (this.shouldReply(trigger)) {
       // 查询 / 清理类工具已经在研判阶段生成好答复时直接用，避免重复调用模型。
@@ -408,6 +420,16 @@ export class AgentLoop {
       else await this.converse(trigger, 'Router 判断这不是可执行的工作请求')
       result.replied += 1
     }
+  }
+
+  /** 路由层动作留痕：router:action 是路由层为这条消息选出的唯一动作（reply / ticket_tool / open_ticket / analysis / ignore）。 */
+  private routerAction(trigger: Trigger, action: 'reply' | 'ticket_tool' | 'open_ticket' | 'analysis' | 'ignore', extra: Record<string, unknown> = {}): void {
+    this.logger.info('router:action', {
+      triggerId: trigger.id,
+      ...messageContext(trigger),
+      action,
+      ...extra,
+    })
   }
 
   /**
@@ -956,7 +978,12 @@ export class AgentLoop {
 }
 
 export function buildSystemPrompt(policy: Policy, home?: string): string {
-  return [readPrompt('orchestrator.md', home), readPrompt('admission.md', home), policySection(policy)].join('\n\n---\n\n')
+  return [
+    readPrompt('orchestrator.md', home),
+    readPrompt('admission.md', home),
+    readPrompt('router-agent.md', home),
+    policySection(policy),
+  ].join('\n\n---\n\n')
 }
 
 /** 会话模式：人格 + 职责 + 准入 + 回复规则 + 策略，一次注入后由 session 复用。 */
@@ -975,6 +1002,7 @@ export function buildUnifiedSystemPrompt(
     readPrompt('orchestrator.md', home),
     readPrompt('admission.md', home),
     readPrompt('conversation.md', home),
+    readPrompt('router-agent.md', home),
     policySection(policy),
   ].filter(Boolean).join('\n\n---\n\n')
 }
