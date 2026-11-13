@@ -287,6 +287,18 @@ decision:
 
 > `apiKey` 与 `model` **两项都要有**才会真的走 Jev：只给密钥不给模型名时，决策层会退化成 LLM 兜底路径，并在日志里记 `decision:provider-missing`。
 
+**怎么确认决策层真的生效**（三项都对才算生效）：
+
+1. `ra doctor` 里有「决策层」一行：`已启用，Provider jev（jev-latest）` 才算装好；写「缺模型名 / 缺 API Key」就是还差东西。
+2. 启动日志里有 `decision:enabled`：`provider` 是 `jev` 或 `llm`（`llm` 说明在走兜底）。
+3. 普通成员在群里发一条**没 @机器人**的消息后，日志里有 `decision:verdict`（带 `action` / `msgType` / `confidence`）；被确定性准入挡掉的是 `intake:decision-dropped`，判定不跟进的是 `intake:decision-ignore`，进了分析会话的是 `intake:opened`。
+
+```bash
+ra logs --follow | grep '"message":"decision:'
+```
+
+> 决策层只处理**群里没 @机器人**的普通成员消息，且该群要同时满足「需求分析助手已开启」与「已绑定项目」；@了机器人的消息直接走 Router 研判，管理员消息永远不进决策层。
+
 面板改造前后的截图见 [assets/decision-config/README.md](assets/decision-config/README.md)。
 
 ## 飞书机器人（专属 profile）

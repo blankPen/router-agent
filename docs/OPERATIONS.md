@@ -236,6 +236,7 @@ Router 不做对话，只在必要时说话：
 | `decision:audit` / `decision:audit-write-failed` | CLI | `engine` `triggerId` `durationMs` `tokens` `toolCalls` `decision` / `detail` | 每次研判的审计记录写入 `decisions.jsonl`；写盘失败不影响研判 |
 | `decision:engine-failed` | Agent Loop | `triggerId` `detail` | 研判引擎调用失败（没额度 / 限流 / 超时 / 鉴权失败等），按 unavailable 处理并留下原因；用户侧会收到对应的失败原因文案 |
 | `decision:verdict` | DecisionAgent | `triggerId` `chat` `provider` `action` `msgType` `confidence` | 决策层分类结论（确定性准入已通过，Jev / LLM 给出动作与消息类型） |
+| `decision:enabled` | EngineFactory | `provider` `model`（jev 时）`detail` | 决策层已装配：走的 Provider 是 jev 还是 llm 兜底；Jev 连接信息不全时会在这里说明原因 |
 | `decision:failed` | DecisionAgent | `triggerId` `chat` `provider` `detail` | 决策模型调用失败，已按兜底结论处理（不改变消息流向） |
 | `decision:provider-missing` | EngineFactory | `detail` | `decision.enabled` 但 Jev 密钥与 LLM 引擎都不可用，回退原有 LLM 初筛 |
 | `tool:denied` | PiDecisionEngine | `triggerId` `tool` `actor` `toolScope` `detail` | 工具层执行时校验拒绝越权调用（普通成员会话无工单 / 状态管理工具） |

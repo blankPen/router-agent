@@ -78,8 +78,16 @@ export function createDecisionAgent(opts: DecisionAgentFactoryOptions): Decision
       model: decision.jev.model,
       ...(decision.jev.baseUrl ? { baseUrl: decision.jev.baseUrl } : {}),
     })
+    // 启动时留痕：日志里能直接看出决策层是否装配、走的哪个 Provider。
+    opts.logger?.info('decision:enabled', { provider: 'jev', model: decision.jev.model })
   } else if (opts.intakeEngine) {
     provider = new LlmDecisionProvider(opts.intakeEngine, opts.config.home)
+    opts.logger?.info('decision:enabled', {
+      provider: 'llm',
+      detail: decision.provider === 'jev'
+        ? 'Jev 连接信息不全（API Key 与模型名要都有），用 LLM 模拟同一份决策契约'
+        : '按配置用 LLM 模拟同一份决策契约',
+    })
   } else {
     opts.logger?.warn('decision:provider-missing', { detail: 'decision.enabled 但 Jev 密钥与 LLM 引擎都不可用，回退 LLM 初筛' })
     return null

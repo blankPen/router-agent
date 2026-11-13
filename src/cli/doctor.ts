@@ -35,6 +35,7 @@ export interface DoctorCheck {
 /** 配置页的分组 id；与 `src/web/client/fields.ts` 的 CONFIG_GROUPS 对齐。 */
 export const CONFIG_SECTIONS = {
   llm: 'llm',
+  decision: 'decision',
   runtime: 'runtime',
   channels: 'channels',
   projects: 'projects',
@@ -67,6 +68,8 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
   const projects = projectsForRuntime(config)
   const projectCount = projects.length
   checks.push(configRequiredCheck(config, projectCount))
+  // 决策层是否真的装上：这是「配了却在用兜底」最容易漏掉的一处。
+  checks.push(decisionLayerCheck(config))
 
   checks.push({
     name: 'accept mode',
@@ -299,6 +302,7 @@ export function configRequiredCheck(config: AppConfig, projectCount = projectsFo
 export function runConfigDoctor(deps: { config: AppConfig; llm: () => { ok: boolean; detail: string } }): DoctorCheck[] {
   const { config } = deps
   const checks: DoctorCheck[] = [configRequiredCheck(config)]
+  checks.push(decisionLayerCheck(config))
   const llm = deps.llm()
   checks.push({
     name: '模型配置',
@@ -321,6 +325,46 @@ export function runConfigDoctor(deps: { config: AppConfig; llm: () => { ok: bool
     })
   }
   return checks
+}
+
+/**
+ * 决策层检查：是否启用、Provider 是谁、Jev 连接信息是否齐全。
+ *
+ * apiKey 与 model 两项都要有才真的走 Jev——只给密钥时服务会退回 LLM 兜底，
+ * 这里必须说清楚，否则「配了却在用 LLM」会很难排查。
+ */
+function decisionLayerCheck(config: AppConfig): DoctorCheck {
+  const decision = config.decision
+  if (!decision.enabled) {
+    return {
+      name: '决策层',
+      status: 'ok',
+      detail: '未启用：普通成员消息仍走原来的 LLM 初筛（需要时在面板「配置 → 决策层」打开）',
+    }
+  }
+  const jev = decision.jev
+  if (decision.provider !== 'jev') {
+    return {
+      name: '决策层',
+      status: 'ok',
+      detail: '已启用，Provider llm（用同一份决策契约模拟）',
+    }
+  }
+  const missing = [!jev.apiKey ? 'API Key' : '', !jev.model ? '模型名' : ''].filter(Boolean)
+  if (missing.length > 0) {
+    return {
+      name: '决策层',
+      status: 'fail',
+      detail: `已启用，但 Jev 连接信息缺${missing.join('、')}：会退回 LLM 兜底，不会真的走 Jev`,
+      hint: '在面板「配置 → 决策层」把模型名与 API Key 都填上（两项都要有）',
+      section: CONFIG_SECTIONS.decision,
+    }
+  }
+  return {
+    name: '决策层',
+    status: 'ok',
+    detail: `已启用，Provider jev（${jev.model}）`,
+  }
 }
 
 async function check(name: string, probe: () => Promise<Omit<DoctorCheck, 'name'>>): Promise<DoctorCheck> {
