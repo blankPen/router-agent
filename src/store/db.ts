@@ -1278,8 +1278,21 @@ export class Store {
     this.db.prepare("UPDATE inputs SET assignment_id = ? WHERE ticket_id = ? AND assignment_id = ''").run(assignmentId, ticketId)
   }
 
-  markInputsDelivered(ticketId: string, at: string): void {
-    this.db.prepare("UPDATE inputs SET status = 'delivered', delivered_at = ? WHERE ticket_id = ? AND status = 'pending'").run(at, ticketId)
+  /**
+   * 标记这批输入已投递。
+   *
+   * 只标记真正送出去的那些：没送出的输入不能算送达，否则它会被当成「已投递等 ack」，
+   * 既不会再重投，也查不出到底有没有送到 worker 终端。
+   */
+  markInputsDelivered(ticketId: string, ids: string[], at: string): void {
+    if (ids.length === 0) return
+    const update = this.db.prepare("UPDATE inputs SET status = 'delivered', delivered_at = ? WHERE id = ? AND ticket_id = ? AND status = 'pending'")
+    for (const id of ids) update.run(at, id, ticketId)
+  }
+
+  /** 重投到上限仍未送达：标成 expired，不再重投，也不代表用户请求已被完成。 */
+  expireInput(ticketId: string, id: string): number {
+    return Number(this.db.prepare("UPDATE inputs SET status = 'expired' WHERE id = ? AND ticket_id = ? AND status = 'pending'").run(id, ticketId).changes)
   }
 
   /**
