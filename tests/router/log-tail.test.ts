@@ -42,12 +42,46 @@ describe('日志增量读取', () => {
     expect(result.entries[0]).toEqual({
       at: '2026-11-09T10:00:00.000Z',
       level: 'info',
+      domain: 'api',
+      event: 'listening',
       message: 'api:listening',
       data: { port: 8787 },
     })
     expect(result.entries[1]?.level).toBe('warn')
     expect(result.more).toBe(false)
     expect(result.cursor).toBeGreaterThan(0)
+  })
+
+  it('解析出结构字段 domain / event / trace，且不进业务字段', () => {
+    setup([
+      jsonLine({
+        at: '2026-11-09T10:00:00.000Z',
+        level: 'info',
+        domain: 'trigger',
+        event: 'ingested',
+        message: 'trigger:ingested',
+        trace: 'trg-1',
+        id: 'trg-1',
+      }),
+    ].join(''))
+
+    const result = readLogs(path)
+    expect(result.entries[0]).toEqual({
+      at: '2026-11-09T10:00:00.000Z',
+      level: 'info',
+      domain: 'trigger',
+      event: 'ingested',
+      trace: 'trg-1',
+      message: 'trigger:ingested',
+      data: { id: 'trg-1' },
+    })
+  })
+
+  it('旧日志没有结构字段时按事件名与业务字段补齐', () => {
+    setup(jsonLine({ at: '2026-11-09T10:00:00.000Z', level: 'warn', message: 'worker:status-failed', ticketId: 'tk-84' }))
+
+    const result = readLogs(path)
+    expect(result.entries[0]).toMatchObject({ domain: 'worker', event: 'status-failed', trace: 'tk-84' })
   })
 
   it('带 cursor 只返回之后新增的行', () => {
@@ -83,7 +117,7 @@ describe('日志增量读取', () => {
   it('非 JSON 行按原文返回，不拖累后续行', () => {
     setup(`这是旧格式日志\n${jsonLine({ at: '2026-11-09T10:00:00.000Z', level: 'info', message: 'after' })}`)
     const result = readLogs(path)
-    expect(result.entries[0]).toEqual({ at: '', level: 'raw', message: '这是旧格式日志' })
+    expect(result.entries[0]).toEqual({ at: '', level: 'raw', domain: '', event: '', message: '这是旧格式日志' })
     expect(result.entries[1]?.message).toBe('after')
   })
 

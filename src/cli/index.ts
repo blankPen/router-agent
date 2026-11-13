@@ -9,6 +9,7 @@ import { ensureHome, intakeEnabledChats, loadConfig, policyOf, projectsForRuntim
 import { Store, type SessionMigrationState } from '../store/db.js'
 import { Engine } from '../core/engine.js'
 import { effectiveAllowed, effectiveAllowedByChat, shouldAcknowledge } from '#core/policy.js'
+import { logDimensions } from '#core/events.js'
 import { loadRuntimePlugins, type LoadedRuntimePlugins } from '#runtime/plugins/loader.js'
 import { loadChannelPlugins, type LoadedChannelPlugins } from '#channel/plugins/loader.js'
 import { AcpRuntimeAdmin } from '@router-agent/runtime-acp'
@@ -1910,16 +1911,21 @@ function syncIdentitySnapshot(
   for (const [openId, name] of identity.names) target.actorNames.set(openId, name)
 }
 
-function createLogger(home: string, output: CliIo, echo = true): Logger {
+export function createLogger(home: string, output: CliIo, echo = true): Logger {
   const path = join(home, 'logs', 'router-agent.log')
   const write = (level: string, message: string, extra?: Record<string, unknown>): void => {
     // message 永远是事件名；业务字段里的 message 改写成 detail，避免把事件名冲掉。
     const { message: detail, ...rest } = extra ?? {}
+    // domain / event / trace 是结构字段：面板按它们过滤，链路 ID 把同一条链路的日志串起来。
+    const dimensions = logDimensions(message, rest)
     const line = JSON.stringify({
       at: new Date().toISOString(),
       level,
+      domain: dimensions.domain,
+      event: dimensions.event,
       message,
       ...(detail === undefined ? {} : { detail }),
+      ...(dimensions.trace ? { trace: dimensions.trace } : {}),
       ...rest,
     })
     try {

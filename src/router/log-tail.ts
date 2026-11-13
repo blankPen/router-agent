@@ -6,6 +6,7 @@
  * 既能跟实时日志，又不会每次把整个文件重新读一遍。
  */
 import { closeSync, existsSync, openSync, readSync, statSync } from 'node:fs'
+import { logDimensions } from '#core/events.js'
 
 /** 面板单次回看的最大行数。 */
 export const MAX_LOG_LINES = 1_000
@@ -21,8 +22,14 @@ export interface LogEntry {
   at: string
   /** info / warn / error；无法解析的行记为 raw。 */
   level: string
+  /** 事件域（事件名的第一段），面板按它过滤。 */
+  domain: string
+  /** 事件动作（事件名冒号后的部分）。 */
+  event: string
+  /** 链路 ID：把同一条链路的日志串起来。 */
+  trace?: string
   message: string
-  /** at / level / message 之外的结构化字段。 */
+  /** at / level / message / 结构字段之外的业务字段。 */
   data?: Record<string, unknown>
 }
 
@@ -169,17 +176,25 @@ function parseLine(line: string): LogEntry {
       const data: Record<string, unknown> = {}
       for (const [key, value] of Object.entries(record)) {
         if (key === 'at' || key === 'level' || key === 'message') continue
+        // domain / event / trace 单独成字段，不混进业务字段里。
+        if (key === 'domain' || key === 'event' || key === 'trace') continue
         data[key] = value
       }
+      const message = typeof record.message === 'string' ? record.message : ''
+      // 旧日志没有结构字段时按事件名与业务字段补齐，面板照样能按维度过滤。
+      const dimensions = logDimensions(message, record)
       return {
         at: typeof record.at === 'string' ? record.at : '',
         level: typeof record.level === 'string' ? record.level : 'info',
-        message: typeof record.message === 'string' ? record.message : '',
+        domain: dimensions.domain,
+        event: dimensions.event,
+        ...(dimensions.trace ? { trace: dimensions.trace } : {}),
+        message,
         ...(Object.keys(data).length > 0 ? { data } : {}),
       }
     }
   } catch {
     // 非 JSON 行（旧日志、异常栈等）按原文展示，不影响后续行。
   }
-  return { at: '', level: 'raw', message: line }
+  return { at: '', level: 'raw', domain: '', event: '', message: line }
 }

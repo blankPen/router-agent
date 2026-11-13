@@ -14,10 +14,21 @@ import {
   tokenize,
 } from '../../src/router/log-assistant.js'
 import type { LogEntry } from '../../src/router/log-tail.js'
+import { logDimensions } from '#core/events.js'
 import type { DiagnosisTool } from '../../src/router/diagnosis-tools.js'
 
 function entry(at: string, level: string, message: string, data?: Record<string, unknown>): LogEntry {
-  return { at, level, message, ...(data ? { data } : {}) }
+  // 维度按真实日志的推导方式补齐，测试里的条目与线上结构一致。
+  const dimensions = logDimensions(message, data ?? {})
+  return {
+    at,
+    level,
+    domain: dimensions.domain,
+    event: dimensions.event,
+    ...(dimensions.trace ? { trace: dimensions.trace } : {}),
+    message,
+    ...(data ? { data } : {}),
+  }
 }
 
 function jsonResponse(payload: unknown, status = 200): Response {
