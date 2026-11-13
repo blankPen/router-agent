@@ -100,7 +100,7 @@ export function RuntimeCards({
   onOptionChange,
   onAddRuntime,
 }: RuntimeCardsProps): JSX.Element {
-  const [busy, setBusy] = useState<Record<string, 'check' | 'install'>>({})
+  const [busy, setBusy] = useState<Record<string, 'check' | 'probe' | 'install'>>({})
   const [jobs, setJobs] = useState<Record<string, InstallJobView>>({})
   const [openLogs, setOpenLogs] = useState<Record<string, boolean>>({})
   const [checks, setChecks] = useState<Record<string, CheckResult>>({})
@@ -161,11 +161,12 @@ export function RuntimeCards({
     return () => window.clearInterval(timer)
   }, [detecting, onChoices, onDetecting])
 
-  const check = async (choice: RuntimeChoiceView): Promise<void> => {
-    setBusy(current => ({ ...current, [choice.id]: 'check' }))
+  // probe = 轻量探测（命令 / 版本 / 依赖）；check = ACP Agent 的完整握手。
+  const runCheck = async (choice: RuntimeChoiceView, kind: 'probe' | 'check'): Promise<void> => {
+    setBusy(current => ({ ...current, [choice.id]: kind }))
     try {
       const result = await sendJson<{ ok: boolean; detail: string; choice?: RuntimeChoiceView }>(
-        '/api/runtimes/check',
+        kind === 'probe' ? '/api/runtimes/probe' : '/api/runtimes/check',
         'POST',
         { id: choice.id },
       )
@@ -181,7 +182,7 @@ export function RuntimeCards({
           : [...current, next])
       }
       const status = result.choice?.status ?? (result.ok ? 'ready' : 'incompatible')
-      const verb = isAcpAgentRuntime(choice.id) ? '握手' : '检测'
+      const verb = kind === 'probe' ? '检测' : '握手'
       const name = runtimeDisplayName(choice)
       if (status === 'needs-auth') {
         onNotice({ kind: 'warn', text: `${name} 握手通过，但仍需登录：${result.choice?.reason ?? result.detail}` })
@@ -373,9 +374,12 @@ export function RuntimeCards({
                     >
                       {isSelected ? <><Icon name="check" size={12} />当前使用</> : selectable ? '使用此运行时' : '不可用'}
                     </button>
-                    {choice.status !== 'not-installed' && (
-                      <button className="btn ghost tiny" disabled={Boolean(busyKind) || detecting} onClick={() => void check(choice)}>
-                        {busyKind === 'check' ? '检测中…' : isAcpAgentRuntime(choice.id) ? '试启动' : '检测'}
+                    <button className="btn ghost tiny" disabled={Boolean(busyKind) || detecting} onClick={() => void runCheck(choice, 'probe')}>
+                      {busyKind === 'probe' ? '检测中…' : '检测'}
+                    </button>
+                    {isAcpAgentRuntime(choice.id) && choice.status !== 'not-installed' && (
+                      <button className="btn ghost tiny" disabled={Boolean(busyKind) || detecting} onClick={() => void runCheck(choice, 'check')}>
+                        {busyKind === 'check' ? '启动中…' : '试启动'}
                       </button>
                     )}
                     {choice.cli && !choice.cli.installed && choice.cli.installUrl && (

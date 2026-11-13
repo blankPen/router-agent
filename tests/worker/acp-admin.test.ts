@@ -117,6 +117,54 @@ describe('内置运行时探测', () => {
     expect(admin.snapshot()?.choices.some(choice => choice.id === 'acp-claude')).toBe(true)
   })
 
+  it('check 内置运行时（herdr / t3code）不会落到 ACP 分支', async () => {
+    const dir = home()
+    const bin = join(dir, 'bin')
+    fakeBin(bin, 'herdr', 'case "$1" in --version) echo "herdr 0.9.5";; status) echo "status: running";; esac')
+    fakeBin(bin, 't3', 'echo "t3 1.0.0"')
+    const admin = new AcpRuntimeAdmin({ home: dir, env: { ...process.env, PATH: bin }, config: config() })
+
+    const herdr = await admin.check('herdr')
+    expect(herdr.detail).not.toContain('未知 ACP Agent')
+    expect(herdr).toMatchObject({ ok: true, choice: { id: 'herdr', status: 'ready', version: '0.9.5' } })
+
+    const t3 = await admin.check('t3code')
+    expect(t3.detail).not.toContain('未知 ACP Agent')
+    expect(t3).toMatchObject({ ok: true, choice: { id: 't3code', status: 'ready' } })
+  })
+
+  it('未知运行时 id 报未知运行时，而不是未知 ACP Agent', async () => {
+    const dir = home()
+    const admin = new AcpRuntimeAdmin({ home: dir, env: { ...process.env, PATH: join(dir, 'bin') }, config: config() })
+    const checked = await admin.check('nope')
+    expect(checked.ok).toBe(false)
+    expect(checked.detail).toBe('未知运行时：nope')
+  })
+
+  it('probe 只探 ACP Agent 的命令与版本，不做完整握手', async () => {
+    const dir = home()
+    const bin = join(dir, 'bin')
+    fakeBin(bin, 'opencode', 'echo "opencode 2.2.7"')
+    const admin = new AcpRuntimeAdmin({ home: dir, env: { ...process.env, PATH: bin }, config: config() })
+
+    const probed = await admin.probe('acp-opencode')
+    expect(probed).toMatchObject({
+      ok: true,
+      detail: '版本探测通过（2.2.7）',
+      choice: { id: 'acp-opencode', status: 'unverified', version: '2.2.7' },
+    })
+    // probe 的结果要写回快照，面板卡片才能刷新。
+    expect(admin.snapshot()?.choices.find(choice => choice.id === 'acp-opencode')).toMatchObject({ version: '2.2.7' })
+  })
+
+  it('probe 未安装的 ACP Agent 时判 not-installed', async () => {
+    const dir = home()
+    const admin = new AcpRuntimeAdmin({ home: dir, env: { ...process.env, PATH: join(dir, 'bin') }, config: config() })
+    const probed = await admin.probe('acp-opencode')
+    expect(probed.ok).toBe(false)
+    expect(probed.choice).toMatchObject({ id: 'acp-opencode', status: 'not-installed' })
+  })
+
   it('内置运行时不允许在线安装', async () => {
     const dir = home()
     const admin = new AcpRuntimeAdmin({ home: dir, env: { ...process.env, PATH: join(dir, 'bin') }, config: config() })
