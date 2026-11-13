@@ -8,9 +8,39 @@ import {
 } from '../../src/web/client/log-filters.js'
 
 const lines: FilterableLogLine[] = [
-  { level: 'info', message: 'trigger:ingested', domain: 'trigger', event: 'ingested', trace: 'trg-1', data: { chat: 'oc_1' } },
-  { level: 'warn', message: 'worker:status-failed', domain: 'worker', event: 'status-failed', trace: 'tk-84', data: { reason: '超时' } },
-  { level: 'error', message: 'api:request-failed', domain: 'api', event: 'request-failed', data: { path: '/api/tickets' } },
+  {
+    level: 'info',
+    message: 'trigger:ingested',
+    category: 'message',
+    domain: 'trigger',
+    event: 'ingested',
+    chat: 'oc_1',
+    actor: 'ou_alice',
+    trace: 'trg-1',
+    data: { chatName: '研发群' },
+  },
+  {
+    level: 'warn',
+    message: 'worker:status-failed',
+    category: 'event',
+    domain: 'worker',
+    event: 'status-failed',
+    chat: 'oc_1',
+    actor: 'ou_alice',
+    runtime: 'orca',
+    ticket: 'tk-84',
+    trace: 'tk-84',
+    data: { reason: '超时' },
+  },
+  {
+    level: 'error',
+    message: 'api:request-failed',
+    category: 'event',
+    domain: 'api',
+    event: 'request-failed',
+    runtime: 'codex-app',
+    data: { path: '/api/tickets' },
+  },
 ]
 
 describe('日志页多维过滤', () => {
@@ -38,8 +68,12 @@ describe('日志页多维过滤', () => {
     ])
   })
 
-  it('关键字同时命中消息与业务字段', () => {
+  it('关键字同时命中消息、维度与业务字段', () => {
     expect(filterLogLines(lines, { ...EMPTY_FILTER, keyword: 'oc_1' }).map(line => line.message)).toEqual([
+      'trigger:ingested',
+      'worker:status-failed',
+    ])
+    expect(filterLogLines(lines, { ...EMPTY_FILTER, keyword: '研发群' }).map(line => line.message)).toEqual([
       'trigger:ingested',
     ])
     expect(filterLogLines(lines, { ...EMPTY_FILTER, keyword: 'request-failed' }).map(line => line.message)).toEqual([
@@ -49,6 +83,7 @@ describe('日志页多维过滤', () => {
 
   it('多个维度同时生效时取交集', () => {
     const visible = filterLogLines(lines, {
+      ...EMPTY_FILTER,
       level: 'warn',
       domain: 'worker',
       event: 'status-failed',
@@ -64,6 +99,24 @@ describe('日志页多维过滤', () => {
     expect(isFilterActive(EMPTY_FILTER)).toBe(false)
     expect(isFilterActive({ ...EMPTY_FILTER, domain: 'api' })).toBe(true)
     expect(isFilterActive({ ...EMPTY_FILTER, keyword: ' ' })).toBe(false)
+  })
+
+  it('按类别过滤：消息 / 事件 / 动作', () => {
+    expect(filterLogLines(lines, { ...EMPTY_FILTER, category: 'message' }).map(line => line.message)).toEqual([
+      'trigger:ingested',
+    ])
+    expect(filterLogLines(lines, { ...EMPTY_FILTER, category: 'event' })).toHaveLength(2)
+  })
+
+  it('按群、发起人、运行时、工单过滤', () => {
+    expect(filterLogLines(lines, { ...EMPTY_FILTER, chat: 'oc_1' })).toHaveLength(2)
+    expect(filterLogLines(lines, { ...EMPTY_FILTER, actor: 'ou_alice' })).toHaveLength(2)
+    expect(filterLogLines(lines, { ...EMPTY_FILTER, runtime: 'orca' }).map(line => line.message)).toEqual([
+      'worker:status-failed',
+    ])
+    expect(filterLogLines(lines, { ...EMPTY_FILTER, ticket: 'tk-84' }).map(line => line.message)).toEqual([
+      'worker:status-failed',
+    ])
   })
 
   it('分面计数按出现次数从多到少', () => {
@@ -82,6 +135,14 @@ describe('日志页多维过滤', () => {
       { value: 'ingested', count: 1 },
       { value: 'request-failed', count: 1 },
       { value: 'status-failed', count: 1 },
+    ])
+  })
+
+  it('群与发起人分面忽略没有上下文的行', () => {
+    expect(facetCounts(lines, EMPTY_FILTER, 'chat')).toEqual([{ value: 'oc_1', count: 2 }])
+    expect(facetCounts(lines, EMPTY_FILTER, 'runtime')).toEqual([
+      { value: 'codex-app', count: 1 },
+      { value: 'orca', count: 1 },
     ])
   })
 

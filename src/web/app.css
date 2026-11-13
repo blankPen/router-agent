@@ -1742,13 +1742,16 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
   flex-wrap: wrap;
   align-items: center;
   gap: 8px 10px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--rule);
+  padding: 9px 12px;
   background: var(--surface);
 }
 
-/* 级别筛选：一行轻量开关，计数用等宽数字，选中态只加一层中性底。 */
-.log-filters { display: flex; align-items: center; gap: 4px; }
+/* 级别筛选用面板已有的分段控件：选中态是一块中性底，数字用等宽。 */
+.log-levels { margin-bottom: 0; }
+.log-levels .log-chip-dot { margin-right: 5px; }
+.log-levels .log-chip-count { margin-left: 6px; color: var(--faint); }
+.log-levels button.active .log-chip-count { color: var(--muted); }
+
 .log-chip {
   display: inline-flex;
   align-items: center;
@@ -1776,7 +1779,7 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 .log-chip-count { color: var(--faint); font-weight: 500; }
 .log-chip.active .log-chip-count { color: var(--muted); }
 
-.log-search { width: 240px; min-width: 200px; margin-left: auto; }
+.log-search { width: 220px; min-width: 180px; }
 /* 路径可以折行，大小与更新时间作为一个整体换行，避免「40.0 / KB」被拆开。 */
 .log-path { overflow-wrap: anywhere; }
 .log-submeta { white-space: nowrap; }
@@ -1807,42 +1810,133 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 10px 0 16px;
+  padding: 0 0 16px;
   background: var(--surface);
-  font-family: var(--mono);
-  font-size: 13px;
   /* 跟手滚动：鼠标停在日志区时只滚日志，不带着整页一起滚。 */
   overscroll-behavior: contain;
 }
 .log-view:focus-visible { outline-offset: -2px; }
 
-.log-row {
-  display: grid;
-  grid-template-columns: 76px 50px minmax(0, 1fr);
-  gap: 12px;
-  align-items: start;
-  padding: 2px 16px 2px 14px;
-  border-left: 2px solid transparent;
-  line-height: 1.6;
+/* ---------------------------------------------------------------------------
+   日志表：一条事件一行，维度成列。
+   表头 12px 灰字、无底色，行之间只用一条细线；颜色只落在级别上。
+   --------------------------------------------------------------------------- */
+
+.log-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 12.5px;
 }
-.log-row:hover { background: var(--raised); }
-/* 级别色只给 WARN / ERROR：一条左侧色轨 + 极淡底色，扫一眼就能定位。 */
-.log-row.level-warn { border-left-color: var(--warning); background: color-mix(in srgb, var(--warning) 5%, transparent); }
-.log-row.level-error { border-left-color: var(--negative); background: color-mix(in srgb, var(--negative) 6%, transparent); }
+.log-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: 32px;
+  padding: 0 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--rule);
+  color: var(--faint);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  white-space: nowrap;
+}
+.log-table tbody td {
+  height: 34px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--rule);
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+.log-table tbody tr:hover td { background: var(--raised); }
 
-.log-time { color: var(--faint); font-size: 12px; line-height: 1.75; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.log-level { font-size: 11px; font-weight: 600; letter-spacing: 0.04em; line-height: 1.9; color: var(--faint); }
-/* INFO 是正常态，保持中性；只有 WARN / ERROR 带语义色，正常行不抢视线。 */
-.log-row.level-info .log-level { color: var(--muted); }
-.log-row.level-warn .log-level { color: var(--warning); }
-.log-row.level-error .log-level { color: var(--negative); }
+.log-col-time { width: 86px; }
+.log-col-level { width: 82px; }
+.log-col-category { width: 56px; }
+.log-col-event { width: 190px; }
+.log-col-chat { width: 124px; }
+.log-col-actor { width: 112px; }
+.log-col-runtime { width: 92px; }
+.log-col-ticket { width: 84px; }
 
-.log-message { color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
-.log-row.level-raw .log-message { color: var(--muted); }
+.log-cell-time { color: var(--faint); font-variant-numeric: tabular-nums; }
+.log-cell-level { color: var(--muted); }
+.log-cell-level .log-chip-dot { display: inline-block; margin-right: 6px; vertical-align: middle; }
+/* INFO 是正常态保持中性；只有 WARN / ERROR 带语义色，正常行不抢视线。 */
+.log-row.level-warn .log-cell-level { color: var(--warning); }
+.log-row.level-error .log-cell-level { color: var(--negative); }
+.log-row.level-warn .log-cell-time { color: var(--muted); }
+.log-row.level-error .log-cell-time { color: var(--muted); }
 
-.log-data { color: var(--muted); }
-.log-pair { margin-left: 8px; }
+.log-cell-category { color: var(--muted); font-family: var(--font); }
+.log-cell-chat, .log-cell-actor, .log-cell-runtime, .log-cell-ticket { font-family: var(--font); }
+
+/* 事件名是这行的身份：可点开看完整字段。 */
+.log-event-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.log-event-button:hover { color: var(--accent); }
+.log-event-chevron { flex: none; color: var(--faint); opacity: 0.55; transform: rotate(0deg); transition: transform 0.12s ease; }
+.log-row:hover .log-event-chevron, .log-event-button:focus-visible .log-event-chevron { opacity: 1; }
+.log-event-chevron.open { transform: rotate(90deg); }
+
+/* 发起人类型：一个小标签，灰色不抢戏。 */
+.log-actor-name { color: var(--muted); }
+.log-actor-type {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 16px;
+  vertical-align: 1px;
+}
+
+.log-pair { margin-left: 10px; }
 .log-key { color: var(--faint); }
+
+/* 展开行：一条事件的全部字段，标签在左、值在右。 */
+.log-detail-row td {
+  height: auto;
+  padding: 10px 12px;
+  background: var(--raised);
+  white-space: normal;
+}
+.log-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 4px 18px;
+}
+/* 标签右对齐、值左对齐：所有值落在同一条竖线上，扫读时不用逐行找。 */
+.log-detail-field {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  gap: 10px;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.log-detail-label { color: var(--faint); font-family: var(--font); text-align: right; }
+.log-detail-value { color: var(--text); overflow-wrap: anywhere; }
 
 .log-empty {
   display: flex;
@@ -1882,8 +1976,8 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 .log-jump-icon { transform: rotate(90deg); }
 
 /* 深色下淡底几乎看不见，单独把 WARN / ERROR 的底色调亮一档。 */
-:root[data-theme="dark"] .log-row.level-warn { background: color-mix(in srgb, var(--warning) 9%, transparent); }
-:root[data-theme="dark"] .log-row.level-error { background: color-mix(in srgb, var(--negative) 10%, transparent); }
+:root[data-theme="dark"] .log-row.level-warn td { background: color-mix(in srgb, var(--warning) 9%, transparent); }
+:root[data-theme="dark"] .log-row.level-error td { background: color-mix(in srgb, var(--negative) 10%, transparent); }
 
 @media (max-width: 1120px) {
   .log-search { width: 200px; min-width: 160px; }
@@ -1893,21 +1987,26 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
   .log-console { height: calc(100vh - 200px); min-height: 380px; }
 }
 
+@media (max-width: 1280px) {
+  /* 窄一点先收起运行时列：它比群与发起人更靠后看。 */
+  .log-col-runtime, .log-cell-runtime { display: none; }
+}
+
+@media (max-width: 1080px) {
+  .log-col-ticket, .log-cell-ticket { display: none; }
+}
+
+@media (max-width: 900px) {
+  .log-col-actor, .log-cell-actor { display: none; }
+}
+
 @media (max-width: 620px) {
   .log-console { height: min(68vh, 620px); min-height: 320px; }
   .log-toolbar { padding: 8px 10px; }
   /* 级别筛选在手机上横向滚动，不把页面撑宽。 */
-  .log-filters { width: 100%; overflow-x: auto; overscroll-behavior-x: contain; padding-bottom: 2px; }
-  .log-search { flex: 1 1 160px; width: auto; min-width: 0; margin-left: 0; }
-  /* 两行一条：时间与级别占首行，消息整行铺开。 */
-  .log-row {
-    grid-template-columns: max-content minmax(0, 1fr);
-    gap: 0 8px;
-    padding: 4px 12px 4px 10px;
-  }
-  .log-message { grid-column: 1 / -1; }
-  .log-time { line-height: 1.4; }
-  .log-level { line-height: 1.5; padding-top: 1px; }
+  .log-levels { max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; padding-bottom: 2px; }
+  .log-search { flex: 1 1 160px; width: auto; min-width: 0; }
+  .log-col-chat, .log-cell-chat { display: none; }
   .log-empty { min-height: 200px; padding: 28px 18px; }
 }
 
@@ -2382,19 +2481,70 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
   .provider-pick-spacer { display: none; }
 }
 
-/* 维度筛选：域 / 动作 / 追踪 ID，与级别筛选同属一条工具栏，维度之间取交集。 */
-.log-dims { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; width: 100%; }
-.log-dim { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--faint); }
-.log-select {
-  height: 26px;
-  max-width: 220px;
-  padding: 0 6px;
-  border: 1px solid var(--control);
-  border-radius: var(--radius-control);
+/* 维度筛选（类别 / 域 / 动作 / 群 / 发起人 / 运行时 / 工单 / 追踪）：一行一排，读起来像一句话。 */
+.log-toolbar-dims { padding: 8px 12px; border-bottom: 1px solid var(--rule); }
+.log-dims {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.log-menu { position: relative; display: inline-flex; }
+.log-menu-trigger {
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px;
+  border-color: var(--control);
+  color: var(--muted);
+}
+.log-menu-trigger:hover { background: var(--raised); }
+.log-menu-label { color: var(--faint); }
+.log-menu-value { color: var(--text); max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 箭头用面板自己的图标集：闭合指向下，展开指向上。 */
+.log-menu-chevron { color: var(--faint); transform: rotate(90deg); transition: transform 0.12s ease; }
+.log-menu-trigger[aria-expanded="true"] .log-menu-chevron { transform: rotate(-90deg); }
+
+/* 展开态：一张薄列表，值在左、计数在右，选中项打勾。 */
+.log-menu-list {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  min-width: 176px;
+  max-width: 300px;
+  max-height: 288px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
   background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  box-shadow: var(--shadow-md);
+}
+.log-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-chip);
+  background: none;
   color: var(--text);
   font-family: var(--font);
   font-size: 12px;
+  text-align: left;
+  cursor: pointer;
 }
-.log-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.log-select:disabled { color: var(--faint); }
+.log-menu-item:hover { background: var(--raised); }
+.log-menu-item[aria-selected="true"] { background: var(--active); }
+.log-menu-check { display: inline-flex; width: 12px; flex: none; color: var(--accent); }
+.log-menu-item-value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log-menu-count { flex: none; color: var(--faint); font-variant-numeric: tabular-nums; }
+/* 「全部」与候选值之间一条细线，两组语义分开。 */
+.log-menu-all { border-bottom: 1px solid var(--rule); border-radius: var(--radius-chip) var(--radius-chip) 0 0; margin-bottom: 4px; padding-bottom: 4px; height: 30px; }
+
+/* 工具栏右侧留给工具类操作，筛选条件都聚在左边。 */
+.log-toolbar-end { margin-left: auto; }
