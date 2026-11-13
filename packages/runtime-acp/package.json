@@ -1,6 +1,6 @@
 {
   "name": "@router-agent/runtime-acp",
-  "version": "0.3.35",
+  "version": "0.3.36",
   "type": "module",
   "description": "ACP 运行时插件：任意 Agent Client Protocol Agent",
   "license": "MIT",
@@ -31,11 +31,11 @@
     "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
-    "@router-agent/runtime": "0.3.35",
-    "@router-agent/core": "0.3.35",
-    "@router-agent/infra": "0.3.35",
-    "@router-agent/runtime-codex": "0.3.35",
-    "@router-agent/runtime-herdr": "0.3.35",
-    "@router-agent/runtime-t3code": "0.3.35"
+    "@router-agent/runtime": "0.3.36",
+    "@router-agent/core": "0.3.36",
+    "@router-agent/infra": "0.3.36",
+    "@router-agent/runtime-codex": "0.3.36",
+    "@router-agent/runtime-herdr": "0.3.36",
+    "@router-agent/runtime-t3code": "0.3.36"
   }
 }
