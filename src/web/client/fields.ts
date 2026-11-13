@@ -158,9 +158,55 @@ export const LLM_FIELDS: FieldDef[] = [
 ]
 
 /**
+ * 决策层：普通成员消息先过确定性准入，再交决策模型分类。
+ *
+ * 默认关闭——打开后才会改变普通成员消息的处理路径。密钥同样只写不读，
+ * 保存后 `publicConfig` 只回 `apiKeySet`；环境变量 TYPESAFE_API_KEY 优先级更高。
+ */
+export const DECISION_FIELDS: FieldDef[] = [
+  {
+    path: 'decision.enabled',
+    label: '启用决策层',
+    kind: 'switch',
+    hint: '开启后，普通成员消息先过确定性准入（去重 / 媒体 / 噪声门槛），再交决策模型分类；关闭时保持原有初筛行为',
+  },
+  {
+    path: 'decision.provider',
+    label: '决策 Provider',
+    kind: 'select',
+    options: [
+      { value: 'jev', label: 'jev · 决策模型（推荐）', hint: '用结构化问题问决策模型，回答可阈值化' },
+      { value: 'llm', label: 'llm · 用同一份 spec 模拟', hint: 'Jev 不可用时的兜底路径' },
+    ],
+    hint: '两个 Provider 用同一份决策契约，输出格式一致',
+  },
+  {
+    path: 'decision.jev.model',
+    label: 'Jev 模型名',
+    kind: 'text',
+    placeholder: '例如 jev-latest',
+    hint: '留空时读环境变量 TYPESAFE_MODEL',
+  },
+  {
+    path: 'decision.jev.apiKey',
+    label: 'Jev API Key',
+    kind: 'password',
+    placeholder: '留空 = 保持已配置的密钥',
+    hint: '只写入 config.yaml，保存后不回显；环境变量 TYPESAFE_API_KEY 可覆盖',
+  },
+  {
+    path: 'decision.jev.baseUrl',
+    label: 'Jev Base URL',
+    kind: 'text',
+    placeholder: '留空 = 默认地址',
+    hint: '只有走代理时才需要填；环境变量 TYPESAFE_BASE_URL 可覆盖',
+  },
+]
+
+/**
  * 配置页的分组与块。
  *
- * 顺序原则：先「能不能跑起来」（LLM 接入、运行时、渠道、项目），再「谁来叫醒它」
+ * 顺序原则：先「能不能跑起来」（LLM 接入、决策层、运行时、渠道、项目），再「谁来叫醒它」
  * （消息准入），最后是低频的其它设置。
  */
 export const CONFIG_GROUPS: ConfigGroup[] = [
@@ -222,6 +268,19 @@ export const CONFIG_GROUPS: ConfigGroup[] = [
           { path: 'router.session.compaction.reserveTokens', label: '压缩预留 token', kind: 'number', min: 1_024, max: 1_000_000 },
           { path: 'router.session.compaction.keepRecentTokens', label: '保留最近 token', kind: 'number', min: 1_024, max: 1_000_000 },
         ],
+      },
+    ],
+  },
+  {
+    id: 'decision',
+    title: '决策层',
+    description: '普通成员消息先过确定性准入门槛，再交决策模型分类。',
+    blocks: [
+      {
+        id: 'decision',
+        title: '决策模型（Jev）',
+        description: '默认关闭。开启后普通成员消息先过确定性准入（去重 / 媒体 / 噪声门槛），再交决策模型判断是否跟进、属于哪一类；关闭时保持原有初筛行为。',
+        fields: DECISION_FIELDS,
       },
     ],
   },

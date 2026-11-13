@@ -172,6 +172,9 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 | `feishu.appId` / `reaction` / `directMessages` / `allowed` / `bots` / `botOpenIds` / `botNames` | 字符串、布尔或逗号分隔列表 |
 | `feishu.chats` | 逗号分隔 chat_id；已有条目的 mode / 绑定 / sync 保留，新条目默认 `all` |
 | `llm.baseUrl` / `llm.model` / `llm.apiKey` | 模型连接信息 |
+| `decision.enabled` | `true` / `false`；开启普通成员消息的决策层 |
+| `decision.provider` | `jev` / `llm`；决策模型来源 |
+| `decision.jev.model` / `decision.jev.apiKey` / `decision.jev.baseUrl` | Jev 连接信息（密钥只写不回显） |
 
 群与项目这类复合结构用专用写法，一次完成「登记 + 绑定」：
 
@@ -257,6 +260,34 @@ llm:
 > 图片转写目前只走 OpenAI 兼容的 `/chat/completions`。如果主模型是 `anthropic-messages` 且没有单独配置 `imageBaseUrl` / `imageApiKey`，请同时配置一个 OpenAI 兼容的视觉模型，或关闭 `feishu.images.enabled`。
 
 `llm.temperature` 只影响图片转写（默认 `0.1`），不参与研判。
+
+## 决策层（普通成员消息）
+
+普通成员消息默认不值得处理：决策层先过**确定性准入门槛**（去重 / 纯媒体 / 口令 / 噪声），再交**决策模型**判断「要不要跟进、属于哪一类、是否与本群项目相关」，通过才进入路由与需求分析。**默认关闭**，关闭时普通成员消息保持原有的初筛行为。
+
+在 Web 面板「配置 → 决策层」里配（也可以写 `config.yaml` 或用 `ra config set`）：
+
+```yaml
+decision:
+  enabled: true
+  provider: jev        # jev | llm（llm 用同一份决策契约模拟，Jev 不可用时兜底）
+  jev:
+    apiKey: sk-xxx
+    model: jev-latest
+    baseUrl: ""        # 留空 = 默认地址
+```
+
+密钥也可以放环境变量，优先级高于 `config.yaml`：
+
+| 变量 | 作用 |
+|-|-|
+| `TYPESAFE_API_KEY` | Jev 密钥 |
+| `TYPESAFE_MODEL` | Jev 模型名 |
+| `TYPESAFE_BASE_URL` | Jev 接口地址（走代理时才需要） |
+
+> `apiKey` 与 `model` **两项都要有**才会真的走 Jev：只给密钥不给模型名时，决策层会退化成 LLM 兜底路径，并在日志里记 `decision:provider-missing`。
+
+面板改造前后的截图见 [assets/decision-config/README.md](assets/decision-config/README.md)。
 
 ## 飞书机器人（专属 profile）
 

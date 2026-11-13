@@ -541,6 +541,70 @@ describe('Pi 研判层配置', () => {
   })
 })
 
+describe('决策层配置（Jev）', () => {
+  it('决策层默认关闭，Provider 默认走 Jev', () => {
+    const cfg = loadConfig(home(), {})
+    expect(cfg.decision.enabled).toBe(false)
+    expect(cfg.decision.provider).toBe('jev')
+    expect(cfg.decision.jev.apiKey).toBe('')
+    expect(cfg.decision.jev.model).toBe('')
+  })
+
+  it('面板保存其它配置后，手写的 decision 段不被冲掉', () => {
+    const dir = home()
+    ensureHome(dir)
+    // 环境变量优先级高于 YAML：这里用空 env，保证断言的是配置里写的值。
+    const cfg = loadConfig(dir, {})
+    cfg.decision.enabled = true
+    cfg.decision.jev.model = 'jev-latest'
+    cfg.decision.jev.apiKey = 'sk-jev'
+    writeConfig(dir, cfg)
+
+    // 面板保存一个无关字段：走的是「读配置 → 打补丁 → 整体写回」。
+    const loaded = loadConfig(dir, {})
+    const patched = applyConfigPatch(loaded, { 'policy.maxWorkers': 3 })
+    expect(patched.errors).toEqual([])
+    writeConfig(dir, loaded)
+
+    const after = loadConfig(dir, {})
+    expect(after.decision.enabled).toBe(true)
+    expect(after.decision.jev.model).toBe('jev-latest')
+    expect(after.decision.jev.apiKey).toBe('sk-jev')
+  })
+
+  it('面板可以保存决策层开关、Provider 与 Jev 连接信息', () => {
+    const cfg = defaultConfig()
+    const result = applyConfigPatch(cfg, {
+      'decision.enabled': true,
+      'decision.provider': 'llm',
+      'decision.jev.model': 'jev-latest',
+      'decision.jev.apiKey': ' sk-jev ',
+    })
+    expect(result.errors).toEqual([])
+    expect(cfg.decision.enabled).toBe(true)
+    expect(cfg.decision.provider).toBe('llm')
+    expect(cfg.decision.jev.model).toBe('jev-latest')
+    expect(cfg.decision.jev.apiKey).toBe('sk-jev')
+  })
+
+  it('决策层配置非法值被拒绝', () => {
+    const cfg = defaultConfig()
+    expect(applyConfigPatch(cfg, { 'decision.provider': 'nope' }).errors).toHaveLength(1)
+    expect(applyConfigPatch(cfg, { 'decision.enabled': 'yes' }).errors).toHaveLength(1)
+  })
+
+  it('config set 支持 decision.*，非法值拒绝', () => {
+    const cfg = defaultConfig()
+    expect(setConfigValue(cfg, 'decision.enabled', 'true')).toBe(true)
+    expect(setConfigValue(cfg, 'decision.provider', 'llm')).toBe(true)
+    expect(setConfigValue(cfg, 'decision.jev.model', 'jev-latest')).toBe(true)
+    expect(setConfigValue(cfg, 'decision.provider', 'nope')).toBe(false)
+    expect(cfg.decision.enabled).toBe(true)
+    expect(cfg.decision.provider).toBe('llm')
+    expect(cfg.decision.jev.model).toBe('jev-latest')
+  })
+})
+
 describe('会话复用与人格配置', () => {
   it('默认开启按人隔离、7 天保留、Pi 压缩', () => {
     const cfg = loadConfig(home())

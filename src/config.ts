@@ -1226,6 +1226,17 @@ export function writeConfig(home: string, config: AppConfig): void {
     },
     worker: { tools: config.worker.tools, evidence: config.worker.evidence, skill: config.worker.skill },
     reply: config.reply,
+    // 决策层（普通成员消息）：enabled / provider / Jev 连接信息都要写回，
+    // 否则面板保存任何其它配置都会把这一段冲掉，决策层会被悄悄关掉。
+    decision: {
+      enabled: config.decision.enabled,
+      provider: config.decision.provider,
+      jev: {
+        apiKey: config.decision.jev.apiKey,
+        model: config.decision.jev.model,
+        ...(config.decision.jev.baseUrl ? { baseUrl: config.decision.jev.baseUrl } : {}),
+      },
+    },
     runtime: {
       default: config.runtime.default,
       ...(config.runtime.options ? { options: config.runtime.options } : {}),
@@ -1625,6 +1636,12 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
   'router.persona.style': enumValue(['friendly', 'concise', 'professional']),
   'router.persona.language': stringValue,
 
+  'decision.enabled': boolValue(),
+  'decision.provider': enumValue(['jev', 'llm']),
+  'decision.jev.apiKey': stringValue,
+  'decision.jev.model': stringValue,
+  'decision.jev.baseUrl': stringValue,
+
   'progress.syncMs': intValue(0, 3_600_000, ' 毫秒'),
   'progress.probeMs': intValue(0, 3_600_000, ' 毫秒'),
   'progress.silenceMs': intValue(1_000, 3_600_000, ' 毫秒'),
@@ -1823,7 +1840,7 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
       ? value
       : path === 'runtime.default'
         ? normalizeRuntimeId(value)
-        : path.startsWith('llm.')
+        : path.startsWith('llm.') || path.startsWith('decision.jev.')
           ? value.trim()
           : value
     const message = validator.check(next)
@@ -2029,6 +2046,25 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
       config.policy.maxAutoRecover = v
       return true
     }
+    case 'decision.enabled': {
+      const v = bool()
+      if (v === null) return false
+      config.decision.enabled = v
+      return true
+    }
+    case 'decision.provider':
+      if (value !== 'jev' && value !== 'llm') return false
+      config.decision.provider = value
+      return true
+    case 'decision.jev.apiKey':
+      config.decision.jev.apiKey = value
+      return true
+    case 'decision.jev.model':
+      config.decision.jev.model = value
+      return true
+    case 'decision.jev.baseUrl':
+      config.decision.jev.baseUrl = value
+      return true
     case 'progress.syncMs': {
       // 0 表示关闭工单进展定时同步
       const n = Number(value)

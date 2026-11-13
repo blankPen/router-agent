@@ -1600,7 +1600,7 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
     <>
       <PageHead
         title="配置"
-        subtitle="按「LLM Provider → 运行时 → 渠道 → 项目 → 消息准入 → 其他设置」分层配置。策略项立即生效，其余配置在重启服务后生效。"
+        subtitle="按「LLM Provider → 决策层 → 运行时 → 渠道 → 项目 → 消息准入 → 其他设置」分层配置。策略项立即生效，其余配置在重启服务后生效。"
         actions={
           <>
             <button className="btn tiny" onClick={requestRestart} disabled={restarting} title="重启 ra 服务，当前页面不会刷新">
