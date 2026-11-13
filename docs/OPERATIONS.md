@@ -86,7 +86,7 @@ Router 不做对话，只在必要时说话：
 | `intake:screen` | AgentLoop | `triggerId` `chat` `chatName` `actor` `actorName` `actorType` `kind` `reason` | 需求识别初筛结论：chat / question / issue（`reason` 已截断到 120 字） |
 | `intake:screen-failed` / `intake:screen-invalid` | AgentLoop | `triggerId` `detail` / `triggerId` | 初筛模型失败或输出不合法；消息按原准入规则继续处理 |
 | `intake:decision-dropped` | AgentLoop | `triggerId` `chat` `rule` | 决策层确定性准入命中（bot / 媒体 / 口令 / 噪声），直接忽略 |
-| `intake:decision-ignore` | AgentLoop | `triggerId` `chat` `kind` `confidence` | 决策层判定无需跟进（闲聊吐槽等），忽略该消息 |
+| `intake:decision-ignore` | AgentLoop | `triggerId` `chat` `msgType` `action` `confidence` | 决策层判定无需跟进（chitchat / grumble 等），忽略该消息 |
 | `intake:opened` | AgentLoop | `intakeId` `chat` `chatName` `actor` `actorName` `actorType` `kind` `project` | 为一条疑似问题创建需求识别会话 |
 | `intake:clarify` | AgentLoop | `intakeId` `questions` | 分析 Agent 发起追问 |
 | `intake:answered` | AgentLoop | `intakeId` `chat` | 分析 Agent 直接给出结论，会话结束，不产出需求单 |
@@ -233,9 +233,10 @@ Router 不做对话，只在必要时说话：
 | `loop:error` | Service | `detail` | 内部定时任务回调抛出的未预期异常，不影响主循环 |
 | `decision:audit` / `decision:audit-write-failed` | CLI | `engine` `triggerId` `durationMs` `tokens` `toolCalls` `decision` / `detail` | 每次研判的审计记录写入 `decisions.jsonl`；写盘失败不影响研判 |
 | `decision:engine-failed` | Agent Loop | `triggerId` `detail` | 研判引擎调用失败（没额度 / 限流 / 超时 / 鉴权失败等），按 unavailable 处理并留下原因；用户侧会收到对应的失败原因文案 |
-| `decision:verdict` | DecisionAgent | `triggerId` `chat` `provider` `action` `kind` `confidence` | 决策层分类结论（确定性准入已通过，Jev / LLM 给出动作与类型） |
+| `decision:verdict` | DecisionAgent | `triggerId` `chat` `provider` `action` `msgType` `confidence` | 决策层分类结论（确定性准入已通过，Jev / LLM 给出动作与消息类型） |
 | `decision:failed` | DecisionAgent | `triggerId` `chat` `provider` `detail` | 决策模型调用失败，已按兜底结论处理（不改变消息流向） |
 | `decision:provider-missing` | EngineFactory | `detail` | `decision.enabled` 但 Jev 密钥与 LLM 引擎都不可用，回退原有 LLM 初筛 |
+| `tool:denied` | PiDecisionEngine | `triggerId` `tool` `actor` `toolScope` `detail` | 工具层执行时校验拒绝越权调用（普通成员会话无工单 / 状态管理工具） |
 | `chat:reply-failed` | Agent Loop | `triggerId` `chat` `reason` `detail` | 回复模型失败（抛错或返回空内容），已按真实原因回话，不再退回「没看出要做什么」这类统一话术 |
 | `session:transcript-failed` / `session:reset-failed` | Agent Loop | `key` `detail` | 会话转录 / `/new` 重置失败，不影响当轮回复 |
 | `config:created` | Config | `path` | 首次启动写入了默认 `config.yaml` |

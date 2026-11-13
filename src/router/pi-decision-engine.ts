@@ -13,6 +13,9 @@ import type {
 } from './decision-engine.js'
 import { proposalFromJson } from './decision-engine.js'
 import { DECISION_TOOL_NAMES, toolSpec, type PiToolDefinition } from './tool-spec.js'
+import { ROUTER_TOOL_AUTHZ } from './tool-spec.js'
+import { allowedTools } from '#core/tool-scope.js'
+import { noopLogger, type Logger } from '#infra/logger.js'
 import type { RouterToolbox } from './tools.js'
 import {
   SessionRegistry,
@@ -91,6 +94,8 @@ export interface PiDecisionEngineOptions {
   compaction?: { enabled: boolean; reserveTokens: number; keepRecentTokens: number }
   /** 模型上下文窗口。 */
   contextWindow?: number
+  /** 工具越权拒绝（tool:denied）等告警日志；缺省 noop。 */
+  logger?: Logger
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000
@@ -144,6 +149,7 @@ export class PiDecisionEngine implements DecisionEngine {
   private sessionTokenBudget: number
   private compaction?: { enabled: boolean; reserveTokens: number; keepRecentTokens: number }
   private contextWindow: number
+  private logger: Logger
   private sessions: SessionRegistry<PiSessionLike> | null = null
   /** 实际暴露给模型的工具；没有更新能力时去掉 router_update。 */
   private toolNames: string[]
@@ -164,6 +170,7 @@ export class PiDecisionEngine implements DecisionEngine {
     this.sessionTokenBudget = opts.sessionTokenBudget === undefined ? 0 : Math.max(0, opts.sessionTokenBudget)
     this.compaction = opts.compaction
     this.contextWindow = opts.contextWindow && opts.contextWindow > 0 ? opts.contextWindow : 128_000
+    this.logger = opts.logger ?? noopLogger
     this.toolNames = DECISION_TOOL_NAMES.filter(name => name !== 'router_update' || opts.toolbox.canUpdate())
 
     if (opts.sessionPersistence && opts.sessionDir) {
@@ -243,7 +250,7 @@ export class PiDecisionEngine implements DecisionEngine {
     return this.runSession({
       systemPrompt: req.systemPrompt,
       userPrompt: req.userPrompt,
-      toolNames: [...this.toolNames],
+      toolNames: this.toolsForScope(req),
       tools: this.buildTools(turnRef),
     }).then(outcome => this.finishAssess(audit, req, state, outcome, started, this.timeoutMs, this.tokenBudget))
   }
@@ -261,7 +268,7 @@ export class PiDecisionEngine implements DecisionEngine {
     }
     turnRef.request = req
     turnRef.state = state
-    entry.session.setActiveToolsByName?.([...this.toolNames])
+    entry.session.setActiveToolsByName?.(this.toolsForScope(req))
 
     const before = Array.isArray(entry.session.messages) ? entry.session.messages.length : 0
     const outcome = await this.runOnSession(entry.session as PiSessionLike, {
@@ -459,7 +466,9 @@ export class PiDecisionEngine implements DecisionEngine {
   }
 
   private buildTools(turnRef: TurnRef): PiToolDefinition[] {
-    return this.toolNames.map(name => {
+    // 瞬时会话在绑定时就按本轮 toolScope 过滤；持久会话创建时 request 未到，
+    // 默认绑定全量（运行时校验 + setActiveToolsByName 兜底）。
+    return this.toolsForTurn(turnRef).map(name => {
       const spec = toolSpec(name)
       return {
         name: spec.name,
@@ -470,6 +479,21 @@ export class PiDecisionEngine implements DecisionEngine {
           const req = turnRef.request
           const state = turnRef.state
           if (!req) return textResult({ error: 'pi:no-turn-context' })
+          const scope = 'toolScope' in req && req.toolScope ? req.toolScope : 'admin-full'
+          // 执行时校验：即使装配漏配 / 提示词强行调用，工具层也要按身份拒绝。
+          if (!allowedTools(scope, [{ name, requires: spec.requires }]).includes(name)) {
+            const triggerId = 'trigger' in req ? req.trigger.id : undefined
+            const actorId = 'trigger' in req ? req.trigger.actorId : undefined
+            this.logger.warn('tool:denied', {
+              ...(triggerId ? { triggerId } : {}),
+              ...(actorId ? { actor: actorId } : {}),
+              tool: name,
+              toolScope: scope,
+              detail: `tool:${name}:scope-not-allowed`,
+            })
+            state.toolCalls.push({ name, args: safeJson(params).slice(0, 500), ok: false, error: 'permission:tool-denied' })
+            return textResult({ error: 'permission:tool-denied', hint: '该工具不在当前会话的工具范围内' })
+          }
           const args = params ?? {}
           const argsText = safeJson(args).slice(0, 500)
           try {
@@ -528,6 +552,18 @@ export class PiDecisionEngine implements DecisionEngine {
         },
       }
     })
+  }
+
+  /** 按本轮发送人的 toolScope 过滤工具白名单：普通成员会话里根本不会出现工单工具。 */
+  private toolsForScope(req: DecisionRequest): string[] {
+    const scope = req.toolScope ?? 'admin-full'
+    return this.toolNames.filter(name => allowedTools(scope, ROUTER_TOOL_AUTHZ).includes(name))
+  }
+
+  private toolsForTurn(turnRef: TurnRef): string[] {
+    const req = turnRef.request
+    if (!req || !('toolScope' in req) || !req.toolScope) return [...this.toolNames]
+    return this.toolsForScope(req)
   }
 
   /** 打开/新建落盘 session，并绑定本轮可变的工具上下文。 */

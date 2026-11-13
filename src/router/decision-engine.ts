@@ -1,4 +1,5 @@
 import type { Decision, Strength, Trigger } from '#core/model.js'
+import type { ToolScope } from '#core/tool-scope.js'
 import type { SessionKeyParts } from './session-registry.js'
 
 /**
@@ -36,6 +37,12 @@ export interface DecisionRequest {
   canMutate?: boolean
   /** 会话复用：本轮落在哪个 session；不传则保持旧的「一次一建」行为。 */
   session?: SessionKeyParts
+  /**
+   * 发送人的工具范围（权限与工具白名单的硬边界）。
+   * 由 AgentLoop 按发送人身份计算：管理员 admin-full，名单外普通成员 member-analysis-read。
+   * 缺省按 admin-full 处理（保持既有调用方行为），AgentLoop 始终显式声明。
+   */
+  toolScope?: ToolScope
 }
 
 /** 一次礼貌回复的输入。 */

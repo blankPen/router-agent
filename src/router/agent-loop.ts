@@ -11,6 +11,7 @@ import { IntakeCoordinator, type IntakeSettingsView } from './intake-flow.js'
 import type { IntakeEngine } from './intake-engine.js'
 import type { DecisionAgent } from './decision/agent.js'
 import { isSmallTalk as smallTalkRule } from '#core/admission.js'
+import { toolScopeFor } from '#core/tool-scope.js'
 import type { SessionKeyParts } from './session-registry.js'
 import { modelFailureMessage } from './model-failure.js'
 import type {
@@ -513,6 +514,7 @@ export class AgentLoop {
         systemPrompt: this.sessionsEnabled ? this.unifiedSystemPrompt : this.systemPromptFor(trigger),
         userPrompt: this.contextPrompt(trigger),
         canMutate: this.canMutate(trigger),
+        toolScope: toolScopeFor(this.isAllowlisted(trigger)),
         ...(session ? { session } : {}),
       })
       .catch(error => {
@@ -536,6 +538,11 @@ export class AgentLoop {
    */
   private canMutate(trigger: Trigger): boolean {
     if (trigger.isBot || trigger.addressed === 'none') return false
+    return this.isAllowlisted(trigger)
+  }
+
+  /** 发送人是否在有效允许名单内（管理员身份，工具范围 admin-full 的依据）。 */
+  private isAllowlisted(trigger: Trigger): boolean {
     const policy = this.engine.policy()
     const scoped = effectiveAllowedByChat(policy, trigger.chatId)
     const allowed = scoped ?? effectiveAllowed(policy)

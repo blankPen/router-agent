@@ -1,5 +1,5 @@
 import type { Clock, DecideOutcome, Engine } from '../core/engine.js'
-import type { Intake, IntakeReport, Ticket, Trigger } from '#core/model.js'
+import type { Intake, IntakeReport, IntakeTurn, Ticket, Trigger } from '#core/model.js'
 import { effectiveAllowedByChat } from '#core/policy.js'
 import { readRouterPrompt } from '../specs/index.js'
 import { messageContext, preview } from '#core/events.js'
@@ -250,7 +250,8 @@ export class IntakeCoordinator {
   /**
    * 决策层路径：确定性准入 + Jev/LLM 分类，替代 LLM 初筛。
    * dropped（噪声）直接忽略；bypassed（管理员 / 口令 / 媒体 / 会话续接）交回 Router；
-   * verdict 需要跟进时按类型建需求会话，chat 保持原初筛口径（忽略）。
+   * verdict 动作映射：ignore / observe 忽略（未 @ 不打扰）；reply（咨询）建咨询会话；
+   * analysis（需求反馈且与项目相关）建需求会话。
    */
   private async handleByDecision(trigger: Trigger): Promise<boolean> {
     const outcome = await this.decisionAgent!.decide(trigger)
@@ -261,12 +262,14 @@ export class IntakeCoordinator {
     }
     if (outcome.kind === 'bypassed') return false
     const verdict = outcome.verdict
-    if (!verdict.needsFollowup || verdict.kind === 'chat') {
-      this.decideIgnore(trigger, `decision:${verdict.kind}:${verdict.confidence.toFixed(2)}`, 'inferred')
-      this.logger.info('intake:decision-ignore', { triggerId: trigger.id, chat: trigger.chatId, kind: verdict.kind, confidence: verdict.confidence })
+    if (verdict.action === 'ignore' || verdict.action === 'observe') {
+      this.decideIgnore(trigger, `decision:${verdict.msgType}:${verdict.confidence.toFixed(2)}`, 'inferred')
+      this.logger.info('intake:decision-ignore', { triggerId: trigger.id, chat: trigger.chatId, msgType: verdict.msgType, action: verdict.action, confidence: verdict.confidence })
       return true
     }
-    const intake = this.createIntake(trigger, verdict.kind === 'question' ? 'question' : 'issue')
+    const intake = this.createIntake(trigger, verdict.action === 'reply' ? 'question' : 'issue', {
+      triage: `决策结论：${verdict.msgType}（${verdict.action}），置信度 ${verdict.confidence.toFixed(2)}${verdict.projectRelated ? '，与本群项目相关' : ''}。`,
+    })
     await this.advance(intake, trigger)
     return true
   }
@@ -300,13 +303,19 @@ export class IntakeCoordinator {
     return true
   }
 
-  private createIntake(trigger: Trigger, kind: 'question' | 'issue'): Intake {
+  private createIntake(trigger: Trigger, kind: 'question' | 'issue', opts: { triage?: string } = {}): Intake {
     const resolution = resolveDispatch({ settings: this.dispatch, chatId: trigger.chatId })
     const now = this.clock.now()
     const id = `it_${trigger.id}`
     // 同一个 trigger 被重试时复用已有会话，避免主键冲突把消息卡在重试循环里。
     const existing = this.store.getIntake(id)
     if (existing) return existing
+    const turns: IntakeTurn[] = [{ role: 'user', text: trigger.text, at: trigger.receivedAt, actorId: trigger.actorId }]
+    // 决策层结论以一条 router 转交消息写进会话历史：跨轮可见、无需改表，
+    // 分析 Agent 直接用它做 triage，不再重复判断消息类型。
+    if (opts.triage) {
+      turns.push({ role: 'router', text: `【决策层转交】${opts.triage}`, at: now })
+    }
     const intake: Intake = {
       id,
       threadId: trigger.threadId,
@@ -319,7 +328,7 @@ export class IntakeCoordinator {
       status: 'clarifying',
       kind,
       rawText: trigger.text,
-      turns: [{ role: 'user', text: trigger.text, at: trigger.receivedAt, actorId: trigger.actorId }],
+      turns,
       questions: 0,
       createdAt: now,
       updatedAt: now,

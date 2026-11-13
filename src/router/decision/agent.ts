@@ -11,6 +11,7 @@ import {
   fallbackVerdict,
   routeVerdict,
   validateAnswers,
+  MEMBER_MESSAGE_KINDS,
   type DecisionAnswers,
   type DecisionVerdict,
 } from '#core/decision.js'
@@ -113,7 +114,7 @@ export class DecisionAgent {
         chat: trigger.chatId,
         provider: this.provider.name,
         action: verdict.action,
-        kind: verdict.kind,
+        msgType: verdict.msgType,
         confidence: verdict.confidence,
       })
       this.audit({ triggerId: trigger.id, provider: this.provider.name, outcome: 'verdict', rule: admission.rule, answers, verdict, latencyMs: this.now() - started })
@@ -169,20 +170,23 @@ export class JevDecisionProvider implements DecisionProvider {
   async ask(ctx: DecisionProviderContext): Promise<DecisionAnswers> {
     const answers = await this.client.ask(jevStateOf(ctx.trigger), {
       needs_followup: { type: 'noul', instructions: '这条普通成员消息是否需要 Router 跟进处理？' },
-      kind: { type: 'score', instructions: '这条消息属于哪一类：闲聊吐槽、咨询问题、需求反馈？', criteria: ['闲聊吐槽', '咨询问题', '需求反馈'] },
+      msg_type: { type: 'score', instructions: '这条消息属于哪一类？', criteria: ['chitchat 闲聊', 'grumble 吐槽', 'consult 咨询', 'feedback 需求反馈'] },
+      project_related: { type: 'noul', instructions: '这条消息是否与本群绑定的项目相关？' },
       urgency: { type: 'noul', instructions: '这条消息的紧迫程度（0=不紧急，1=非常紧急）？' },
     })
     // extractAnswers 按 questions 的 key 全量返回，缺 key 已在 JevClient 抛 malformed；
     // 这里显式收窄 undefined，避免 noUncheckedIndexedAccess 下的类型污染。
     const needsFollowup = answers.needs_followup
-    const kindScore = answers.kind
+    const msgTypeScore = answers.msg_type
+    const projectRelated = answers.project_related
     const urgency = answers.urgency
-    if (needsFollowup === undefined || kindScore === undefined || urgency === undefined) {
+    if (needsFollowup === undefined || msgTypeScore === undefined || projectRelated === undefined || urgency === undefined) {
       throw new Error('decision:answer-missing')
     }
     return {
       needsFollowup,
-      kindScore,
+      msgTypeScore,
+      projectRelated,
       urgency,
     }
   }
@@ -212,7 +216,8 @@ export class LlmDecisionProvider implements DecisionProvider {
     if (!json) throw new Error('decision:llm-invalid')
     return {
       needsFollowup: probabilityOf(json.needs_followup),
-      kindScore: probabilityOf(json.kind_score),
+      msgTypeScore: scoreOf(json.msg_type),
+      projectRelated: probabilityOf(json.project_related),
       urgency: probabilityOf(json.urgency),
     }
   }
@@ -222,4 +227,11 @@ function probabilityOf(value: unknown): number {
   const number = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN
   if (!Number.isFinite(number)) throw new Error('decision:answer-missing')
   return number
+}
+
+/** msg_type 枚举 → 档位下标归一化（0~1），非枚举值直接抛错。 */
+function scoreOf(value: unknown): number {
+  const index = MEMBER_MESSAGE_KINDS.indexOf(value as (typeof MEMBER_MESSAGE_KINDS)[number])
+  if (index < 0) throw new Error('decision:answer-missing')
+  return index / (MEMBER_MESSAGE_KINDS.length - 1)
 }

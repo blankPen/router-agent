@@ -1,16 +1,23 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { Store } from '../../src/store/db.js'
 import { Engine } from '../../src/core/engine.js'
 import { DEFAULT_ADMISSION, type Policy } from '#core/policy.js'
 import type { Trigger } from '#core/model.js'
+import type { Logger } from '#infra/logger.js'
 import type { PiModelConfig } from '../../src/router/model-config.js'
 import { RouterToolbox } from '../../src/router/tools.js'
+import { DECISION_TOOL_NAMES, ROUTER_TOOL_SPECS } from '../../src/router/tool-spec.js'
 import {
   PiDecisionEngine,
   type PiSessionEvent,
   type PiSessionLike,
   type PiSessionOptions,
 } from '../../src/router/pi-decision-engine.js'
+import { SqliteSessionPersistence } from '../../src/router/session-persistence.js'
+import type { SessionKeyParts } from '../../src/router/session-registry.js'
 
 const policy: Policy = {
   version: 'p1',
@@ -51,6 +58,14 @@ function request(over: Partial<Trigger> = {}, canMutate = true) {
     userPrompt: '{"trigger":{"id":"t1"}}',
     canMutate,
   }
+}
+
+function memberRequest() {
+  return { ...request(), toolScope: 'member-analysis-read' as const }
+}
+
+function sessionKey(actorId = 'ou_member'): SessionKeyParts {
+  return { key: `chat:oc_dev:user:${actorId}`, chatId: 'oc_dev', actorId, threadId: 'feishu:oc_dev:om_1' }
 }
 
 class FakeSession implements PiSessionLike {
@@ -136,6 +151,65 @@ function setup(
 }
 
 describe('PiDecisionEngine', () => {
+  it('每个 router 工具都声明了角色要求，注册表与白名单一致', () => {
+    expect(ROUTER_TOOL_SPECS.every(spec => ['admin', 'member', 'all'].includes(spec.requires))).toBe(true)
+    expect(ROUTER_TOOL_SPECS.map(spec => spec.name).sort()).toEqual([...DECISION_TOOL_NAMES].sort())
+  })
+
+  it('普通成员 scope 的会话装配结果不含任何工单工具', async () => {
+    const { enginePi, state } = setup(s => s.finish())
+    await enginePi.assess(memberRequest())
+
+    expect(state.captured?.toolNames).toEqual([])
+    expect(state.captured?.tools).toEqual([])
+    expect(state.captured?.tools.some(tool => tool.name.startsWith('router_'))).toBe(false)
+  })
+
+  it('越权调用工单工具被执行时校验拒绝并记 tool:denied', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ra-scope-'))
+    try {
+      const store = new Store(':memory:')
+      const engine = new Engine({ store, policy })
+      const toolbox = new RouterToolbox({ store, engine })
+      engine.ingest(trigger())
+      const warnings: Array<{ message: string; extra?: Record<string, unknown> }> = []
+      const logger: Logger = {
+        info: () => {},
+        warn: (message, extra) => warnings.push({ message, extra }),
+        error: () => {},
+      }
+      const enginePi = new PiDecisionEngine({
+        model,
+        toolbox,
+        agentDir: dir,
+        sessionPersistence: new SqliteSessionPersistence(store),
+        sessionDir: dir,
+        logger,
+        sessionFactory: async opts => new FakeSession(opts, async s => {
+          // 持久会话在创建时绑定全量工具，这里模拟「提示词强行调用」的绕过路径。
+          const ticket = s.opts.tools.find(tool => tool.name === 'router_ticket')!
+          const outcome = await ticket.execute('call-1', {})
+          expect(outcome.content[0]?.text).toContain('permission:tool-denied')
+          s.messages = [{ role: 'assistant', content: '我没有权限查看工单。' }]
+          s.emit({ type: 'message_end', message: { role: 'assistant', usage: { input: 5, output: 5, totalTokens: 10 } } })
+          s.finish()
+        }),
+      })
+
+      const result = await enginePi.assess({ ...memberRequest(), session: sessionKey() })
+
+      expect(result.audit.toolCalls).toEqual([
+        { name: 'router_ticket', args: expect.any(String), ok: false, error: 'permission:tool-denied' },
+      ])
+      expect(warnings).toContainEqual(expect.objectContaining({
+        message: 'tool:denied',
+        extra: expect.objectContaining({ tool: 'router_ticket', toolScope: 'member-analysis-read' }),
+      }))
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('放行读 / 查 / 清理 / 决定四类 router_* 工具，并把 Router 的 system prompt 注入 Pi', async () => {
     const { enginePi, state } = setup(session => session.finish())
     await enginePi.assess(request())

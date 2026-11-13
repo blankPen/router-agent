@@ -1399,6 +1399,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
         store,
         model,
         engine,
+        logger,
         updater: updateService,
         scheduleRestart: scheduleUpdateRestart,
       })

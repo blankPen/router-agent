@@ -16,6 +16,8 @@ export interface DecisionEngineFactoryOptions {
   config: AppConfig
   store: Store
   model: PiModelConfig
+  /** 工具越权 / 装配失败等告警日志；缺省 noop。 */
+  logger?: Logger
   /** 关单 / 回收 workspace 等运维工具需要 Engine；只读场景可不传。 */
   engine?: Engine
   /** 版本检查 / 升级；传入后模型才拥有 router_update 工具。 */
@@ -39,6 +41,7 @@ export function createDecisionEngine(opts: DecisionEngineFactoryOptions): PiDeci
     cwd: opts.config.home,
     timeoutMs: opts.config.router.timeoutMs,
     tokenBudget: opts.config.router.tokenBudget,
+    ...(opts.logger ? { logger: opts.logger } : {}),
     ...(session.enabled
       ? {
           sessionPersistence: new SqliteSessionPersistence(opts.store),

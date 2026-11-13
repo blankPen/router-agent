@@ -31,6 +31,14 @@ function trigger(overrides: Partial<Trigger> = {}): Trigger {
   }
 }
 
+const answers = (over: Partial<DecisionAnswers> = {}): DecisionAnswers => ({
+  needsFollowup: 0.9,
+  msgTypeScore: 0.8, // feedback
+  projectRelated: 0.9,
+  urgency: 0.7,
+  ...over,
+})
+
 class StubProvider implements DecisionProvider {
   name = 'stub'
   calls: DecisionProviderContext[] = []
@@ -57,7 +65,7 @@ function recordingLogger(): { logger: Logger; events: Array<{ level: string; mes
 
 describe('DecisionAgent.decide', () => {
   it('disabled_agent_bypasses_without_calling_provider', async () => {
-    const provider = new StubProvider(() => ({ needsFollowup: 0.9, kindScore: 0.8, urgency: 0.7 }))
+    const provider = new StubProvider(() => answers())
     const agent = new DecisionAgent({ provider, enabled: false, isAdmin: () => false })
     const outcome = await agent.decide(trigger())
     expect(outcome).toMatchObject({ kind: 'bypassed', rule: 'disabled' })
@@ -65,7 +73,7 @@ describe('DecisionAgent.decide', () => {
   })
 
   it('bot_messages_are_dropped_without_provider_call', async () => {
-    const provider = new StubProvider(() => ({ needsFollowup: 0.9, kindScore: 0.8, urgency: 0.7 }))
+    const provider = new StubProvider(() => answers())
     const agent = new DecisionAgent({ provider, isAdmin: () => false })
     const outcome = await agent.decide(trigger({ isBot: true }))
     expect(outcome).toMatchObject({ kind: 'dropped', rule: 'bot' })
@@ -73,7 +81,7 @@ describe('DecisionAgent.decide', () => {
   })
 
   it('admin_messages_bypass_to_router', async () => {
-    const provider = new StubProvider(() => ({ needsFollowup: 0.9, kindScore: 0.8, urgency: 0.7 }))
+    const provider = new StubProvider(() => answers())
     const agent = new DecisionAgent({ provider, isAdmin: trig => trig.actorId === 'ou_admin' })
     const outcome = await agent.decide(trigger({ actorId: 'ou_admin' }))
     expect(outcome).toMatchObject({ kind: 'bypassed', rule: 'identity-split' })
@@ -81,7 +89,7 @@ describe('DecisionAgent.decide', () => {
   })
 
   it('small_talk_is_dropped_as_noise_without_provider_call', async () => {
-    const provider = new StubProvider(() => ({ needsFollowup: 0.9, kindScore: 0.8, urgency: 0.7 }))
+    const provider = new StubProvider(() => answers())
     const agent = new DecisionAgent({ provider, isAdmin: () => false })
     const outcome = await agent.decide(trigger({ text: '你好' }))
     expect(outcome).toMatchObject({ kind: 'dropped', rule: 'noise' })
@@ -89,7 +97,7 @@ describe('DecisionAgent.decide', () => {
   })
 
   it('member_request_returns_verdict_from_provider_answers', async () => {
-    const provider = new StubProvider(() => ({ needsFollowup: 0.9, kindScore: 0.85, urgency: 0.7 }))
+    const provider = new StubProvider(() => answers({ msgTypeScore: 0.85 }))
     const { logger, events } = recordingLogger()
     const audits: DecisionAudit[] = []
     const agent = new DecisionAgent({ provider, isAdmin: () => false, logger, onAudit: audit => audits.push(audit), now: () => 1000 })
@@ -97,13 +105,23 @@ describe('DecisionAgent.decide', () => {
     expect(outcome.kind).toBe('verdict')
     if (outcome.kind === 'verdict') {
       expect(outcome.verdict.action).toBe('analysis')
-      expect(outcome.verdict.kind).toBe('issue')
+      expect(outcome.verdict.msgType).toBe('feedback')
       expect(outcome.verdict.toolScope).toBe('member-analysis-read')
-      expect(outcome.verdict.specId).toBe('msg.user.v1')
+      expect(outcome.verdict.specId).toBe('msg.user.v2')
     }
     expect(provider.calls).toHaveLength(1)
     expect(events).toContainEqual(expect.objectContaining({ level: 'info', message: 'decision:verdict', extra: expect.objectContaining({ triggerId: 'trg_1' }) }))
     expect(audits[0]).toMatchObject({ triggerId: 'trg_1', provider: 'stub', outcome: 'verdict' })
+  })
+
+  it('consult_message_routes_to_reply', async () => {
+    const provider = new StubProvider(() => answers({ msgTypeScore: 0.6 }))
+    const agent = new DecisionAgent({ provider, isAdmin: () => false })
+    const outcome = await agent.decide(trigger({ text: '这个配置在哪个文件？' }))
+    if (outcome.kind === 'verdict') {
+      expect(outcome.verdict.msgType).toBe('consult')
+      expect(outcome.verdict.action).toBe('reply')
+    }
   })
 
   it('provider_failure_degrades_to_conservative_analysis_and_logs_warn', async () => {
@@ -123,7 +141,7 @@ describe('DecisionAgent.decide', () => {
   })
 
   it('invalid_answers_degrades_to_conservative_analysis', async () => {
-    const provider = new StubProvider(() => ({ needsFollowup: 1.5, kindScore: 0.8, urgency: 0.7 }) as unknown as DecisionAnswers)
+    const provider = new StubProvider(() => answers({ needsFollowup: 1.5 }) as unknown as DecisionAnswers)
     const agent = new DecisionAgent({ provider, isAdmin: () => false })
     const outcome = await agent.decide(trigger())
     expect(outcome.kind).toBe('verdict')
@@ -134,13 +152,13 @@ describe('DecisionAgent.decide', () => {
 describe('JevDecisionProvider', () => {
   it('maps_spec_questions_to_jev_and_back_to_answers', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
-      answers: { needs_followup: { noul: 0.9 }, kind: { score: 2 }, urgency: { noul: 0.6 } },
+      answers: { needs_followup: { noul: 0.9 }, msg_type: { score: 2 }, project_related: { noul: 0.8 }, urgency: { noul: 0.6 } },
     }), { status: 200 }))
     const provider = new JevDecisionProvider({ apiKey: 'k', model: 'm' }, { fetch: fetchMock as unknown as typeof fetch })
-    const answers = await provider.ask({ trigger: trigger(), admission: { outcome: 'pass', rule: 'pass', reason: 'pass:to-decision' } })
-    expect(answers).toEqual({ needsFollowup: 0.9, kindScore: 1, urgency: 0.6 })
+    const result = await provider.ask({ trigger: trigger(), admission: { outcome: 'pass', rule: 'pass', reason: 'pass:to-decision' } })
+    expect(result).toEqual({ needsFollowup: 0.9, msgTypeScore: 2 / 3, projectRelated: 0.8, urgency: 0.6 })
     const body = JSON.parse(String((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body))
-    expect(body.questions.kind.criteria).toEqual(['闲聊吐槽', '咨询问题', '需求反馈'])
+    expect(body.questions.msg_type.criteria).toEqual(['chitchat 闲聊', 'grumble 吐槽', 'consult 咨询', 'feedback 需求反馈'])
   })
 })
 
@@ -154,9 +172,14 @@ describe('LlmDecisionProvider', () => {
   }
 
   it('parses_decision_json_into_answers', async () => {
-    const provider = new LlmDecisionProvider(new FakeLlm([JSON.stringify({ needs_followup: 0.8, kind_score: 0.9, urgency: 0.5 })]))
-    const answers = await provider.ask({ trigger: trigger(), admission: { outcome: 'pass', rule: 'pass', reason: 'pass:to-decision' } })
-    expect(answers).toEqual({ needsFollowup: 0.8, kindScore: 0.9, urgency: 0.5 })
+    const provider = new LlmDecisionProvider(new FakeLlm([JSON.stringify({ needs_followup: 0.8, msg_type: 'feedback', project_related: 0.8, urgency: 0.5 })]))
+    const result = await provider.ask({ trigger: trigger(), admission: { outcome: 'pass', rule: 'pass', reason: 'pass:to-decision' } })
+    expect(result).toEqual({ needsFollowup: 0.8, msgTypeScore: 1, projectRelated: 0.8, urgency: 0.5 })
+  })
+
+  it('throws_when_msg_type_is_not_in_spec', async () => {
+    const provider = new LlmDecisionProvider(new FakeLlm([JSON.stringify({ needs_followup: 0.8, msg_type: 'other', project_related: 0.8, urgency: 0.5 })]))
+    await expect(provider.ask({ trigger: trigger(), admission: { outcome: 'pass', rule: 'pass', reason: 'pass:to-decision' } })).rejects.toThrow(/decision:answer-missing/)
   })
 
   it('throws_when_llm_output_is_not_decision_json', async () => {
