@@ -4,6 +4,7 @@ import type { AppConfig, EventSettings } from '../config.js'
 import type { CommandRunner } from '#infra/process.js'
 import { errorMessage, noopLogger, type Logger } from '#infra/logger.js'
 import type { EventEnvelope, EventSource } from '#core/event.js'
+import type { ReplyBlock } from '#core/reply.js'
 import { EventBus, type DispatchPlan } from './event-bus.js'
 import { DEFAULT_CHANNEL_ID } from '#channel/port.js'
 import { buildEventSources } from './event-sources.js'
@@ -157,8 +158,15 @@ export function notifyEventReview(
   event: EventRecord,
   queue: EventQueueRecord,
 ): void {
-  const chatId = config.event?.notifyChat || ''
+  const chatId = notifyChatOf(config, event.source)
   if (!chatId) return
+  const now = clock.now()
+  const quietEnd = quietEndOf(config, now)
+  // 高优先级事件单独通知；普通事件按来源合并，避免事件风暴刷屏。
+  const urgent = queue.priority >= NOTIFY_URGENT_PRIORITY
+  const key = urgent
+    ? `event:review:${event.id}`
+    : `event:review:${chatId}:${event.source}:${bucketOf(now, quietEnd)}`
   const text = [
     '**新事件待审核**',
     `来源：${event.source}`,
@@ -167,14 +175,81 @@ export function notifyEventReview(
     `判定依据：${queue.reason ?? ''}（优先级 ${queue.priority}）`,
     '面板「事件」页可以批准派单、驳回或延后。',
   ].join('\n')
-  store.enqueueOutbox({
-    id: `ob_event_review_${event.id}`,
-    key: `event:review:${event.id}`,
+  const blocks: ReplyBlock[] = [{
+    type: 'card',
+    title: '新事件待审核',
+    tone: 'warning',
+    markdown: [event.summary, event.link ? `[查看事件原文](${event.link})` : ''].filter(Boolean).join('\n\n'),
+    fields: [
+      { label: '来源', value: event.source },
+      { label: '对象', value: event.subject },
+      { label: '优先级', value: String(queue.priority) },
+      { label: '判定依据', value: queue.reason ?? '' },
+    ],
+    actions: [
+      { label: '批准派单', value: { eventAction: 'approve', eventId: event.id } },
+      { label: '驳回', value: { eventAction: 'reject', eventId: event.id } },
+    ],
+  }]
+  const enqueued = store.enqueueOutbox({
+    id: `ob_${key.replace(/[^a-zA-Z0-9:_-]/g, '_')}`,
+    key,
     channelKind: DEFAULT_CHANNEL_ID,
     channelId: chatId,
     threadId: '',
     text,
-    now: clock.now(),
+    blocks,
+    now,
+    ...(quietEnd ? { nextAt: quietEnd } : {}),
   })
-  logger.info('event:review-notified', { eventId: event.id, channelId: chatId })
+  if (!enqueued) {
+    // 同一批次已经发过一条：面板里仍然有完整列表，这里只留一条合并日志。
+    logger.info('event:review-merged', { eventId: event.id, channelId: chatId, key })
+    return
+  }
+  logger.info('event:review-notified', {
+    eventId: event.id,
+    channelId: chatId,
+    ...(quietEnd ? { deferredTo: quietEnd } : {}),
+  })
+}
+
+/** 通知群：来源自己配的优先，没配才用全局的。 */
+export function notifyChatOf(config: AppConfig, sourceId: string): string {
+  const source = config.event?.sources.find(item => item.id === sourceId)
+  return source?.notifyChat || config.event?.notifyChat || ''
+}
+
+/** 高优先级事件单独通知，不参与合并。 */
+const NOTIFY_URGENT_PRIORITY = 85
+
+/** 合并批次：十分钟一档；静默时段里的通知归到静默结束那一刻。 */
+const NOTIFY_BUCKET_MINUTES = 10
+
+/** 静默时段内的推送时刻；不在静默时段返回空。 */
+function quietEndOf(config: AppConfig, now: string): string | undefined {
+  const quiet = config.event?.notifyQuietHours
+  if (!quiet) return undefined
+  const base = new Date(now)
+  const minutes = base.getHours() * 60 + base.getMinutes()
+  const from = minutesOfClock(quiet.from)
+  const to = minutesOfClock(quiet.to)
+  const inside = from <= to ? minutes >= from && minutes < to : minutes >= from || minutes < to
+  if (!inside) return undefined
+  const end = new Date(base)
+  end.setHours(Math.floor(to / 60), to % 60, 0, 0)
+  if (end.getTime() <= base.getTime()) end.setDate(end.getDate() + 1)
+  return end.toISOString()
+}
+
+function minutesOfClock(clock: string): number {
+  const [hour = '0', minute = '0'] = clock.split(':')
+  return Number(hour) * 60 + Number(minute)
+}
+
+/** 合并批次号：静默时段用「静默结束那一刻」，否则用当前十分钟档。 */
+function bucketOf(now: string, quietEnd?: string): string {
+  const base = new Date(quietEnd ?? now)
+  const minutes = Math.floor(base.getTime() / 60_000 / NOTIFY_BUCKET_MINUTES)
+  return String(minutes)
 }

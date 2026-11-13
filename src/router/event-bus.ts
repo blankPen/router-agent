@@ -3,20 +3,29 @@ import type { Engine } from '../core/engine.js'
 import type { EventSettings } from '../config.js'
 import { errorMessage, noopLogger, type Logger } from '#infra/logger.js'
 import {
+  batchWindowAt,
   budgetState,
   eventRulesOf,
   eventSubjectValid,
   mergeTriage,
+  tierOfPriority,
   windowAllows,
   type EventEnvelope,
   type EventModelAnswers,
+  type EventRuleVerdict,
   type EventTier,
 } from '#core/event.js'
 import type { Trigger } from '#core/model.js'
-import type { EventTriagePort, EventTriageResult } from './event-triage.js'
+import type { EventTriageBatchResult, EventTriagePort, EventTriageResult } from './event-triage.js'
 
 /** 自产事件链的最大深度：超过就熔断，避免 A→B→A 自激。 */
 export const MAX_EVENT_HOPS = 3
+
+/** 预算触顶后仍值得花模型调用问一遍的优先级门槛（与 T0 同档）。 */
+const URGENT_PRIORITY = 85
+
+/** 本机面板的保留身份：没有具名身份，按本机放行处理。 */
+export const LOCAL_OPERATOR = 'panel'
 
 /** 派工目标：事件要落到哪个仓库与分支。 */
 export interface DispatchPlan {
@@ -69,6 +78,12 @@ export interface TickOutcome {
 
 /** 人工审核动作。 */
 export type ReviewAction = 'approve' | 'reject' | 'defer'
+
+/** 队列里待判定的一条事件：事件本体 + 规则层结论。 */
+interface EventCandidate {
+  event: EventRecord
+  rule: EventRuleVerdict
+}
 
 /** 审核结果。 */
 export interface ReviewOutcome {
@@ -175,14 +190,67 @@ export class EventBus {
     return { accepted: true, eventId: record.id, duplicate: false }
   }
 
-  /** 处理一轮队列：取到期项，逐条判定与派发。 */
+  /** 处理一轮队列：先做不花钱的前置判断，再判定（可批量合并），最后分级派发。 */
   async tick(): Promise<TickOutcome> {
     const outcome: TickOutcome = { processed: 0, dispatched: 0, pending: 0, deferred: 0, dropped: 0, archived: 0 }
     const now = this.clock.now()
+    const settings = this.settings()
     const pending = this.store.pickEventQueue(now, 20)
+    const candidates: EventCandidate[] = []
     for (const item of pending) {
       outcome.processed += 1
-      const state = await this.process(item, now)
+      const event = this.store.getEvent(item.eventId)
+      if (!event) continue
+      if (event.deadlineAt && Date.parse(event.deadlineAt) < Date.parse(now)) {
+        this.logger.warn('event:expired', { eventId: event.id, deadlineAt: event.deadlineAt })
+        this.settle(event.id, { state: 'expired', tier: item.tier || 't3', reason: 'event:expired' })
+        continue
+      }
+
+      const rule = eventRulesOf({
+        text: event.summary,
+        isBot: event.actorType === 'bot',
+        hasProject: Boolean(event.project),
+        hasScope: Boolean(event.subject),
+        priorityHint: event.priorityHint,
+      })
+      if (rule.outcome === 'drop') {
+        this.logger.warn('event:dropped', { eventId: event.id, reason: rule.reason })
+        this.settle(event.id, { state: 'dropped', tier: 't3', priority: rule.priority, reason: rule.reason })
+        outcome.dropped += 1
+        continue
+      }
+
+      // 预算触顶后先别问模型：规则层认定高优先级且无需人介入的事件才值得继续。
+      // 否则每条事件都要先花一次判定调用，预算反而拦不住成本。
+      const used = this.usage(settings, now)
+      const budget = budgetState(settings.budget, used)
+      if (budget.exceeded && (rule.needsHuman || rule.priority < URGENT_PRIORITY)) {
+        this.logger.warn('event:budget-exceeded', {
+          eventId: event.id,
+          reason: budget.reason,
+          used: budget.reason === 'tokens' ? used.tokens : used.events,
+          limit: budget.reason === 'tokens' ? settings.budget.dailyTokens : settings.budget.dailyEvents,
+        })
+        this.settle(event.id, {
+          state: 'deferred',
+          tier: tierOfPriority(rule.priority),
+          priority: rule.priority,
+          reason: 'event:budget-exceeded',
+          notBefore: nextDayStart(now),
+          decidedBy: 'rule',
+        })
+        outcome.deferred += 1
+        continue
+      }
+      candidates.push({ event, rule })
+    }
+
+    const triaged = await this.triagePhase(candidates, settings, now)
+    for (const candidate of candidates) {
+      const triage = triaged.get(candidate.event.id)
+      if (!triage) continue
+      const state = await this.finish(candidate, triage, settings, now)
       if (state === 'dispatched') outcome.dispatched += 1
       else if (state === 'pending_review') outcome.pending += 1
       else if (state === 'deferred') outcome.deferred += 1
@@ -192,29 +260,89 @@ export class EventBus {
     return outcome
   }
 
-  /** 处理单个事件；返回落定的队列状态。 */
-  private async process(item: EventQueueRecord, now: string): Promise<string> {
-    const event = this.store.getEvent(item.eventId)
-    if (!event) return item.state
-    if (event.deadlineAt && Date.parse(event.deadlineAt) < Date.parse(now)) {
-      this.logger.warn('event:expired', { eventId: event.id, deadlineAt: event.deadlineAt })
-      return this.settle(event.id, { state: 'expired', tier: item.tier || 't3', reason: 'event:expired' })
+  /**
+   * 判定阶段。
+   *
+   * 命中批量窗口时，同 `source + type + project` 的事件合并成一次模型调用；
+   * 批量调用失败就退回逐条判定——判定层不能自己吞掉错误。
+   */
+  private async triagePhase(
+    candidates: EventCandidate[],
+    settings: EventSettings,
+    now: string,
+  ): Promise<Map<string, EventTriageResult & { degraded: boolean }>> {
+    const out = new Map<string, EventTriageResult & { degraded: boolean }>()
+    const batchWindow = batchWindowAt(settings.windows, this.timeOfDay(now))
+    if (!batchWindow) {
+      for (const candidate of candidates) {
+        const triage = await this.triageEvent(candidate.event)
+        this.addTokens(triage.tokens ?? 0, now)
+        out.set(candidate.event.id, triage)
+      }
+      return out
     }
-
-    const rule = eventRulesOf({
-      text: event.summary,
-      isBot: event.actorType === 'bot',
-      hasProject: Boolean(event.project),
-      hasScope: Boolean(event.subject),
-      priorityHint: event.priorityHint,
-    })
-    if (rule.outcome === 'drop') {
-      this.logger.warn('event:dropped', { eventId: event.id, reason: rule.reason })
-      return this.settle(event.id, { state: 'dropped', tier: 't3', priority: rule.priority, reason: rule.reason })
+    const groups = new Map<string, EventCandidate[]>()
+    for (const candidate of candidates) {
+      const key = `${candidate.event.source}|${candidate.event.type}|${candidate.event.project ?? ''}`
+      const group = groups.get(key)
+      if (group) group.push(candidate)
+      else groups.set(key, [candidate])
     }
+    for (const [key, group] of groups) {
+      if (group.length < 2) {
+        const candidate = group[0]!
+        const triage = await this.triageEvent(candidate.event)
+        this.addTokens(triage.tokens ?? 0, now)
+        out.set(candidate.event.id, triage)
+        continue
+      }
+      const batch = await this.triageBatch(group.map(candidate => candidate.event))
+      if (!batch) {
+        for (const candidate of group) {
+          const triage = await this.triageEvent(candidate.event)
+          this.addTokens(triage.tokens ?? 0, now)
+          out.set(candidate.event.id, triage)
+        }
+        continue
+      }
+      this.addTokens(batch.tokens, now)
+      this.logger.info('event:triage-batched', { group: key, count: group.length, tokens: batch.tokens })
+      group.forEach((candidate, index) => {
+        const result = batch.results[index]
+        out.set(candidate.event.id, result ? { ...result, degraded: false } : this.degradedTriage(candidate.event))
+      })
+    }
+    return out
+  }
 
-    const settings = this.settings()
-    const triage = await this.triageEvent(event)
+  /** 一次模型调用判一批事件；判定层不支持批量或调用失败时返回空，由上层退回逐条判定。 */
+  private async triageBatch(events: EventRecord[]): Promise<EventTriageBatchResult | null> {
+    if (!this.triage?.triageBatch) return null
+    try {
+      return await this.triage.triageBatch(events.map(event => ({
+        subject: event.subject,
+        summary: event.summary,
+        type: event.type,
+        source: event.source,
+        ...(event.project ? { project: event.project } : {}),
+      })))
+    } catch (error) {
+      this.logger.warn('event:triage-batch-failed', {
+        count: events.length,
+        detail: errorMessage(error).slice(0, 200),
+      })
+      return null
+    }
+  }
+
+  /** 判定之后：融合结论、过闸门、按档位派发。 */
+  private async finish(
+    candidate: EventCandidate,
+    triage: EventTriageResult & { degraded: boolean },
+    settings: EventSettings,
+    now: string,
+  ): Promise<string> {
+    const { event, rule } = candidate
     const merged = mergeTriage(
       { priority: rule.priority, needsHuman: rule.needsHuman, confidence: 1 },
       triage.answers,
@@ -251,14 +379,7 @@ export class EventBus {
 
   /** 调判定模型；失败降级到「要人介入」，绝不静默丢弃事件。 */
   private async triageEvent(event: EventRecord): Promise<EventTriageResult & { degraded: boolean }> {
-    if (!this.triage) {
-      return {
-        answers: { needsHandling: 1, eventType: 0.5, priority: event.priorityHint / 100, needsHuman: 1, projectRelated: 1 },
-        eventTypeLabel: 'info',
-        priorityLabel: 'medium',
-        degraded: true,
-      }
-    }
+    if (!this.triage) return this.degradedTriage(event)
     try {
       const result = await this.triage.triage({
         subject: event.subject,
@@ -273,12 +394,17 @@ export class EventBus {
         eventId: event.id,
         detail: errorMessage(error).slice(0, 200),
       })
-      return {
-        answers: { needsHandling: 1, eventType: 0.5, priority: event.priorityHint / 100, needsHuman: 1, projectRelated: 1 },
-        eventTypeLabel: 'info',
-        priorityLabel: 'medium',
-        degraded: true,
-      }
+      return this.degradedTriage(event)
+    }
+  }
+
+  /** 判定层的降级结论：一律「要人介入」，绝不静默丢弃事件。 */
+  private degradedTriage(event: EventRecord): EventTriageResult & { degraded: boolean } {
+    return {
+      answers: { needsHandling: 1, eventType: 0.5, priority: event.priorityHint / 100, needsHuman: 1, projectRelated: 1 },
+      eventTypeLabel: 'info',
+      priorityLabel: 'medium',
+      degraded: true,
     }
   }
 
@@ -316,6 +442,16 @@ export class EventBus {
     const events = this.store.countEventsSince(dayStart(now))
     void settings
     return { tokens, events }
+  }
+
+  /** 把本次判定消耗的 token 记到当日游标；预算闸门按它算账。 */
+  private addTokens(tokens: number, now: string): void {
+    if (tokens <= 0) return
+    const key = `event:tokens:${dayKey(now)}`
+    const current = Number(this.store.getCursor(key) ?? 0)
+    const next = current + tokens
+    this.store.setCursor(key, String(next), now)
+    this.logger.info('event:tokens-used', { tokens, day: dayKey(now), total: next })
   }
 
   /** 派工：合成一条 Trigger 走既有开单路径。 */
@@ -463,6 +599,13 @@ export class EventBus {
     const event = this.store.getEvent(eventId)
     const queue = this.store.getEventQueue(eventId)
     if (!event || !queue) return { state: 'not-found' }
+    // 审核人名单是最后一道闸：卡片按钮、API 带身份时走同一条判定。
+    // 本机面板没有具名身份（operator = 'panel'），按「本机放行」处理。
+    const approvers = this.settings().approvers
+    if (approvers.length > 0 && operator !== LOCAL_OPERATOR && !approvers.includes(operator)) {
+      this.logger.warn('event:review-forbidden', { eventId, operator })
+      return { state: 'forbidden' }
+    }
     if (action === 'reject') {
       this.settle(eventId, { state: 'dropped', tier: queue.tier || 't1', reason: 'event:review-rejected' })
       this.logger.info('event:review-rejected', { eventId, operator })
@@ -524,7 +667,10 @@ function dayStart(now: string): string {
   return base.toISOString()
 }
 
-/** 今天的日期键。 */
+/** 今天的日期键（本地日历日）；跨零点按本地时间换日。 */
 function dayKey(now: string): string {
-  return dayStart(now).slice(0, 10)
+  const base = new Date(now)
+  const month = String(base.getMonth() + 1).padStart(2, '0')
+  const day = String(base.getDate()).padStart(2, '0')
+  return `${base.getFullYear()}-${month}-${day}`
 }

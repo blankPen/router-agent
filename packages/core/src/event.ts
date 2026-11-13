@@ -340,6 +340,17 @@ function windowCovers(window: EventWindow, current: number): boolean {
 }
 
 /**
+ * 当前时刻命中的批量合并窗口；没有就返回空。
+ *
+ * 批量只发生在窗口里：低峰窗口把同源事件合并成一次模型调用，
+ * 高峰窗口不许合并——时间窗必须先于批量，否则批量会在高峰期偷偷跑。
+ */
+export function batchWindowAt(windows: EventWindow[], timeOfDay: string): EventWindow | undefined {
+  const current = minutesOf(timeOfDay)
+  return windows.find(window => window.batch === true && windowCovers(window, current))
+}
+
+/**
  * 时间窗判定。
  *
  * `timeOfDay` 是本地时间 'HH:MM'；窗口为空表示一直放行。

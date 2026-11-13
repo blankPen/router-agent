@@ -30,6 +30,16 @@ export interface EventTriageResult {
   eventTypeLabel: string
   /** 优先级标签。 */
   priorityLabel: string
+  /** 本次判定消耗的 token；判定层拿不到用量时为 0。 */
+  tokens?: number
+}
+
+/** 批量判定结果：N 条事件的判定 + 本次调用整体消耗。 */
+export interface EventTriageBatchResult {
+  /** 与输入一一对应的判定结果。 */
+  results: EventTriageResult[]
+  /** 本次批量调用消耗的 token；按整体计一次，不摊到每条。 */
+  tokens: number
 }
 
 /**
@@ -39,6 +49,8 @@ export interface EventTriageResult {
  */
 export interface EventTriagePort {
   triage(input: EventTriageInput): Promise<EventTriageResult>
+  /** 可选：一次模型调用判多条事件；缺省时上层退回逐条判定。 */
+  triageBatch?(inputs: EventTriageInput[]): Promise<EventTriageBatchResult>
 }
 
 /**
@@ -97,7 +109,7 @@ export class JevEventTriage implements EventTriagePort {
   }
 
   async triage(input: EventTriageInput): Promise<EventTriageResult> {
-    const answers = await this.askModel(input)
+    const { answers, tokens } = await this.askModel(input)
     const needsHandling = answers.needsHandling
     const eventType = answers.eventType
     const priority = answers.priority
@@ -116,13 +128,66 @@ export class JevEventTriage implements EventTriagePort {
       answers: { needsHandling, eventType, priority, needsHuman, projectRelated },
       eventTypeLabel: labelOf(EVENT_TYPE_CRITERIA, eventType),
       priorityLabel: labelOf(EVENT_PRIORITY_CRITERIA, priority),
+      tokens,
     }
   }
 
   /** 模型返回的答案结构不合法时统一成一个错误名，方便上层识别「降级到规则层」。 */
-  private async askModel(input: EventTriageInput): Promise<Record<string, number>> {
+  private async askModel(input: EventTriageInput): Promise<{ answers: Record<string, number>; tokens: number }> {
     try {
-      return await this.client.ask(eventTriageState(input), EVENT_TRIAGE_QUESTIONS)
+      const result = await this.client.askWithUsage(eventTriageState(input), EVENT_TRIAGE_QUESTIONS)
+      return { answers: result.answers, tokens: result.usage.total }
+    } catch (error) {
+      if (error instanceof JevError && error.kind === 'malformed') throw new Error('event:triage-invalid')
+      throw error
+    }
+  }
+
+  /**
+   * 批量判定：一次请求问完 N 条事件的五个问题。
+   *
+   * 问题 id 带事件下标（`e0.priority`），指令只说「第几条事件」——
+   * 事件正文仍然只出现在状态里，不进指令槽。答案缺任何一条都算结构非法，
+   * 由上层退回逐条判定。
+   */
+  async triageBatch(inputs: EventTriageInput[]): Promise<EventTriageBatchResult> {
+    if (inputs.length === 0) return { results: [], tokens: 0 }
+    const questions: Record<string, JevQuestion> = {}
+    inputs.forEach((_input, index) => {
+      for (const [id, question] of Object.entries(EVENT_TRIAGE_QUESTIONS)) {
+        questions[`e${index}.${id}`] = {
+          type: question.type,
+          instructions: `第 ${index + 1} 条事件：${question.instructions}`,
+          ...(question.criteria ? { criteria: [...question.criteria] } : {}),
+        }
+      }
+    })
+    const state = inputs
+      .map((input, index) => `第 ${index + 1} 条事件\n${eventTriageState(input)}`)
+      .join('\n\n')
+    try {
+      const { answers, usage } = await this.client.askWithUsage(state, questions)
+      const results = inputs.map((_input, index) => {
+        const pick = (id: string): number => {
+          const value = answers[`e${index}.${id}`]
+          if (value === undefined) throw new Error('event:triage-invalid')
+          return value
+        }
+        const eventType = pick('eventType')
+        const priority = pick('priority')
+        return {
+          answers: {
+            needsHandling: pick('needsHandling'),
+            eventType,
+            priority,
+            needsHuman: pick('needsHuman'),
+            projectRelated: pick('projectRelated'),
+          },
+          eventTypeLabel: labelOf(EVENT_TYPE_CRITERIA, eventType),
+          priorityLabel: labelOf(EVENT_PRIORITY_CRITERIA, priority),
+        }
+      })
+      return { results, tokens: usage.total }
     } catch (error) {
       if (error instanceof JevError && error.kind === 'malformed') throw new Error('event:triage-invalid')
       throw error

@@ -36,7 +36,8 @@ function envelope(over: Partial<EventEnvelope> = {}): EventEnvelope {
   }
 }
 
-function triageOf(over: Partial<{ needsHandling: number; eventType: number; priority: number; needsHuman: number; projectRelated: number }> = {}): EventTriagePort {
+function triageOf(over: Partial<{ needsHandling: number; eventType: number; priority: number; needsHuman: number; projectRelated: number; tokens: number }> = {}): EventTriagePort {
+  const { tokens, ...answers } = over
   return {
     async triage() {
       return {
@@ -46,10 +47,11 @@ function triageOf(over: Partial<{ needsHandling: number; eventType: number; prio
           priority: 0.75,
           needsHuman: 0.1,
           projectRelated: 0.9,
-          ...over,
+          ...answers,
         },
         eventTypeLabel: 'defect',
         priorityLabel: 'high',
+        ...(tokens === undefined ? {} : { tokens }),
       }
     },
   }
@@ -162,23 +164,48 @@ describe('事件总线', () => {
     expect(store.listTickets({ limit: 10 })).toHaveLength(0)
   })
 
-  it('预算超限且不是最高档时延后', async () => {
+  it('预算超限时不再问模型，低优先级事件直接延后', async () => {
     settings.budget.dailyEvents = 1
-    const b = bus({ triage: triageOf({ needsHuman: 0.9 }) })
+    const port = triageOf({ needsHuman: 0.9 })
+    const triage = vi.fn(port.triage)
+    const b = bus({ triage: { triage } })
     await b.ingest(envelope())
     await b.tick()
     const queue = store.getEventQueue('ev_1')
     expect(queue?.state).toBe('deferred')
-    expect(logs.some(log => log.event === 'event:budget-exceeded')).toBe(true)
+    expect(queue?.reason).toBe('event:budget-exceeded')
+    // 预算的意义就是不再花钱问模型：这条事件一次判定都不该发生。
+    expect(triage).not.toHaveBeenCalled()
+    expect(logs.some(log => log.event === 'event:budget-exceeded' && log.level === 'warn')).toBe(true)
   })
 
-  it('预算超限但事件是最高档时仍然派工并记一条告警', async () => {
+  it('预算超限时规则层判为高优先级的事件仍然派工', async () => {
     settings.budget.dailyEvents = 1
     const b = bus({ triage: triageOf({ priority: 0.95 }) })
-    await b.ingest(envelope())
+    await b.ingest(envelope({ priorityHint: 95 }))
     await b.tick()
     expect(store.getEventQueue('ev_1')?.state).toBe('dispatched')
     expect(logs.some(log => log.event === 'event:budget-exceeded' && log.level === 'warn')).toBe(true)
+  })
+
+  it('判定消耗的 token 计入当日预算，触顶后不再调用判定模型', async () => {
+    settings.budget.dailyTokens = 10
+    const port = triageOf({ needsHuman: 0.9, tokens: 100 })
+    const triage = vi.fn(port.triage)
+    const b = bus({ triage: { triage } })
+    await b.ingest(envelope({ id: 'ev_1', externalId: 'ext-1' }))
+    await b.tick()
+    expect(store.getEventQueue('ev_1')?.state).toBe('deferred')
+    expect(store.getEventQueue('ev_1')?.reason).toBe('event:budget-exceeded')
+    // 计数器按本地日历日分桶：日期用 Intl 独立算，不复制生产实现。
+    const localDay = new Date(NOW).toLocaleDateString('en-CA')
+    expect(store.getCursor(`event:tokens:${localDay}`)).toBe('100')
+
+    await b.ingest(envelope({ id: 'ev_2', externalId: 'ext-2' }))
+    await b.tick()
+    expect(store.getEventQueue('ev_2')?.state).toBe('deferred')
+    // 预算已触顶，第二条事件一次模型调用都不该再发生。
+    expect(triage).toHaveBeenCalledTimes(1)
   })
 
   it('时间窗不放行时延后到窗口开始', async () => {
@@ -189,6 +216,67 @@ describe('事件总线', () => {
     const queue = store.getEventQueue('ev_1')
     expect(queue?.state).toBe('deferred')
     expect(queue?.reason).toBe('event:window-closed')
+  })
+
+  it('批量窗口内同源同类型事件合并成一次判定调用', async () => {
+    settings.windows = [{ id: 'night', from: '09:00', to: '20:00', allow: ['t0', 't1'], batch: true }]
+    const triage = vi.fn(async () => ({
+      answers: { needsHandling: 0.9, eventType: 0.6, priority: 0.75, needsHuman: 0.1, projectRelated: 0.9 },
+      eventTypeLabel: 'defect',
+      priorityLabel: 'high',
+    }))
+    const triageBatch = vi.fn(async (inputs: Array<{ subject: string }>) => ({
+      results: inputs.map(() => ({
+        answers: { needsHandling: 0.9, eventType: 0.6, priority: 0.75, needsHuman: 0.1, projectRelated: 0.9 },
+        eventTypeLabel: 'defect',
+        priorityLabel: 'high',
+      })),
+      tokens: 42,
+    }))
+    const b = bus({ triage: { triage, triageBatch } })
+    await b.ingest(envelope({ id: 'ev_1', externalId: 'ext-1' }))
+    await b.ingest(envelope({ id: 'ev_2', externalId: 'ext-2' }))
+    const outcome = await b.tick()
+    expect(triageBatch).toHaveBeenCalledTimes(1)
+    expect(triageBatch.mock.calls[0]?.[0]).toHaveLength(2)
+    expect(triage).not.toHaveBeenCalled()
+    expect(outcome.dispatched).toBe(2)
+    expect(logs.some(log => log.event === 'event:triage-batched' && log.level === 'info')).toBe(true)
+    const localDay = new Date(NOW).toLocaleDateString('en-CA')
+    expect(store.getCursor(`event:tokens:${localDay}`)).toBe('42')
+  })
+
+  it('不在批量窗口时逐条判定，不合并调用', async () => {
+    settings.windows = [{ id: 'peak', from: '09:00', to: '20:00', allow: ['t0', 't1'] }]
+    const triage = vi.fn(async () => ({
+      answers: { needsHandling: 0.9, eventType: 0.6, priority: 0.75, needsHuman: 0.1, projectRelated: 0.9 },
+      eventTypeLabel: 'defect',
+      priorityLabel: 'high',
+    }))
+    const triageBatch = vi.fn(async () => ({ results: [], tokens: 0 }))
+    const b = bus({ triage: { triage, triageBatch } })
+    await b.ingest(envelope({ id: 'ev_1', externalId: 'ext-1' }))
+    await b.ingest(envelope({ id: 'ev_2', externalId: 'ext-2' }))
+    await b.tick()
+    expect(triage).toHaveBeenCalledTimes(2)
+    expect(triageBatch).not.toHaveBeenCalled()
+  })
+
+  it('批量判定失败时退回逐条判定，事件不丢', async () => {
+    settings.windows = [{ id: 'night', from: '09:00', to: '20:00', allow: ['t0', 't1'], batch: true }]
+    const triage = vi.fn(async () => ({
+      answers: { needsHandling: 0.9, eventType: 0.6, priority: 0.75, needsHuman: 0.1, projectRelated: 0.9 },
+      eventTypeLabel: 'defect',
+      priorityLabel: 'high',
+    }))
+    const triageBatch = vi.fn(async () => { throw new Error('jev:http-500') })
+    const b = bus({ triage: { triage, triageBatch } })
+    await b.ingest(envelope({ id: 'ev_1', externalId: 'ext-1' }))
+    await b.ingest(envelope({ id: 'ev_2', externalId: 'ext-2' }))
+    const outcome = await b.tick()
+    expect(triage).toHaveBeenCalledTimes(2)
+    expect(outcome.dispatched).toBe(2)
+    expect(logs.some(log => log.event === 'event:triage-batch-failed' && log.level === 'warn')).toBe(true)
   })
 
   it('审核批准后开单，驳回后丢弃', async () => {

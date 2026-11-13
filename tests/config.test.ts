@@ -1091,4 +1091,17 @@ describe('事件总线的 config set 白名单', () => {
     expect(setConfigValue(cfg, 'event.sources', '[]')).toBe(true)
     expect(cfg.event.sources).toEqual([])
   })
+
+  it('applyConfigPatch 可设置与取消通知静默时段', () => {
+    const cfg = loadConfig(home())
+    const set = applyConfigPatch(cfg, { 'event.notifyQuietHours': { from: '22:00', to: '08:00' } })
+    expect(set.errors).toHaveLength(0)
+    expect(cfg.event.notifyQuietHours).toEqual({ from: '22:00', to: '08:00' })
+
+    const cleared = applyConfigPatch(cfg, { 'event.notifyQuietHours': { from: '', to: '' } })
+    expect(cleared.errors).toHaveLength(0)
+    expect(cfg.event.notifyQuietHours).toBeUndefined()
+
+    expect(applyConfigPatch(cfg, { 'event.notifyQuietHours': { from: '22:00', to: '' } }).errors).toHaveLength(1)
+  })
 })

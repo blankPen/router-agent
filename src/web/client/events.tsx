@@ -80,6 +80,7 @@ export interface EventConfigView {
   maxQueueDepth: number
   approvers: string[]
   notifyChat: string
+  notifyQuietHours?: { from: string; to: string }
 }
 
 const TIER_LABEL: Record<string, string> = {
@@ -385,6 +386,10 @@ function EventGateCard({ config, onSaved, onError }: {
         'event.windows': draft.windows,
         'event.maxQueueDepth': draft.maxQueueDepth,
         'event.notifyChat': draft.notifyChat,
+        'event.notifyQuietHours': {
+          from: draft.notifyQuietHours?.from ?? '',
+          to: draft.notifyQuietHours?.to ?? '',
+        },
       })
       onSaved()
     } catch (error) {
@@ -444,6 +449,26 @@ function EventGateCard({ config, onSaved, onError }: {
             value={draft.notifyChat}
             placeholder="群 chat_id，留空则只在面板可见"
             onChange={event => update({ notifyChat: event.target.value })}
+          />
+        </div>
+        <div className="meta-item">
+          <span className="meta-label">通知静默开始</span>
+          <input
+            className="text-input"
+            type="time"
+            value={draft.notifyQuietHours?.from ?? ''}
+            placeholder="22:00"
+            onChange={event => update({ notifyQuietHours: { from: event.target.value, to: draft.notifyQuietHours?.to ?? '' } })}
+          />
+        </div>
+        <div className="meta-item">
+          <span className="meta-label">通知静默结束</span>
+          <input
+            className="text-input"
+            type="time"
+            value={draft.notifyQuietHours?.to ?? ''}
+            placeholder="08:00"
+            onChange={event => update({ notifyQuietHours: { from: draft.notifyQuietHours?.from ?? '', to: event.target.value } })}
           />
         </div>
       </div>

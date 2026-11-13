@@ -1732,6 +1732,28 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       if (!adapter.startCardActions) continue
       const startCardActions = adapter.startCardActions
       void Promise.resolve().then(() => startCardActions.call(adapter, action => {
+        // 事件审核按钮走事件总线，不进选择题那条路。
+        const eventAction = String(action.value.eventAction ?? '')
+        if (eventAction && eventRuntime) {
+          void eventRuntime.bus
+            .review(String(action.value.eventId ?? ''), eventAction === 'approve' ? 'approve' : 'reject', action.operatorId)
+            .then(result => {
+              logger.info('event:review-from-card', {
+                eventId: String(action.value.eventId ?? ''),
+                action: eventAction,
+                operator: action.operatorId,
+                state: result.state,
+              })
+            })
+            .catch(error => {
+              logger.warn('event:review-from-card-failed', {
+                eventId: String(action.value.eventId ?? ''),
+                channel: adapter.id,
+                detail: errorMessage(error),
+              })
+            })
+          return
+        }
         void service.handleCardAction(action).catch(error => {
           logger.warn('question:handle-failed', {
             channel: adapter.id,

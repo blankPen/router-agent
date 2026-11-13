@@ -334,6 +334,14 @@ export interface EventSourceSettings {
 }
 
 /** 事件总线的配置。 */
+/** 通知静默时段；留空 = 不静默。 */
+export interface EventQuietHours {
+  /** 'HH:MM' 本地时间。 */
+  from: string
+  /** 'HH:MM' 本地时间；可以跨零点（22:00 → 06:00）。 */
+  to: string
+}
+
 export interface EventSettings {
   /** 总开关；关掉时所有来源都不接。 */
   enabled: boolean
@@ -353,6 +361,8 @@ export interface EventSettings {
   approvers: string[]
   /** 审核通知群。 */
   notifyChat: string
+  /** 通知静默时段；期间只入面板不推送。 */
+  notifyQuietHours?: EventQuietHours
 }
 
 /** 事件总线的默认配置：关闭、不限预算、一直放行。 */
@@ -776,6 +786,7 @@ export function parseEventWindows(value: unknown): EventWindowSettings[] {
 export function parseEventSettings(doc: unknown, fallback: EventSettings = defaultEventSettings()): EventSettings {
   if (!isRecord(doc)) return fallback
   const budgetDoc = isRecord(doc.budget) ? doc.budget : {}
+  const quietHours = parseEventQuietHours(doc.notifyQuietHours)
   return {
     enabled: booleanOr(doc.enabled, fallback.enabled),
     sources: parseEventSources(doc.sources),
@@ -787,7 +798,17 @@ export function parseEventSettings(doc: unknown, fallback: EventSettings = defau
     maxQueueDepth: positiveIntOr(doc.maxQueueDepth, fallback.maxQueueDepth, 1, 100_000),
     approvers: stringArray(doc.approvers, fallback.approvers),
     notifyChat: stringOr(doc.notifyChat, fallback.notifyChat),
+    ...(quietHours ? { notifyQuietHours: quietHours } : {}),
   }
+}
+
+/** 解析通知静默时段；格式不对就当没配，不静默。 */
+export function parseEventQuietHours(value: unknown): EventQuietHours | undefined {
+  if (!isRecord(value)) return undefined
+  const from = stringOr(value.from, '')
+  const to = stringOr(value.to, '')
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(from) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(to)) return undefined
+  return { from, to }
 }
 
 export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv = process.env, options: ConfigLoadOptions = {}): AppConfig {
@@ -1486,6 +1507,9 @@ export function writeConfig(home: string, config: AppConfig): void {
       maxQueueDepth: config.event.maxQueueDepth,
       approvers: config.event.approvers,
       notifyChat: config.event.notifyChat,
+      ...(config.event.notifyQuietHours
+        ? { notifyQuietHours: { from: config.event.notifyQuietHours.from, to: config.event.notifyQuietHours.to } }
+        : {}),
     },
     ...(config.channels && Object.keys(config.channels).length > 0 ? { channels: config.channels } : {}),
     projects: config.projects,
@@ -1867,6 +1891,20 @@ function validateEventSources(value: unknown): { error: string | null; value: Ev
   return { error: null, value: sources }
 }
 
+/** 校验通知静默时段；空对象表示不静默。 */
+function validateEventQuietHours(value: unknown): { error: string | null; value: EventQuietHours | undefined } {
+  if (value === null || value === undefined) return { error: null, value: undefined }
+  if (!isRecord(value)) return { error: '静默时段要写成 { from, to }', value: undefined }
+  const from = typeof value.from === 'string' ? value.from.trim() : ''
+  const to = typeof value.to === 'string' ? value.to.trim() : ''
+  // 两端都留空 = 取消静默；只填一端是写错了，直接拒绝。
+  if (!from && !to) return { error: null, value: undefined }
+  if (!CLOCK_PATTERN.test(from) || !CLOCK_PATTERN.test(to)) {
+    return { error: '静默时段的时间要用 HH:MM 格式', value: undefined }
+  }
+  return { error: null, value: { from, to } }
+}
+
 /** 校验一份时间窗清单。 */
 function validateEventWindows(value: unknown): { error: string | null; value: EventWindowSettings[] } {
   if (!Array.isArray(value)) return { error: '需要时间窗数组', value: [] }
@@ -1968,6 +2006,7 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
   'event.maxQueueDepth': intValue(1, 100_000),
   'event.approvers': stringListValue(),
   'event.notifyChat': stringValue,
+  'event.notifyQuietHours': listValue(validateEventQuietHours),
 }
 
 /** 整段替换的复杂字段（项目、群、白名单这类不适合逐项点路径编辑的配置）。 */
@@ -2154,6 +2193,11 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
     if (JSON.stringify(before) === JSON.stringify(value)) continue
     if (path === 'projects') config.projects = value as ProjectConfig[]
     else if (path === 'feishu.chats') config.feishu.chats = value as ChatSettings[]
+    else if (path === 'event.notifyQuietHours') {
+      // 两端留空表示取消静默：这一项要真删掉，不能留一个空壳。
+      if (value) config.event.notifyQuietHours = value as EventQuietHours
+      else delete config.event.notifyQuietHours
+    }
     else if (path.startsWith('runtime.projects.')) {
       setProjectsForRuntime(config, path.slice('runtime.projects.'.length), value as ProjectConfig[])
     } else if (path.startsWith('runtime.options.')) {
@@ -2402,6 +2446,19 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
     case 'event.notifyChat':
       config.event.notifyChat = value
       return true
+    case 'event.notifyQuietHours': {
+      // 静默时段整体替换；空值表示取消静默。
+      if (value === '') {
+        delete config.event.notifyQuietHours
+        return true
+      }
+      const parsed = parseJsonValue(value)
+      if (!parsed) return false
+      const quiet = parseEventQuietHours(parsed)
+      if (!quiet) return false
+      config.event.notifyQuietHours = quiet
+      return true
+    }
     case 'event.windows': {
       // 时间窗结构复杂，用 JSON 整体替换；条目不合法时整体拒绝，不写半份。
       const parsed = parseJsonValue(value)

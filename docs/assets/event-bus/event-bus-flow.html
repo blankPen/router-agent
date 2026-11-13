@@ -313,7 +313,7 @@
       <div class="win">
         <span class="rid">示例 · window: night 00:00–06:00</span>
         <h4>低峰 · 全量 + 批量</h4>
-        <p>放行 T0~T3；同来源事件合并成一次 Jev 调用，调用次数 N → 1。<b>窗口可在面板改。</b></p>
+        <p>放行 T0~T3；同 <span class="mono">source + type + project</span> 的事件合并成一次 Jev 调用，调用次数 N → 1；合并失败自动退回逐条判定。<b>窗口可在面板改。</b></p>
       </div>
       <div class="win">
         <span class="rid">示例 · window: peak 09:00–20:00</span>
@@ -328,7 +328,7 @@
       <div class="win">
         <span class="rid">配置项 · budget daily</span>
         <h4>预算闸门（默认不限）</h4>
-        <p>可配置日 token / 日事件数；默认 <b>0 = 不限制</b>，配了才拦截，触顶自动延后并记 <span class="mono">event:budget-exceeded</span>。</p>
+        <p>可配置日 token / 日事件数；默认 <b>0 = 不限制</b>，配了才拦截；触顶后先不调模型、低优事件延后到次日，已判定完的 T0 仍执行，并记 <span class="mono">event:budget-exceeded</span>。</p>
       </div>
     </div>
     <div class="gates">

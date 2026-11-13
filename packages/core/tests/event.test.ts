@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   EVENT_TRIAGE_SPEC,
+  batchWindowAt,
   budgetState,
   eventKey,
   eventRulesOf,
@@ -173,6 +174,23 @@ describe('时间窗', () => {
     const night = [{ id: 'n', from: '22:00', to: '06:00', allow: ['t0'] as const }]
     expect(windowAllows(night, 't0', '23:30').allowed).toBe(true)
     expect(windowAllows(night, 't0', '12:00').allowed).toBe(false)
+  })
+})
+
+describe('批量合并窗口', () => {
+  it('没有开启批量的窗口不算批量窗口', () => {
+    const windows = [{ id: 'peak', from: '09:00', to: '20:00', allow: ['t0'] as const }]
+    expect(batchWindowAt(windows, '10:00')).toBeUndefined()
+  })
+
+  it('命中开启批量的窗口时返回该窗口', () => {
+    const windows = [{ id: 'night', from: '22:00', to: '06:00', allow: ['t0'] as const, batch: true }]
+    expect(batchWindowAt(windows, '23:30')?.id).toBe('night')
+  })
+
+  it('窗口外的时刻不批量', () => {
+    const windows = [{ id: 'night', from: '22:00', to: '06:00', allow: ['t0'] as const, batch: true }]
+    expect(batchWindowAt(windows, '12:00')).toBeUndefined()
   })
 })
 

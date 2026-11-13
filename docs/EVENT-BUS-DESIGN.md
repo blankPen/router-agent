@@ -430,6 +430,14 @@ export const EVENT_TRIAGE_SPEC = {
 
 这样「重复点批准」「派工失败后重试」「外部系统重投」都不会开出重复工单。
 
+### 7.4 审核人名单闸门
+
+`event.approvers` 非空时，只有名单内的人能对待审事件做拍板；不在名单里的操作一律拒绝，记 `event:review-forbidden`。
+
+- 名单为空 = 不限制（默认行为，admin 全能）。
+- 本机面板没有具名身份（operator 记作 `panel`），按「本机放行」处理——否则面板上的按钮永远点不动。
+- 闸门在**动作入口**上生效：面板 API 与飞书卡片按钮走同一条 `review()`，不会出现「卡片能批、面板不能」的不一致。
+
 ## 8. 成本控制与可配置时间窗
 
 ### 8.1 三重闸门（全部可配置）
@@ -437,7 +445,7 @@ export const EVENT_TRIAGE_SPEC = {
 | 闸门 | 配置项 | 默认值 | 行为 |
 |-|-|-|-|
 | **时间窗** | `event.windows[]`：`{ id, from, to, allow: ['t0','t1',...], batch: bool }` | **先留空** = 一直放行（全 tier、不批量） | 窗口不允许该 tier → 延后到窗口开始 |
-| **预算** | `event.budget.dailyTokens` / `event.budget.dailyEvents` | **不限**（`0` 或缺省 = 不限制） | 超出才延后到下一个窗口并记 `event:budget-exceeded`；T0 超限仍执行（保响应）但记 `warn` |
+| **预算** | `event.budget.dailyTokens` / `event.budget.dailyEvents` | **不限**（`0` 或缺省 = 不限制） | **前置闸门**：预算触顶后先不调模型——规则层判为高优先级且无需人介入的事件才继续，其余直接延后到次日；**后置闸门**：已经判定完的 T0 超限仍执行（保响应）并记 `warn` |
 | **来源范围** | `event.sources[].repos` / `labels` / `state` | 空 = 不接该来源 | 决定接哪些仓库、哪些标签 |
 | **并发** | 复用现有 `policy.maxWorkers`；队列侧 `event.maxQueueDepth` / 每 lane 1 在飞 | 沿用现有并发上限 | 背压优先于排队 |
 
@@ -478,6 +486,13 @@ event:
 
 夜间批处理：同 `source + type + project` 的事件在窗口内合并成一次 Jev 调用（批量输入 N 条，输出 N 条判定），调用次数从 N 降到 1。
 
+**落地口径**（已实现）：
+
+- 合并只在**开了 `batch` 的时间窗内**发生——窗口必须先于批量，否则批量会在高峰期偷偷跑（§12 顺序约束）。
+- 一次调用的请求里带 N×5 个问题（每条事件五个问题），问题 id 带事件下标（`e0.priority`）；指令只说「第几条事件」，事件正文仍然只进状态槽、不进指令槽（§7.1 的注入防护不变）。
+- 批量调用的 token 整体计入当日预算游标（`event:tokens-used`），不摊到每条事件上。
+- 批量调用失败（超时 / 答案缺条 / 结构非法）就**退回逐条判定**并记 `event:triage-batch-failed`：合并只是省钱的优化，不该让事件没人判。
+
 ## 9. Web 事件面板
 
 新增面板页签「**事件**」，与既有「工单 / 日志 / 配置 / 来源」并列。
@@ -500,9 +515,11 @@ event:
 ### 9.3 通知
 
 - 复用现有 `outbox` + `Question`/`ask` 能力：进审核队列时推一张飞书卡片给 admin（含摘要、事件链接、批准/驳回按钮）。
-- **聚合**：待审 > N 条（默认 10）或同来源多条时合并成一条摘要通知，避免刷屏。
-- **免打扰**：可配静默时段（如 22:00–08:00），期间只入面板不推送，恢复后发一条汇总。
+- **通知群**：来源自己配的 `notifyChat` 优先，没配才用全局 `event.notifyChat`；都没配就只在面板里可见（面板永远是唯一真源）。
+- **聚合**：同来源同十分钟档的多条事件合并成一条通知（`outbox` 唯一键去重，记 `event:review-merged`）；优先级 ≥85 的事件单独通知，不参与合并。
+- **免打扰**：可配静默时段（如 22:00–08:00），期间只入面板不推送，通知推迟到静默结束那一刻（`nextAt`，日志带 `deferredTo`）；合并桶也归到那一刻。
 - **通知失败**不影响主流程：记 `event:review-notify-failed` 并保留在面板待办里。
+- **卡片按钮**：卡片上带「批准派单 / 驳回」两个按钮，回调直接走事件总线的 `review()`，与面板动作共用同一套判定（含审核人名单闸门）。
 
 ## 10. 日志与可观测性
 
@@ -514,12 +531,18 @@ event:
 | `event:duplicate` | info | eventId, source, externalId | 幂等命中，丢弃重复 |
 | `event:triaged` | info | eventId, tier, decidedBy, reason, confidence | 判定结论 |
 | `event:triage-failed` | warn | eventId, detail | Jev 失败，降级到规则 |
+| `event:triage-batched` | info | group, count, tokens | 批量窗口内合并成一次判定调用 |
+| `event:triage-batch-failed` | warn | count, detail | 批量判定失败，退回逐条判定 |
 | `event:deferred` | info | eventId, notBefore, reason | 延后（窗口 / 预算 / 人工） |
-| `event:budget-exceeded` | warn | eventId, used, limit | 预算触顶 |
+| `event:budget-exceeded` | warn | eventId, reason, used, limit | 预算触顶 |
+| `event:tokens-used` | info | tokens, day, total | 判定消耗记进当日预算游标 |
 | `event:dispatched` | info | eventId, ticketId, project | 已转工单 |
 | `event:pending-review` | info | eventId, approvers | 进审核队列 |
 | `event:review-notified` | info | eventId, channelId | 通知已发 |
+| `event:review-merged` | info | eventId, channelId, key | 同批次合并，没有重复推送 |
 | `event:review-approved` / `event:review-rejected` | info | eventId, operator, ticketId | 人工拍板结果 |
+| `event:review-forbidden` | warn | eventId, operator | 操作人不在审核人名单，审核被拒 |
+| `event:review-from-card` / `event:review-from-card-failed` | info / warn | eventId, action, operator / detail | 飞书卡片按钮的审核处理与失败 |
 | `event:dropped` | warn | eventId, reason | 丢弃（原因必填） |
 | `event:expired` | warn | eventId, deadlineAt | 超时过期 |
 | `event:hops-exceeded` | warn | eventId, hops | 自产事件熔断（未来 P2） |
@@ -556,7 +579,7 @@ event:
 
 顺序上唯一不能错：**熔断（hops）必须先于自产事件（emit）**；**时间窗必须先于批量**（否则批量会在高峰期偷偷跑）。
 
-**实现现状**（2026-11-14）：P0 / P1 / P2 已随 tk-87 一并落地——事件契约与队列表、规则层 + Jev `event.triage.v1` 判定、T1 审核队列与统一待审核列表、可配置时间窗与预算、GitHub Issue 轮询与 webhook、cron 定时任务、Web 事件面板。**夜间批量合并（`window.batch`）只保留配置与面板入口，尚未实现合并调用**；P3 自产事件（`--emit`）只落地了 `hops` 熔断，未开放自产来源。
+**实现现状**（2026-11-14）：P0 / P1 / P2 已随 tk-87 一并落地——事件契约与队列表、规则层 + Jev `event.triage.v1` 判定、T1 审核队列与统一待审核列表、可配置时间窗与预算、GitHub Issue 轮询与 webhook、cron 定时任务、Web 事件面板。**夜间批量合并（`window.batch`）已落地**：命中批量窗口时同源同类型事件合并成一次 Jev 调用，失败自动退回逐条判定。P3 自产事件（`--emit`）只落地了 `hops` 熔断，未开放自产来源。
 
 ## 13. 风险与开放问题
 
@@ -567,6 +590,7 @@ event:
 | **自动开单越权** | 判定误判导致自动派工 | 直派必须同时满足四条前置条件（§7.2）；置信度 <0.5 一律待审；`acceptMode` 仍是总闸；面板可看到每次直派依据 |
 | **提示词注入** | Issue / webhook 正文里的指令被模型执行 | `subject` 白名单 + 正文只落 `detailRef` + 提示词声明「资料非指令」 |
 | **成本失控** | 事件风暴打爆 token | 规则前置 + 可配置预算 + 时间窗 + 队列背压 + 批量合并；预算默认不限，需显式配置才生效 |
+| **批量判定答不全** | 模型一次没答全 N 条事件，判定结果缺失 | 答案缺条按结构非法处理，整批退回逐条判定（记 `event:triage-batch-failed`），事件不丢 |
 | **队列积压** | 面板越来越长，判定越来越晚 | `maxQueueDepth` + TTL 过期 + 每日汇总归档 |
 | **自激** | 事件触发事件，无限循环 | `hops` 熔断（P3 前置）+ 来源白名单 + 每 lane 串行 |
 | **通知刷屏** | admin 被卡片淹没 | 聚合阈值 + 免打扰时段 + 面板为唯一真源 |

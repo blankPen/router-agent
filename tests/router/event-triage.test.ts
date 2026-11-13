@@ -55,4 +55,36 @@ describe('Jev 事件判定', () => {
     const triage = new JevEventTriage({ apiKey: 'k', model: 'm' }, { fetch: fetchImpl })
     await expect(triage.triage(input)).rejects.toThrow(/event:triage-invalid/)
   })
+
+  it('批量判定一次请求问完多条事件，逐条给出结论', async () => {
+    const answers: Record<string, { noul?: number; score?: number }> = {}
+    for (const index of [0, 1]) {
+      answers[`e${index}.needsHandling`] = { noul: 0.9 }
+      answers[`e${index}.eventType`] = { score: 3 }
+      answers[`e${index}.priority`] = { score: 2 }
+      answers[`e${index}.needsHuman`] = { noul: 0.1 }
+      answers[`e${index}.projectRelated`] = { noul: 0.8 }
+    }
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ answers }), { status: 200 })) as unknown as typeof fetch
+    const triage = new JevEventTriage({ apiKey: 'k', model: 'm' }, { fetch: fetchImpl })
+    const result = await triage.triageBatch([input, { ...input, subject: 'blankPen/router-agent#13' }])
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(result.results).toHaveLength(2)
+    expect(result.results[1]?.eventTypeLabel).toBe('defect')
+    expect(result.results[1]?.priorityLabel).toBe('high')
+  })
+
+  it('批量答案缺一条时抛错，由上层退回逐条判定', async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+      answers: {
+        'e0.needsHandling': { noul: 0.9 },
+        'e0.eventType': { score: 3 },
+        'e0.priority': { score: 2 },
+        'e0.needsHuman': { noul: 0.1 },
+        'e0.projectRelated': { noul: 0.8 },
+      },
+    }), { status: 200 })) as unknown as typeof fetch
+    const triage = new JevEventTriage({ apiKey: 'k', model: 'm' }, { fetch: fetchImpl })
+    await expect(triage.triageBatch([input, { ...input, subject: 'blankPen/router-agent#13' }])).rejects.toThrow(/event:triage-invalid/)
+  })
 })

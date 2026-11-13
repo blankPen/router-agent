@@ -119,6 +119,8 @@ export interface EnqueueOutbox {
   threadId: string
   text: string
   now: string
+  /** 最早可投递时间；缺省等于 `now`。静默时段的通知用它推迟到时段结束。 */
+  nextAt?: string
   /** 用户消息 ID（不是话题根），用于回复后撤销回执表情。 */
   originMessageId?: string
   /** 结构化回复块；为空时只发 `text`。 */
@@ -1686,7 +1688,7 @@ export class Store {
   enqueueOutbox(item: EnqueueOutbox): boolean {
     const result = this.db.prepare(`INSERT OR IGNORE INTO outbox (id, key, channel_kind, channel_id, thread_id, text, blocks, status, attempts, next_at, created_at, origin_message_id)
       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)`)
-      .run(item.id, item.key, item.channelKind, item.channelId, item.threadId, item.text, item.blocks ? JSON.stringify(item.blocks) : null, item.now, item.now, item.originMessageId ?? null)
+      .run(item.id, item.key, item.channelKind, item.channelId, item.threadId, item.text, item.blocks ? JSON.stringify(item.blocks) : null, item.nextAt ?? item.now, item.now, item.originMessageId ?? null)
     return Number(result.changes) > 0
   }
 

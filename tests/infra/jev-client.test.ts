@@ -52,6 +52,26 @@ describe('JevClient.ask', () => {
     await expect(outOfRange.ask({}, { a: { type: 'noul', instructions: 'x' } })).rejects.toThrow(/jev:malformed:a/)
   })
 
+  it('askWithUsage 返回 provider 给的 token 用量', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({
+      answers: { a: { noul: 0.5 } },
+      usage: { prompt_tokens: 120, completion_tokens: 30, total_tokens: 150 },
+    }))
+    const client = new JevClient({ apiKey: 'k', model: 'm' }, { fetch: fetchMock as unknown as typeof fetch })
+    const result = await client.askWithUsage({ message: 'x' }, { a: { type: 'noul', instructions: 'x' } })
+    expect(result.usage).toEqual({ input: 120, output: 30, total: 150 })
+    expect(result.answers.a).toBe(0.5)
+  })
+
+  it('provider 不给 usage 时按字符数估算 token', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ answers: { a: { noul: 0.5 } } }))
+    const client = new JevClient({ apiKey: 'k', model: 'm' }, { fetch: fetchMock as unknown as typeof fetch })
+    const result = await client.askWithUsage({ message: 'x'.repeat(400) }, { a: { type: 'noul', instructions: 'x' } })
+    expect(result.usage.total).toBeGreaterThan(100)
+    expect(result.usage.input).toBeGreaterThan(0)
+    expect(result.usage.output).toBeGreaterThan(0)
+  })
+
   it('fails_with_timeout_when_jev_slow', async () => {
     vi.useFakeTimers()
     const client = new JevClient({ apiKey: 'k', model: 'm' }, {
