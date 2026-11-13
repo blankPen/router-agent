@@ -42,6 +42,13 @@ for (const asset of packageAssets) {
   copyFileSync(join(root, asset), to)
 }
 
+// Worker 技能目录（SKILL.md + references/）整体复制：目录结构要保持，
+// reader 按 `skill/<相对路径>` 定位。
+const skillRoot = join(root, 'packages/runtime/src/spec/worker')
+if (existsSync(skillRoot)) {
+  cpSync(skillRoot, join(root, 'dist/packages/runtime/src/spec/worker'), { recursive: true })
+}
+
 const assets = [
   'src/router/prompts/orchestrator.md',
   'src/router/prompts/admission.md',

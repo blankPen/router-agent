@@ -19,12 +19,21 @@ const channelPackage = (id: string): string | undefined => DEFAULT_CHANNEL_PLUGI
 
 export type ChatMode = 'all' | 'mention'
 
+/** Worker 启动方式：技能目录按需读取，或回退到 prompt 里的旧内联手册。 */
+export type WorkerSkillMode = 'path' | 'inline'
+
+/** 选择题的作答方式：按钮回调、序号回复，或自动探测。 */
+export type AskMode = 'callback' | 'text' | 'auto'
+
+/** 谁能作答：群内任何人，或仅工单发起人。 */
+export type AskAllow = 'anyone' | 'requester'
+
 /** worker 的默认工具策略：只允许上报/文档/git/gh/glab，默认无网络。 */
 export const DEFAULT_WORKER_TOOLS: ToolPolicy = {
   fileAccess: 'read-write',
   shell: 'allowlist',
   shellAllow: [
-    'ra report', 'ra doc', 'git', 'gh', 'glab',
+    'ra reply', 'ra report', 'ra doc', 'git', 'gh', 'glab',
     'pnpm', 'npm', 'npx', 'node', 'yarn', 'bun',
     'python', 'python3', 'pytest', 'cargo', 'go', 'make', 'mvn', 'gradle',
   ],
@@ -267,7 +276,16 @@ export interface AppConfig {
   progress: ProgressSettings
   retention: RetentionSettings
   workspace: WorkspaceSettings
-  worker: { tools: ToolPolicy; evidence: { ui: UiEvidenceMode } }
+  worker: {
+    tools: ToolPolicy
+    evidence: { ui: UiEvidenceMode }
+    /** 技能化启动（path）或回退到旧的内联手册（inline）。 */
+    skill: { mode: WorkerSkillMode }
+  }
+  /** Worker 选择题（--ask）的作答方式与权限。 */
+  reply: {
+    ask: { mode: AskMode; allow: AskAllow; timeoutMs: number }
+  }
   runtime: {
     default: string
     options?: Record<string, unknown>
@@ -427,7 +445,8 @@ export function defaultConfig(): AppConfig {
       keepHours: 24,
       sweepMinutes: 30,
     },
-    worker: { tools: { ...DEFAULT_WORKER_TOOLS }, evidence: { ui: 'warn' } },
+    worker: { tools: { ...DEFAULT_WORKER_TOOLS }, evidence: { ui: 'warn' }, skill: { mode: 'path' } },
+    reply: { ask: { mode: 'auto', allow: 'anyone', timeoutMs: 30 * 60_000 } },
     runtime: { default: 'orca' },
     server: { port: 3083 },
   }
@@ -692,6 +711,18 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
       },
       evidence: {
         ui: pickUiEvidenceMode(doc.worker?.evidence?.ui, base.worker.evidence.ui),
+      },
+      skill: {
+        mode: doc.worker?.skill?.mode === 'inline' ? 'inline' : base.worker.skill.mode,
+      },
+    },
+    reply: {
+      ask: {
+        mode: doc.reply?.ask?.mode === 'callback' || doc.reply?.ask?.mode === 'text'
+          ? doc.reply.ask.mode
+          : base.reply.ask.mode,
+        allow: doc.reply?.ask?.allow === 'requester' ? 'requester' : base.reply.ask.allow,
+        timeoutMs: positiveIntOr(doc.reply?.ask?.timeoutMs, base.reply.ask.timeoutMs, 60_000, 24 * 60 * 60_000),
       },
     },
 runtime: {
@@ -2033,6 +2064,24 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
       if (!UI_EVIDENCE_MODES.includes(value as UiEvidenceMode)) return false
       config.worker.evidence.ui = value as UiEvidenceMode
       return true
+    case 'worker.skill.mode':
+      if (value !== 'path' && value !== 'inline') return false
+      config.worker.skill.mode = value
+      return true
+    case 'reply.ask.mode':
+      if (value !== 'callback' && value !== 'text' && value !== 'auto') return false
+      config.reply.ask.mode = value
+      return true
+    case 'reply.ask.allow':
+      if (value !== 'anyone' && value !== 'requester') return false
+      config.reply.ask.allow = value
+      return true
+    case 'reply.ask.timeoutMs': {
+      const v = int(60_000, 24 * 60 * 60_000)
+      if (v === null) return false
+      config.reply.ask.timeoutMs = v
+      return true
+    }
     case 'router.timeoutMs': {
       const v = int(1000, 600_000)
       if (v === null) return false

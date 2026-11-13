@@ -9,6 +9,7 @@ import type {
   IntakeReport,
   IntakeTurn,
   Mandate,
+  Question,
   Report,
   SourceKind,
   Stage,
@@ -19,6 +20,7 @@ import type {
   TriggerDisposition,
 } from '#core/model.js'
 import type { Policy } from '#core/policy.js'
+import type { ReplyBlock } from '#core/reply.js'
 import { normalizeStage, stageAliases } from '#core/stage.js'
 
 /** sessionKey 迁移记录 ID；与手工执行的 SQL 文件保持一致。 */
@@ -64,6 +66,8 @@ export interface OutboxItem {
   lastError?: string
   /** 触发这条回复的用户消息，回复成功后用于撤销回执表情。 */
   originMessageId?: string
+  /** 结构化回复块；为空时按 `text` 的 Markdown / 纯文本渲染。 */
+  blocks?: ReplyBlock[]
 }
 
 export interface EffectItem {
@@ -117,6 +121,8 @@ export interface EnqueueOutbox {
   now: string
   /** 用户消息 ID（不是话题根），用于回复后撤销回执表情。 */
   originMessageId?: string
+  /** 结构化回复块；为空时只发 `text`。 */
+  blocks?: ReplyBlock[]
 }
 
 export interface EnqueueEffect {
@@ -223,6 +229,9 @@ CREATE TABLE IF NOT EXISTS tickets (
   repo TEXT NOT NULL DEFAULT '',
   branch TEXT NOT NULL DEFAULT '',
   attachments TEXT NOT NULL DEFAULT '[]',
+  request TEXT NOT NULL DEFAULT '',
+  request_actor_name TEXT NOT NULL DEFAULT '',
+  request_at TEXT NOT NULL DEFAULT '',
   pr_number INTEGER NOT NULL DEFAULT 0,
   pr_url TEXT NOT NULL DEFAULT '',
   pr_state TEXT NOT NULL DEFAULT 'none',
@@ -361,6 +370,26 @@ CREATE TABLE IF NOT EXISTS attention (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS questions (
+  id TEXT PRIMARY KEY,
+  ticket_id TEXT NOT NULL,
+  assignment_id TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
+  thread_id TEXT NOT NULL,
+  turn INTEGER NOT NULL,
+  prompt TEXT NOT NULL,
+  options TEXT NOT NULL,
+  multi INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,
+  answer TEXT,
+  operator_id TEXT,
+  message_id TEXT,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  answered_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_questions_open ON questions (status, expires_at);
+
 CREATE TABLE IF NOT EXISTS outbox (
   id TEXT PRIMARY KEY,
   key TEXT NOT NULL UNIQUE,
@@ -373,7 +402,8 @@ CREATE TABLE IF NOT EXISTS outbox (
   next_at TEXT NOT NULL,
   created_at TEXT NOT NULL,
   last_error TEXT,
-  origin_message_id TEXT
+  origin_message_id TEXT,
+  blocks TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_due ON outbox (status, next_at);
 
@@ -448,6 +478,10 @@ export class Store {
     if (!columns.some(column => column.name === 'origin_message_id')) {
       this.db.exec('ALTER TABLE outbox ADD COLUMN origin_message_id TEXT')
     }
+    // 结构化回复：卡片 / 图片 / PR 对比不能只靠一列 Markdown 表达。
+    if (!columns.some(column => column.name === 'blocks')) {
+      this.db.exec('ALTER TABLE outbox ADD COLUMN blocks TEXT')
+    }
     const reportColumns = this.db.prepare('PRAGMA table_info(reports)').all() as Row[]
     if (!reportColumns.some(column => column.name === 'deliverable')) {
       this.db.exec('ALTER TABLE reports ADD COLUMN deliverable TEXT')
@@ -482,6 +516,16 @@ export class Store {
     }
     if (!ticketColumns.some(column => column.name === 'attachments')) {
       this.db.exec("ALTER TABLE tickets ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'")
+    }
+    // 用户原始请求：派工时要把原话一起给 Worker，否则用户写下的口径会丢。
+    if (!ticketColumns.some(column => column.name === 'request')) {
+      this.db.exec("ALTER TABLE tickets ADD COLUMN request TEXT NOT NULL DEFAULT ''")
+    }
+    if (!ticketColumns.some(column => column.name === 'request_actor_name')) {
+      this.db.exec("ALTER TABLE tickets ADD COLUMN request_actor_name TEXT NOT NULL DEFAULT ''")
+    }
+    if (!ticketColumns.some(column => column.name === 'request_at')) {
+      this.db.exec("ALTER TABLE tickets ADD COLUMN request_at TEXT NOT NULL DEFAULT ''")
     }
     // 通道实例只在多通道时需要；历史飞书数据按 feishu 兜底，不回填避免写错别家实例。
     if (!ticketColumns.some(column => column.name === 'channel_id')) {
@@ -752,9 +796,9 @@ export class Store {
   // ---------- Ticket / Mandate ----------
 
   insertTicket(t: Ticket): void {
-    this.db.prepare(`INSERT INTO tickets (id, title, thread_id, source, channel_id, chat_id, mandate_id, stage, repo, branch, attachments, pr_number, pr_url, pr_state, created_at, updated_at, closed_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(t.id, t.title, t.threadId, t.source, t.channelId ?? null, t.chatId, t.mandateId, t.stage, t.repo, t.branch, JSON.stringify(t.attachments ?? []), t.prNumber, t.prUrl, t.prState, t.createdAt, t.updatedAt, t.closedAt ?? null)
+    this.db.prepare(`INSERT INTO tickets (id, title, thread_id, source, channel_id, chat_id, mandate_id, stage, repo, branch, attachments, request, request_actor_name, request_at, pr_number, pr_url, pr_state, created_at, updated_at, closed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(t.id, t.title, t.threadId, t.source, t.channelId ?? null, t.chatId, t.mandateId, t.stage, t.repo, t.branch, JSON.stringify(t.attachments ?? []), t.request ?? '', t.requestActorName ?? '', t.requestAt ?? '', t.prNumber, t.prUrl, t.prState, t.createdAt, t.updatedAt, t.closedAt ?? null)
   }
 
   updateTicket(t: Ticket): void {
@@ -1267,12 +1311,59 @@ export class Store {
     return row ? { question: String(row.question), createdAt: String(row.created_at) } : null
   }
 
+  // ---------- Questions（Worker --ask 的选择题） ----------
+
+  upsertQuestion(q: Question): void {
+    this.db.prepare(`INSERT INTO questions (id, ticket_id, assignment_id, chat_id, thread_id, turn, prompt, options, multi, status, created_at, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        prompt = excluded.prompt,
+        options = excluded.options,
+        multi = excluded.multi,
+        chat_id = excluded.chat_id,
+        thread_id = excluded.thread_id,
+        expires_at = excluded.expires_at`).run(
+      q.id, q.ticketId, q.assignmentId, q.chatId, q.threadId, q.turn, q.prompt,
+      JSON.stringify(q.options), q.multi ? 1 : 0, q.createdAt, q.expiresAt,
+    )
+  }
+
+  getQuestion(id: string): Question | null {
+    const row = this.db.prepare('SELECT * FROM questions WHERE id = ?').get(id) as Row | undefined
+    return row ? questionFromRow(row) : null
+  }
+
+  /** 只有 open 的题能被作答；重复点击返回 false，由调用方幂等处理。 */
+  answerQuestion(id: string, answer: string, operatorId: string, at: string): boolean {
+    const result = this.db.prepare("UPDATE questions SET status = 'answered', answer = ?, operator_id = ?, answered_at = ? WHERE id = ? AND status = 'open'")
+      .run(answer, operatorId, at, id)
+    return Number(result.changes) > 0
+  }
+
+  setQuestionMessage(id: string, messageId: string): void {
+    this.db.prepare('UPDATE questions SET message_id = ? WHERE id = ?').run(messageId, id)
+  }
+
+  expireQuestion(id: string, at: string): boolean {
+    const result = this.db.prepare("UPDATE questions SET status = 'expired', answered_at = ? WHERE id = ? AND status = 'open'").run(at, id)
+    return Number(result.changes) > 0
+  }
+
+  /** 到期未答：标记 expired，返回本轮到期的题，供调用方发一次提醒。 */
+  expireQuestions(before: string, at: string): Question[] {
+    const rows = this.db.prepare("SELECT * FROM questions WHERE status = 'open' AND expires_at <= ?").all(before) as Row[]
+    if (rows.length === 0) return []
+    const stmt = this.db.prepare("UPDATE questions SET status = 'expired', answered_at = ? WHERE id = ? AND status = 'open'")
+    for (const row of rows) stmt.run(at, String(row.id))
+    return rows.map(row => ({ ...questionFromRow(row), status: 'expired' as const, answeredAt: at }))
+  }
+
   // ---------- Outbox ----------
 
   enqueueOutbox(item: EnqueueOutbox): boolean {
-    const result = this.db.prepare(`INSERT OR IGNORE INTO outbox (id, key, channel_kind, channel_id, thread_id, text, status, attempts, next_at, created_at, origin_message_id)
-      VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)`)
-      .run(item.id, item.key, item.channelKind, item.channelId, item.threadId, item.text, item.now, item.now, item.originMessageId ?? null)
+    const result = this.db.prepare(`INSERT OR IGNORE INTO outbox (id, key, channel_kind, channel_id, thread_id, text, blocks, status, attempts, next_at, created_at, origin_message_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)`)
+      .run(item.id, item.key, item.channelKind, item.channelId, item.threadId, item.text, item.blocks ? JSON.stringify(item.blocks) : null, item.now, item.now, item.originMessageId ?? null)
     return Number(result.changes) > 0
   }
 
@@ -1454,6 +1545,9 @@ function ticketFromRow(row: Row): Ticket {
     repo: String(row.repo ?? ''),
     branch: String(row.branch ?? ''),
     ...(attachments.length > 0 ? { attachments } : {}),
+    ...(row.request ? { request: String(row.request) } : {}),
+    ...(row.request_actor_name ? { requestActorName: String(row.request_actor_name) } : {}),
+    ...(row.request_at ? { requestAt: String(row.request_at) } : {}),
     prNumber: Number(row.pr_number),
     prUrl: String(row.pr_url),
     prState: row.pr_state as Ticket['prState'],
@@ -1614,6 +1708,7 @@ function inputFromRow(row: Row): Input {
 }
 
 function outboxFromRow(row: Row, bump: number): OutboxItem {
+  const blocks = parseBlocks(row.blocks)
   return {
     id: String(row.id),
     key: String(row.key),
@@ -1627,6 +1722,45 @@ function outboxFromRow(row: Row, bump: number): OutboxItem {
     createdAt: String(row.created_at),
     ...(row.last_error ? { lastError: String(row.last_error) } : {}),
     ...(row.origin_message_id ? { originMessageId: String(row.origin_message_id) } : {}),
+    ...(blocks ? { blocks } : {}),
+  }
+}
+
+function parseBlocks(value: unknown): ReplyBlock[] | undefined {
+  if (typeof value !== 'string' || !value) return undefined
+  try {
+    const parsed = JSON.parse(value) as unknown
+    return Array.isArray(parsed) ? parsed as ReplyBlock[] : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function questionFromRow(row: Row): Question {
+  let options: Question['options'] = []
+  try {
+    const parsed = JSON.parse(String(row.options)) as unknown
+    if (Array.isArray(parsed)) options = parsed as Question['options']
+  } catch {
+    // 脏数据按空选项处理；题型本身仍可展示，不会阻塞主流程。
+  }
+  return {
+    id: String(row.id),
+    ticketId: String(row.ticket_id),
+    assignmentId: String(row.assignment_id),
+    chatId: String(row.chat_id),
+    threadId: String(row.thread_id),
+    turn: Number(row.turn),
+    prompt: String(row.prompt),
+    options,
+    multi: Number(row.multi) === 1,
+    status: String(row.status) as Question['status'],
+    ...(row.answer ? { answer: String(row.answer) } : {}),
+    ...(row.operator_id ? { operatorId: String(row.operator_id) } : {}),
+    ...(row.message_id ? { messageId: String(row.message_id) } : {}),
+    createdAt: String(row.created_at),
+    expiresAt: String(row.expires_at),
+    ...(row.answered_at ? { answeredAt: String(row.answered_at) } : {}),
   }
 }
 

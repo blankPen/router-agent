@@ -227,6 +227,10 @@ describe('全局状态目录与配置', () => {
 
   it('setConfigValue 支持点路径与类型转换，非法值被拒绝', () => {
     const cfg = loadConfig(home())
+    expect(cfg.worker.skill.mode).toBe('path')
+    expect(setConfigValue(cfg, 'worker.skill.mode', 'inline')).toBe(true)
+    expect(cfg.worker.skill.mode).toBe('inline')
+    expect(setConfigValue(cfg, 'worker.skill.mode', 'nope')).toBe(false)
     expect(setConfigValue(cfg, 'policy.acceptMode', 'observe')).toBe(true)
     expect(cfg.policy.acceptMode).toBe('observe')
     expect(setConfigValue(cfg, 'policy.acceptMode', 'yolo')).toBe(false)

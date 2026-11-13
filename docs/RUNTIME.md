@@ -455,6 +455,10 @@ ra config set runtime.options.t3code.model gpt-5.4
 
 ## Worker 规范注入
 
-Worker 手册（`packages/runtime/src/spec/prompt-mode.md`）会拼进启动 prompt；非 Orca 运行时使用运行时中立的 `packages/runtime/src/spec/contract.md`。两者都不改项目自己的 `AGENTS.md`。
+默认 `worker.skill.mode: path`：首轮只发 ≤25 行的短引导（`buildWorkerBrief`），包含工单事实、研判结论 `mandate.scope`、用户原话（最多 2000 字，超出时给 `request.md` 全文路径）和技能入口。冲突时以用户原话为准，并要求 Worker 在 `ra reply --summary` 里写明差异。
 
-这些规范 markdown 统一存放在状态目录的 `specs/` 下，可在 Web 面板「配置 → 规范文件」直接编辑或恢复默认；保存后对之后派出的新工单生效。
+技能文件随运行时包发布，源码在 `packages/runtime/src/spec/worker/`（`SKILL.md` + `references/`），构建时复制进 `dist/`。用户覆盖固定放在 `<RA_HOME>/specs/worker/<相对路径>`，读取时覆盖文件优先；Web 面板「配置 → 规范文件」按文件列出，旧 `prompt-mode.md` / `contract.md` 只读留存，并标注「已并入 SKILL.md」。技能文件不会写进项目仓库，也不改项目自己的 `AGENTS.md`。
+
+派工时读取当前生效的 `SKILL.md`，计算 `name` / `version` / `sha256`，记 `launch:skill` 并合并进运行时写好的 `meta.json`（运行时没写 meta 时不补建，避免 `resumeHint` 误判）。用户改了覆盖文件后指纹随之变化，可回查某张工单当时用的是哪版交付规范。
+
+需要回滚时把 `worker.skill.mode` 设为 `inline`：Orca 继续渲染 `prompt-mode.md`，其它运行时继续渲染 `contract.md`，行为回到拆分前的内联手册；该模式不计算技能指纹。

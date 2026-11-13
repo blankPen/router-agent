@@ -451,6 +451,9 @@ export class IntakeCoordinator {
         reason: `intake:approved:${intake.id}`,
         title: ticket.title,
         scope: `${ticket.scope}\n\n提出人：${intake.actorName || intake.actorId}（${intake.actorId}）\n需求单：${intake.id}`,
+        // 用户原话取提出人写的那些，不是管理员点「确认派单」的那句话。
+        request: this.originalRequest(intake),
+        requestActorName: intake.actorName || intake.actorId,
         repo: intake.repo,
         branch: intake.branch,
         rules: ['intake:approved'],
@@ -489,6 +492,22 @@ export class IntakeCoordinator {
       expected: '',
       assessment: `已追问 ${intake.questions} 轮仍未收集齐全，按现有信息整理${detail ? `；用户补充：${detail}` : ''}`,
     }
+  }
+
+  /**
+   * 提出人的原始请求：首条原文 + 后续补充。
+   *
+ * 需求单经过多轮追问后，结构化报告是整理结果；派工时还要把原话一起给 Worker，
+ * 否则用户明确写下的口径（字段名、过滤维度这些）会丢。
+   */
+  private originalRequest(intake: Intake): string {
+    const userTurns = intake.turns
+      .filter(turn => turn.role === 'user')
+      .map(turn => turn.text.trim())
+      .filter(Boolean)
+    const first = intake.rawText.trim()
+    const rest = userTurns.filter(text => text !== first)
+    return [first, ...rest].filter(Boolean).join('\n\n')
   }
 
   /**

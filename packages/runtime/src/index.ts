@@ -9,8 +9,18 @@ export * from './naming.js'
 export * from './resume.js'
 export * from './report-poller.js'
 export * from './evidence-gate.js'
-export { readWorkerSpec, workerSpecPath, bundledWorkerSpecPath } from './spec/reader.js'
-export { buildWorkerPrompt, buildNeutralContract } from './spec/index.js'
+export {
+  readWorkerSpec,
+  readWorkerSkill,
+  workerSpecPath,
+  workerSkillDir,
+  workerSkillSnapshot,
+  bundledWorkerSpecPath,
+  bundledWorkerSkillRoot,
+} from './spec/reader.js'
+export { buildWorkerPrompt, buildNeutralContract, buildWorkerBrief } from './spec/index.js'
+export type { WorkerBriefInput } from './spec/index.js'
+export type { WorkerSkillSnapshot } from './spec/reader.js'
 export { GitWorktreeProvider } from './workspaces/git-worktree.js'
 export { AGENT_PROFILES, agentProfileOf, resolveSession, resolveSessionId } from './agents/registry.js'
 export {

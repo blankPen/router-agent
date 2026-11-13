@@ -18,6 +18,7 @@ import { noopLogger, errorMessage, type Logger } from '#infra/logger.js'
 import type { IdentityStatusView } from '@router-agent/channel-feishu'
 import type { WorkerStateFile } from '#runtime/report-poller.js'
 import type { ResumeHint } from '#runtime/port.js'
+import { isReplyPayload, type ReplyPayload } from '#core/reply.js'
 import type { WorkspaceAdminPort } from '#runtime/workspaces/overview.js'
 import { PluginInstallStartError, type PluginPackageAdmin } from './plugin-admin.js'
 import { readLogs } from './log-tail.js'
@@ -344,7 +345,12 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       const latest = opts.store.latestReport(ticketId)
       const requestedTurn = Number(body.turn)
       const turn = Number.isFinite(requestedTurn) && requestedTurn >= 0 ? requestedTurn : (latest?.turn ?? 0) + 1
-      const reply = String(body.reply ?? legacyReply(body.deliverable) ?? '').trim()
+      const rawPayload = body.replyPayload
+      if (rawPayload !== undefined && !isReplyPayload(rawPayload)) {
+        return respond(res, 400, { error: 'invalid-reply-payload', message: 'replyPayload 结构不合法' })
+      }
+      const replyPayload = isReplyPayload(rawPayload) ? rawPayload as ReplyPayload : undefined
+      const reply = String(body.reply ?? legacyReply(body.deliverable) ?? replyPayload?.fallbackText ?? '').trim()
       const uiChange = optionalBoolean(body.uiChange)
 
       const payload: WorkerStateFile = {
@@ -358,6 +364,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         prUrl: String(body.prUrl ?? ''),
         ...(uiChange !== undefined ? { uiChange } : {}),
         ...(reply ? { reply } : {}),
+        ...(replyPayload ? { replyPayload } : {}),
         ackedInputs: Array.isArray(body.ackedInputs) ? body.ackedInputs.map(String) : [],
         updatedAt: String(body.updatedAt ?? clock.now()),
       }

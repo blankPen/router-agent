@@ -1166,7 +1166,6 @@ describe('RouterService 编排', () => {
     expect(entry?.extra).toMatchObject({ ticketId: ticket.id, runtime: 'orca', message: 'status down' })
   })
 })
-
 describe('会话文件清理', () => {
   function serviceWithSession(): { service: RouterService; store: Store; config: AppConfig; home: string } {
     const home = mkdtempSync(join(tmpdir(), 'ra-clean-'))
@@ -1242,4 +1241,168 @@ describe('会话文件清理', () => {
     expect(await service.cleanupChatSessions()).toBe(0)
     expect(existsSync(outside)).toBe(true)
   })
-})
+  })
+
+  describe('Worker 选择题闭环', () => {
+    let store: Store
+    let engine: Engine
+    let runtime: FakeRuntime
+    let config: AppConfig
+    let logs: { level: string; message: string; extra?: Record<string, unknown> }[]
+    let now = '2026-11-06T10:00:10.000Z'
+
+    function reset(): void {
+      const home = mkdtempSync(join(tmpdir(), 'ra-question-'))
+      logs = []
+      store = new Store(':memory:')
+      config = { ...defaultConfig(), home }
+      config.projects = [{ name: 'acme/web', repo: 'acme/web', defaultBranch: 'main' }]
+      config.policy = { acceptMode: 'auto', maxWorkers: 2, admission: { ...DEFAULT_ADMISSION }, interruptedRecovery: 'auto', maxAutoRecover: 1 }
+      config.feishu = { ...config.feishu, chats: [chatEntry('oc_dev')], allowed: ['ou_alice'] }
+      let n = 0
+      engine = new Engine({ store, policy: policyOf(config), clock: { now: () => '2026-11-06T10:00:00.000Z' }, ids: { next: p => `${p}_${++n}` } })
+      runtime = new FakeRuntime()
+      now = '2026-11-06T10:00:10.000Z'
+    }
+
+    function questionService() {
+      reset()
+      const updates: { selected: string[]; expired?: boolean }[] = []
+      const adapter = {
+        id: 'feishu',
+        kind: 'feishu',
+        capabilities: {
+          threadReply: true, ack: true, richText: true, documents: true, directory: true,
+          attachmentsIn: true, attachmentsOut: true, idempotency: true, maxTextLength: 3500,
+          directMessage: true, images: true, cards: true, choices: true,
+        },
+        normalize: () => ({ dropped: 'not-a-message' }),
+        send: async () => ({}),
+        updateQuestionCard: async (update: { selected: string[]; expired?: boolean }) => {
+          updates.push(update)
+        },
+      }
+      const channels = {
+        get: (id: string) => id === 'feishu' ? adapter : undefined,
+        list: () => [adapter],
+      }
+      const prTracker = new FakePrTracker()
+      const svc = new RouterService({
+        config, store, engine, runtime, decisionEngine: new AcceptEngine(), prTracker,
+        clock: { now: () => now },
+        channels: channels as never,
+        logger: {
+          info: (message, extra) => logs.push({ level: 'info', message, ...(extra ? { extra } : {}) }),
+          warn: (message, extra) => logs.push({ level: 'warn', message, ...(extra ? { extra } : {}) }),
+          error: (message, extra) => logs.push({ level: 'error', message, ...(extra ? { extra } : {}) }),
+        },
+        agentLoopOptions: { batchWindowMs: 0 },
+      })
+      return { svc, updates, advance: (iso: string) => { now = iso } }
+    }
+
+    function ask(svc: RouterService, turn = 2): { ticketId: string; questionId: string } {
+      engine.ingest(makeTrigger())
+      const { ticket } = engine.decide({ triggerId: 't1', decision: 'accept', strength: 'explicit', reason: 'ok', scope: '测试' })
+      const assignment = engine.startAssignment(ticket!.id, { runtimeId: 'orca', handle: 'term-1', workdir: '/tmp/wt' })
+      runtime.handles.set('term-1', true)
+      svc.onWorkerState({
+        ticketId: ticket!.id,
+        assignmentId: assignment.id,
+        turn,
+        state: 'ready',
+        summary: '等待选择',
+        prNumber: 0,
+        prUrl: '',
+        ackedInputs: [],
+        replyPayload: {
+          blocks: [{
+            type: 'choices',
+            questionId: '',
+            prompt: '选哪个方案？',
+            options: [{ id: 'A', label: '方案 A' }, { id: 'B', label: '方案 B' }],
+          }],
+          fallbackText: '选哪个方案？',
+        },
+        updatedAt: '2026-11-06T10:00:10.000Z',
+      })
+      return { ticketId: ticket!.id, questionId: `q_${ticket!.id}_${turn}` }
+    }
+
+    it('ask 生成问题卡片；点选后落成 Input、回写卡片并立即投递', async () => {
+      const { svc, updates } = questionService()
+      const { ticketId, questionId } = ask(svc)
+
+      const outbox = store.listOutbox(10).find(item => item.key.startsWith('reply:'))
+      expect(outbox?.blocks?.[0]).toMatchObject({ type: 'choices', questionId, mode: 'callback' })
+      expect(store.getQuestion(questionId)).toMatchObject({ status: 'open', prompt: '选哪个方案？' })
+
+      await svc.handleCardAction({
+        id: 'ev_1', channelId: 'feishu', chatId: 'oc_dev', messageId: 'om_card', operatorId: 'ou_alice', token: 'tok_1',
+        value: { questionId, optionId: 'A' },
+      })
+      await svc.deliverPendingInputs()
+
+      expect(store.getQuestion(questionId)).toMatchObject({ status: 'answered', answer: 'A', operatorId: 'ou_alice' })
+      expect(store.findInputBySourceKey(ticketId, `question:${questionId}`)?.text).toContain('方案 A')
+      expect(runtime.delivered.at(-1)?.text).toContain('方案 A')
+      expect(updates.at(-1)).toMatchObject({ selected: ['A'] })
+      expect(logs.some(entry => entry.message === 'question:answered' && entry.extra?.inputId)).toBe(true)
+    })
+
+    it('卡片回调启动失败时 auto 退化为文本序号，不登记 Question', async () => {
+      const { svc } = questionService()
+      svc.markCardActionsUnavailable('feishu')
+      const { ticketId, questionId } = ask(svc)
+
+      const outbox = store.listOutbox(10).find(item => item.key.startsWith('reply:'))
+      expect(outbox?.blocks?.[0]).toMatchObject({ type: 'choices', questionId, mode: 'text' })
+      expect(store.getQuestion(questionId)).toBeNull()
+      expect(ticketId).toBeTruthy()
+    })
+
+    it('重复点击不再产生第二条 Input', async () => {
+      const { svc } = questionService()
+      const { ticketId, questionId } = ask(svc)
+      const action = {
+        id: 'ev_1', channelId: 'feishu', chatId: 'oc_dev', messageId: 'om_card', operatorId: 'ou_alice', token: 'tok_1',
+        value: { questionId, optionId: 'A' },
+      }
+      await svc.handleCardAction(action)
+      await svc.handleCardAction({ ...action, id: 'ev_2' })
+
+      expect(store.listInputs(ticketId).filter(input => input.sourceKey === `question:${questionId}`)).toHaveLength(1)
+      expect(logs.some(entry => entry.message === 'question:duplicate')).toBe(true)
+    })
+
+    it('requester-only 时名单外点击被拒绝且不投递', async () => {
+      const { svc } = questionService()
+      config.reply.ask.allow = 'requester'
+      const { ticketId, questionId } = ask(svc)
+
+      await svc.handleCardAction({
+        id: 'ev_1', channelId: 'feishu', chatId: 'oc_dev', messageId: 'om_card', operatorId: 'ou_bob', token: 'tok_1',
+        value: { questionId, optionId: 'A' },
+      })
+
+      expect(store.listInputs(ticketId).filter(input => input.sourceKey === `question:${questionId}`)).toHaveLength(0)
+      expect(logs.some(entry => entry.message === 'question:rejected' && entry.extra?.reason === 'not-requester')).toBe(true)
+    })
+
+    it('到期后标 expired 并提醒一次；之后的点击不再作答', async () => {
+      const { svc, advance } = questionService()
+      const { ticketId, questionId } = ask(svc)
+      advance('2026-11-06T10:31:00.000Z')
+      await svc.sweepQuestions()
+
+      expect(store.getQuestion(questionId)?.status).toBe('expired')
+      expect(store.listOutbox(20).some(item => item.key === `question:expired:${questionId}`)).toBe(true)
+      expect(logs.some(entry => entry.message === 'question:expired' && entry.extra?.questionId === questionId)).toBe(true)
+
+      await svc.handleCardAction({
+        id: 'ev_1', channelId: 'feishu', chatId: 'oc_dev', messageId: 'om_card', operatorId: 'ou_alice', token: 'tok_1',
+        value: { questionId, optionId: 'A' },
+      })
+      expect(store.listInputs(ticketId).filter(input => input.sourceKey === `question:${questionId}`)).toHaveLength(0)
+    })
+  })

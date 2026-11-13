@@ -12,7 +12,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseDocument } from 'yaml'
-import { readWorkerSpec as readRuntimeWorkerSpec } from '#runtime/spec/reader.js'
+import { readWorkerSkill as readRuntimeWorkerSkill, readWorkerSpec as readRuntimeWorkerSpec } from '#runtime/spec/reader.js'
 
 export type SpecGroup = 'router' | 'worker'
 
@@ -21,10 +21,19 @@ interface SpecDefinition {
   group: SpecGroup
   /** 随包内置文件名；覆盖文件路径固定为 `<group>/<file>`。 */
   file: string
+  /**
+   * 技能目录下的文件（相对 `worker/` 根，如 `references/reply-protocol.md`）。
+   *
+   * 技能文件与旧的手册模板是两套东西：手册模板是拼进 prompt 的正文，
+   * 技能文件是 Worker 按需 Read 的交付规范。
+   */
+  skill?: boolean
   label: string
   description: string
   /** 保存后什么时候生效的说明，面板直接展示。 */
   applyHint: string
+  /** 只读：内容已并入别的文件，面板不再提供编辑。 */
+  readonly?: boolean
 }
 
 const GROUP_LABELS: Record<SpecGroup, string> = {
@@ -86,23 +95,79 @@ const SPECS: SpecDefinition[] = [
     group: 'worker',
     file: 'prompt-mode.md',
     label: 'Worker 手册',
-    description: '拼进 Worker 启动 prompt 的完整手册。',
-    applyHint: '对之后派出的新工单生效',
+    description: '已合并进「Worker 交付技能」的 SKILL.md；仅作只读留存。',
+    applyHint: '已并入 SKILL.md',
+    readonly: true,
   },
   {
     id: 'worker.contract',
     group: 'worker',
     file: 'contract.md',
     label: 'Worker 契约（中立运行时）',
-    description: 'Claude Code / ACP 等非 Orca 运行时使用的任务契约。',
-    applyHint: '保存后对之后派出的新工单生效',
+    description: '已合并进「Worker 交付技能」的 SKILL.md；仅作只读留存。',
+    applyHint: '已并入 SKILL.md',
+    readonly: true,
+  },
+  {
+    id: 'worker.skill',
+    group: 'worker',
+    file: 'SKILL.md',
+    skill: true,
+    label: 'Worker 交付技能（SKILL.md）',
+    description: 'Worker 开工前必读的交付规范：交付形态、上报命令、硬约束。',
+    applyHint: '对之后派出的新工单生效',
+  },
+  {
+    id: 'worker.skill.reply-protocol',
+    group: 'worker',
+    file: 'references/reply-protocol.md',
+    skill: true,
+    label: '上报协议（ra reply）',
+    description: 'ra reply 的全参数、kind 与退出码。',
+    applyHint: '对之后派出的新工单生效',
+  },
+  {
+    id: 'worker.skill.code-delivery',
+    group: 'worker',
+    file: 'references/code-delivery.md',
+    skill: true,
+    label: '代码交付',
+    description: '分支、提交前检查、PR / MR 描述模板。',
+    applyHint: '对之后派出的新工单生效',
+  },
+  {
+    id: 'worker.skill.ui-evidence',
+    group: 'worker',
+    file: 'references/ui-evidence.md',
+    skill: true,
+    label: 'UI 证据（Before / After）',
+    description: '界面改动的 Before / After 截图规范与门禁。',
+    applyHint: '对之后派出的新工单生效',
+  },
+  {
+    id: 'worker.skill.followups',
+    group: 'worker',
+    file: 'references/followups.md',
+    skill: true,
+    label: '追问与回交',
+    description: '追问处理、超范围回交、提问用法。',
+    applyHint: '对之后派出的新工单生效',
+  },
+  {
+    id: 'worker.skill.troubleshooting',
+    group: 'worker',
+    file: 'references/troubleshooting.md',
+    skill: true,
+    label: '排障',
+    description: '上报失败、退出码、服务不可达的处理。',
+    applyHint: '对之后派出的新工单生效',
   },
 ]
 
 /** 覆盖文件的体积上限，避免误把大文件塞进规范存储。 */
 const MAX_SPEC_BYTES = 512 * 1024
 
-export type SpecErrorCode = 'unknown-spec' | 'no-home' | 'empty-content' | 'too-large'
+export type SpecErrorCode = 'unknown-spec' | 'no-home' | 'empty-content' | 'too-large' | 'readonly'
 
 export class SpecError extends Error {
   constructor(readonly code: SpecErrorCode, message: string) {
@@ -118,6 +183,8 @@ export interface SpecView {
   label: string
   description: string
   applyHint: string
+  /** 只读：内容已并入别的文件，面板不提供编辑。 */
+  readonly: boolean
   /** 是否存在用户覆盖文件（true 表示内容来自 Web 编辑 / 旧路径迁移）。 */
   isCustom: boolean
   /** 覆盖文件最后修改时间；内置默认内容为 null。 */
@@ -170,8 +237,10 @@ function stats(path: string): { isCustom: boolean; updatedAt: string | null } {
 }
 
 function builtinContent(def: SpecDefinition): string {
-  // Worker 模板由运行时包自带（并负责 `<home>/specs/worker` 覆盖），这里不重复维护路径。
-  if (def.group === 'worker') return readRuntimeWorkerSpec(undefined, def.file)
+  // Worker 模板与技能文件由运行时包自带（并负责 `<home>/specs/worker` 覆盖），这里不重复维护路径。
+  if (def.group === 'worker') {
+    return def.skill ? readRuntimeWorkerSkill(undefined, def.file) : readRuntimeWorkerSpec(undefined, def.file)
+  }
   return readFileSync(builtinPath(def.group, def.file), 'utf8')
 }
 
@@ -213,6 +282,7 @@ function viewOf(home: string | undefined, def: SpecDefinition): SpecView {
     label: def.label,
     description: def.description,
     applyHint: def.applyHint,
+    readonly: Boolean(def.readonly),
     isCustom: meta.isCustom,
     updatedAt: meta.updatedAt,
     content: readSpecContent(home, def.id),
@@ -233,6 +303,7 @@ export function getSpec(home: string | undefined, id: string): SpecView | null {
 export function saveSpec(home: string | undefined, id: string, content: unknown): SpecView {
   if (!home) throw new SpecError('no-home', '未配置状态目录，无法保存规范')
   const def = definitionOrThrow(id)
+  if (def.readonly) throw new SpecError('readonly', `${def.label} 已并入 SKILL.md，不能再单独编辑`)
   if (typeof content !== 'string' || content.trim() === '') {
     throw new SpecError('empty-content', '规范内容不能为空；如需还原内置内容请使用「恢复默认」')
   }

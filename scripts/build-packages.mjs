@@ -49,6 +49,12 @@ for (const asset of [
   cpSync(join(root, from), join(root, to))
 }
 
+// Worker 技能目录：目录结构要保持，reader 按 `skill/<相对路径>` 定位。
+const skillRoot = join(root, 'packages/runtime/src/spec/worker')
+if (existsSync(skillRoot)) {
+  cpSync(skillRoot, join(root, 'packages/runtime/dist/spec/worker'), { recursive: true })
+}
+
 function walk(dir) {
   return readdirSync(dir).flatMap(entry => {
     const full = join(dir, entry)

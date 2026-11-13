@@ -1,4 +1,5 @@
 import { noopLogger, type Logger } from '@router-agent/infra/logger.js'
+import type { ReplyBlock } from '@router-agent/core/reply.js'
 import type { ChannelRegistry } from './registry.js'
 
 /** Outbox 交给通道层的最小字段集；与 store 的 OutboxItem 结构兼容。 */
@@ -7,6 +8,7 @@ export interface ChannelOutboxItem {
   channelId: string
   threadId: string
   text: string
+  blocks?: ReplyBlock[]
   key: string
   originMessageId?: string
 }
@@ -37,6 +39,7 @@ export class ChannelRouter {
       targetId: item.channelId,
       ...(item.threadId ? { threadRef: item.threadId } : {}),
       text,
+      ...(item.blocks ? { blocks: item.blocks } : {}),
       format: 'markdown',
       idempotencyKey: item.key,
       ...(item.originMessageId ? { originMessageId: item.originMessageId } : {}),

@@ -251,7 +251,8 @@ Every field, the `ra config set` allowlist, runtime options, environment variabl
 | `ra runtime check <id>` | Full ACP handshake (`initialize` + `session/new`) |
 | `ra runtime login <id>` | Interactive login (provided by the agent: `acp-claude` runs `claude`, `acp-codex` runs `codex-acp login`) |
 | `ra config` | View config; `config set <key> <value>` changes one key (including `project.<name>` / `chatBinding.<chat>` / `chatMode.<chat>` / `chatAllow.<chat>` / `progress.syncMs` / `progress.probeMs`); `config edit` edits the whole file |
-| `ra report` | Worker-side reporting: state, summary, `--reply` (literal / `@file` / `-`), PR link and `--ack` |
+| `ra reply` | Worker-side delivery: state, summary, text / images / PR / doc / choices; falls back to `state.json` when the service is unreachable |
+| `ra report` | Deprecated alias of `ra reply`; same arguments |
 | `ra doc` | Worker-side Feishu doc creation; put the returned link in `--reply` for long results |
 
 The global option `--home <dir>` switches the state directory (for tests and multiple instances). The reporting protocol and field details are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#上报协议) (Chinese).

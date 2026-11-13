@@ -31,7 +31,7 @@ import { formatChecks, runDoctor } from './doctor.js'
 import { cmdRuntimeAdd, cmdRuntimeCheck, cmdRuntimeInstall, cmdRuntimeList, cmdRuntimeLogin, cmdRuntimeUninstall } from './runtime.js'
 import { PACKAGE_NAME, PACKAGE_VERSION, UpdateService, runNpmUpgrade } from '../update/index.js'
 import { simulate } from './simulate.js'
-import { runReport, readContentArg, type ReportOptions } from './report.js'
+import { runReply, readContentArg, type ReplyOptions } from './reply.js'
 import type { Prompter } from './prompts.js'
 import { realRunner, type CommandRunner } from '#infra/process.js'
 import { errorMessage } from '#infra/logger.js'
@@ -219,21 +219,56 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
       setCode(await cmdSimulate(homeOf(opts, output), opts, output))
     })
 
-  withHome(program.command('report').description('Worker 上报状态与回复：POST 给本地 Router，服务不可用时落回 state.json'))
+  withHome(program.command('reply').description('Worker 交付：状态 + 文本 / 图片 / PR / 文档 / 选择题（服务不可用时落回 state.json）'))
     .requiredOption('--ticket <id>', '工单 ID')
-    .requiredOption('--state <state>', 'progress | waiting | ready | blocked | failed | dropped')
-    .requiredOption('--summary <text>', '一句话摘要（给日志和列表用）')
+    .option('--state <state>', 'progress | waiting | ready | blocked | failed | dropped（默认 ready）')
+    .option('--summary <text>', '一句话摘要（给日志和列表用；缺省取正文首行）')
     .option('--assignment <id>', '派工 ID（默认取该工单最新派工）')
     .option('--turn <n>', '轮次（默认由 Router 自增）')
     .option('--human-action <text>', 'blocked 时要人做的事')
+    .option('--body <text>', '要发给发起人的完整回复：字面量 / @文件 / - 读 stdin')
+    .option('--kind <kind>', 'auto | text | markdown | image | images | pr | doc | ask')
+    .option('--image <path>', '图片路径，可重复；支持 before= / after= 前缀', collect, [])
+    .option('--pr <n>', 'PR 编号（--pr-number 的简写）')
     .option('--pr-number <n>', 'PR 编号')
     .option('--pr-url <url>', 'PR 链接')
     .option('--ui-change [value]', '声明本次改动是否涉及 UI（true / false）；不传由 Router 按改动文件推断')
+    .option('--ask', '提问模式：--question + 至少两个 --option')
+    .option('--question <text>', '要问用户的问题')
+    .option('--option <value>', '选项，格式 标识|说明；可重复', collect, [])
+    .option('--multi', '允许多选')
     .option('--reply <text>', '要发给发起人的完整回复：字面量 / @文件 / - 读 stdin')
     .option('--ack <id>', '确认已读的输入 ID，可重复', collect, [])
     .option('--port <n>', 'Router 端口（默认读 config/server.port 或 RA_PORT）')
-    .action(async (opts: ReportOptions & { home?: string; port?: string }) => {
-      setCode(await cmdReport(homeOf(opts, output), opts, output))
+    .action(async (opts: ReplyOptions & { home?: string; port?: string }) => {
+      setCode(await cmdReply(homeOf(opts, output), opts, output))
+    })
+
+  // 旧命令保留为隐藏别名：参数原样映射，只打一行弃用提示。
+  withHome(program.command('report').description('（已弃用）等同 ra reply'))
+    .requiredOption('--ticket <id>', '工单 ID')
+    .option('--state <state>', 'progress | waiting | ready | blocked | failed | dropped（默认 ready）')
+    .option('--summary <text>', '一句话摘要（给日志和列表用）')
+    .option('--assignment <id>', '派工 ID（默认取该工单最新派工）')
+    .option('--turn <n>', '轮次（默认由 Router 自增）')
+    .option('--human-action <text>', 'blocked 时要人做的事')
+    .option('--body <text>', '要发给发起人的完整回复：字面量 / @文件 / - 读 stdin')
+    .option('--kind <kind>', 'auto | text | markdown | image | images | pr | doc | ask')
+    .option('--image <path>', '图片路径，可重复；支持 before= / after= 前缀', collect, [])
+    .option('--pr <n>', 'PR 编号（--pr-number 的简写）')
+    .option('--pr-number <n>', 'PR 编号')
+    .option('--pr-url <url>', 'PR 链接')
+    .option('--ui-change [value]', '声明本次改动是否涉及 UI（true / false）；不传由 Router 按改动文件推断')
+    .option('--ask', '提问模式：--question + 至少两个 --option')
+    .option('--question <text>', '要问用户的问题')
+    .option('--option <value>', '选项，格式 标识|说明；可重复', collect, [])
+    .option('--multi', '允许多选')
+    .option('--reply <text>', '要发给发起人的完整回复：字面量 / @文件 / - 读 stdin')
+    .option('--ack <id>', '确认已读的输入 ID，可重复', collect, [])
+    .option('--port <n>', 'Router 端口（默认读 config/server.port 或 RA_PORT）')
+    .action(async (opts: ReplyOptions & { home?: string; port?: string }) => {
+      output.stderr('ra report 已弃用，改用 ra reply（参数相同）；本次仍按旧别名上报。')
+      setCode(await cmdReply(homeOf(opts, output), opts, output))
     })
 
   withHome(program.command('doc').description('创建飞书文档并输出链接（worker 沉淀长结论用，链接写进 --reply）'))
@@ -393,30 +428,18 @@ async function cmdDoctor(home: string, opts: { json?: boolean }, output: CliIo):
   return checks.some(check => check.status === 'fail') ? 1 : 0
 }
 
-async function cmdReport(home: string, opts: ReportOptions & { port?: string; uiChange?: boolean | string }, output: CliIo): Promise<number> {
+async function cmdReply(home: string, opts: ReplyOptions & { port?: string }, output: CliIo): Promise<number> {
   const config = loadConfig(home)
   const envPort = Number(output.env.RA_PORT)
   const port = Number(opts.port) > 0 ? Number(opts.port) : (Number.isFinite(envPort) && envPort > 0 ? envPort : config.server.port)
-  const { uiChange: rawUiChange, ...rest } = opts
-  const uiChange = parseUiChange(rawUiChange)
-  if (uiChange === null) {
-    output.stderr('--ui-change 只接受 true / false')
-    return 2
-  }
-  return runReport(
-    { home, port, stdout: output.stdout, stderr: output.stderr },
-    { ...rest, ...(uiChange !== undefined ? { uiChange } : {}) },
+  // 只有 --kind doc 才需要文档器；其余回复不碰 lark。
+  const createDocument = opts.kind === 'doc'
+    ? (title: string, markdown: string) => createFeishuDocumenter({ runner: output.lark ?? createLarkRunner() }).createDocument(title, markdown)
+    : undefined
+  return runReply(
+    { home, port, stdout: output.stdout, stderr: output.stderr, ...(createDocument ? { createDocument } : {}) },
+    opts,
   )
-}
-
-/** `--ui-change` 不带值视为 true；带值时只认 true/false（含 yes/no/1/0）。 */
-function parseUiChange(value: boolean | string | undefined): boolean | undefined | null {
-  if (value === undefined) return undefined
-  if (value === true || value === false) return value
-  const text = String(value).trim().toLowerCase()
-  if (text === 'true' || text === 'yes' || text === '1') return true
-  if (text === 'false' || text === 'no' || text === '0') return false
-  return null
 }
 
 async function cmdDoc(_home: string, opts: { title: string; content?: string }, output: CliIo): Promise<number> {
@@ -1445,6 +1468,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
         directory,
         transcriber: imageTranscriber,
         allowUnaddressed,
+        cardActions: config.reply.ask.mode !== 'text',
         hooks: {
           onReady: () => logger.info('feishu:ready', {}),
           onReconnect: ({ attempt, delayMs }: { attempt: number; delayMs: number }) => logger.warn('feishu:reconnecting', { attempt, delayMs }),
@@ -1514,6 +1538,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       logger,
       effects,
       sender: outbox,
+      channels,
       decisionEngine,
       ...(intakeEngine ? { intakeEngine } : {}),
       // 终审管理员：配置里写邮箱，这里传解析后的 open_id。
@@ -1630,6 +1655,26 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     void Promise.resolve(adapter.start(raw => ingress.handleRaw(raw)))
       .then(() => logger.info('channel:consumer-started', { channel: adapter.id }))
       .catch(error => logger.warn('channel:consumer-start-failed', { channel: adapter.id, detail: errorMessage(error) }))
+  }
+  // 卡片按钮回调是独立事件流；未开启时选择题自动退化为序号回复。
+  if (service) {
+    for (const adapter of channels.list()) {
+      if (!adapter.startCardActions) continue
+      void Promise.resolve(adapter.startCardActions(action => {
+        void service.handleCardAction(action).catch(error => {
+          logger.warn('question:handle-failed', {
+            channel: adapter.id,
+            questionId: String(action.value.questionId ?? ''),
+            detail: errorMessage(error),
+          })
+        })
+      }))
+        .then(() => logger.info('channel:card-actions-started', { channel: adapter.id }))
+        .catch(error => {
+          service.markCardActionsUnavailable(adapter.id)
+          logger.warn('channel:card-actions-failed', { channel: adapter.id, detail: errorMessage(error) })
+        })
+    }
   }
   // Web-only 模式下不刷新群目录、也不启动消费循环，等配好 LLM 重启后再跑。
   const refreshChats = (): void => {

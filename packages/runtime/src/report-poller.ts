@@ -2,6 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statS
 import { join } from 'node:path'
 import { z } from 'zod'
 import type { ReportState } from '@router-agent/core/model.js'
+import { isReplyPayload, type ReplyPayload } from '@router-agent/core/reply.js'
 
 /** 旧版 state.json 的交付物字段，仅用于向后兼容，不再参与新协议。 */
 const LegacyDeliverableSchema = z.object({
@@ -24,6 +25,8 @@ const StateSchema = z.object({
   ui_change: z.boolean().optional(),
   /** Worker 要发给发起人的完整回复（Markdown）。 */
   reply: z.string().optional().default(''),
+  /** 结构化回复载荷；字段名沿用 state.json 的 snake_case。 */
+  reply_payload: z.unknown().optional(),
   /** 旧版交付物字段，读取时拼进 reply。 */
   deliverable: LegacyDeliverableSchema,
   acked_inputs: z.array(z.string()).default([]),
@@ -42,6 +45,8 @@ export interface WorkerStateFile {
   /** Worker 显式声明是否改了 UI；缺省时由 Router 按改动文件推断。 */
   uiChange?: boolean
   reply?: string
+  /** 结构化回复块；有值时优先于 `reply` 渲染。 */
+  replyPayload?: ReplyPayload
   ackedInputs: string[]
   updatedAt: string
 }
@@ -132,6 +137,7 @@ export function parseStateFile(content: string, expectedTicketId?: string): { ti
   const legacy = data.deliverable
   // 旧版 deliverable 升级成纯回复：正文 + 链接，不再保留 kind。
   const reply = data.reply.trim() || [legacy?.content?.trim(), legacy?.url?.trim()].filter(Boolean).join('\n\n')
+  const replyPayload = isReplyPayload(data.reply_payload) ? data.reply_payload : undefined
   return {
     ticketId: data.ticket_id,
     state: {
@@ -145,6 +151,7 @@ export function parseStateFile(content: string, expectedTicketId?: string): { ti
       prUrl: data.pr_url,
       ...(data.ui_change !== undefined ? { uiChange: data.ui_change } : {}),
       ...(reply ? { reply } : {}),
+      ...(replyPayload ? { replyPayload } : {}),
       ackedInputs: data.acked_inputs,
       updatedAt: data.updated_at,
     },

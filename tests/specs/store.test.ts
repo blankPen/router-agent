@@ -14,6 +14,7 @@ import {
 } from '../../src/specs/index.js'
 import { buildSystemPrompt } from '../../src/router/agent-loop.js'
 import { buildWorkerPrompt } from '#runtime/spec/index.js'
+import { readWorkerSkill } from '#runtime/spec/reader.js'
 import { defaultConfig, policyOf } from '../../src/config.js'
 import type { Ticket } from '#core/model.js'
 
@@ -56,6 +57,12 @@ describe('规范 markdown 内置存储', () => {
       'router.intake-analyst',
       'worker.prompt-mode',
       'worker.contract',
+      'worker.skill',
+      'worker.skill.reply-protocol',
+      'worker.skill.code-delivery',
+      'worker.skill.ui-evidence',
+      'worker.skill.followups',
+      'worker.skill.troubleshooting',
     ])
     expect(specs.every(spec => spec.isCustom === false)).toBe(true)
     expect(specs.find(spec => spec.id === 'router.soul')?.content.length).toBeGreaterThan(0)
@@ -83,22 +90,25 @@ describe('规范 markdown 内置存储', () => {
     expect(() => saveSpec(home, 'router.nope', 'x')).toThrowError(/未知规范/)
   })
 
-  it('Router / Worker 的 prompt 构建会读取覆盖文件', () => {
+  it('Router 的 prompt 构建会读取覆盖文件', () => {
     saveSpec(home, 'router.orchestrator', '自定义执行规范')
-    saveSpec(home, 'worker.prompt-mode', '自定义 Worker 手册：{{title}} / {{scope}}')
 
     const policy = policyOf(defaultConfig())
     expect(buildSystemPrompt(policy, home)).toContain('自定义执行规范')
-
-    const prompt = buildWorkerPrompt({
+    expect(buildWorkerPrompt({
       ticket,
       mandateScope: '只改登录超时',
       statePath: '/tmp/s.json',
       eventsPath: '/tmp/e.log',
       repo: 'dsh/router-agent',
       home,
-    })
-    expect(prompt).toContain('自定义 Worker 手册：调整登录超时 / 只改登录超时')
+    })).toContain('只改登录超时')
+  })
+
+  it('Worker 技能文件可覆盖，旧手册已标记只读', () => {
+    saveSpec(home, 'worker.skill', '# 自定义技能\n\n先读需求再动手。\n')
+    expect(readWorkerSkill(home, 'SKILL.md')).toBe('# 自定义技能\n\n先读需求再动手。\n')
+    expect(() => saveSpec(home, 'worker.prompt-mode', 'x')).toThrowError(/已并入 SKILL.md/)
   })
 
   it('迁移旧的自定义 soulFile：导入内容、移除配置项、保留原文件', () => {

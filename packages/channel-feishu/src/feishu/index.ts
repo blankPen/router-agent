@@ -4,6 +4,7 @@ import type { ImageTranscriber } from '@router-agent/infra/vision.js'
 import type { Trigger } from '@router-agent/core/model.js'
 import { FeishuBotAdmin } from '../sources/feishu-bot-admin.js'
 import { attachImageText } from '../sources/feishu-image.js'
+import { normalizeCardAction } from '../sources/feishu-reply.js'
 import {
   FeishuConsumer,
   FeishuSender,
@@ -14,7 +15,8 @@ import {
   type UnaddressedAdmission,
 } from '../sources/feishu.js'
 import { createLarkRunner, larkEnv } from '../sources/lark.js'
-import { DEFAULT_CHANNEL_ID, type ChannelAdapter, type ChannelCapabilities, type NormalizedInbound, type OutboundMessage, type SendReceipt } from '@router-agent/channel'
+import { DEFAULT_CHANNEL_ID, type CardAction, type ChannelAdapter, type ChannelCapabilities, type NormalizedInbound, type OutboundMessage, type QuestionCardUpdate, type SendReceipt } from '@router-agent/channel'
+import type { ReplyPayload } from '@router-agent/core/reply.js'
 
 export interface FeishuChannelHooks {
   /** 事件流就绪。 */
@@ -31,6 +33,9 @@ export interface FeishuSenderLike {
   send(chatId: string, text: string, idempotencyKey: string): Promise<void>
   sendCard(chatId: string, markdown: string, idempotencyKey: string): Promise<void>
   replyCard(messageId: string, markdown: string, idempotencyKey: string): Promise<void>
+  sendReply(chatId: string, payload: ReplyPayload, idempotencyKey: string): Promise<void>
+  replyReply(messageId: string, payload: ReplyPayload, idempotencyKey: string): Promise<void>
+  updateQuestionCard(update: QuestionCardUpdate): Promise<void>
   react(messageId: string, emojiType: string): Promise<string | null>
   unreact(messageId: string, reactionId: string): Promise<void>
   createDocument(title: string, markdown: string): Promise<string>
@@ -53,6 +58,8 @@ export interface FeishuChannelOptions {
   /** 注入点：测试里替换为假 sender/admin。 */
   sender?: FeishuSenderLike
   admin?: FeishuBotAdmin
+  /** 是否启动卡片按钮回调消费；关闭时 choices 退化为序号回复。 */
+  cardActions?: boolean
   /**
    * 未 @ 机器人的消息要不要放行。
    *
@@ -83,6 +90,7 @@ export class FeishuChannel implements ChannelAdapter {
   private readonly sender: FeishuSenderLike
   private readonly opts: FeishuChannelOptions
   private consumer: FeishuConsumer | null = null
+  private cardConsumer: FeishuConsumer | null = null
 
   constructor(opts: FeishuChannelOptions) {
     this.opts = opts
@@ -101,7 +109,10 @@ export class FeishuChannel implements ChannelAdapter {
       documents: true,
       directory: true,
       attachmentsIn: true,
-      attachmentsOut: false,
+      attachmentsOut: true,
+      images: true,
+      cards: true,
+      choices: Boolean(opts.cardActions),
       idempotency: true,
       maxTextLength: 3500,
       directMessage: opts.config.directMessages,
@@ -147,8 +158,14 @@ export class FeishuChannel implements ChannelAdapter {
 
   async send(message: OutboundMessage): Promise<SendReceipt> {
     const text = message.text.trim()
-    if (!text) return {}
+    if (!text && !message.blocks?.length) return {}
     const key = message.idempotencyKey
+    if (message.blocks?.length) {
+      const payload: ReplyPayload = { blocks: message.blocks, fallbackText: text || '（无文字内容）' }
+      if (message.threadRef) await this.sender.replyReply(message.threadRef, payload, key)
+      else await this.sender.sendReply(message.targetId, payload, key)
+      return { degradedTo: 'rich' }
+    }
     if (shouldSendAsText(text)) {
       if (message.threadRef) await this.sender.reply(message.threadRef, text, key)
       else await this.sender.send(message.targetId, text, key)
@@ -173,6 +190,30 @@ export class FeishuChannel implements ChannelAdapter {
     return this.sender.createDocument(title, markdown)
   }
 
+  async startCardActions(sink: (action: CardAction) => void): Promise<void> {
+    if (this.cardConsumer || !this.opts.cardActions) return
+    this.cardConsumer = new FeishuConsumer({
+      ...(this.opts.bin ? { bin: this.opts.bin } : {}),
+      env: this.opts.env ?? larkEnv(),
+      eventKey: 'card.action.trigger',
+      onEvent: raw => {
+        const action = normalizeCardAction(raw)
+        if (action) sink({ ...action, channelId: this.id })
+      },
+      ...(this.opts.hooks?.onError ? { onError: this.opts.hooks.onError } : {}),
+    })
+    this.cardConsumer.start()
+  }
+
+  stopCardActions(): void {
+    this.cardConsumer?.stop()
+    this.cardConsumer = null
+  }
+
+  async updateQuestionCard(update: QuestionCardUpdate): Promise<void> {
+    await this.sender.updateQuestionCard(update)
+  }
+
   async start(sink: (raw: unknown) => void): Promise<void> {
     if (this.consumer) return
     this.consumer = new FeishuConsumer({
@@ -190,6 +231,7 @@ export class FeishuChannel implements ChannelAdapter {
   stop(): void {
     this.consumer?.stop()
     this.consumer = null
+    this.stopCardActions()
   }
 }
 

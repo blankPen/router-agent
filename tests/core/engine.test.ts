@@ -76,6 +76,32 @@ describe('Engine', () => {
     expect(store.listOpenTickets()).toHaveLength(1)
   })
 
+  it('接单把触发消息原话与发起人写进工单，供派工引导回显', () => {
+    engine.ingest(makeTrigger())
+    const { ticket } = engine.decide({ triggerId: 'trg_1', decision: 'accept', strength: 'explicit', reason: 'ok', scope: '只改登录超时' })
+
+    expect(ticket?.request).toBe('帮我把登录超时从 10 秒改成 30 秒')
+    expect(ticket?.requestActorName).toBe('Alice')
+    expect(ticket?.requestAt).toBe('2026-11-06T10:00:00.000Z')
+    expect(store.getTicket(ticket!.id)).toMatchObject({ request: ticket!.request, requestActorName: 'Alice' })
+  })
+
+  it('需求单终审用提出人的原话，不用管理员点确认的那句话', () => {
+    engine.ingest(makeTrigger({ text: '管理员：确认派单' }))
+    const { ticket } = engine.decide({
+      triggerId: 'trg_1',
+      decision: 'accept',
+      strength: 'explicit',
+      reason: 'intake:approved',
+      scope: '结构化范围',
+      request: '提出人写的原始需求：字段名必须是 loginTimeout',
+      requestActorName: '提出人',
+    })
+
+    expect(ticket?.request).toBe('提出人写的原始需求：字段名必须是 loginTimeout')
+    expect(ticket?.requestActorName).toBe('提出人')
+  })
+
   it('工单号是全局短编号，按开单顺序自增', () => {
     engine.ingest(makeTrigger({ id: 't1', externalId: 'e1' }))
     engine.ingest(makeTrigger({ id: 't2', externalId: 'e2' }))
