@@ -290,7 +290,7 @@ ra config edit                                   # 用 $EDITOR 编辑全文
 | `ra logs [--follow]` | 最近 50 行日志；`--follow` 持续跟踪 |
 | `ra update [--check]` | 检查并升级到 npm 最新版：默认执行 `npm install -g router-agent@latest`，服务在跑时自动重启；`--no-restart` 只安装、`--registry` 指定源、`--force` 在源码 / link 运行时仍装全局版、`--json` 机器可读 |
 | `ra runtime [list]` | 探测本机 ACP Agent：状态、版本、来源；`--json` 机器可读 |
-| `ra runtime add <id> <npm 包名 | 路径>` | 声明自定义运行时插件（`runtime.plugins.<id>`），npm 包同时下载到 `~/.router-agent/node_modules` |
+| `ra runtime add <npm 包名 | 路径>` | 安装插件包并按它声明的 `meta.id` 登记运行时，npm 包下载到 `~/.router-agent/node_modules` |
 | `ra runtime install <id>` | 按需安装 ACP 适配器到 `~/.router-agent/runtimes/<agent>`，或下载已声明的 npm 插件包 |
 | `ra runtime uninstall <id>` | 卸载 ra 托管的 ACP 适配器 |
 | `ra runtime check <id>` | 完整 ACP 握手（`initialize` + `session/new`） |

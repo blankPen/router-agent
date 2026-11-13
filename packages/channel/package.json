@@ -1,6 +1,6 @@
 {
   "name": "@router-agent/channel",
-  "version": "0.3.38",
+  "version": "0.3.39",
   "type": "module",
   "description": "消息通道 SDK：端口、注册表、插件协议与入站管线",
   "license": "MIT",
@@ -31,7 +31,7 @@
     "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
-    "@router-agent/core": "0.3.38",
-    "@router-agent/infra": "0.3.38"
+    "@router-agent/core": "0.3.39",
+    "@router-agent/infra": "0.3.39"
   }
 }

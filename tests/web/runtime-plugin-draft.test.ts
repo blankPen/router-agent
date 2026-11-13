@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { applyRuntimePluginDraft } from '../../src/web/client/fields.js'
 
 describe('运行时插件草稿写入', () => {
-  it('npm 包入口写入 runtime.plugins.<id> 并去掉首尾空白', () => {
-    const draft = applyRuntimePluginDraft({ runtime: { default: 'orca' } }, ' my-runtime ', ' @acme/runtime-x ')
-    expect(draft).toEqual({ runtime: { default: 'orca', plugins: { 'my-runtime': '@acme/runtime-x' } } })
+  it('按插件包声明的 id 写入 runtime.plugins 并去掉首尾空白', () => {
+    const draft = applyRuntimePluginDraft({ runtime: { default: 'orca' } }, ' demo ', ' @acme/runtime-x ')
+    expect(draft).toEqual({ runtime: { default: 'orca', plugins: { demo: '@acme/runtime-x' } } })
   })
 
   it('本地路径同样可以写入', () => {

@@ -16,7 +16,7 @@ function home(): string {
 }
 
 /** 模拟 npm install：写到 --prefix 下的 node_modules。 */
-function fakeNpm(options: { wait?: Promise<void> } = {}): NpmRunner {
+function fakeNpm(options: { wait?: Promise<void>; kind?: 'runtime' | 'channel' } = {}): NpmRunner {
   return async (args, opts) => {
     if (options.wait) await options.wait
     const prefixIndex = args.indexOf('--prefix')
@@ -27,7 +27,8 @@ function fakeNpm(options: { wait?: Promise<void> } = {}): NpmRunner {
     const dir = join(prefix, 'node_modules', name)
     mkdirSync(dir, { recursive: true })
     writeFileSync(join(dir, 'package.json'), JSON.stringify({ name, version, main: './index.js' }), 'utf8')
-    writeFileSync(join(dir, 'index.js'), 'module.exports = { kind: "runtime" }\n', 'utf8')
+    const kind = options.kind ?? 'runtime'
+    writeFileSync(join(dir, 'index.js'), `module.exports = { kind: "${kind}", meta: { id: "x", name: "X" } }\n`, 'utf8')
     opts.onLine(`added ${name}@${version}`)
     return 0
   }
@@ -82,6 +83,71 @@ describe('插件包安装任务', () => {
     expect(finished?.lines?.join('\n')).toContain('added @acme/runtime-x')
   })
 
+  it('安装成功后从包里读出声明的 runtime id', async () => {
+    const dir = home()
+    const events: Array<{ message: string; fields?: Record<string, unknown> }> = []
+    const admin = new PluginPackageAdmin({
+      home: dir,
+      config: defaultConfig(),
+      env: {},
+      runNpm: fakeNpm(),
+      logger: {
+        info: (message, fields) => { events.push({ message, ...(fields ? { fields } : {}) }) },
+        warn: (message, fields) => { events.push({ message, ...(fields ? { fields } : {}) }) },
+        error: (message, fields) => { events.push({ message, ...(fields ? { fields } : {}) }) },
+      },
+    })
+    const job = admin.startInstall('runtime', '', { entry: '@acme/runtime-x' })
+    const finished = await waitJob(admin, job.id)
+    expect(finished?.status).toBe('ok')
+    expect(finished?.declaredId).toBe('x')
+    expect(events.find(event => event.message === 'plugin:id-detected')?.fields).toMatchObject({
+      kind: 'runtime',
+      id: 'x',
+      package: '@acme/runtime-x',
+    })
+  })
+
+  it('本地路径入口不下载，直接读出声明的 runtime id', async () => {
+    const dir = home()
+    const pluginDir = join(dir, 'my-runtime')
+    mkdirSync(pluginDir, { recursive: true })
+    writeFileSync(join(pluginDir, 'package.json'), JSON.stringify({
+      name: 'my-runtime',
+      version: '1.0.0',
+      type: 'module',
+      main: './index.js',
+    }), 'utf8')
+    writeFileSync(join(pluginDir, 'index.js'), 'export default { kind: "runtime", meta: { id: "my-runtime" } }\n', 'utf8')
+    const admin = new PluginPackageAdmin({ home: dir, config: defaultConfig(), env: {}, runNpm: fakeNpm() })
+    const job = admin.startInstall('runtime', '', { entry: './my-runtime' })
+    const finished = await waitJob(admin, job.id)
+    expect(finished?.status).toBe('ok')
+    expect(finished?.declaredId).toBe('my-runtime')
+  })
+
+  it('包没有声明 meta.id 时安装任务失败', async () => {
+    const dir = home()
+    const admin = new PluginPackageAdmin({
+      home: dir,
+      config: defaultConfig(),
+      env: {},
+      runNpm: async (args, opts) => {
+        const prefix = args[args.indexOf('--prefix') + 1]!
+        const pkgDir = join(prefix, 'node_modules', '@acme', 'runtime-x')
+        mkdirSync(pkgDir, { recursive: true })
+        writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({ name: '@acme/runtime-x', version: '1.0.0', main: './index.js' }), 'utf8')
+        writeFileSync(join(pkgDir, 'index.js'), 'module.exports = { kind: "runtime" }\n', 'utf8')
+        opts.onLine('added @acme/runtime-x')
+        return 0
+      },
+    })
+    const job = admin.startInstall('runtime', '', { entry: '@acme/runtime-x' })
+    const finished = await waitJob(admin, job.id)
+    expect(finished?.status).toBe('failed')
+    expect(finished?.error).toContain('meta.id')
+  })
+
   it('本地路径、未声明、禁用与内置包都拒绝启动安装', () => {
     const dir = home()
     const config = defaultConfig()
@@ -131,7 +197,7 @@ describe('插件包安装任务', () => {
     const dir = home()
     const config = defaultConfig()
     config.channels = { slack: 'slack-channel' }
-    const admin = new PluginPackageAdmin({ home: dir, config, env: {}, runNpm: fakeNpm() })
+    const admin = new PluginPackageAdmin({ home: dir, config, env: {}, runNpm: fakeNpm({ kind: 'channel' }) })
     const job = admin.startInstall('channel', 'slack')
     const finished = await waitJob(admin, job.id)
     expect(finished?.status).toBe('ok')
@@ -180,6 +246,26 @@ describe('插件安装 API', () => {
     const started = await call(server, 'POST', '/api/plugins/install', { kind: 'runtime', id: 'my-runtime', packageName: '@acme/runtime-x' })
     expect(started.status).toBe(202)
     expect(started.json).toMatchObject({ ok: true, packageName: '@acme/runtime-x' })
+  })
+
+  it('POST 只带 packageName 时按包名安装，装完回传插件声明的 id', async () => {
+    const dir = home()
+    const store = new Store(':memory:')
+    const config = defaultConfig()
+    const engine = new Engine({ store, policy: policyOf(config) })
+    const admin = new PluginPackageAdmin({ home: dir, config, env: {}, runNpm: fakeNpm() })
+    const server = await createApiServer({ engine, store, config, pluginAdmin: admin })
+    closers.push(async () => { await server.close(); store.close() })
+
+    const started = await call(server, 'POST', '/api/plugins/install', { kind: 'runtime', packageName: '@acme/runtime-x' })
+    expect(started.status).toBe(202)
+    expect(started.json).toMatchObject({ ok: true, packageName: '@acme/runtime-x' })
+    let job = await call(server, 'GET', `/api/plugins/install/${started.json.jobId}`)
+    for (let attempt = 0; attempt < 100 && job.json.status === 'running'; attempt += 1) {
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 10))
+      job = await call(server, 'GET', `/api/plugins/install/${started.json.jobId}`)
+    }
+    expect(job.json).toMatchObject({ status: 'ok', declaredId: 'x' })
   })
 
   it('未知插件与非法 kind 返回 400', async () => {
