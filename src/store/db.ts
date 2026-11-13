@@ -801,6 +801,40 @@ export class Store {
     return rows.map(eventQueueFromRow)
   }
 
+  /** 延后到点的事件自动回到可取状态；返回回队条数。 */
+  requeueDueDeferred(now: string): number {
+    const row = this.db.prepare(`UPDATE event_queue
+      SET state = 'ready', not_before = NULL, updated_at = ?
+      WHERE state = 'deferred' AND (not_before IS NULL OR not_before <= ?)`).run(now, now)
+    return Number(row.changes ?? 0)
+  }
+
+  /** 等待处理的事件数：queued + ready + deferred。 */
+  eventQueueDepth(): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM event_queue WHERE state IN ('queued', 'ready', 'deferred')").get() as Row | undefined
+    return Number(row?.n ?? 0)
+  }
+
+  /** 排队中（非延后）最低分的若干事件 id；背压超限时按它丢弃。 */
+  lowestQueuedIds(limit: number): string[] {
+    const rows = this.db.prepare(`SELECT event_id FROM event_queue
+      WHERE state IN ('queued', 'ready')
+      ORDER BY priority ASC, created_at ASC
+      LIMIT ?`).all(limit) as Row[]
+    return rows.map(row => String(row.event_id))
+  }
+
+  /** 该 lane 是否还有未完成（在飞）的工单；用于同 lane 串行。 */
+  laneHasLiveTicket(lane: string, excludeEventId: string): boolean {
+    const rows = this.db.prepare(`SELECT ticket_id FROM event_queue
+      WHERE lane = ? AND state = 'dispatched' AND ticket_id IS NOT NULL AND event_id != ?`).all(lane, excludeEventId) as Row[]
+    for (const row of rows) {
+      const ticket = this.getTicket(String(row.ticket_id))
+      if (ticket && ticket.stage !== 'done') return true
+    }
+    return false
+  }
+
   /** 队列统计：总数 + 按状态 + 按档位。 */
   eventQueueStats(): EventQueueStats {
     const total = Number((this.db.prepare('SELECT COUNT(*) AS n FROM event_queue').get() as Row).n ?? 0)

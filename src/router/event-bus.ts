@@ -94,6 +94,9 @@ export interface ReviewOutcome {
 
 const defaultIds = { next: (prefix: string) => `${prefix}_${crypto.randomUUID()}` }
 
+/** 同 lane 串行的重查间隔：在飞工单未完成时每隔这么久再判一次。 */
+const LANE_RETRY_MS = 60_000
+
 /**
  * 事件总线。
  *
@@ -195,6 +198,18 @@ export class EventBus {
     const outcome: TickOutcome = { processed: 0, dispatched: 0, pending: 0, deferred: 0, dropped: 0, archived: 0 }
     const now = this.clock.now()
     const settings = this.settings()
+    const requeued = this.store.requeueDueDeferred(now)
+    if (requeued > 0) this.logger.info('event:requeued', { count: requeued })
+    // 背压：队列等待数超过上限时丢弃最低分事件，而不是无限堆积。
+    const depth = this.store.eventQueueDepth()
+    if (settings.maxQueueDepth > 0 && depth > settings.maxQueueDepth) {
+      const overflow = depth - settings.maxQueueDepth
+      for (const eventId of this.store.lowestQueuedIds(overflow)) {
+        this.logger.warn('event:dropped', { eventId, reason: 'event:queue-overflow' })
+        this.settle(eventId, { state: 'dropped', tier: 't3', reason: 'event:queue-overflow' })
+        outcome.dropped += 1
+      }
+    }
     const pending = this.store.pickEventQueue(now, 20)
     const candidates: EventCandidate[] = []
     for (const item of pending) {
@@ -218,6 +233,22 @@ export class EventBus {
         this.logger.warn('event:dropped', { eventId: event.id, reason: rule.reason })
         this.settle(event.id, { state: 'dropped', tier: 't3', priority: rule.priority, reason: rule.reason })
         outcome.dropped += 1
+        continue
+      }
+
+      // 同 lane 串行：该泳道已有未完成工单时延后，避免同一项目被多事件并发改代码。
+      if (this.store.laneHasLiveTicket(item.lane, event.id)) {
+        const notBefore = new Date(Date.parse(now) + LANE_RETRY_MS).toISOString()
+        this.logger.info('event:lane-busy', { eventId: event.id, lane: item.lane, notBefore })
+        this.settle(event.id, {
+          state: 'deferred',
+          tier: tierOfPriority(item.priority),
+          priority: item.priority,
+          reason: 'event:lane-busy',
+          notBefore,
+          decidedBy: 'rule',
+        })
+        outcome.deferred += 1
         continue
       }
 

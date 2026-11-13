@@ -218,6 +218,66 @@ describe('事件总线', () => {
     expect(queue?.reason).toBe('event:window-closed')
   })
 
+  it('延后事件到点后自动回到可取状态并被派发', async () => {
+    settings.windows = [{ id: 'peak', from: '09:00', to: '20:00', allow: ['t0'] }]
+    let current = '2026-11-14T08:00:00.000Z'
+    const clock = { now: () => current }
+    const b = bus({
+      clock,
+      timeOfDay: now => {
+        const d = new Date(now)
+        return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`
+      },
+      triage: triageOf({ priority: 0.95 }),
+    })
+    await b.ingest(envelope())
+    await b.tick()
+    const queue = store.getEventQueue('ev_1')
+    expect(queue?.state).toBe('deferred')
+    expect(queue?.reason).toBe('event:window-closed')
+    // 推进到窗口放行、且已过 not_before 的时刻：延后事件必须被重新取回。
+    current = '2026-11-15T09:30:00.000Z'
+    const outcome = await b.tick()
+    expect(outcome.dispatched).toBe(1)
+    expect(store.getEventQueue('ev_1')?.state).toBe('dispatched')
+  })
+
+  it('队列超过 maxQueueDepth 时丢弃最低分事件并记日志', async () => {
+    settings.maxQueueDepth = 2
+    const b = bus({ triage: triageOf() })
+    await b.ingest(envelope({ id: 'ev_1', externalId: 'ext-1', priorityHint: 10 }))
+    await b.ingest(envelope({ id: 'ev_2', externalId: 'ext-2', priorityHint: 20 }))
+    await b.ingest(envelope({ id: 'ev_3', externalId: 'ext-3', priorityHint: 30 }))
+    await b.tick()
+    expect(store.getEventQueue('ev_1')?.state).toBe('dropped')
+    expect(store.getEventQueue('ev_1')?.reason).toBe('event:queue-overflow')
+    expect(store.getEventQueue('ev_2')?.state).not.toBe('dropped')
+    expect(logs.some(log => log.event === 'event:dropped' && log.fields.reason === 'event:queue-overflow' && log.level === 'warn')).toBe(true)
+  })
+
+  it('同一 lane 已有在飞工单时新事件延后，工单完成后自动放行', async () => {
+    let current = NOW
+    const clock = { now: () => current }
+    const b = bus({ clock, triage: triageOf({ priority: 0.95 }) })
+    await b.ingest(envelope({ id: 'ev_1', externalId: 'ext-1' }))
+    await b.tick()
+    const first = store.getEventQueue('ev_1')
+    expect(first?.state).toBe('dispatched')
+    expect(first?.ticketId).toBeTruthy()
+    // 同一 lane 的第二条事件：有在飞工单 → 延后，不重复开单。
+    await b.ingest(envelope({ id: 'ev_2', externalId: 'ext-2' }))
+    await b.tick()
+    const second = store.getEventQueue('ev_2')
+    expect(second?.state).toBe('deferred')
+    expect(second?.reason).toBe('event:lane-busy')
+    // 完成第一张工单，推进时钟到延后到点，再 tick → 放行派发。
+    engine.closeTicket(first!.ticketId!, '完成验收')
+    current = new Date(Date.parse(NOW) + 2 * 60_000).toISOString()
+    const outcome = await b.tick()
+    expect(outcome.dispatched).toBe(1)
+    expect(store.getEventQueue('ev_2')?.state).toBe('dispatched')
+  })
+
   it('批量窗口内同源同类型事件合并成一次判定调用', async () => {
     settings.windows = [{ id: 'night', from: '09:00', to: '20:00', allow: ['t0', 't1'], batch: true }]
     const triage = vi.fn(async () => ({

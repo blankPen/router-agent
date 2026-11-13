@@ -579,7 +579,7 @@ event:
 
 顺序上唯一不能错：**熔断（hops）必须先于自产事件（emit）**；**时间窗必须先于批量**（否则批量会在高峰期偷偷跑）。
 
-**实现现状**（2026-11-14）：P0 / P1 / P2 已随 tk-87 一并落地——事件契约与队列表、规则层 + Jev `event.triage.v1` 判定、T1 审核队列与统一待审核列表、可配置时间窗与预算、GitHub Issue 轮询与 webhook、cron 定时任务、Web 事件面板。**夜间批量合并（`window.batch`）已落地**：命中批量窗口时同源同类型事件合并成一次 Jev 调用，失败自动退回逐条判定。P3 自产事件（`--emit`）只落地了 `hops` 熔断，未开放自产来源。
+**实现现状**（2026-11-14）：P0 / P1 / P2 已随 tk-87 一并落地——事件契约与队列表、规则层 + Jev `event.triage.v1` 判定、T1 审核队列与统一待审核列表、可配置时间窗与预算、GitHub Issue 轮询与 webhook、cron 定时任务、Web 事件面板。**夜间批量合并（`window.batch`）已落地**：命中批量窗口时同源同类型事件合并成一次 Jev 调用，失败自动退回逐条判定。**§5.2/§5.3 队列语义已闭环**：`deferred` 到点自动回到 `ready`（`event:requeued`）；`maxQueueDepth` 背压超限时丢弃最低分事件（`event:dropped`，原因 `event:queue-overflow`）；同 lane 串行落地（在飞工单未完成时新事件延后重查，`event:lane-busy`）。P3 自产事件（`--emit`）只落地了 `hops` 熔断，未开放自产来源。
 
 ## 13. 风险与开放问题
 
