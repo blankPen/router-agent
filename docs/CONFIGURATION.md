@@ -286,12 +286,15 @@ router-agent 固定使用 `~/.router-agent-lark` 作为 lark-cli profile，**不
 
 项目清单仍按运行时隔离：Orca 用顶层 `projects`，其它运行时用 `runtime.projects.<runtime id>`，见 [RUNTIME.md](RUNTIME.md)。
 
-Web 面板的「登记项目」提供两种添加方式：
+Web 面板的「项目配置」提供三种添加方式：
 
 | 入口 | 行为 |
 |-|-|
+| 扫描本地项目 | 读本机 Claude Code（`~/.claude/projects`）、Codex（`~/.codex/sessions`）、OpenCode（`~/.local/share/opencode`）的历史会话日志，从里面还原用过的目录，按最近活跃时间倒序列出候选；默认勾选最近活跃的 5 个 Git 项目，其余不勾。导入时逐个走本地项目登记流程（Orca 运行时同时 `orca repo add`），路径重复的自动跳过，项目名撞了加序号 |
 | 添加本地项目 | 弹出系统目录选择框；选中后自动识别 Git 根目录、当前分支与 origin。不是 Git 仓库时直接提示，不能用于创建 worktree |
 | 添加 Git 项目 | 填写 ssh / http(s) 地址，自动 clone 到 `<RA_HOME>/repos/<项目名>`（默认 `~/.router-agent/repos`） |
+
+扫描只读会话日志，不写任何文件；目录已不存在的会话记录会被跳过，非 Git 目录会被标出来且不默认勾选。
 
 登记到 Orca 是自动的：Orca 运行时新增项目时立刻 `orca repo add`，派工时再兜底登记一次，所以清单里只写路径就够了。想看 Orca 侧已登记的仓库：
 

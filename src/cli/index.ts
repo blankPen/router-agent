@@ -44,6 +44,7 @@ import { EffectsProcessor } from '../core/effects.js'
 import { createApiServer, emptyIdentityStatus, type IdentityPort } from '../router/api.js'
 import { PluginPackageAdmin } from '../router/plugin-admin.js'
 import { ProjectSetup } from '../router/project-setup.js'
+import { scanLocalProjects } from '../router/project-scan.js'
 import { createLogAssistant } from '../router/log-assistant.js'
 import { createDiagnosisTools } from '../router/diagnosis-tools.js'
 import { createIssueReporter } from '../router/issue-report.js'
@@ -1575,6 +1576,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     logAssistant,
     issueReporter,
     projectSetup: new ProjectSetup({ home, git: gitRunner, orca: orcaRunner }),
+    projectScan: { scan: () => scanLocalProjects() },
     // Web-only 模式没有 RouterService，工作区清理端点按「不支持」返回。
     ...(service
       ? {

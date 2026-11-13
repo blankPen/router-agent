@@ -1373,6 +1373,28 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 .project-detect.ok { border-color: color-mix(in srgb, var(--positive) 35%, var(--border)); }
 .project-detect.bad { border-color: color-mix(in srgb, var(--danger) 35%, var(--border)); }
 
+/* 扫描本地项目弹窗 */
+.scan-list { display: flex; flex-direction: column; gap: 4px; }
+.scan-item {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  font-size: 12px;
+}
+.scan-item:hover { background: var(--raised); border-color: var(--border); }
+.scan-item input { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
+.scan-item-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.scan-item-main strong { display: flex; align-items: center; gap: 6px; font-weight: 600; color: var(--text); }
+.scan-item-main code { word-break: break-all; color: var(--muted); font-size: 11px; }
+.scan-item-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; color: var(--faint); font-size: 11px; }
+.scan-tag { padding: 1px 6px; border-radius: 999px; font-style: normal; font-size: 10px; font-weight: 500; }
+.scan-tag.warn { background: var(--warn-soft); color: var(--warn); }
+
 /* 工单页 · 清理工作区弹窗 */
 .modal-wide { width: min(820px, calc(100vw - 32px)); }
 .ws-group {

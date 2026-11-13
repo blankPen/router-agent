@@ -5,6 +5,7 @@ import { Store } from '../../src/store/db.js'
 import { Engine } from '../../src/core/engine.js'
 import { createApiServer, type ApiServer } from '../../src/router/api.js'
 import { ProjectSetupError, type PreparedProject, type ProjectSetupPort } from '../../src/router/project-setup.js'
+import type { ProjectScanPort } from '../../src/router/project-scan.js'
 import { defaultConfig, policyOf, type AppConfig } from '../../src/config.js'
 
 function call(server: ApiServer, method: string, path: string, body?: unknown): Promise<{ status: number; json: any }> {
@@ -60,8 +61,8 @@ describe('项目登记 API', () => {
     store.close()
   })
 
-  async function start(projectSetup?: ProjectSetupPort): Promise<ApiServer> {
-    return createApiServer({ engine, store, config, ...(projectSetup ? { projectSetup } : {}) })
+  async function start(projectSetup?: ProjectSetupPort, projectScan?: ProjectScanPort): Promise<ApiServer> {
+    return createApiServer({ engine, store, config, ...(projectSetup ? { projectSetup } : {}), ...(projectScan ? { projectScan } : {}) })
   }
 
   it('未注入 projectSetup 时端点返回 404', async () => {
@@ -160,6 +161,47 @@ describe('项目登记 API', () => {
       const clone = await call(server, 'POST', '/api/projects/clone', { url: 'git@host:a/b.git' })
       expect(clone.status).toBe(400)
       expect(clone.json).toMatchObject({ error: 'clone-failed', url: 'x' })
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('扫描本地项目：未注入扫描器时返回 404', async () => {
+    const server = await start()
+    try {
+      const res = await call(server, 'POST', '/api/projects/scan', {})
+      expect(res.status).toBe(404)
+      expect(res.json.error).toBe('project-scan-not-available')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('扫描本地项目：返回候选清单并记录事件', async () => {
+    const events: any[] = []
+    const server = await createApiServer({
+      engine,
+      store,
+      config,
+      onEvent: event => events.push(event),
+      projectScan: {
+        scan: async () => [
+          {
+            path: '/Users/me/alpha',
+            name: 'alpha',
+            sources: ['claude'],
+            lastActiveAt: '2026-01-02T00:00:00.000Z',
+            isGit: true,
+          },
+        ],
+      },
+    })
+    try {
+      const res = await call(server, 'POST', '/api/projects/scan', {})
+      expect(res.status).toBe(200)
+      expect(res.json.projects).toHaveLength(1)
+      expect(res.json.projects[0].path).toBe('/Users/me/alpha')
+      expect(events.some(event => event.event === 'project:scanned')).toBe(true)
     } finally {
       await server.close()
     }

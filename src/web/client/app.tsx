@@ -54,6 +54,7 @@ import {
   type PluginView,
 } from './api.js'
 import { Icon, LogoMark } from './icons.js'
+import { defaultSelectedPaths, mergeImportedProjects, type ScanCandidate } from './project-scan.js'
 import type { IdentityStatusView } from './identity-status.js'
 import { RuntimeCards, type RuntimeNotice } from './runtime-cards.js'
 import { FeishuBotPanel } from './feishu-panel.js'
@@ -2129,7 +2130,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
   const steps = [
     { label: 'LLM 已配置', hint: llmReady ? '已就绪' : '填写 Base URL / 模型 / API Key', done: llmReady },
     { label: '运行时可用', hint: runtimeReady ? '已就绪' : runtimeChoice ? runtimeStatusLabel(runtimeChoice.status) : '未选择', done: runtimeReady },
-    { label: '已登记项目', hint: projectReady ? `${activeProjects.length} 个项目` : '至少一个', done: projectReady },
+    { label: '已配置项目', hint: projectReady ? `${activeProjects.length} 个项目` : '至少一个', done: projectReady },
     { label: `${channelName}已接入`, hint: channelReady ? '已就绪' : `写入${channelName}接入信息`, done: channelReady },
     { label: '监控群已添加', hint: chatReady ? `${chats.length} 个群` : '至少一个', done: chatReady },
   ]
@@ -2289,8 +2290,8 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       <section className="settings-card" id="setup-projects">
         <header className="settings-head">
           <div>
-            <h2>3. 登记项目</h2>
-            <p>当前运行时：<strong>{runtimeLabel}</strong>。至少登记一个项目，群绑定才能选；可以选本机已有目录，也可以填 Git 地址自动 clone。</p>
+            <h2>3. 项目配置</h2>
+            <p>当前运行时：<strong>{runtimeLabel}</strong>。至少配置一个项目，群绑定才能选；可以扫本机会话日志批量导入，也可以选本机已有目录或填 Git 地址自动 clone。</p>
           </div>
           <div className="settings-badges">
             {projectReady ? <span className="badge hot">已完成</span> : <span className="badge cold">未完成</span>}
@@ -2388,6 +2389,16 @@ interface ProjectInspectionView {
   orca?: { registered: boolean; repo: string; displayName: string; error?: string }
 }
 
+/** 「扫描本地项目」的弹窗状态。 */
+interface ProjectScanState {
+  busy: boolean
+  candidates: ScanCandidate[]
+  selected: string[]
+  importing: boolean
+  error: string | null
+  notice: string | null
+}
+
 interface ProjectDialogState {
   mode: 'local' | 'git'
   url: string
@@ -2402,6 +2413,15 @@ interface ProjectDialogState {
   force: boolean
 }
 
+/** 候选项目的最近活跃时间：显示到分钟。 */
+function formatActivity(iso: string): string {
+  const stamp = Date.parse(iso)
+  if (Number.isNaN(stamp)) return iso
+  const date = new Date(stamp)
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
 function dialogError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -2414,6 +2434,7 @@ function ProjectsEditor({ runtimeId, projects, error, onChange }: {
 }): JSX.Element {
   const isOrca = runtimeId === ORCA_RUNTIME_ID
   const [dialog, setDialog] = useState<ProjectDialogState | null>(null)
+  const [scan, setScan] = useState<ProjectScanState | null>(null)
   const update = (index: number, patch: Partial<ProjectDraft>): void => {
     onChange(projects.map((project, i) => (i === index ? { ...project, ...patch } : project)))
   }
@@ -2565,6 +2586,59 @@ function ProjectsEditor({ runtimeId, projects, error, onChange }: {
     setDialog(null)
   }
 
+  /** 「扫描本地项目」：读 Claude Code / Codex / OpenCode 的会话日志，列出候选目录。 */
+  const startScan = async (): Promise<void> => {
+    setScan({ busy: true, candidates: [], selected: [], importing: false, error: null, notice: null })
+    try {
+      const result = await sendJson<{ projects: ScanCandidate[] }>('/api/projects/scan', 'POST', {})
+      const candidates = result.projects ?? []
+      setScan({
+        busy: false,
+        candidates,
+        selected: defaultSelectedPaths(candidates),
+        importing: false,
+        error: null,
+        notice: null,
+      })
+    } catch (failure) {
+      setScan({ busy: false, candidates: [], selected: [], importing: false, error: dialogError(failure), notice: null })
+    }
+  }
+
+  /** 导入勾选的项目：逐个登记（Orca 运行时同时登记到 Orca），再并进项目清单。 */
+  const importSelected = async (): Promise<void> => {
+    if (!scan) return
+    const picked = scan.candidates.filter(candidate => scan.selected.includes(candidate.path))
+    setScan({ ...scan, importing: true, error: null, notice: null })
+    const drafts: ProjectDraft[] = []
+    const failures: string[] = []
+    for (const candidate of picked) {
+      try {
+        const prepared = await sendJson<ProjectInspectionView>('/api/projects/register', 'POST', { path: candidate.path, runtimeId })
+        drafts.push({
+          name: prepared.name || candidate.name,
+          repo: prepared.repo ?? prepared.path,
+          defaultBranch: prepared.detached ? '' : prepared.branch,
+        })
+        if (prepared.orca && !prepared.orca.registered) {
+          failures.push(`${candidate.name}：登记到 Orca 失败（${prepared.orca.error ?? '未知原因'}）`)
+        }
+      } catch (failure) {
+        failures.push(`${candidate.name}：${dialogError(failure)}`)
+      }
+    }
+    if (drafts.length > 0) onChange(mergeImportedProjects(projects, drafts))
+    setScan(current => (current
+      ? {
+        ...current,
+        importing: false,
+        selected: [],
+        error: failures.length > 0 ? failures.join('；') : null,
+        notice: drafts.length > 0 ? `已导入 ${drafts.length} 个项目，记得保存配置` : null,
+      }
+      : current))
+  }
+
   const canAdd = Boolean(dialog?.info?.isGit && dialog.name.trim())
 
   return (
@@ -2594,6 +2668,9 @@ function ProjectsEditor({ runtimeId, projects, error, onChange }: {
       ))}
       {error && <p className="field-error">{error}</p>}
       <div className="project-add-actions">
+        <button className="btn add" onClick={() => void startScan()}>
+          <Icon name="search" size={13} />扫描本地项目
+        </button>
         <button className="btn add" onClick={() => void startLocal()}>
           <Icon name="folder" size={13} />添加本地项目
         </button>
@@ -2712,6 +2789,73 @@ function ProjectsEditor({ runtimeId, projects, error, onChange }: {
                   {dialog.busy ? '处理中…' : dialog.force ? '仍然添加' : '添加项目'}
                 </button>
               )}
+            </footer>
+          </div>
+        </div>
+      )}
+
+      {scan && (
+        <div className="modal-layer">
+          <button className="modal-backdrop" aria-label="关闭" onClick={() => { if (!scan.importing) setScan(null) }} />
+          <div className="modal modal-wide" role="dialog" aria-modal="true" aria-label="扫描本地项目">
+            <header className="modal-head">
+              <div>
+                <h3>扫描本地项目</h3>
+                <p>从 Claude Code / Codex / OpenCode 的历史会话日志里读出用过的目录，勾选后导入当前运行时。</p>
+              </div>
+              <button className="icon-btn" title="关闭" onClick={() => setScan(null)} disabled={scan.importing}>
+                <Icon name="close" size={14} />
+              </button>
+            </header>
+            <div className="modal-body">
+              {scan.busy && <p className="modal-hint"><Icon name="refresh" size={13} className="spin" />正在扫描会话日志…</p>}
+              {scan.error && <p className="modal-error">{scan.error}</p>}
+              {scan.notice && <p className="modal-notice">{scan.notice}</p>}
+              {!scan.busy && scan.candidates.length === 0 && (
+                <p className="editor-empty">没有扫到候选项目。确认 Claude Code / Codex / OpenCode 在本机留有会话记录后再试。</p>
+              )}
+              {scan.candidates.length > 0 && (
+                <div className="scan-list">
+                  {scan.candidates.map(candidate => (
+                    <label key={candidate.path} className="scan-item">
+                      <input
+                        type="checkbox"
+                        checked={scan.selected.includes(candidate.path)}
+                        disabled={scan.importing}
+                        onChange={event => setScan(current => (current
+                          ? {
+                            ...current,
+                            selected: event.target.checked
+                              ? [...current.selected, candidate.path]
+                              : current.selected.filter(item => item !== candidate.path),
+                          }
+                          : current))}
+                      />
+                      <span className="scan-item-main">
+                        <strong>
+                          {candidate.name}
+                          {!candidate.isGit && <em className="scan-tag warn">非 Git</em>}
+                        </strong>
+                        <code>{candidate.path}</code>
+                      </span>
+                      <span className="scan-item-meta">
+                        <span>{candidate.sources.join(' / ')}</span>
+                        <span>{formatActivity(candidate.lastActiveAt)}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+            <footer className="modal-foot">
+              <button className="btn tiny" onClick={() => setScan(null)} disabled={scan.importing}>取消</button>
+              <button
+                className="btn primary"
+                onClick={() => void importSelected()}
+                disabled={scan.busy || scan.importing || scan.selected.length === 0}
+              >
+                {scan.importing ? '导入中…' : `导入勾选的 ${scan.selected.length} 个项目`}
+              </button>
             </footer>
           </div>
         </div>
