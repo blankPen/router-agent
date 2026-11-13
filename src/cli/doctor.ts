@@ -22,7 +22,25 @@ export interface DoctorCheck {
   status: CheckStatus
   detail: string
   hint?: string
+  /**
+   * 面板配置页的分组 id（`sec-<id>`）；排查助手据此把用户直接带到该改的地方。
+   */
+  section?: string
+  /**
+   * 缺的具体配置项（点路径）；面板把它显示成「该改哪项」。
+   */
+  items?: string[]
 }
+
+/** 配置页的分组 id；与 `src/web/client/fields.ts` 的 CONFIG_GROUPS 对齐。 */
+export const CONFIG_SECTIONS = {
+  llm: 'llm',
+  runtime: 'runtime',
+  channels: 'channels',
+  projects: 'projects',
+  admission: 'admission',
+  ops: 'ops',
+} as const
 
 export interface DoctorDeps {
   config: AppConfig
@@ -46,22 +64,9 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
   const manualBot = config.feishu.botOpenIds.length > 0 || config.feishu.botNames.length > 0
   /** 只有 mode=mention 的群靠 @ 机器人判定收不收消息，也只有它们需要识别机器人身份。 */
   const mentionChatIds = config.feishu.chats.filter(chat => chat.mode === 'mention').map(chat => chat.chat)
-
-  const missing: string[] = []
   const projects = projectsForRuntime(config)
   const projectCount = projects.length
-  if (projectCount === 0) missing.push('projects')
-  if (config.feishu.chats.length === 0) missing.push('feishu.chats')
-  if (config.feishu.allowed.length === 0) missing.push('feishu.allowed')
-  // 机器人身份不再要求手填：留空时启动会自动按 feishu.appId 识别（见「机器人身份自动识别」检查）。
-  checks.push({
-    name: '配置必填项',
-    status: missing.length === 0 ? 'ok' : 'fail',
-    detail: missing.length === 0
-      ? `${config.runtime.default} 运行时 ${projectCount} 个项目（${projects.map(project => project.name).join('、')}），群 ${config.feishu.chats.length} 个（绑定 ${config.feishu.chats.filter(chat => chat.repo).length} 个）`
-      : `缺少 ${missing.join(' / ')}`,
-    ...(missing.length > 0 ? { hint: 'ra config set project.<名称> "<repo>@<分支>"，或重新运行 ra init' } : {}),
-  })
+  checks.push(configRequiredCheck(config, projectCount))
 
   checks.push({
     name: 'accept mode',
@@ -239,6 +244,82 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
     }))
   }
 
+  return checks
+}
+
+/**
+ * 配置必填项检查：缺什么、缺了会导致什么。
+ *
+ * 单独拆出来是因为排查助手要复用它：面板打开时不需要跑完整个 doctor
+ * （那要连飞书、Orca 的网络），只需要知道「配置缺了什么」。
+ */
+export function configRequiredCheck(config: AppConfig, projectCount = projectsForRuntime(config).length): DoctorCheck {
+  const missing: string[] = []
+  if (projectCount === 0) missing.push('projects')
+  if (config.feishu.chats.length === 0) missing.push('feishu.chats')
+  if (config.feishu.allowed.length === 0) missing.push('feishu.allowed')
+  // 缺什么用大白话说：面板上直接展示这句，用户要知道自己该补什么。
+  const missingItems: Record<string, string> = {
+    projects: '还没有登记任何项目，机器人不知道要把活派给哪个仓库',
+    'feishu.chats': '还没有配置要监听的群，机器人收不到消息',
+    'feishu.allowed': '还没有配置允许名单，名单外的人发消息一律不理',
+  }
+  // 每一项缺的东西要去哪个分组改，面板按这个跳。
+  const missingSections: Record<string, string> = {
+    projects: CONFIG_SECTIONS.projects,
+    'feishu.chats': CONFIG_SECTIONS.channels,
+    'feishu.allowed': CONFIG_SECTIONS.channels,
+  }
+  // 机器人身份不再要求手填：留空时启动会自动按 feishu.appId 识别（见「机器人身份自动识别」检查）。
+  return {
+    name: '配置必填项',
+    status: missing.length === 0 ? 'ok' : 'fail',
+    detail: missing.length === 0
+      ? `${config.runtime.default} 运行时 ${projectCount} 个项目（${projectsForRuntime(config).map(project => project.name).join('、')}），群 ${config.feishu.chats.length} 个（绑定 ${config.feishu.chats.filter(chat => chat.repo).length} 个）`
+      : `缺少 ${missing.join(' / ')}`,
+    ...(missing.length > 0
+      ? {
+        hint: 'ra config set project.<名称> "<repo>@<分支>"，或重新运行 ra init',
+        // 引导到第一项缺失所在的分组；多项缺失时用户补完第一项再点一次即可。
+        section: missingSections[missing[0]!] ?? CONFIG_SECTIONS.channels,
+        // 面板用的大白话：说清缺的是什么、去哪补。CLI 仍看 detail 里的配置路径。
+        items: missing.map(item => `${missingItems[item] ?? `缺少 ${item}`}（去「${missingSections[item] === CONFIG_SECTIONS.projects ? '配置 → 项目清单' : '配置 → 渠道配置'}」补）`),
+      }
+      : {}),
+  }
+}
+
+/**
+ * 只跑不联网的配置自检：面板打开时用这个。
+ *
+ * 完整 doctor 要连飞书与 Orca，面板打开时等它跑完太慢；
+ * 而「配置缺了什么、模型配了没」才是面板要先回答的问题。
+ * 网络层面的问题由日志（飞书身份失败等）与服务日志里的事件体现。
+ */
+export function runConfigDoctor(deps: { config: AppConfig; llm: () => { ok: boolean; detail: string } }): DoctorCheck[] {
+  const { config } = deps
+  const checks: DoctorCheck[] = [configRequiredCheck(config)]
+  const llm = deps.llm()
+  checks.push({
+    name: '模型配置',
+    status: llm.ok ? 'ok' : 'fail',
+    detail: llm.ok ? llm.detail : '还没有配置模型，助手只能按内置规则判断，结论不如模型贴合',
+    ...(llm.ok ? {} : { hint: '在面板「配置 → LLM Provider」填 Base URL / 模型 / API Key', section: CONFIG_SECTIONS.llm }),
+  })
+  if (config.runtime.default !== 'orca') {
+    const projects = projectsForRuntime(config)
+    const missing = projects.filter(project => !existsSync(project.repo.replace(/^path:/, '')))
+    checks.push({
+      name: '本地项目路径',
+      status: projects.length === 0 ? 'fail' : missing.length === 0 ? 'ok' : 'fail',
+      detail: projects.length === 0
+        ? '未配置任何项目'
+        : projects.map(project => `${project.name} → ${project.repo.replace(/^path:/, '')}`).join('，'),
+      ...(missing.length > 0
+        ? { hint: 'repo 必须是本地仓库绝对路径；在面板「配置 → 项目清单」或 ra config set project.<名称> 中修正', section: CONFIG_SECTIONS.projects }
+        : {}),
+    })
+  }
   return checks
 }
 

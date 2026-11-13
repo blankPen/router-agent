@@ -1,23 +1,18 @@
 /**
  * Web 面板右下角的「智能问题排查助手」悬浮按钮与弹窗。
  *
- * 交互按三步走：
- * 1. 服务日志里出现 error 时，悬浮按钮变成「有异常」的样子（红点 + 数量）；
- * 2. 鼠标移上去展开快捷操作：智能分析异常 / 上报 GitHub issue / 看日志；
- * 3. 点开是弹窗，里面做问题分析，给出结论、可能原因、建议与证据，
- *    并按结论类型给出后续动作：配置类引导去改配置，缺陷类一键上报 issue。
+ * 交互只有三步：
+ * 1. 右下角一个按钮，点开就是排查面板——没有快捷菜单，也不会自动开始分析；
+ * 2. 面板一打开就把当前存在的异常日志、配置错误与配置遗漏摆出来，
+ *    不用先描述问题；用户看完点「分析」才发起一次分析；
+ * 3. 结论面向普通用户：主区只说「发生了什么」「现在该做什么」，
+ *    原始日志与专业术语收进折叠的补充信息。
  *
  * 服务端没装这个端点时（老版本 daemon）整个入口隐藏，不在页面上留死按钮。
  */
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { sendJson } from './api.js'
 import { Icon } from './icons.js'
-
-export interface LogSuggestion {
-  id: string
-  title: string
-  example: string
-}
 
 export interface LogEvidence {
   at: string
@@ -50,85 +45,77 @@ export interface LogDiagnosis {
   next?: LogNextStep[]
 }
 
+/** 面板打开时展示的一条异常摘要。 */
+export interface LogOverviewIssue {
+  event: string
+  title: string
+  detail?: string
+  at: string
+  action?: string
+}
+
+/** 面板打开时展示的一条配置问题。 */
+export interface LogOverviewConfigIssue {
+  name: string
+  detail: string
+  hint?: string
+  section?: string
+  items?: string[]
+}
+
+export interface LogAssistantOverview {
+  errorCount: number
+  warnCount: number
+  issues: LogOverviewIssue[]
+  configIssues: LogOverviewConfigIssue[]
+  window: { since: string; version: string }
+}
+
 export interface LogAssistantStatus {
   llmConfigured: boolean
-  suggestions: LogSuggestion[]
+  overview: LogAssistantOverview
 }
-
-interface LogBatch {
-  entries: { level: string; message: string }[]
-}
-
-/** 悬浮按钮轮询日志的间隔；比日志页慢一点，避免重复读文件。 */
-const POLL_MS = 5_000
-/** 悬浮按钮一次看多少行日志。 */
-const POLL_LINES = 200
 
 export function LogAssistantFab({ onOpenConfig }: { onOpenConfig: (section?: string) => void }): JSX.Element | null {
   const [status, setStatus] = useState<LogAssistantStatus | null>(null)
   const [supported, setSupported] = useState(true)
-  const [errorCount, setErrorCount] = useState(0)
-  const [toast, setToast] = useState<string | null>(null)
   const [open, setOpen] = useState(false)
-  const [question, setQuestion] = useState('')
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<LogDiagnosis | null>(null)
   const [failure, setFailure] = useState<string | null>(null)
   const [issue, setIssue] = useState<{ number: number; url: string } | null>(null)
   const [issuing, setIssuing] = useState(false)
 
-  const seenRef = useRef<number | null>(null)
-
-  useEffect(() => {
-    let cancelled = false
-    void (async () => {
-      try {
-        const res = await fetch('/api/logs/assistant')
-        if (res.status === 404) {
-          if (!cancelled) setSupported(false)
-          return
-        }
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        const data = (await res.json()) as LogAssistantStatus
-        if (!cancelled) setStatus(data)
-      } catch {
-        // 状态拿不到时不影响悬浮按钮的其它能力，先静默。
+  const load = useCallback(async (): Promise<void> => {
+    try {
+      const res = await fetch('/api/logs/assistant')
+      if (res.status === 404) {
+        setSupported(false)
+        return
       }
-    })()
-    return () => { cancelled = true }
-  }, [])
-
-  // 轮询日志里的 error 数量：有新错误就提醒一次，悬浮按钮也一直挂着红色角标。
-  useEffect(() => {
-    let cancelled = false
-    const tick = async (): Promise<void> => {
-      try {
-        const res = await fetch(`/api/logs?limit=${POLL_LINES}`)
-        if (!res.ok) return
-        const batch = (await res.json()) as LogBatch
-        const errors = batch.entries.filter(entry => entry.level === 'error').length
-        if (cancelled) return
-        const previous = seenRef.current
-        seenRef.current = errors
-        setErrorCount(errors)
-        if (previous !== null && errors > previous) {
-          setToast(`检测到 ${errors - previous} 条新的错误日志，点击查看排查建议`)
-        }
-      } catch {
-        // 读不到日志就保持现状，下一轮再试。
-      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      setStatus((await res.json()) as LogAssistantStatus)
+    } catch {
+      // 状态拿不到时不影响面板的其它能力，先静默。
     }
-    void tick()
-    const timer = setInterval(() => { void tick() }, POLL_MS)
-    return () => { cancelled = true; clearInterval(timer) }
   }, [])
 
-  const analyze = useCallback(async (text: string): Promise<void> => {
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  // 面板打开时刷新一次：面板可能开着半天，日志与配置都变了。
+  useEffect(() => {
+    if (!open) return
+    void load()
+  }, [open, load])
+
+  const analyze = useCallback(async (): Promise<void> => {
     setBusy(true)
     setFailure(null)
     setIssue(null)
     try {
-      const data = await sendJson<{ diagnosis: LogDiagnosis }>('/api/logs/assistant', 'POST', { question: text })
+      const data = await sendJson<{ diagnosis: LogDiagnosis }>('/api/logs/assistant', 'POST', { question: '' })
       setResult(data.diagnosis)
     } catch (err) {
       setFailure(err instanceof Error ? err.message : String(err))
@@ -142,12 +129,11 @@ export function LogAssistantFab({ onOpenConfig }: { onOpenConfig: (section?: str
     setIssuing(true)
     setFailure(null)
     try {
+      const issueStep = result.next?.find(step => step.kind === 'issue')
       const data = await sendJson<{ issue: { number: number; url: string } }>(
         '/api/logs/assistant/issue',
         'POST',
-        { question, diagnosis: result, ...(result.next?.find(step => step.kind === 'issue')?.issueTitle
-          ? { title: result.next.find(step => step.kind === 'issue')?.issueTitle }
-          : {}) },
+        { question: '', diagnosis: result, ...(issueStep?.issueTitle ? { title: issueStep.issueTitle } : {}) },
       )
       setIssue(data.issue)
     } catch (err) {
@@ -155,23 +141,8 @@ export function LogAssistantFab({ onOpenConfig }: { onOpenConfig: (section?: str
     } finally {
       setIssuing(false)
     }
-  }, [question, result])
+  }, [result])
 
-  const openWithAnalysis = useCallback((text: string): void => {
-    setOpen(true)
-    setQuestion(text)
-    void analyze(text)
-  }, [analyze])
-
-  /**
-   * 「上报 GitHub issue」快捷入口：先分析，看完结论再决定要不要报。
-   *
-   * 这里只负责打开面板并跑分析，不代替用户提交：
-   * 自动建 issue 会在用户还没看结论时就往仓库里写东西，
-   * 结论若是「配置没生效」，用户根本不想报。所以真正的上报入口是
-   * 弹窗底部那个按钮——分析完、用户看过结论，由用户点一下才发出。
-   * 快捷菜单只是把用户送到「结论 + 上报按钮」这一步。
-   */
   useEffect(() => {
     if (!open) return
     const onKey = (event: globalThis.KeyboardEvent): void => {
@@ -183,49 +154,21 @@ export function LogAssistantFab({ onOpenConfig }: { onOpenConfig: (section?: str
 
   if (!supported) return null
 
+  const overview = status?.overview
+  const errorCount = overview?.errorCount ?? 0
   const hasError = errorCount > 0
   const issueStep = result?.next?.find(step => step.kind === 'issue')
   const configStep = result?.next?.find(step => step.kind === 'config')
 
   return (
     <>
-      {toast && (
-        <button className="assistant-toast" onClick={() => { setToast(null); setOpen(true) }}>
-          <Icon name="alert" size={14} />
-          <span>{toast}</span>
-        </button>
-      )}
-
       <div className={`assistant-fab-wrap ${hasError ? 'has-error' : ''}`}>
-        <div className="assistant-fab-menu" role="menu" aria-label="智能排查助手快捷操作">
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => openWithAnalysis('最近的错误日志是什么问题？帮我排查一下。')}
-          >
-            <Icon name="zap" size={14} />
-            智能分析异常
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            title="先分析最近的错误日志，看完结论再决定要不要上报"
-            onClick={() => openWithAnalysis('最近的错误日志是什么问题？帮我排查一下。')}
-          >
-            <Icon name="external" size={14} />
-            上报 GitHub issue
-          </button>
-          <button type="button" role="menuitem" onClick={() => setOpen(true)}>
-            <Icon name="file-text" size={14} />
-            打开排查面板
-          </button>
-        </div>
         <button
           type="button"
           className="assistant-fab"
           onClick={() => setOpen(true)}
-          aria-label={hasError ? `智能排查助手：检测到 ${errorCount} 条错误日志` : '智能排查助手'}
-          title={hasError ? `检测到 ${errorCount} 条错误日志` : '智能排查助手'}
+          aria-label={hasError ? `智能排查助手：最近有 ${errorCount} 条错误` : '智能排查助手'}
+          title={hasError ? `最近有 ${errorCount} 条错误` : '智能排查助手'}
         >
           <Icon name={hasError ? 'alert' : 'zap'} size={20} />
           {hasError && <span className="assistant-fab-badge">{errorCount > 99 ? '99+' : errorCount}</span>}
@@ -244,7 +187,7 @@ export function LogAssistantFab({ onOpenConfig }: { onOpenConfig: (section?: str
             <div className="assistant-modal-head">
               <div>
                 <strong>智能问题排查助手</strong>
-                <small>结合服务日志、本机 router-agent 代码与当前配置给出结论</small>
+                <small>看最近这段时间的服务状态；有异常时再让它分析一次</small>
               </div>
               <button type="button" className="icon-btn" aria-label="关闭" onClick={() => setOpen(false)}>
                 <Icon name="close" size={15} />
@@ -252,49 +195,11 @@ export function LogAssistantFab({ onOpenConfig }: { onOpenConfig: (section?: str
             </div>
 
             <div className="assistant-modal-body">
-              <div className="assistant-input">
-                <textarea
-                  value={question}
-                  onChange={event => setQuestion(event.target.value)}
-                  onKeyDown={(event: KeyboardEvent<HTMLTextAreaElement>) => {
-                    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-                      event.preventDefault()
-                      if (!busy) void analyze(question)
-                    }
-                  }}
-                  rows={2}
-                  placeholder="描述你遇到的问题，例如：飞书发消息机器人完全没反应"
-                  aria-label="描述遇到的问题"
-                />
-                <button
-                  className="btn"
-                  onClick={() => void analyze(question)}
-                  disabled={busy || question.trim().length === 0}
-                >
-                  <Icon name={busy ? 'clock' : 'zap'} size={14} />
-                  {busy ? '分析中…' : '分析'}
-                </button>
-              </div>
-
-              {status && status.suggestions.length > 0 && (
-                <div className="assistant-chips" role="group" aria-label="常见问题">
-                  {status.suggestions.map(item => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      className="assistant-chip"
-                      title={item.title}
-                      onClick={() => setQuestion(item.example)}
-                    >
-                      {item.title}
-                    </button>
-                  ))}
-                </div>
-              )}
-
               {status && !status.llmConfigured && (
-                <p className="assistant-note">未配置模型，助手按内置的事件规则排查；配置 LLM 后可得到自然语言总结，并能读本机代码与配置。</p>
+                <p className="assistant-note">当前没有配置模型，助手按内置规则判断；配置模型后结论更贴合你的情况。</p>
               )}
+
+              <Overview status={status} onOpenConfig={onOpenConfig} />
 
               {failure && (
                 <div className="log-alert" role="alert">
@@ -318,6 +223,10 @@ export function LogAssistantFab({ onOpenConfig }: { onOpenConfig: (section?: str
             </div>
 
             <div className="assistant-modal-foot">
+              <button className="btn primary" onClick={() => void analyze()} disabled={busy}>
+                <Icon name={busy ? 'clock' : 'zap'} size={14} />
+                {busy ? '分析中…' : result ? '重新分析' : '分析'}
+              </button>
               {configStep && (
                 <button
                   className="btn"
@@ -347,6 +256,74 @@ export function LogAssistantFab({ onOpenConfig }: { onOpenConfig: (section?: str
   )
 }
 
+/** 面板打开时的现状摘要：异常日志 + 配置问题，都用大白话。 */
+function Overview({ status, onOpenConfig }: {
+  status: LogAssistantStatus | null
+  onOpenConfig: (section?: string) => void
+}): JSX.Element {
+  if (!status) {
+    return <p className="assistant-note">正在读取服务状态…</p>
+  }
+  const { overview } = status
+  const clean = overview.errorCount === 0 && overview.warnCount === 0 && overview.configIssues.length === 0
+
+  return (
+    <div className="assistant-overview">
+      <div className="assistant-overview-head">
+        <span className={`assistant-state ${clean ? 'ok' : 'warn'}`}>
+          <Icon name={clean ? 'check' : 'alert'} size={14} />
+          {clean ? '一切正常，暂时没有发现问题' : '发现了一些需要处理的问题'}
+        </span>
+        <span className="assistant-window">
+          只看最近 3 小时{overview.window.version ? ` · 当前版本 v${overview.window.version}` : ''}
+        </span>
+      </div>
+
+      {overview.issues.length > 0 && (
+        <div className="assistant-block">
+          <h4>最近的异常（{overview.errorCount} 条错误）</h4>
+          <ul className="assistant-list">
+            {overview.issues.map((item, index) => (
+              <li key={`${item.event}-${index}`}>
+                <strong>{item.title}</strong>
+                {item.action && <span>{item.action}</span>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {overview.configIssues.length > 0 && (
+        <div className="assistant-block">
+          <h4>配置还没配齐</h4>
+          <ul className="assistant-list">
+            {overview.configIssues.map((item, index) => (
+              <li key={`${item.name}-${index}`}>
+                <strong>{item.name}</strong>
+                {item.items && item.items.length > 0 && (
+                  <span className="assistant-sublist">
+                    {item.items.map((entry, itemIndex) => (
+                      <span key={`${entry}-${itemIndex}`}>{entry}</span>
+                    ))}
+                  </span>
+                )}
+                {!item.items?.length && <span>{item.detail}</span>}
+                {item.hint && !item.items?.length && <span className="assistant-hint">{item.hint}</span>}
+                {item.section && (
+                  <button className="assistant-link" onClick={() => onOpenConfig(item.section)}>
+                    去改这一项
+                    <Icon name="chevron" size={12} />
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function AssistantResult({ result }: { result: LogDiagnosis }): JSX.Element {
   return (
     <div className="assistant-result">
@@ -360,41 +337,42 @@ function AssistantResult({ result }: { result: LogDiagnosis }): JSX.Element {
 
       {result.degraded && <p className="assistant-note warn">{result.degraded}</p>}
 
-      {result.toolsUsed && result.toolsUsed.length > 0 && (
-        <p className="assistant-note">助手查阅了：{result.toolsUsed.join('、')}</p>
-      )}
-
-      {result.causes.length > 0 && (
-        <div className="assistant-block">
-          <h4>可能原因</h4>
-          <ol className="assistant-list">
-            {result.causes.map((cause, index) => (
-              <li key={`${cause.title}-${index}`}>
-                <strong>{cause.title}</strong>
-                {cause.detail && <span>{cause.detail}</span>}
-                {cause.events.length > 0 && (
-                  <span className="assistant-events">
-                    {cause.events.map(event => <code key={event}>{event}</code>)}
-                  </span>
-                )}
-              </li>
-            ))}
-          </ol>
-        </div>
-      )}
-
       {result.actions.length > 0 && (
         <div className="assistant-block">
-          <h4>建议的下一步</h4>
+          <h4>现在该做什么</h4>
           <ul className="assistant-list">
             {result.actions.map((action, index) => <li key={`${action}-${index}`}>{action}</li>)}
           </ul>
         </div>
       )}
 
-      {result.evidence.length > 0 && (
-        <details className="assistant-block">
-          <summary>证据日志（{result.evidence.length} 条）</summary>
+      <details className="assistant-block">
+        <summary>补充细节（原因与原始日志）</summary>
+
+        {result.causes.length > 0 && (
+          <div className="assistant-block">
+            <h4>可能原因</h4>
+            <ol className="assistant-list">
+              {result.causes.map((cause, index) => (
+                <li key={`${cause.title}-${index}`}>
+                  <strong>{cause.title}</strong>
+                  {cause.detail && <span>{cause.detail}</span>}
+                  {cause.events.length > 0 && (
+                    <span className="assistant-events">
+                      {cause.events.map(event => <code key={event}>{event}</code>)}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ol>
+          </div>
+        )}
+
+        {result.toolsUsed && result.toolsUsed.length > 0 && (
+          <p className="assistant-note">助手查阅了：{result.toolsUsed.join('、')}</p>
+        )}
+
+        {result.evidence.length > 0 && (
           <div className="assistant-evidence">
             {result.evidence.map((item, index) => (
               <div key={`${item.at}-${index}`} className={`assistant-evidence-row level-${item.level}`}>
@@ -407,8 +385,8 @@ function AssistantResult({ result }: { result: LogDiagnosis }): JSX.Element {
               </div>
             ))}
           </div>
-        </details>
-      )}
+        )}
+      </details>
     </div>
   )
 }
@@ -419,3 +397,4 @@ function formatClock(at: string): string {
   if (Number.isNaN(date.getTime())) return at
   return date.toLocaleTimeString('zh-CN', { hour12: false })
 }
+
