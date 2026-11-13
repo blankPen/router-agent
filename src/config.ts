@@ -268,6 +268,15 @@ export interface LlmSettings {
   imageApiKey?: string
 }
 
+export interface DecisionSettings {
+  /** 普通成员消息的决策层开关；关闭时保持原有 LLM 初筛行为。 */
+  enabled: boolean
+  /** 决策 Provider：jev 优先，llm 用同一份 spec 模拟（Jev 不可用时兜底）。 */
+  provider: 'jev' | 'llm'
+  /** Jev 连接信息；apiKey / model 缺省从 TYPESAFE_API_KEY / TYPESAFE_MODEL 读取。 */
+  jev: { apiKey: string; model: string; baseUrl?: string }
+}
+
 export interface AppConfig {
   home: string
   projects: ProjectConfig[]
@@ -302,6 +311,7 @@ export interface AppConfig {
   channels?: Record<string, PluginEntry>
   server: { port: number }
   llm?: LlmSettings
+  decision: DecisionSettings
 }
 
 /** 某个 runtime 当前可用的项目清单；orca 兼容顶层 projects。 */
@@ -446,6 +456,11 @@ export function defaultConfig(): AppConfig {
       keepHours: 24,
       sweepMinutes: 30,
     },
+    decision: {
+      enabled: false,
+      provider: 'jev',
+      jev: { apiKey: '', model: '' },
+    },
     worker: { tools: { ...DEFAULT_WORKER_TOOLS }, evidence: { ui: 'warn' }, skill: { mode: 'path' } },
     reply: { ask: { mode: 'auto', allow: 'anyone', timeoutMs: 30 * 60_000 } },
     runtime: { default: 'orca' },
@@ -576,6 +591,16 @@ server:
 #   api: openai-completions   # 或 anthropic-messages（Claude Code / CCSwitch 的 Anthropic 兼容网关）
 #   authHeader: false         # anthropic-messages 用 ANTHROPIC_AUTH_TOKEN 时改成 true
 #   contextWindow: 128000     # 用于会话自动压缩的阈值计算
+
+# 决策层（普通成员消息）：先过确定性准入（身份分流 / 噪声门槛），再交决策模型分类。
+# Jev 密钥从 RA_HOME/.env 读取：TYPESAFE_API_KEY / TYPESAFE_MODEL（可选 TYPESAFE_BASE_URL 指向代理）
+# decision:
+#   enabled: false      # 开启后普通成员消息的初筛改由决策层完成
+#   provider: jev       # jev | llm（llm 用同一份 spec 模拟，Jev 不可用时兜底）
+#   jev:
+#     apiKey: ""
+#     model: ""
+#     baseUrl: https://api.typesafe.ai/v1/systemone
 `
 
 /** 创建 ~/.router-agent 目录结构；不覆盖已有配置。 */
@@ -736,6 +761,7 @@ runtime: {
     ...(Object.keys(channelPlugins).length > 0 ? { channels: channelPlugins } : {}),
     server: { port: Number.isFinite(port) && port >= 0 && port < 65536 ? port : base.server.port },
     ...(isRecord(doc.llm) ? { llm: parseLlm(doc.llm) } : {}),
+    decision: parseDecision(doc.decision, env),
   }
   // 群绑定分支始终跟随项目清单，避免 YAML 里残留的自定义分支与面板显示不一致。
   alignChatBranches(config)
@@ -764,6 +790,25 @@ function parseLlm(value: unknown): LlmSettings {
     out.contextWindow = value.contextWindow
   }
   return out
+}
+
+/**
+ * 决策层配置：只认 enabled / provider / jev 三个键。
+ * Jev 密钥优先级：环境变量 TYPESAFE_API_KEY / TYPESAFE_MODEL / TYPESAFE_BASE_URL > YAML。
+ */
+function parseDecision(value: unknown, env: NodeJS.ProcessEnv): DecisionSettings {
+  const record = isRecord(value) ? value : {}
+  const jevDoc = isRecord(record.jev) ? record.jev : {}
+  const baseUrl = env.TYPESAFE_BASE_URL ?? stringOr(jevDoc.baseUrl, '')
+  return {
+    enabled: typeof record.enabled === 'boolean' ? record.enabled : false,
+    provider: record.provider === 'llm' ? 'llm' : 'jev',
+    jev: {
+      apiKey: env.TYPESAFE_API_KEY ?? stringOr(jevDoc.apiKey, ''),
+      model: env.TYPESAFE_MODEL ?? stringOr(jevDoc.model, ''),
+      ...(baseUrl ? { baseUrl } : {}),
+    },
+  }
 }
 
 /**
@@ -1255,6 +1300,15 @@ export function publicConfig(config: AppConfig): Record<string, unknown> {
     ...(typeof llm.contextWindow === 'number' ? { contextWindow: llm.contextWindow } : {}),
     apiKeySet: Boolean(llm.apiKey),
   }
+  // Jev 密钥明文不下发；apiKeySet 只告诉面板「已经配过」。
+  const decisionDoc = (doc.decision ?? {}) as Record<string, unknown>
+  const jev = (decisionDoc.jev ?? {}) as Record<string, unknown>
+  decisionDoc.jev = {
+    ...(typeof jev.model === 'string' && jev.model ? { model: jev.model } : {}),
+    ...(typeof jev.baseUrl === 'string' && jev.baseUrl ? { baseUrl: jev.baseUrl } : {}),
+    apiKeySet: Boolean(jev.apiKey),
+  }
+
   // ACP 适配器的 env 可能包含 API key：只下发 key 名，不下发明文。
   const options = runtime?.options
   if (runtime && options && typeof options === 'object' && !Array.isArray(options)) {

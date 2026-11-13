@@ -9,6 +9,8 @@ import { activeDraft, resolveDispatch, type DispatchMissing, type DispatchSettin
 import { readRouterPrompt } from '../specs/index.js'
 import { IntakeCoordinator, type IntakeSettingsView } from './intake-flow.js'
 import type { IntakeEngine } from './intake-engine.js'
+import type { DecisionAgent } from './decision/agent.js'
+import { isSmallTalk as smallTalkRule } from '#core/admission.js'
 import type { SessionKeyParts } from './session-registry.js'
 import { modelFailureMessage } from './model-failure.js'
 import type {
@@ -57,6 +59,8 @@ export interface AgentLoopOptions {
     settings: IntakeSettingsView
     /** 项目选择器 → 本地目录；返回空表示这一轮不读代码。 */
     resolveProjectPath?: (project: { name: string; repo: string }) => Promise<string | undefined>
+    /** 决策层（确定性准入 + Jev/LLM 分类）；传入后替代普通成员路径的 LLM 初筛。 */
+    decisionAgent?: DecisionAgent
   }
 }
 
@@ -140,12 +144,9 @@ export function parseSessionResetCommand(text: string): boolean {
   return /^\s*(?:@\S+\s+)?\/new\s*$/.test(text)
 }
 
-/** 显式 @ 也可能是寒暄/测试；只匹配纯寒暄，不误伤简短需求（如「修个 bug」）。 */
+/** 单一词表来源：寒暄判定在 core/admission.ts，这里只转发，保持公开 API 不变。 */
 export function isSmallTalk(text: string): boolean {
-  // 去掉标点与空白后，只由寒暄词组成才算闲聊（容许「你好在吗」这类拼接）。
-  const normalized = text.replace(/[\s!！。.，,~～?？、:：]+/g, '').toLowerCase()
-  if (!normalized || normalized.length > 20) return false
-  return /^(?:你好|您好|hi|hello|hey|在吗|在不在|在么|谢谢|thanks|辛苦了|收到|好的|ok|早上好|晚上好|测试一下|测试|test|哈+|嗯+|哦+|在)+$/.test(normalized)
+  return smallTalkRule(text)
 }
 
 /**
@@ -208,6 +209,7 @@ export class AgentLoop {
           ...(opts.intake.resolveProjectPath ? { resolveProjectPath: opts.intake.resolveProjectPath } : {}),
           reply: (trigger, text, key, opts) => this.reply(trigger, text, key, opts),
           fallbackApprovers: () => effectiveAllowed(this.engine.policy()),
+          ...(opts.intake.decisionAgent ? { decisionAgent: opts.intake.decisionAgent } : {}),
           ...(this.home ? { home: this.home } : {}),
         })
       : undefined

@@ -9,6 +9,7 @@ export * from './process.js'
 export * from './chat.js'
 export * from './plugin-loader.js'
 export * from './plugin-install.js'
+export * from './decision/jev-client.js'
 export {
   createVisionTranscriber,
   type ImageInput,

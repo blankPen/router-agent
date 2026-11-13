@@ -14,6 +14,7 @@ import { AgentLoop } from './router/agent-loop.js'
 import type { DecisionAudit, DecisionEngine } from './router/decision-engine.js'
 import { dispatchSettingsOf } from './router/dispatch.js'
 import type { IntakeEngine } from './router/intake-engine.js'
+import type { DecisionAgent } from './router/decision/agent.js'
 import type { IntakeChatSettings } from './router/intake-flow.js'
 import { createRepoPathResolver } from './router/repo-paths.js'
 import { ReportPoller, appendEvent, readWorkerMeta, type WorkerMeta, type WorkerStateFile } from '#runtime/report-poller.js'
@@ -78,6 +79,8 @@ export interface RouterServiceOptions {
    * 需求识别引擎（初筛 + 分析子 Agent）。
    * 只在有群开启「需求分析助手」时装配；不传则普通成员仍无法自助提需。
    */
+  /** 决策层（确定性准入 + Jev/LLM 分类）；传入后替代普通成员路径的 LLM 初筛。 */
+  decisionAgent?: DecisionAgent
   intakeEngine?: IntakeEngine
   /**
    * 群 id → 终审管理员 open_id（启动时已把邮箱解析成 open_id）。
@@ -626,6 +629,7 @@ export class RouterService {
         ? {
             intake: {
               llm: opts.intakeEngine,
+              ...(opts.decisionAgent ? { decisionAgent: opts.decisionAgent } : {}),
               settings: { forChat: (chatId: string) => this.intakeSettingsOf(opts, chatId) },
               resolveProjectPath: this.intakeProjectPathOf(opts),
             },

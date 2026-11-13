@@ -37,7 +37,7 @@ import type { Prompter } from './prompts.js'
 import { realRunner, type CommandRunner } from '#infra/process.js'
 import { errorMessage, withFieldContext } from '#infra/logger.js'
 import { resolveImageModelConfig, resolvePiModelConfig, type PiModelConfig } from '../router/model-config.js'
-import { createDecisionEngine, createIntakeEngine } from '../router/engine-factory.js'
+import { createDecisionAgent, createDecisionEngine, createIntakeEngine } from '../router/engine-factory.js'
 import type { DecisionAudit } from '../router/decision-engine.js'
 import type { WorkerStateFile } from '#runtime/report-poller.js'
 import { RouterService, type Logger } from '../service.js'
@@ -1412,6 +1412,11 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   const intakeEngine = model && intakeChats.size > 0
     ? createIntakeEngine({ config, store, model, logger })
     : undefined
+  // 决策层：普通成员消息先过确定性准入，再交 Jev（或 LLM 模拟）分类。
+  // 只有模型已配（RouterService 存在）时才装配；未开启时返回 null，保持原有 LLM 初筛。
+  const decisionAgent = model && config.decision.enabled
+    ? createDecisionAgent({ config, store, model, intakeEngine, engine, logger })
+    : null
   const auditPath = join(home, 'logs', 'decisions.jsonl')
   const onDecisionAudit = (audit: DecisionAudit): void => {
     try {
@@ -1544,6 +1549,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       channels,
       decisionEngine,
       ...(intakeEngine ? { intakeEngine } : {}),
+      ...(decisionAgent ? { decisionAgent } : {}),
       // 终审管理员：配置里写邮箱，这里传解析后的 open_id。
       ...(identity?.approverOpenIdsByChat ? { intakeApprovers: identity.approverOpenIdsByChat } : {}),
       orca: orcaRunner,

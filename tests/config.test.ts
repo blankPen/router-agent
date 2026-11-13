@@ -933,4 +933,46 @@ describe('关单后的工作区回收配置', () => {
     expect(cfg.workspace.sweepMinutes).toBe(15)
     expect(setConfigValue(cfg, 'workspace.sweepMinutes', '0')).toBe(false)
   })
+
+  it('decision 默认关闭，Jev 密钥优先读环境变量', () => {
+    const cfg = loadConfig(home(), { TYPESAFE_API_KEY: 'env-key', TYPESAFE_MODEL: 'jev-latest' })
+    expect(cfg.decision.enabled).toBe(false)
+    expect(cfg.decision.provider).toBe('jev')
+    expect(cfg.decision.jev).toEqual({ apiKey: 'env-key', model: 'jev-latest' })
+  })
+
+  it('decision YAML 可开启并配置 Jev，环境变量覆盖密钥', () => {
+    const dir = home()
+    ensureHome(dir)
+    const { writeFileSync } = require('node:fs') as typeof import('node:fs')
+    writeFileSync(join(dir, 'config.yaml'), [
+      'decision:',
+      '  enabled: true',
+      '  provider: jev',
+      '  jev:',
+      '    apiKey: yaml-key',
+      '    model: jev-latest',
+      '    baseUrl: https://proxy.example/j',
+    ].join('\n'))
+    const cfg = loadConfig(dir, { TYPESAFE_API_KEY: 'env-key' })
+    expect(cfg.decision.enabled).toBe(true)
+    expect(cfg.decision.provider).toBe('jev')
+    expect(cfg.decision.jev).toEqual({ apiKey: 'env-key', model: 'jev-latest', baseUrl: 'https://proxy.example/j' })
+  })
+
+  it('decision provider 只认 jev / llm 两种取值', () => {
+    const dir = home()
+    ensureHome(dir)
+    const { writeFileSync } = require('node:fs') as typeof import('node:fs')
+    writeFileSync(join(dir, 'config.yaml'), ['decision:', '  enabled: true', '  provider: other'].join('\n'))
+    expect(loadConfig(dir).decision.provider).toBe('jev')
+  })
+
+  it('publicConfig 遮蔽 decision.jev 明文密钥', () => {
+    const cfg = defaultConfig()
+    cfg.decision = { enabled: true, provider: 'jev', jev: { apiKey: 'jev-secret', model: 'jev-latest' } }
+    const published = publicConfig(cfg) as { decision: { jev: Record<string, unknown> } }
+    expect(published.decision.jev).toEqual({ model: 'jev-latest', apiKeySet: true })
+    expect(JSON.stringify(published)).not.toContain('jev-secret')
+  })
 })

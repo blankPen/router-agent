@@ -8,6 +8,9 @@ import { PiIntakeEngine } from './intake-engine.js'
 import { SqliteSessionPersistence } from './session-persistence.js'
 import { RouterToolbox, type RouterToolboxDeps } from './tools.js'
 import type { Logger } from '#infra/logger.js'
+import { effectiveAllowed, effectiveAllowedByChat } from '#core/policy.js'
+import { DecisionAgent, JevDecisionProvider, LlmDecisionProvider, type DecisionProvider } from './decision/agent.js'
+import type { IntakeEngine } from './intake-engine.js'
 
 export interface DecisionEngineFactoryOptions {
   config: AppConfig
@@ -48,6 +51,49 @@ export function createDecisionEngine(opts: DecisionEngineFactoryOptions): PiDeci
           contextWindow: opts.config.llm?.contextWindow ?? 128_000,
         }
       : {}),
+  })
+}
+
+
+/** 决策层装配参数：在研判引擎参数之上多一个分析引擎（LLM 兜底用）。 */
+export interface DecisionAgentFactoryOptions extends DecisionEngineFactoryOptions {
+  intakeEngine?: IntakeEngine
+  logger?: Logger
+}
+
+/**
+ * 装配决策层：普通成员消息先过确定性准入，再交 Jev（或 LLM 模拟）分类。
+ * 未开启（decision.enabled=false）或没有可用 Provider 时返回 null，保持原有 LLM 初筛行为。
+ */
+export function createDecisionAgent(opts: DecisionAgentFactoryOptions): DecisionAgent | null {
+  const decision = opts.config.decision
+  if (!decision.enabled) return null
+  let provider: DecisionProvider
+  if (decision.provider === 'jev' && decision.jev.apiKey && decision.jev.model) {
+    provider = new JevDecisionProvider({
+      apiKey: decision.jev.apiKey,
+      model: decision.jev.model,
+      ...(decision.jev.baseUrl ? { baseUrl: decision.jev.baseUrl } : {}),
+    })
+  } else if (opts.intakeEngine) {
+    provider = new LlmDecisionProvider(opts.intakeEngine, opts.config.home)
+  } else {
+    opts.logger?.warn('decision:provider-missing', { detail: 'decision.enabled 但 Jev 密钥与 LLM 引擎都不可用，回退 LLM 初筛' })
+    return null
+  }
+  return new DecisionAgent({
+    provider,
+    isAdmin: trigger => {
+      const policy = opts.engine?.policy()
+      if (!policy) return false
+      const scoped = effectiveAllowedByChat(policy, trigger.chatId)
+      const allowed = scoped ?? effectiveAllowed(policy)
+      return allowed.includes(trigger.actorId)
+    },
+    // 话题已绑定在办工单的放行消息由 Gate 打标（unaddressedAdmitted），走工单相关路径。
+    hasBoundTicket: trigger => Boolean(trigger.unaddressedAdmitted),
+    isCommand: text => /^\s*(?:@\S+\s+)?\/new\s*$/.test(text),
+    logger: opts.logger,
   })
 }
 

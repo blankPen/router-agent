@@ -8,6 +8,7 @@ import type { DispatchSettings } from './dispatch.js'
 import { resolveDispatch } from './dispatch.js'
 import type { Store } from '../store/db.js'
 import type { IntakeEngine } from './intake-engine.js'
+import type { DecisionAgent } from './decision/agent.js'
 import {
   buildAnalystUserPrompt,
   buildScreenerUserPrompt,
@@ -56,6 +57,8 @@ export interface IntakeCoordinatorOptions {
   /** 终审管理员缺省值（策略里的生效名单）。 */
   fallbackApprovers: () => string[]
   home?: string
+  /** 决策层（确定性准入 + Jev/LLM 分类）；传入后替代 LLM 初筛。 */
+  decisionAgent?: DecisionAgent
   /** intake 会话空闲多久后自动放弃，默认 72 小时。 */
   ttlMs?: number
 }
@@ -84,6 +87,7 @@ export class IntakeCoordinator {
   private fallbackApprovers: () => string[]
   private home?: string
   private ttlMs: number
+  private decisionAgent?: DecisionAgent
 
   constructor(opts: IntakeCoordinatorOptions) {
     this.store = opts.store
@@ -98,6 +102,7 @@ export class IntakeCoordinator {
     this.fallbackApprovers = opts.fallbackApprovers
     this.home = opts.home
     this.ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS
+    this.decisionAgent = opts.decisionAgent
   }
 
   /** 这个群是否开启了需求识别。 */
@@ -238,7 +243,32 @@ export class IntakeCoordinator {
       this.logger.warn('intake:project-unbound', { triggerId: trigger.id, ...messageContext(trigger) })
       return false
     }
+    if (this.decisionAgent) return this.handleByDecision(trigger)
     return this.screen(trigger)
+  }
+
+  /**
+   * 决策层路径：确定性准入 + Jev/LLM 分类，替代 LLM 初筛。
+   * dropped（噪声）直接忽略；bypassed（管理员 / 口令 / 媒体 / 会话续接）交回 Router；
+   * verdict 需要跟进时按类型建需求会话，chat 保持原初筛口径（忽略）。
+   */
+  private async handleByDecision(trigger: Trigger): Promise<boolean> {
+    const outcome = await this.decisionAgent!.decide(trigger)
+    if (outcome.kind === 'dropped') {
+      this.decideIgnore(trigger, outcome.reason, 'inferred')
+      this.logger.info('intake:decision-dropped', { triggerId: trigger.id, chat: trigger.chatId, rule: outcome.rule })
+      return true
+    }
+    if (outcome.kind === 'bypassed') return false
+    const verdict = outcome.verdict
+    if (!verdict.needsFollowup || verdict.kind === 'chat') {
+      this.decideIgnore(trigger, `decision:${verdict.kind}:${verdict.confidence.toFixed(2)}`, 'inferred')
+      this.logger.info('intake:decision-ignore', { triggerId: trigger.id, chat: trigger.chatId, kind: verdict.kind, confidence: verdict.confidence })
+      return true
+    }
+    const intake = this.createIntake(trigger, verdict.kind === 'question' ? 'question' : 'issue')
+    await this.advance(intake, trigger)
+    return true
   }
 
   private async screen(trigger: Trigger): Promise<boolean> {
