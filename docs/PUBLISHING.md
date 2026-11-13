@@ -87,6 +87,8 @@ Actions → 发布 npm 包 → Run workflow。发布的是所选分支 `package.
 2. 校验 `NPM_TOKEN` 是否存在；
 3. `pnpm install --frozen-lockfile`；
 4. 自动升版时把 `package.json` 版本改成计划里的版本，并用 `--sync` 把所有 `@router-agent/*` 的版本与依赖同步到同一版本；
+   `--sync` 还会重新生成 `pnpm-lock.yaml`：锁文件里记着内部包的 specifier，只改 `package.json` 的话，
+   锁文件会停在旧版本，下一次 CI 的 `--frozen-lockfile` 安装会直接失败；
 5. `node scripts/publish-packages.mjs --check-publisher`：用 `npm whoami` + `npm view router-agent maintainers --json`
    确认 token 用户是根包维护者。无权限时 npm 对已存在的包返回 **E404（伪装成不存在）**，不是 E403；
 6. `pnpm check`（类型检查 + 全量测试）；
@@ -97,7 +99,20 @@ Actions → 发布 npm 包 → Run workflow。发布的是所选分支 `package.
    发布根包；任一包失败立即中止，并打印失败包名与 npm 原始输出末 10 行。
 10. 依据 `npm publish` 的退出码与 JSON 输出判定发布是否成功（`scripts/publish-result.mjs`），
    判定结果写进 step outputs 传给后续步骤，不再回查 npm registry；
-11. 自动升版时把版本号提交回 `main`，让仓库与 npm 保持一致。
+11. 自动升版时把版本号提交回 `main`，让仓库与 npm 保持一致；提交里包含重新生成的
+    `pnpm-lock.yaml`，否则仓库里的锁文件会与包清单脱节。
+
+### 改了版本号要一起提交锁文件
+
+手动改版本号（改根 `package.json` 的 `version`）后，跑一次
+
+```bash
+node scripts/publish-packages.mjs --sync   # 同步各包版本并重新生成 pnpm-lock.yaml
+```
+
+并把 `package.json`、`packages/*/package.json`、`pnpm-lock.yaml` 一起提交。
+`tests/scripts/lockfile-sync.test.ts` 会校验锁文件里的内部包版本与包清单一致，
+不一致时 `pnpm check` 就会失败，避免问题拖到 CI 才暴露。
 
 ### 怎么判定发布成功
 

@@ -82,6 +82,19 @@ export function writeVersionedManifests(targetVersion) {
   writeFileSync(rootPkgPath, `${JSON.stringify(syncRootDependencies(rootPkg, targetVersion), null, 2)}\n`, 'utf8')
 }
 
+/**
+ * 版本号变更后重新生成 pnpm-lock.yaml。
+ *
+ * 锁文件里记着内部包的 specifier，版本号只改 package.json 的话锁文件会停在旧版本，
+ * CI 的 `pnpm install --frozen-lockfile` 会直接失败（0.3.34 发布回归）。
+ */
+export function syncLockfile() {
+  execFileSync('pnpm', ['install', '--lockfile-only', '--no-frozen-lockfile'], {
+    cwd: root,
+    stdio: 'inherit',
+  })
+}
+
 /** 发布前确认包入口指向 dist，防止把 src 发布出去。 */
 export function assertPackable(name, pkg) {
   const dir = pkg.exports?.['.']
@@ -277,9 +290,10 @@ export function publishMode(argv) {
 async function main() {
   const mode = publishMode(process.argv.slice(2))
   if (mode === 'sync') {
-    // sync 是纯同步命令：只回写版本号。若不提前返回，会落到下面的发布循环，
+    // sync 是同步命令：回写版本号并重新生成锁文件。若不提前返回，会落到下面的发布循环，
     // 在 CI 未构建的检出里因缺少 dist 而失败（0.3.31 发布回归）。
     writeVersionedManifests(version)
+    syncLockfile()
     return
   }
   if (mode === 'check-publisher') {
