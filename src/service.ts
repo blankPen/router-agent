@@ -2846,8 +2846,21 @@ let repo = ticket.repo
     this.log('worker:lost', ticket.id, { handle: assignment?.handle ?? '', reason, lastSeq, expired })
   }
 
+  /**
+   * 这张工单能不能往外出消息。
+   *
+   * 事件派生的工单没有对应群（chatId 为空）：没有落点就不发，
+   * 否则每次进展都会尝试往一个不存在的会话投递。
+   */
+  private canReply(ticket: Ticket): boolean {
+    if (ticket.chatId) return true
+    this.logger.info('outbox:suppressed', { ticketId: ticket.id, reason: 'event-no-chat' })
+    return false
+  }
+
   /** 长内容按行切块并顺序进入 outbox，避免超过飞书单条消息长度。 */
   private queueLong(ticket: Ticket, header: string, content: string, key: string): void {
+    if (!this.canReply(ticket)) return
     const body = header ? `${header}\n\n${content}` : content
     const chunks = splitMessage(body, 3500)
     const base = Date.parse(this.clock.now())
@@ -2867,6 +2880,7 @@ let repo = ticket.repo
 
   /** 结构化回复只发一条：卡片内部自行排版，切块会拆散图片与按钮。 */
   private queuePayload(ticket: Ticket, payload: ReplyPayload, key: string, turn: number): void {
+    if (!this.canReply(ticket)) return
     const prepared = this.prepareQuestion(ticket, payload, turn)
     this.store.enqueueOutbox({
       id: `ob_${key.replace(/[^a-zA-Z0-9:_-]/g, '_')}`,
@@ -2934,6 +2948,7 @@ let repo = ticket.repo
   }
 
   private queue(ticket: Ticket, text: string, key: string): void {
+    if (!this.canReply(ticket)) return
     this.store.enqueueOutbox({
       id: `ob_${key.replace(/[^a-zA-Z0-9:_-]/g, '_')}`,
       key,

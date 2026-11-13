@@ -242,6 +242,28 @@ Router 不做对话，只在必要时说话：
 | `decision:enabled` | EngineFactory | `provider` `model`（jev 时）`detail` | 决策层已装配：走的 Provider 是 jev 还是 llm 兜底；Jev 连接信息不全时会在这里说明原因 |
 | `decision:failed` | DecisionAgent | `triggerId` `chat` `provider` `detail` | 决策模型调用失败，已按兜底结论处理（不改变消息流向） |
 | `decision:provider-missing` | EngineFactory | `detail` | `decision.enabled` 但 Jev 密钥与 LLM 引擎都不可用，回退原有 LLM 初筛 |
+| `event:enabled` | Service | `sources` `queueDepth` | 事件总线已装配，列出接入的来源与当前队列深度 |
+| `event:ingested` | EventBus | `eventId` `source` `type` `lane` `priority` | 事件入队（幂等键 source + externalId） |
+| `event:duplicate` | EventBus | `source` `externalId` | 幂等命中：同一外部事件重投，不会产生第二条 |
+| `event:dropped` | EventBus | `eventId` `source` `reason` | 事件被丢弃（机器人 / 寒暄 / 对象标识非法等），原因必填 |
+| `event:hops-exceeded` | EventBus | `source` `hops` | 自产事件链超过上限，熔断丢弃 |
+| `event:triaged` | EventBus | `eventId` `tier` `decidedBy` `reason` `confidence` | 判定结论：t0 直派 / t1 待审 / t2 归档 / t3 丢弃 |
+| `event:triage-failed` | EventBus | `eventId` `detail` | 判定模型失败，已降级到规则层并转人工审核（不丢事件） |
+| `event:deferred` | EventBus | `eventId` `notBefore` `reason` | 事件延后（时间窗 / 预算 / 人工指定） |
+| `event:budget-exceeded` | EventBus | `reason` `used` `limit` | 预算触顶；t0 事件仍会执行（保响应） |
+| `event:dispatched` | EventBus | `eventId` `ticketId` `project` `reused` | 事件已转成工单；`reused=true` 表示复用了之前已开的工单 |
+| `event:pending-review` | EventBus | `eventId` `reason` | 事件进待审核队列（不派工） |
+| `event:review-notified` | Service | `eventId` `channelId` | 待审核事件已推给管理员 |
+| `event:review-notify-failed` | EventBus | `eventId` `detail` | 通知管理员失败，事件仍留在面板待办里 |
+| `event:review-approved` / `event:review-rejected` | EventBus | `eventId` `operator` `ticketId` | 人工拍板结果 |
+| `event:expired` | EventBus | `eventId` `deadlineAt` | 事件超过最晚处理时间，过期 |
+| `event:webhook-rejected` | EventWebhookGateway | `source` `reason` | webhook 验签不过或来源不在白名单，拒绝入队 |
+| `event:source-failed` | Service | `source` `message` | 来源轮询失败，本轮不推进队列 |
+| `event:tick` / `event:tick-failed` | Service | `processed` `dispatched` `pending` `deferred` `dropped` `archived` / `message` | 一轮事件队列处理结果 / 处理异常 |
+| `api:event-inbound` / `api:event-inbound-rejected` | HTTP API | `source` `eventId` `accepted` / `reason` | webhook 入口收下事件 / 拒绝事件 |
+| `api:event-review` | HTTP API | `eventId` `action` `state` | 面板上的事件审核动作 |
+| `api:event-config` | HTTP API | `changed` | 时间窗与预算保存成功，立即生效 |
+| `outbox:suppressed` | Service | `ticketId` `reason` | 工单没有可回复的会话，消息不再外发（事件派生工单） |
 | `tool:denied` | PiDecisionEngine | `triggerId` `tool` `actor` `toolScope` `detail` | 工具层执行时校验拒绝越权调用（普通成员会话无工单 / 状态管理工具） |
 | `chat:reply-failed` | Agent Loop | `triggerId` `chat` `reason` `detail` | 回复模型失败（抛错或返回空内容），已按真实原因回话，不再退回「没看出要做什么」这类统一话术 |
 | `session:transcript-failed` / `session:reset-failed` | Agent Loop | `key` `detail` | 会话转录 / `/new` 重置失败，不影响当轮回复 |

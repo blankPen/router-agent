@@ -1114,6 +1114,7 @@ button, input, select {
   border-radius: 999px;
   font-size: 11px;
   font-weight: 500;
+  white-space: nowrap;
 }
 .badge.hot { background: var(--pill-positive-bg); color: var(--pill-positive-ink); }
 .badge.cold { background: var(--pill-neutral-bg); color: var(--pill-neutral-ink); }
@@ -2548,3 +2549,65 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 
 /* 工具栏右侧留给工具类操作，筛选条件都聚在左边。 */
 .log-toolbar-end { margin-left: auto; }
+
+/* ---------------------------------------------------------------------------
+   事件面板
+   队列、待审核与成本闸门共用现有的表、卡片与 token，不另起一套样式。
+   --------------------------------------------------------------------------- */
+
+.event-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  padding: 9px var(--card-pad-x);
+  border-bottom: 1px solid var(--rule);
+}
+.event-filters .segmented { margin: 0; }
+.event-filters .text-input { width: auto; min-width: 150px; height: 28px; }
+.event-filters select.text-input { min-width: 120px; }
+
+/* 档位徽标：T0 最急，用语义色排开；T3 是噪音，走中性色。 */
+.tier-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: var(--radius-chip);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--tier-ink);
+  background: color-mix(in srgb, var(--tier) 14%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--tier) 32%, var(--border));
+}
+.tier-t0 { --tier: var(--negative); --tier-ink: var(--negative); }
+.tier-t1 { --tier: var(--warning); --tier-ink: var(--warning); }
+.tier-t2 { --tier: var(--info); --tier-ink: var(--info); }
+.tier-t3 { --tier: var(--muted); --tier-ink: var(--muted); }
+
+.event-table th, .event-table td { white-space: nowrap; }
+.event-table td.event-cell-summary { white-space: normal; min-width: 220px; }
+
+.event-summary { font-size: 13px; color: var(--text); }
+.event-subject { margin-top: 2px; font-size: 11.5px; color: var(--faint); }
+
+.row-actions { display: flex; align-items: center; gap: 6px; }
+
+.tier-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+}
+.tier-check input { accent-color: var(--accent); }
+
+.event-window-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 12px;
+}
