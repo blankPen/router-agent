@@ -1250,7 +1250,9 @@ export class RouterService {
     const lastSeq = this.store.pendingInputs(ticket.id).reduce((max, input) => Math.max(max, input.seq), 0)
     this.saveLaunchFailure(ticket.id, { attempts, lastSeq, lastReason: failure.reason })
 
-    const hint = `请确认项目「${ticket.repo}」与起始分支「${ticket.branch}」存在；修正后在本话题回复任意内容即可重试`
+    // 运行时能说清原因时用它（例如「provider 与 model 要成对」），否则退回通用的仓库/分支兜底。
+    const hint = failure.hint
+      ?? `请确认项目「${ticket.repo}」与起始分支「${ticket.branch}」存在；修正后在本话题回复任意内容即可重试`
     this.engine.setAttention(ticket.id, `执行环境创建失败：${failure.reason}`)
     this.appendEventLog(ticket.id, { kind: 'launch-failure', attempt: attempts, reason: failure.reason, at: this.clock.now() })
 
@@ -2695,6 +2697,8 @@ export function splitMessage(text: string, limit = 3500): string[] {
 
 export interface LaunchErrorDetail {
   reason: string
+  /** 运行时给的处置建议；比通用兜底文案更贴近真实原因。 */
+  hint?: string
   /** provider 包装成通用文案时保留的底层原因。 */
   cause?: string
   /** 启动结果未知时的重试句柄。 */
@@ -2728,6 +2732,7 @@ export function describeLaunchError(error: unknown): LaunchErrorDetail {
     const detail = error.detail ?? {}
     return {
       reason: error.reason,
+      ...(typeof detail.hint === 'string' ? { hint: detail.hint } : {}),
       ...(error.cause ? { cause: error.cause } : {}),
       ...(typeof detail.operationId === 'string' ? { operationId: detail.operationId } : {}),
       ...(typeof detail.code === 'number' ? { code: detail.code } : {}),
