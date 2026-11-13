@@ -866,6 +866,18 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       const id = typeof body.id === 'string' ? body.id.trim() : ''
       if (!id) return respond(res, 400, { error: 'id-required' })
       const result = await opts.runtimeAdmin.check(id)
+      if (!result.ok) logger.warn('runtime:check-failed', { runtimeId: id, detail: result.detail })
+      return respond(res, 200, result)
+    }
+
+    // 轻量探测：命令 / 版本 / 依赖；不做 ACP 握手。面板的「检测」按钮走这里。
+    if (path === '/api/runtimes/probe' && req.method === 'POST') {
+      if (!opts.runtimeAdmin) return respond(res, 404, { error: 'runtime-admin-not-available' })
+      const body = await readJson(req)
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      if (!id) return respond(res, 400, { error: 'id-required' })
+      const result = await opts.runtimeAdmin.probe(id)
+      if (!result.ok) logger.warn('runtime:probe-failed', { runtimeId: id, detail: result.detail })
       return respond(res, 200, result)
     }
 

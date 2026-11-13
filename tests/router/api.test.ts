@@ -344,6 +344,7 @@ describe('HTTP 管理 API', () => {
         return { jobId: 'job-1' }
       },
       check: async () => ({ ok: true, detail: 'ok', choice }),
+      probe: async () => ({ ok: true, detail: '版本探测通过', choice }),
       installJob: (id: string) => (id === 'job-1' ? job : null),
     }
     const runtimeServer = await createApiServer({ engine, store, config, runtimeAdmin: admin as never })
@@ -365,6 +366,11 @@ describe('HTTP 管理 API', () => {
       expect(checked.status).toBe(200)
       expect(checked.json).toMatchObject({ ok: true, choice: { id: 'acp-codex', status: 'ready' } })
 
+      const probed = await call(runtimeServer, 'POST', '/api/runtimes/probe', { id: 'acp-codex' })
+      expect(probed.status).toBe(200)
+      expect(probed.json).toMatchObject({ ok: true, choice: { id: 'acp-codex', status: 'ready' } })
+      expect((await call(runtimeServer, 'POST', '/api/runtimes/probe', {})).status).toBe(400)
+
       const installed = await call(runtimeServer, 'POST', '/api/runtimes/install', { id: 'acp-codex' })
       expect(installed.status).toBe(202)
       expect(installed.json.jobId).toBe('job-1')
@@ -380,6 +386,34 @@ describe('HTTP 管理 API', () => {
       expect(jobRes.status).toBe(200)
       expect(jobRes.json).toMatchObject({ id: 'job-1', status: 'ok' })
       expect((await call(runtimeServer, 'GET', '/api/runtimes/install/nope')).status).toBe(404)
+    } finally {
+      await runtimeServer.close()
+    }
+  })
+
+  it('运行时检测失败时记录 runtime:check-failed / runtime:probe-failed', async () => {
+    const logs: { message: string; extra?: Record<string, unknown> }[] = []
+    const admin = {
+      snapshot: () => null,
+      isDetecting: () => false,
+      detect: async () => ({ detectedAt: '2026-11-06T10:00:00.000Z', choices: [] }),
+      check: async () => ({ ok: false, detail: '未知 ACP Agent: herdr' }),
+      probe: async () => ({ ok: false, detail: '未找到 t3 CLI' }),
+      startInstall: () => ({ jobId: 'job-1' }),
+      installJob: () => null,
+    }
+    const runtimeServer = await createApiServer({
+      engine, store, config,
+      runtimeAdmin: admin as never,
+      logger: { info: () => {}, warn: (message, extra) => logs.push({ message, ...(extra ? { extra } : {}) }), error: () => {} },
+    })
+    try {
+      await call(runtimeServer, 'POST', '/api/runtimes/check', { id: 'herdr' })
+      await call(runtimeServer, 'POST', '/api/runtimes/probe', { id: 't3code' })
+      const checked = logs.find(log => log.message === 'runtime:check-failed')
+      expect(checked?.extra).toMatchObject({ runtimeId: 'herdr', detail: '未知 ACP Agent: herdr' })
+      const probed = logs.find(log => log.message === 'runtime:probe-failed')
+      expect(probed?.extra).toMatchObject({ runtimeId: 't3code', detail: '未找到 t3 CLI' })
     } finally {
       await runtimeServer.close()
     }

@@ -8,6 +8,7 @@ import {
   HERDR_RUNTIME_ID,
   ORCA_RUNTIME_ID,
   T3CODE_RUNTIME_ID,
+  WORKER_RUNTIME_IDS,
   WORKER_RUNTIMES,
   normalizeRuntimeId,
   type WorkerRuntimeMeta,
@@ -385,6 +386,43 @@ export class AcpRuntimeAdmin {
     }
   }
 
+  /**
+   * 轻量探测：命令在不在、版本多少、依赖齐不齐；不做 ACP 握手。
+   *
+   * 面板的「检测」按钮走这里，「试启动」才走 check() 的完整握手。
+   */
+  async probe(idOrRuntimeId: string): Promise<{ ok: boolean; detail: string; choice?: RuntimeChoice }> {
+    const normalized = normalizeRuntimeId(idOrRuntimeId)
+    if (WORKER_RUNTIME_IDS.includes(normalized)) return this.checkBuiltin(normalized)
+    const agent = acpAgentOf(normalized)
+    if (!agent) return { ok: false, detail: `未知运行时：${idOrRuntimeId}` }
+    const detected = await detectAcpAgent(agent.runtimeId, {
+      home: this.opts.home,
+      env: this.env,
+      config: this.opts.config,
+      runner: this.runner,
+    })
+    const choice = detected ?? {
+      id: agent.runtimeId,
+      name: agent.name,
+      label: agent.label,
+      hint: agent.hint,
+      status: 'not-installed' as const,
+      installable: Boolean(agent.package),
+      ...(installHintOf(agent) ? { installHint: installHintOf(agent) } : {}),
+      ...(agent.deprecated ? { deprecated: true } : {}),
+    }
+    this.mergeChoices([choice])
+    const ok = choice.status === 'ready' || choice.status === 'unverified'
+    return {
+      ok,
+      detail: ok
+        ? `版本探测通过${choice.version ? `（${choice.version}）` : ''}`
+        : choice.reason ?? `运行时状态：${choice.status}`,
+      choice,
+    }
+  }
+
   /** L2 完整握手；结果写回快照，让下拉框反映「实际能不能连上」。 */
   async check(idOrRuntimeId: string): Promise<{
     ok: boolean
@@ -398,17 +436,18 @@ export class AcpRuntimeAdmin {
     if (normalized === CODEX_APP_RUNTIME_ID) {
       return this.checkCodexApp()
     }
-    if (normalized === ORCA_RUNTIME_ID || normalized === CLAUDE_CODE_RUNTIME_ID || normalized === ACP_RUNTIME_ID || normalized === T3CODE_RUNTIME_ID) {
+    // 内置运行时按目录判定，别手写白名单：漏一个（如 herdr）就会掉进 ACP 分支报「未知 ACP Agent」。
+    if (WORKER_RUNTIME_IDS.includes(normalized)) {
       return this.checkBuiltin(normalized)
     }
-    const result = await checkAcpAgent(idOrRuntimeId, {
+    const agent = acpAgentOf(normalized)
+    if (!agent) return { ok: false, detail: `未知运行时：${idOrRuntimeId}` }
+    const result = await checkAcpAgent(agent.runtimeId, {
       home: this.opts.home,
       env: this.env,
       config: this.opts.config,
       runner: this.runner,
     })
-    const agent = acpAgentOf(idOrRuntimeId)
-    if (!agent) return result
     const detected = await detectAcpAgent(agent.runtimeId, {
       home: this.opts.home,
       env: this.env,

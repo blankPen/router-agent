@@ -23,7 +23,8 @@ Worker 不在 Router 进程里跑。每张工单开工时，Router 按 `runtime.
 
 - 自动检测 CLI 是否安装、版本、来源（PATH / ra 托管）、ACP 扩展依赖与登录状态；
 - **安装 CLI** 跳转该 Agent 的官方安装页；**安装 ACP 扩展** 由 ra 把 npm 适配包装到 `~/.router-agent/runtimes/<agent>`；
-- **检测 / 试启动** 做一次真实 ACP 握手（`initialize` + `session/new`），避免只看版本号；
+- **检测** 重新探一次这张卡片：命令在不在、版本多少、依赖齐不齐（不启动 Agent）；
+- **试启动**（只有 ACP Agent 卡片有）做一次真实 ACP 握手（`initialize` + `session/new`），避免只看版本号；
 - 点卡片即切换 `runtime.default`，只影响新工单；已开工的工单保留原运行时。
 - 运行时声明了自己的选项时，选项卡片会出现在运行时卡片下方（例如 Orca 的「执行 Agent」）。
 

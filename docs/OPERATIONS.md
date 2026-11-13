@@ -230,6 +230,7 @@ Router 不做对话，只在必要时说话：
 | `cursor:invalid` | Service | `key` `detail` | 游标 JSON 损坏，按无游标处理 |
 | `llm:model-config-failed` | CLI | `detail` | 启动时模型配置缺失或不可解析 |
 | `runtime:detected` / `runtime:detect-failed` | CLI | `ready` `unavailable` / `detail` | 启动时后台探测可用运行时 |
+| `runtime:check-failed` / `runtime:probe-failed` | HTTP API | `runtimeId` `detail` | 面板点「试启动」（完整 ACP 握手）或「检测」（命令 / 版本 / 依赖探测）失败 |
 | `llm:import-applied` | HTTP API | `source` `name` `api` `baseUrl` `changed` | 从本地 Claude Code / CCSwitch / Pi / OpenCode / Magpie 配置导入 Provider，已写回 `config.yaml` |
 | `api:llm-import` | HTTP API | `source` `model` `changed` | 面板触发的本地 Provider 导入成功（不记录密钥） |
 | `llm:import-missing` / `llm:import-rejected` / `llm:import-scan-failed` / `llm:import-write-failed` | HTTP API / Import | `id` / `errors` / `detail` | 候选已失效、校验失败、扫描失败或落盘失败（不记录密钥） |
