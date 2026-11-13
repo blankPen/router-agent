@@ -422,7 +422,7 @@ describe('RouterService 编排', () => {
     expect(store.getTicket(ticket.id)?.prNumber).toBe(12)
   })
 
-  it('PR 合并后关闭工单并通知发起人', async () => {
+  it('PR 合并后工单保持开放，worker 继续跑', async () => {
     engine.ingest(makeTrigger())
     await service.runOnce()
     const ticket = store.listTickets()[0]!
@@ -435,15 +435,69 @@ describe('RouterService 编排', () => {
     prTracker.states.set(12, 'merged')
     await service.trackPullRequests()
 
-    expect(store.getTicket(ticket.id)?.stage).toBe('done')
+    expect(store.getTicket(ticket.id)?.stage).toBe('review')
     expect(store.getTicket(ticket.id)?.prState).toBe('merged')
     const outbox = store.claimOutbox('2026-11-06T10:10:00.000Z', 10)
     expect(outbox.some(item => item.text.includes('已合并'))).toBe(true)
 
-    // PR 合并关单只停 worker：目录留给定时任务 / 用户手动回收。
+    // PR 合并只结束 PR，不结束会话：worker 不停，目录也不回收。
     await service.runOnce()
-    expect(runtime.stopped).toContain(assignment.handle)
+    expect(runtime.stopped).toHaveLength(0)
     expect(runtime.removed).toHaveLength(0)
+  })
+
+  it('PR 合并后用户追问仍然能派给 worker', async () => {
+    engine.ingest(makeTrigger())
+    await service.runOnce()
+    const ticket = store.listTickets()[0]!
+    const assignment = store.latestAssignment(ticket.id)!
+    service.onWorkerState({
+      ticketId: ticket.id, assignmentId: assignment.id, turn: 1, state: 'ready', summary: 'PR 已开',
+      prNumber: 12, prUrl: 'https://github.com/o/r/pull/12', ackedInputs: [], updatedAt: '2026-11-06T10:01:00.000Z',
+    })
+
+    prTracker.states.set(12, 'merged')
+    await service.trackPullRequests()
+
+    const input = engine.deliverInput(ticket.id, { kind: 'followup', text: '合并后再帮我确认下日志' })
+    expect(input.ticketId).toBe(ticket.id)
+  })
+
+  it('PR 合并后不再重复查询 PR 状态', async () => {
+    engine.ingest(makeTrigger())
+    await service.runOnce()
+    const ticket = store.listTickets()[0]!
+    const assignment = store.latestAssignment(ticket.id)!
+    service.onWorkerState({
+      ticketId: ticket.id, assignmentId: assignment.id, turn: 1, state: 'ready', summary: 'PR 已开',
+      prNumber: 12, prUrl: 'https://github.com/o/r/pull/12', ackedInputs: [], updatedAt: '2026-11-06T10:01:00.000Z',
+    })
+
+    prTracker.states.set(12, 'merged')
+    await service.trackPullRequests()
+    const queried = prTracker.calls.length
+
+    await service.trackPullRequests()
+    expect(prTracker.calls.length).toBe(queried)
+  })
+
+  it('PR 被关闭后工单同样保持开放', async () => {
+    engine.ingest(makeTrigger())
+    await service.runOnce()
+    const ticket = store.listTickets()[0]!
+    const assignment = store.latestAssignment(ticket.id)!
+    service.onWorkerState({
+      ticketId: ticket.id, assignmentId: assignment.id, turn: 1, state: 'ready', summary: 'PR 已开',
+      prNumber: 14, prUrl: 'https://github.com/o/r/pull/14', ackedInputs: [], updatedAt: '2026-11-06T10:01:00.000Z',
+    })
+
+    prTracker.states.set(14, 'closed')
+    await service.trackPullRequests()
+
+    expect(store.getTicket(ticket.id)?.stage).toBe('review')
+    expect(store.getTicket(ticket.id)?.prState).toBe('closed')
+    await service.runOnce()
+    expect(runtime.stopped).toHaveLength(0)
   })
 
   it('PR 仍开时不关闭工单', async () => {

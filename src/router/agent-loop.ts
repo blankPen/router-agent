@@ -116,12 +116,14 @@ export function isReopenRequest(text: string): boolean {
 }
 
 /** 关闭话题的固定回复；不调用模型，保证每次都是同一套口径。 */
-export function closedThreadText(ticket: Ticket): string {
+export function closedThreadText(ticket: Ticket, opts: { workspaceRemoved?: boolean } = {}): string {
   const closedAt = ticket.closedAt ? ticket.closedAt.slice(0, 10) : ''
   const pr = ticket.prUrl ? `，PR：${ticket.prUrl}` : ''
   return [
     `这张工单「${ticket.title}」（${ticket.id}）已于 ${closedAt} 关闭${pr}，后续消息不会自动继续处理。`,
     '',
+    // 工作区已经被回收，原工单没有现场可接，只能另开一张单。
+    ...(opts.workspaceRemoved ? ['需要的话，我可以帮你新开工单进行处理。'] : []),
     '如果还需要继续，请回复「重新开工」并说明要补充的内容，我会基于原工单创建一张新工单跟进。',
     '如果是新需求，请描述完整需求并回复「重新开工」，我会创建一张新工单。',
   ].join('\n')
@@ -783,10 +785,11 @@ export class AgentLoop {
       // 用户可能是先描述需求、再补一句「重新开工」；把这条原文记下来。
       this.store.setCursor(reopenDraftKey(trigger.threadId, trigger.actorId), trigger.text.trim().slice(0, 4000), this.clock.now())
     }
-    this.reply(trigger, closedThreadText(closed), `closed-thread:${trigger.id}`, { thread: true })
+    const text = closedThreadText(closed, { workspaceRemoved: this.store.isWorkspaceRemoved(closed.id) })
+    this.reply(trigger, text, `closed-thread:${trigger.id}`, { thread: true })
     await this.recordTranscript(
       trigger,
-      `${trigger.actorName || trigger.actorId}：${trigger.text}\nRouter：${closedThreadText(closed)}`,
+      `${trigger.actorName || trigger.actorId}：${trigger.text}\nRouter：${text}`,
     )
     this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength, reason: 'thread:closed' })
     result.replied += 1

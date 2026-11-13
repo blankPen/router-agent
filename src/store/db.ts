@@ -1313,6 +1313,18 @@ export class Store {
     this.db.prepare('DELETE FROM cursors WHERE key = ?').run(key)
   }
 
+  // ---------- workspace 回收标记 ----------
+
+  /** 记下「这张工单的 workspace 已被回收」，用于关单后的话题提示。 */
+  markWorkspaceRemoved(ticketId: string, at: string): void {
+    this.setCursor(`workspace:removed:${ticketId}`, at, at)
+  }
+
+  /** workspace 是否已经被回收（目录已删）。 */
+  isWorkspaceRemoved(ticketId: string): boolean {
+    return this.getCursor(`workspace:removed:${ticketId}`) !== null
+  }
+
   // ---------- 自增计数器 ----------
 
   /** 原子自增并返回新值；进程重启后从上次的值继续。 */

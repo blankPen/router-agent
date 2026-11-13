@@ -913,6 +913,7 @@ export class RouterService {
           }
         }
         await runtime.removeWorkspace(this.workspaceRefOf(assignment))
+        this.store.markWorkspaceRemoved(entry.ticketId, this.clock.now())
         result.removed.push({ ticketId: entry.ticketId, workdir: entry.workdir })
         this.log('workspace:bulk-removed', entry.ticketId, { runtimeId, workdir: entry.workdir })
       } catch (error) {
@@ -1795,7 +1796,7 @@ export class RouterService {
   }
 
   /**
-   * 投递「只停 worker」的收尾任务：自动关单（闲置超时、PR 合并 / 关闭）都走这里。
+   * 投递「只停 worker」的收尾任务：闲置超时自动关单走这里。
    * 目录不删 —— 关单和回收 workspace 是两件事，回收交给定时任务或用户手动触发。
    */
   private enqueueStopWorker(ticket: Ticket, source: string): void {
@@ -1857,6 +1858,7 @@ export class RouterService {
     try {
       // 不带 force：脏工作区交给 provider 拒绝，避免误删未提交改动。
       await runtime.removeWorkspace(this.workspaceRefOf(assignment))
+      this.store.markWorkspaceRemoved(ticketId, this.clock.now())
       this.log('cleanup:worktree-removed', ticketId, { workdir: assignment.workdir })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -2242,6 +2244,8 @@ export class RouterService {
 
   async trackPullRequests(): Promise<void> {
     for (const ticket of this.store.listOpenTickets()) {
+      // 已合并的 PR 状态不会再变：工单保持开放，但没必要继续每 5 秒查一次。
+      if (ticket.prState === 'merged') continue
       // 每张工单自带仓库，不再有全局 repo 兜底。
 let repo = ticket.repo
       // 派工信息在下面多处要用（workdir 兜底、PR 查询提示），提前取一次。
@@ -2318,16 +2322,15 @@ let repo = ticket.repo
       const updated = this.engine.updatePr(ticket.id, { number: info.number, url: info.url || ticket.prUrl, state: info.state })
       if (before !== info.state) this.log('pr:state', ticket.id, { from: before, to: info.state })
 
-      if ((info.state === 'merged' || info.state === 'closed') && updated.stage !== 'done') {
-        const closed = this.engine.closeTicket(ticket.id, `pr:${info.state}`)
+      // PR 终态不等于会话结束：合并或关闭后话题照常开着，用户追问还能接着推进。
+      // 只有巡查判定长期无进展、或用户主动关闭时才会结束会话。
+      if (before !== info.state && (info.state === 'merged' || info.state === 'closed') && updated.stage !== 'done') {
         appendEvent(join(this.config.home, 'workers', ticket.id, 'events.log'), { kind: 'pr', state: info.state, at: this.clock.now() })
-        // PR 闭环也是自动关单：和闲置超时关单一样只停 worker，目录留给定时任务 / 用户回收。
-        this.enqueueStopWorker(closed, `pr:${info.state}`)
         const label = info.state === 'merged' ? '已合并' : '已关闭'
         this.notify(
-          closed,
-          `工单「${closed.title}」的 PR ${info.url} ${label}，工单闭环。`
-          + `workspace 会保留 ${this.workspace.keepHours} 小时后自动回收，也可以随时手动回收。`,
+          updated,
+          `工单「${updated.title}」的 PR ${info.url} ${label}。`
+          + `工单保持开放，你在本话题继续回复就能接着推进；只有长期无进展被巡查关闭、或你主动关闭时才会结束会话。`,
           `pr:${ticket.id}:${info.state}`,
         )
       }
