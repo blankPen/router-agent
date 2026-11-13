@@ -360,7 +360,7 @@ describe('Herdr 运行时', () => {
         warn: (message, fields) => events.push({ message, ...(fields ? { fields } : {}) }),
         error: (message, fields) => events.push({ message, ...(fields ? { fields } : {}) }),
       },
-      runners: { herdr, git: new FakeGit(), orca: herdr, claude: herdr },
+      runners: { herdr, git: new FakeGit(), orca: herdr, claude: herdr, t3: herdr },
     })
     await runtime!.start({ ticket, assignment, workdir: '' } as never)
     const started = herdr.calls.find(call => call[0] === 'agent' && call[1] === 'start')!

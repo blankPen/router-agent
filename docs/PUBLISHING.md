@@ -70,9 +70,9 @@ Actions → 发布 npm 包 → Run workflow。发布的是所选分支 `package.
 
 ## 工作流做了什么
 
-0. 仓库是 pnpm workspace，会按依赖顺序发布 10 个包：
+0. 仓库是 pnpm workspace，会按依赖顺序发布 11 个包：
    1. SDK：`@router-agent/core` → `infra` → `runtime` → `channel`
-   2. 内置插件：`runtime-codex` / `runtime-herdr` / `runtime-claude-code` / `runtime-orca` / `runtime-acp` / `channel-feishu`
+   2. 内置插件：`runtime-codex` / `runtime-herdr` / `runtime-claude-code` / `runtime-orca` / `runtime-t3code` / `runtime-acp` / `channel-feishu`
    3. 根包 `router-agent` 最后发
 
    顺序由 `scripts/publish-packages.mjs` 的 `PUBLISH_ORDER` 决定。根包的 `pnpm build` 会把

@@ -37,6 +37,8 @@ export interface RuntimePluginContext {
     claude: CommandRunner
     git: CommandRunner
     herdr: CommandRunner
+    /** T3 Code CLI；t3code 运行时用。 */
+    t3: CommandRunner
   }
   claudeBin?: string
   claudeProjectsDir?: string

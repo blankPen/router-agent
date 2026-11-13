@@ -20,6 +20,9 @@ describe('多包发布', () => {
     expect(PUBLISH_ORDER.indexOf('runtime-codex')).toBeLessThan(PUBLISH_ORDER.indexOf('runtime-acp'))
     expect(PUBLISH_ORDER.indexOf('runtime-herdr')).toBeLessThan(PUBLISH_ORDER.indexOf('runtime-acp'))
     expect(PUBLISH_ORDER).toContain('runtime-acp')
+    // ACP 复用了 T3 的服务端探测实现，必须排在它之后。
+    expect(PUBLISH_ORDER.indexOf('runtime-t3code')).toBeLessThan(PUBLISH_ORDER.indexOf('runtime-acp'))
+    expect(PUBLISH_ORDER).toContain('runtime-t3code')
   })
 
   it('sync 模式只同步版本号，不会落到发布循环', () => {

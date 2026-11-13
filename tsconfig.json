@@ -40,6 +40,8 @@
       "@router-agent/runtime-herdr/*": ["packages/runtime-herdr/src/*"],
       "@router-agent/runtime-acp": ["packages/runtime-acp/src/index.ts"],
       "@router-agent/runtime-acp/*": ["packages/runtime-acp/src/*"],
+      "@router-agent/runtime-t3code": ["packages/runtime-t3code/src/index.ts"],
+      "@router-agent/runtime-t3code/*": ["packages/runtime-t3code/src/*"],
       "@router-agent/channel": ["packages/channel/src/index.ts"],
       "@router-agent/channel/*": ["packages/channel/src/*"],
       "@router-agent/channel-feishu": ["packages/channel-feishu/src/index.ts"],

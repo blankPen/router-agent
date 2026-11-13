@@ -15,6 +15,7 @@ packages/runtime-orca        内置插件：Orca
 packages/runtime-claude-code 内置插件：Claude Code
 packages/runtime-codex       内置插件：Codex App
 packages/runtime-herdr       内置插件：Herdr
+packages/runtime-t3code      内置插件：T3 Code
 packages/runtime-acp         内置插件：ACP
 packages/channel-feishu      内置插件：飞书
 src/                       宿主应用：Engine/Store、Router、API/Web、CLI、配置与装配

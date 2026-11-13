@@ -42,6 +42,7 @@ describe('monorepo 包边界', () => {
       'runtime-codex',
       'runtime-herdr',
       'runtime-acp',
+      'runtime-t3code',
       'channel',
       'channel-feishu',
     ]) {

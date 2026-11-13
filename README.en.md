@@ -182,6 +182,7 @@ Workers don't run inside the Router process. The Router picks an adapter from `r
 | `claude-code` | `git worktree` + background `claude --bg` session | You don't use Orca and just want Claude Code |
 | `codex-app` | `git worktree` + `codex app-server`, preferring the CLI bundled with the Codex app | Use Codex and want Router-created threads visible in the Codex desktop app |
 | `herdr` | ra creates the worktree with git, Herdr opens a terminal pane for the agent | You already drive terminals with Herdr and want tickets visible in its sidebar |
+| `t3code` | ra creates the worktree with git, T3 Code runs the agent in a thread there | You already use T3 Code and want tickets visible from its phone or desktop app |
 | `acp` / `acp-*` | ACP child process (Claude / Codex / Gemini / OpenCode and friends) | You want to plug in another ACP agent |
 
 Project lists are kept per runtime: Orca uses repository selectors, other runtimes need absolute local paths. Switching the default only affects new tickets. The full comparison, ACP agent catalog, tool policy and spec injection are in [docs/RUNTIME.md](docs/RUNTIME.md) (Chinese).
@@ -276,6 +277,7 @@ Source layout (pnpm workspace with pluggable adapter packages):
 packages/core/     domain core: Ticket / Mandate / Stage / Policy and shared types
 packages/infra/    logger, subprocess runner, chat model, image transcription
 packages/runtime/  WorkerRuntime port, RuntimeRegistry, Orca / Claude Code / Codex / ACP / Herdr adapters
+packages/runtime-t3code/  T3 Code runtime plugin (t3 thread wrapper + server probe)
 packages/channel/  ChannelAdapter port, ChannelRegistry, Feishu adapter and lark-cli wrapper
 src/               host: Engine / Store, Router, HTTP API, web dashboard, CLI and wiring
 ```

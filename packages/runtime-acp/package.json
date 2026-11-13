@@ -35,6 +35,7 @@
     "@router-agent/core": "0.3.32",
     "@router-agent/infra": "0.3.32",
     "@router-agent/runtime-codex": "0.3.32",
-    "@router-agent/runtime-herdr": "0.3.32"
+    "@router-agent/runtime-herdr": "0.3.32",
+    "@router-agent/runtime-t3code": "0.3.32"
   }
 }

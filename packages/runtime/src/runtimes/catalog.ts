@@ -10,6 +10,7 @@ export const CLAUDE_CODE_RUNTIME_ID = 'claude-code'
 export const ACP_RUNTIME_ID = 'acp'
 export const CODEX_APP_RUNTIME_ID = 'codex-app'
 export const HERDR_RUNTIME_ID = 'herdr'
+export const T3CODE_RUNTIME_ID = 't3code'
 
 export interface WorkerRuntimeMeta {
   id: string
@@ -62,6 +63,14 @@ export const WORKER_RUNTIMES: readonly WorkerRuntimeMeta[] = [
     hint: '检出由 ra 用 git worktree 建，Herdr 只开终端窗口跑 Agent；状态来自 Herdr 的 Agent 检测',
     installHint: '从 Herdr 官方发布页下载安装，并确保 herdr CLI 在 PATH 中',
     installUrl: 'https://github.com/herdrdev/herdr/releases',
+  },
+  {
+    id: T3CODE_RUNTIME_ID,
+    name: 'T3 Code',
+    label: 't3code · git worktree + T3 Code 线程',
+    hint: '用 T3 Code 的线程承载工单；Agent 在 ra 建的 worktree 里跑，手机端能看到同一个线程',
+    installHint: '安装 T3 Code 桌面端，或 npm i -g t3；并确保 t3 CLI 在 PATH 中',
+    installUrl: 'https://t3.codes/download',
   },
 ]
 
