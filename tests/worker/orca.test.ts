@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { OrcaRuntime, OrcaCommandError, parseCreateResult, summarizeArgs } from '@router-agent/runtime-orca'
 import { claudeProjectSlug, describeToolInfo, describeToolUse } from '#runtime/agents/claude.js'
-import { worktreeCreate, terminalSend, terminalClose, terminalList, terminalRead, worktreeRemove, agentLaunch } from '@router-agent/runtime-orca'
+import { worktreeCreate, terminalSend, terminalClose, terminalList, terminalRead, worktreeRemove, agentLaunch, repoAdd } from '@router-agent/runtime-orca'
 import type { CommandRunner, CommandResult } from '@router-agent/runtime-orca'
 import type { Assignment, Ticket } from '#core/model.js'
 import { buildNeutralContract, buildWorkerPrompt } from '#runtime/spec/index.js'
@@ -71,6 +71,16 @@ describe('Orca 命令构造', () => {
     expect(worktreeCreate({ repo: 'path:/Users/me/repo', name: 'n', prompt })[3]).toBe('path:/Users/me/repo')
     expect(worktreeCreate({ repo: 'name:my-repo', name: 'n', prompt })[3]).toBe('name:my-repo')
     expect(worktreeCreate({ repo: 'my-repo', name: 'n', prompt })[3]).toBe('name:my-repo')
+  })
+
+  it('本地绝对路径统一翻成 Orca 的 path: 选择器', () => {
+    const prompt = 'x'
+    expect(worktreeCreate({ repo: '/Users/me/repo', name: 'n', prompt })[3]).toBe('path:/Users/me/repo')
+    expect(worktreeCreate({ repo: 'path:/Users/me/repo', name: 'n', prompt })[3]).toBe('path:/Users/me/repo')
+  })
+
+  it('repo add 按本地路径登记项目', () => {
+    expect(repoAdd('/Users/me/repo')).toEqual(['repo', 'add', '--path', '/Users/me/repo', '--kind', 'git', '--json'])
   })
 
   it('terminal send 追加 Enter 并请求 JSON', () => {
@@ -181,6 +191,72 @@ describe('OrcaRuntime', () => {
     const meta = JSON.parse(readFileSync(metaPath, 'utf8'))
     expect(meta.handle).toBe('term-9')
     expect(meta.assignmentId).toBe('as_1')
+  })
+
+  it('派工前自动把项目路径登记成 Orca 项目，并用 path: 选择器建 worktree', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ra-workers-'))
+    const logs: { level: string; message: string; extra?: Record<string, unknown> }[] = []
+    const runner = new FakeRunner([
+      { code: 0, stdout: JSON.stringify({ ok: true, result: { repo: { displayName: 'router-agent' } } }), stderr: '' },
+      { code: 0, stdout: JSON.stringify({ ok: true, result: { launch: { outcome: { handle: 'term-9' } }, worktree: { path: '/tmp/wt-9' } } }), stderr: '' },
+    ])
+    const adapter = new OrcaRuntime({
+      runner,
+      workersDir: dir,
+      logger: {
+        info: (message, extra) => { logs.push({ level: 'info', message, extra: extra as Record<string, unknown> }) },
+        warn: (message, extra) => { logs.push({ level: 'warn', message, extra: extra as Record<string, unknown> }) },
+        error: (message, extra) => { logs.push({ level: 'error', message, extra: extra as Record<string, unknown> }) },
+      },
+    })
+
+    await adapter.start({ ticket: { ...ticket, repo: '/Users/me/router-agent' }, assignment, workdir: '/tmp/wt-9' })
+
+    expect(runner.calls[0]!.argv).toEqual(['repo', 'add', '--path', '/Users/me/router-agent', '--kind', 'git', '--json'])
+    expect(runner.calls[1]!.argv.slice(0, 4)).toEqual(['worktree', 'create', '--repo', 'path:/Users/me/router-agent'])
+    expect(logs.find(item => item.message === 'orca:project-registered')?.extra).toMatchObject({
+      ticketId: 'tk_1',
+      path: '/Users/me/router-agent',
+      displayName: 'router-agent',
+    })
+  })
+
+  it('登记失败只告警，派工继续（真正的失败由 worktree create 报）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ra-workers-'))
+    const logs: { level: string; message: string; extra?: Record<string, unknown> }[] = []
+    const runner = new FakeRunner([
+      { code: 1, stdout: '', stderr: 'Orca runtime not reachable' },
+      { code: 0, stdout: JSON.stringify({ ok: true, result: { launch: { outcome: { handle: 'term-9' } } } }), stderr: '' },
+    ])
+    const adapter = new OrcaRuntime({
+      runner,
+      workersDir: dir,
+      logger: {
+        info: (message, extra) => { logs.push({ level: 'info', message, extra: extra as Record<string, unknown> }) },
+        warn: (message, extra) => { logs.push({ level: 'warn', message, extra: extra as Record<string, unknown> }) },
+        error: (message, extra) => { logs.push({ level: 'error', message, extra: extra as Record<string, unknown> }) },
+      },
+    })
+
+    const started = await adapter.start({ ticket: { ...ticket, repo: '/Users/me/router-agent' }, assignment, workdir: '/tmp/wt-9' })
+
+    expect(started.handle).toBe('term-9')
+    expect(runner.calls[1]!.argv.slice(0, 2)).toEqual(['worktree', 'create'])
+    expect(logs.find(item => item.message === 'orca:project-register-failed')?.extra).toMatchObject({
+      ticketId: 'tk_1',
+      path: '/Users/me/router-agent',
+      reason: 'Orca runtime not reachable',
+    })
+  })
+
+  it('遗留的 name: 选择器不登记（路径未知，登记不了）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ra-workers-'))
+    const runner = new FakeRunner([
+      { code: 0, stdout: JSON.stringify({ ok: true, result: { launch: { outcome: { handle: 'term-9' } } } }), stderr: '' },
+    ])
+    await new OrcaRuntime({ runner, workersDir: dir }).start({ ticket, assignment, workdir: '/tmp/wt-9' })
+
+    expect(runner.calls.map(call => call.argv.slice(0, 2).join(' '))).toEqual(['worktree create'])
   })
 
   it('未配置时用声明默认 claude；配置后按配置传', async () => {

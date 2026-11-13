@@ -11,9 +11,9 @@ import {
   parseEventPrecheck,
   parseLarkChats,
   parseLarkMembers,
-  parseOrcaRepos,
   parseOrcaStatus,
 } from '@router-agent/channel-feishu'
+import { projectRepoPath } from '#runtime/runtimes/repo-path.js'
 
 export type CheckStatus = 'ok' | 'warn' | 'fail'
 
@@ -77,37 +77,25 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
       const ready = res.code === 0 && parsed.runtimeReachable === 'true'
       return { status: ready ? 'ok' : 'fail', detail: ready ? `runtimeState=${parsed.runtimeState ?? 'unknown'}` : (res.stderr || res.stdout).trim().slice(0, 160), ...(ready ? {} : { hint: '打开 Orca 应用或运行 orca open' }) }
     }))
-
-    checks.push(await check('Orca 仓库', async () => {
-      const res = await deps.orca.run(['repo', 'list', '--json'])
-      const repos = res.code === 0 ? parseOrcaRepos(res.stdout) : []
-      const wanted = projects.map(project => project.repo)
-      if (wanted.length === 0) return { status: 'fail', detail: '未配置任何项目', hint: 'ra config set project.<name> <repo>@<分支>' }
-      const missingRepos = wanted.filter(repo => {
-        const name = repo.replace(/^(id|name|path):/, '')
-        return !repos.some(item => item.name === name || item.path === name)
-      })
-      return missingRepos.length === 0
-        ? { status: 'ok', detail: wanted.join(', ') }
-        : { status: 'fail', detail: `未找到仓库 ${missingRepos.join(', ')}`, hint: 'orca repo list 查看可选项，或 orca repo add --path <dir>' }
-    }))
-  } else {
-    // 非 Orca 运行时（claude-code / acp-*）：项目 repo 必须是已存在的本地仓库目录。
-    checks.push({
-      name: '本地项目路径',
-      status: projects.length === 0
-        ? 'fail'
-        : projects.every(project => existsSync(project.repo.replace(/^path:/, ''))) ? 'ok' : 'fail',
-      detail: projects.length === 0
-        ? '未配置任何项目'
-        : projects
-          .map(project => `${project.name} → ${project.repo.replace(/^path:/, '')}`)
-          .join('，'),
-      ...(projects.length > 0 && projects.some(project => !existsSync(project.repo.replace(/^path:/, '')))
-        ? { hint: 'repo 必须是本地仓库绝对路径；在面板「配置 → 项目清单」或 ra config set project.<名称> 中修正' }
-        : {}),
-    })
   }
+
+  // 项目路径统一是本地仓库绝对路径：所有 runtime 都按本地目录检查。
+  // Orca 侧是否已登记不用查：派工时 ra 会自动 orca repo add 登记。
+  const missingPaths = projects.filter(project => !existsSync(projectRepoPath(project.repo)))
+  checks.push({
+    name: '本地项目路径',
+    status: projects.length === 0
+      ? 'fail'
+      : missingPaths.length === 0 ? 'ok' : 'fail',
+    detail: projects.length === 0
+      ? '未配置任何项目'
+      : projects
+        .map(project => `${project.name} → ${project.repo}`)
+        .join('，'),
+    ...(missingPaths.length > 0
+      ? { hint: `repo 必须是存在的本地仓库绝对路径（${missingPaths.map(item => item.name).join('、')}）；在面板「配置 → 项目清单」或 ra config set project.<名称> 中修正` }
+      : {}),
+  })
 
   // ACP Agent 逐项展示；非默认运行时的不可用只提示，不影响 doctor 退出码。
   for (const choice of deps.runtimeChoices ?? []) {

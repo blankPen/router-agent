@@ -88,7 +88,7 @@ ra start                      # 启动，就绪后自动打开 http://127.0.0.1:
 
 1. **LLM Provider**：Base URL / 模型 / API Key，三项必填；OpenAI 兼容与 Anthropic 兼容协议都支持。密钥只写入 `config.yaml`，保存后不回显；环境变量 `RA_LLM_*` 可覆盖。右上角「从本地配置导入」会打开选择弹窗，从 Claude Code、CCSwitch、Pi、OpenCode、Magpie 的已有 Provider 里选一份导入（只读原配置，密钥不回显）。
 2. **选择运行时**：Orca / Claude Code / ACP Agent 卡片平铺，自动检测 CLI、版本、ACP 依赖与登录状态，支持安装引导和真实握手试启动。运行时自己的选项在卡片的「设置」弹窗里改（例如 Orca 的「执行 Agent」：默认 Claude Code，也可指定 codex 等）。
-3. **登记项目**：添加本地项目（系统目录选择 + 自动识别 Git）或 Git 项目（自动 clone 到 `~/.router-agent/repos`，可用 `RA_HOME` 改根目录）。
+3. **项目配置**：扫描本地项目（读 Claude Code / Codex / OpenCode 的会话日志列出候选目录，默认勾选最近活跃的 5 个）、添加本地项目（系统目录选择 + 自动识别 Git）或 Git 项目（自动 clone 到 `~/.router-agent/repos`，可用 `RA_HOME` 改根目录）。
 4. **飞书机器人**：填 App ID / App Secret（Secret 只写入 lark-cli 加密存储），固定使用 `~/.router-agent-lark` profile；保存后可检查授权状态并完成 Device Flow 授权。
 5. **群与绑定**：至少添加一个监控群；可把群固定到某个项目，之后开工不再追问。
 
@@ -169,7 +169,7 @@ Worker 不在 Router 进程里跑。Router 按 `runtime.default` 选择适配器
 | `t3code` | ra 用 git worktree 建检出，T3 Code 在检出里开线程跑 Agent | 本机已装 T3 Code，想在 T3 手机端 / 桌面端看到工单 |
 | `acp` / `acp-*` | ACP 子进程（Claude / Codex / Gemini / OpenCode / Copilot / Cursor / Goose） | 想接其它 ACP Agent |
 
-换运行时只加一个 adapter，内核与 Router 一行不改。项目清单按运行时分开维护：Orca 用仓库选择器，其它运行时用本地仓库绝对路径；切换默认运行时只影响新工单。完整的运行时对比、ACP Agent 目录、工具策略与规范注入见 [docs/RUNTIME.md](docs/RUNTIME.md)。
+换运行时只加一个 adapter，内核与 Router 一行不改。项目清单按运行时分开维护，但清单里的项目路径口径统一：所有运行时都填本地仓库绝对路径，Orca 侧由适配器翻译成 `path:` 选择器并在派工前自动登记成 Orca 项目；切换默认运行时只影响新工单。完整的运行时对比、ACP Agent 目录、工具策略与规范注入见 [docs/RUNTIME.md](docs/RUNTIME.md)。
 
 ![运行时选择：Orca、Claude Code 与 ACP Agent 卡片](docs/assets/readme/runtime-cards.png)
 
@@ -253,7 +253,7 @@ policy:
 
 projects:
   - name: router-agent
-    repo: name:dsh/router-agent
+    repo: /Users/me/router-agent
     defaultBranch: main
 ```
 
@@ -265,7 +265,7 @@ projects:
 
 ```bash
 ra config set policy.acceptMode observe          # 先观察，不开工
-ra config set project.router-agent "name:dsh/router-agent@main"
+ra config set project.router-agent "/Users/me/router-agent@main"
 ra config set chatBinding.oc_xxx "router-agent@main"
 ra config set runtime.default claude-code
 ra config set runtime.options.orca.agent codex   # Orca 派工时用 Codex；不配 = 默认 Claude Code

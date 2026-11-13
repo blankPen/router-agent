@@ -2,7 +2,7 @@
 
 Worker 不在 Router 进程里跑。每张工单开工时，Router 按 `runtime.default` 选一个 **WorkerRuntime** 适配器，由它负责：创建隔离 workspace、拉起 Agent、投递工单、读取状态、接住追问。内核与 Router 只依赖 `WorkerRuntime` 端口，换运行时不需要改业务代码。
 
-一份配置只有一个默认运行时，但**项目清单按运行时分开维护**：Orca 用仓库选择器（`name:` / `id:` / `path:`），Claude Code 与 ACP 用本地仓库绝对路径。切换运行时不会把 Orca 的选择器当成文件路径；旧工单也不会被新的默认运行时接管，而是继续用 Assignment 里记录的运行时。
+一份配置只有一个默认运行时，**项目清单按运行时分开维护**，但清单里的 `repo` 口径统一：所有运行时都填**本地仓库绝对路径**（`/Users/me/project`，`path:/Users/me/project` 是兼容写法）。Orca 运行时把它翻译成 `path:` 选择器，并在派工前自动把目录登记成 Orca 项目（`orca repo add`，幂等）；其它运行时直接拿它做 `git worktree`。切换运行时不会把一个运行时的路径当成另一个运行时的选择器；旧工单也不会被新的默认运行时接管，而是继续用 Assignment 里记录的运行时。
 
 ## 内置运行时
 
@@ -71,7 +71,7 @@ runtime:
   projects:
     claude-code:
       - name: router-agent
-        repo: /Users/me/router-agent   # 本地仓库绝对路径
+        repo: /Users/me/router-agent   # 所有 runtime 统一是本地仓库绝对路径
         defaultBranch: main
     acp-codex:
       - name: router-agent
@@ -289,7 +289,7 @@ ra config set runtime.options.herdr.agent claude   # claude / codex / opencode
 ra config set runtime.options.herdr.model sonnet    # 可选；留空用 Agent 自己的默认
 ```
 
-项目清单按运行时隔离，与 `claude-code` / `codex-app` 一样填**本地仓库绝对路径**：
+项目清单按运行时隔离，与 `claude-code` / `codex-app` 一样填**本地仓库绝对路径**（所有运行时口径一致）：
 
 ```yaml
 runtime:

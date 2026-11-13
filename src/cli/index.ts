@@ -44,6 +44,7 @@ import { EffectsProcessor } from '../core/effects.js'
 import { createApiServer, emptyIdentityStatus, type IdentityPort } from '../router/api.js'
 import { PluginPackageAdmin } from '../router/plugin-admin.js'
 import { ProjectSetup } from '../router/project-setup.js'
+import { scanLocalProjects } from '../router/project-scan.js'
 import { createLogAssistant } from '../router/log-assistant.js'
 import { createDiagnosisTools } from '../router/diagnosis-tools.js'
 import { createIssueReporter } from '../router/issue-report.js'
@@ -124,7 +125,7 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
   ra init
   ra tickets --stage blocked
   ra config set policy.acceptMode observe
-  ra config set project.router-agent "name:dsh/router-agent@main"
+  ra config set project.router-agent "/Users/me/router-agent@main"
   ra config set chatBinding.oc_xxx "router-agent@main"
   ra config --edit`)
 
@@ -291,7 +292,7 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
 示例:
   ra config                      查看全部配置
   ra config set policy.acceptMode observe
-  ra config set project.router-agent "name:dsh/router-agent@main"
+  ra config set project.router-agent "/Users/me/router-agent@main"
   ra config set chatBinding.oc_xxx "router-agent@main"
   ra config edit                 用 $EDITOR 打开`)
     .action(async (action: string | undefined, key: string | undefined, value: string | undefined, opts: { home?: string }) => {
@@ -1575,6 +1576,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     logAssistant,
     issueReporter,
     projectSetup: new ProjectSetup({ home, git: gitRunner, orca: orcaRunner }),
+    projectScan: { scan: () => scanLocalProjects() },
     // Web-only 模式没有 RouterService，工作区清理端点按「不支持」返回。
     ...(service
       ? {
