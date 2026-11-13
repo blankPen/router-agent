@@ -13,9 +13,10 @@ Router 不做对话，只在必要时说话：
 | 群里 @机器人，但只是寒暄 / 试探 | **Pi 生成**一句礼貌回复，作为**普通消息**发出；不建单 |
 | 群里 @机器人，是真需求 | 只发一条**话题**消息：「工单「标题」（id）已开始执行。后续进展会在这个话题里更新。」，不再额外回「我帮你创建了工单」之类的普通消息 ack |
 | 未 @ 的群消息 | 走 Pi 研判；判为闲聊则**完全静默**（不刷屏） |
-| 需求识别开启的群里，普通成员反馈问题（可不 @） | 先轻量初筛：`chat` 静默；`question` / `issue` 由分析子 Agent 追问或直接答疑，信息收敛后 @管理员终审，确认后才派单 |
+| 处理普通成员消息开启的群里，普通成员反馈问题（可不 @） | 先过决策层：不跟进就静默；咨询由分析子 Agent 直接给结论；需求进澄清会话，信息收敛后 @管理员终审，确认后才派单 |
 | 分析子 Agent 追问 / 需求单整理完成 | 回复挂在该话题：追问直接发；需求单完成后先告知发起人「已提交管理员确认」，再 @管理员给出结构化需求单与操作口令 |
 | 管理员终审 | 回复「确认派单」生成正式工单；「驳回」结束；直接补充要求则重新分析一版 |
+| 管理员的需求太模糊或太复杂 | 先开澄清会话讨论几轮；聊清楚后直接开单（发起人就是管理员，不再走终审） |
 | 私聊 | 走 Pi 研判；判为闲聊时用 Pi 礼貌回复（普通消息） |
 | 只发了图片 | 下载原图落盘并透传给 Worker，同时转成文字走研判；识别失败也保留原图，不再回「看不到附件内容」 |
 | 只发了文件 / 语音等其它附件 | **不开单**：@ 或私聊时回一句「看不到附件内容，请用文字说明」 |
@@ -83,21 +84,23 @@ Router 不做对话，只在必要时说话：
 | `trigger:dropped` | Source | `reason` `chat` `chatName` `actor` `actorName` `actorType` | 收到但被过滤 |
 | `trigger:ingest-failed` | Channel Ingress | `channel` `detail` | 富化或入库抛错，消息没能进入系统；重试依赖飞书重投兜底 |
 | `trigger:admitted-unaddressed` | CLI | `chat` `actor` `keys` | 已绑定工单的话题里，名单内成员没 @ 机器人也放行处理（tk-59） |
-| `intake:screen` | AgentLoop | `triggerId` `chat` `chatName` `actor` `actorName` `actorType` `kind` `reason` | 需求识别初筛结论：chat / question / issue（`reason` 已截断到 120 字） |
+| `intake:screen` | AgentLoop | `triggerId` `chat` `chatName` `actor` `actorName` `actorType` `kind` `reason` | 决策层不可用时的初筛兜底结论：chat / question / issue（`reason` 已截断到 120 字） |
 | `intake:screen-failed` / `intake:screen-invalid` | AgentLoop | `triggerId` `detail` / `triggerId` | 初筛模型失败或输出不合法；消息按原准入规则继续处理 |
 | `intake:decision-dropped` | AgentLoop | `triggerId` `chat` `rule` | 决策层确定性准入命中（bot / 媒体 / 口令 / 噪声），直接忽略 |
 | `intake:decision-ignore` | AgentLoop | `triggerId` `chat` `msgType` `action` `confidence` | 决策层判定无需跟进（chitchat / grumble 等），忽略该消息 |
-| `intake:opened` | AgentLoop | `intakeId` `chat` `chatName` `actor` `actorName` `actorType` `kind` `action` `project` | 为一条疑似问题创建需求识别会话；`action` 是路由层落地的动作（reply / analysis） |
-| `router:action` | AgentLoop | `triggerId` `action` `ticketId`（open_ticket 时）`stage`（澄清中）`missing` | 路由层为这条消息选出的唯一动作：reply / ticket_tool / open_ticket / analysis / ignore；同一条 trigger 只记一次 |
+| `intake:opened` | AgentLoop | `intakeId` `chat` `chatName` `actor` `actorName` `actorType` `kind` `action` `project` | 为一条消息创建需求会话；`kind` 是 issue（成员需求）/ question（成员咨询）/ request（管理员澄清），`action` 是路由层落地的动作（reply / analysis / clarify） |
+| `router:action` | AgentLoop | `triggerId` `action` `ticketId`（open_ticket 时）`stage`（澄清中）`missing` | 路由层为这条消息选出的唯一动作：reply / ticket_tool / open_ticket / analysis / ignore；同一条 trigger 只记一次。`analysis` 表示需求要先讨论几轮再开单 |
 | `intake:clarify` | AgentLoop | `intakeId` `questions` | 分析 Agent 发起追问 |
 | `intake:answered` | AgentLoop | `intakeId` `chat` | 分析 Agent 直接给出结论，会话结束，不产出需求单 |
 | `intake:ready` | AgentLoop | `intakeId` `chat` `title` `approvers` | 需求单整理完成，已 @管理员终审 |
+| `intake:request-dispatched` | AgentLoop | `intakeId` `ticketId` `chat` | 管理员的澄清会话聊清楚后直接开单（不走终审） |
+| `intake:request-failed` / `intake:request-invalid` / `intake:request-noproject` / `intake:request-blocked` | AgentLoop | `intakeId` `detail` | 管理员的需求没能开单：开单报错 / 报告缺内容 / 缺项目与分支 / 策略不允许自动开单 |
 | `intake:approved` | AgentLoop | `intakeId` `ticketId` `actor` `reused` | 管理员确认派单，已生成正式工单；`reused=true` 表示复用了上次已建的工单 |
 | `intake:rejected` | AgentLoop | `intakeId` `actor` | 管理员驳回需求单 |
 | `intake:expired` | AgentLoop | `intakeId` | 需求识别会话超过 72 小时无消息，自动放弃 |
 | `intake:analysis-failed` / `intake:analysis-invalid` | AgentLoop | `intakeId` `detail` / `intakeId` `triggerId` | 分析模型失败或输出不合法；已给用户兜底回复 |
 | `intake:approve-failed` | AgentLoop | `intakeId` `detail` | 终审通过后开单失败；需求单仍可再次终审 |
-| `intake:requester-not-allowed` | AgentLoop | `triggerId` `chat` `actor` | 发起人不在该群白名单里，不再继续澄清（群名单是硬边界） |
+| `intake:requester-not-allowed` | AgentLoop | `triggerId` `chat` `actor` | 该群名单没解析出任何人，不再继续澄清（该群拒绝所有人） |
 | `intake:project-unbound` | AgentLoop | `chat` `triggerId` | 群没绑定项目，intake 不接管，按原准入规则处理 |
 | `intake:decision-failed` | AgentLoop | `triggerId` `detail` | 落决策失败（例如同一轮已落过决定） |
 | `intake:abort-failed` / `intake:dispose-failed` | IntakeEngine | `stage` `detail` | 分析会话超时中断或释放失败；已拿到的结果不受影响 |
@@ -230,7 +233,7 @@ Router 不做对话，只在必要时说话：
 | `feishu:bot-identity-resolved` | Identity | `bot` `name` | 机器人身份自动识别成功（按 `app_id` 匹配群成员），或使用了手动填写的身份 |
 | `feishu:bot-identity-failed` | Identity | `detail` | 机器人身份识别失败，`mode: mention` 的群会丢消息，需人工确认 |
 | `feishu:chat-allowlist-empty` | Identity | `chat` `name` `count` | 群级允许名单配了却一个都解析不出来，该群按「拒绝所有人」处理 |
-| `feishu:intake-approver-empty` | Identity | `chat` `name` `count` | 需求分析助手的终审管理员配了却一个都解析不出来，该群没有人能终审（不会退回全局名单） |
+| `feishu:member-approver-empty` | Identity | `chat` `name` `count` | 普通成员需求的终审管理员配了却一个都解析不出来，该群没有人能终审（不会退回全局名单） |
 | `loop:trigger-failed` | Agent Loop | `triggerId` `chat` `detail` | 单条消息处理异常，同批其它消息不受影响 |
 | `loop:error` | Service | `detail` | 内部定时任务回调抛出的未预期异常，不影响主循环 |
 | `decision:audit` / `decision:audit-write-failed` | CLI | `engine` `triggerId` `durationMs` `tokens` `toolCalls` `decision` / `detail` | 每次研判的审计记录写入 `decisions.jsonl`；写盘失败不影响研判 |

@@ -432,7 +432,7 @@ describe('Pi 研判层配置', () => {
     expect(loaded.router.tokenBudget).toBe(16000)
   })
 
-  it('需求分析助手是群级配置：可写回并读回，patch 做类型与范围校验', () => {
+  it('处理普通成员消息是群级配置：可写回并读回，patch 做类型与范围校验', () => {
     const dir = home()
     const cfg = loadConfig(dir)
     const patch = applyConfigPatch(cfg, {
@@ -442,14 +442,14 @@ describe('Pi 研判层配置', () => {
         repo: '',
         branch: '',
         allowed: [],
-        intake: { enabled: true, maxQuestions: 2, codeAccess: false, approvers: ['admin@example.com'] },
+        members: { enabled: true, maxQuestions: 2, codeAccess: false, approvers: ['admin@example.com'] },
       }],
     })
     expect(patch.errors).toEqual([])
     writeConfig(dir, cfg)
 
     const loaded = loadConfig(dir)
-    expect(loaded.feishu.chats[0]?.intake).toEqual({
+    expect(loaded.feishu.chats[0]?.members).toEqual({
       enabled: true,
       maxQuestions: 2,
       codeAccess: false,
@@ -458,15 +458,15 @@ describe('Pi 研判层配置', () => {
 
     // 轮次越界：0–50 的整数。
     expect(applyConfigPatch(loadConfig(home()), {
-      'feishu.chats': [{ chat: 'oc_dev', mode: 'all', repo: '', branch: '', allowed: [], intake: { enabled: true, maxQuestions: 51, codeAccess: true, approvers: [] } }],
+      'feishu.chats': [{ chat: 'oc_dev', mode: 'all', repo: '', branch: '', allowed: [], members: { enabled: true, maxQuestions: 51, codeAccess: true, approvers: [] } }],
     }).errors).toHaveLength(1)
     // 全局路径已经下沉到群级，不再是合法的配置项。
     expect(applyConfigPatch(loadConfig(home()), { 'intake.enabled': true }).errors).toHaveLength(1)
   })
 
-  it('新建群默认带需求分析助手配置：关闭、10 轮、允许只读代码', () => {
+  it('新建群默认带普通成员消息配置：关闭、10 轮、允许只读代码', () => {
     const cfg = loadConfig(home())
-    expect(chatEntry('oc_new').intake).toEqual({ enabled: false, maxQuestions: 10, codeAccess: true, approvers: [] })
+    expect(chatEntry('oc_new').members).toEqual({ enabled: false, maxQuestions: 10, codeAccess: true, approvers: [] })
     expect(cfg.feishu.chats).toEqual([])
   })
 
@@ -488,19 +488,19 @@ describe('Pi 研判层配置', () => {
       '',
     ].join('\n'))
     const cfg = loadConfig(dir)
-    expect(cfg.feishu.chats.find(chat => chat.chat === 'oc_dev')?.intake).toEqual({
+    expect(cfg.feishu.chats.find(chat => chat.chat === 'oc_dev')?.members).toEqual({
       enabled: true,
       maxQuestions: 6,
       codeAccess: false,
       approvers: ['admin@example.com'],
     })
     // 不在旧白名单里的群保持关闭。
-    expect(cfg.feishu.chats.find(chat => chat.chat === 'oc_ops')?.intake?.enabled).toBe(false)
+    expect(cfg.feishu.chats.find(chat => chat.chat === 'oc_ops')?.members?.enabled).toBe(false)
     // 写回后全局段消失，只剩群级配置。
     writeConfig(dir, cfg)
     const text = readFileSync(join(dir, 'config.yaml'), 'utf8')
     expect(text).not.toContain('\nintake:')
-    expect(text).toContain('intake:')
+    expect(text).toContain('members:')
   })
 
   it('旧版全局 intake 段没写生效群时迁移到所有已监控的群', () => {
@@ -517,18 +517,18 @@ describe('Pi 研判层配置', () => {
     ].join('\n'))
     const cfg = loadConfig(dir)
     for (const chat of cfg.feishu.chats) {
-      expect(chat.intake.enabled).toBe(true)
-      expect(chat.intake.maxQuestions).toBe(4)
+      expect(chat.members.enabled).toBe(true)
+      expect(chat.members.maxQuestions).toBe(4)
     }
   })
 
-  it('群上已经写了需求分析配置时，旧全局段不再覆盖它', () => {
+  it('群上已经写了普通成员配置时，旧全局段不再覆盖它', () => {
     const dir = home()
     writeFileSync(join(dir, 'config.yaml'), [
       'feishu:',
       '  chats:',
       '    - chat: oc_dev',
-      '      intake:',
+      '      members:',
       '        enabled: true',
       '        maxQuestions: 7',
       'intake:',
@@ -537,7 +537,22 @@ describe('Pi 研判层配置', () => {
       '',
     ].join('\n'))
     const cfg = loadConfig(dir)
-    expect(cfg.feishu.chats[0]?.intake).toMatchObject({ enabled: true, maxQuestions: 7 })
+    expect(cfg.feishu.chats[0]?.members).toMatchObject({ enabled: true, maxQuestions: 7 })
+  })
+
+  it('群上旧的 intake 段按同一口径读成普通成员配置', () => {
+    const dir = home()
+    writeFileSync(join(dir, 'config.yaml'), [
+      'feishu:',
+      '  chats:',
+      '    - chat: oc_dev',
+      '      intake:',
+      '        enabled: true',
+      '        maxQuestions: 3',
+      '',
+    ].join('\n'))
+    const cfg = loadConfig(dir)
+    expect(cfg.feishu.chats[0]?.members).toMatchObject({ enabled: true, maxQuestions: 3 })
   })
 })
 

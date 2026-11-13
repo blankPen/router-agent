@@ -12,8 +12,8 @@ export interface ChatAdmissionSettings {
   mode: 'all' | 'mention'
   /** 本群只允许这些 open_id 操作；空表示沿用全局名单。 */
   allowed: string[]
-  /** 需求分析助手的终审管理员；邮箱或 open_id。 */
-  intake?: { approvers?: string[] }
+  /** 普通成员消息的终审管理员；邮箱或 open_id。 */
+  members?: { approvers?: string[] }
 }
 
 /** worker 运行时选项：`runtime.options.<runtimeId>.<key>`。 */

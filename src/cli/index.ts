@@ -5,7 +5,7 @@ import { dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { Command, CommanderError } from 'commander'
-import { ensureHome, intakeEnabledChats, loadConfig, policyOf, projectsForRuntime, publicConfig, replyAlwaysChatsOf, setConfigValue, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
+import { ensureHome, memberHandledChats, loadConfig, policyOf, projectsForRuntime, publicConfig, replyAlwaysChatsOf, setConfigValue, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
 import { Store, type SessionMigrationState } from '../store/db.js'
 import { Engine } from '../core/engine.js'
 import { effectiveAllowed, effectiveAllowedByChat, shouldAcknowledge } from '#core/policy.js'
@@ -1406,13 +1406,14 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
         scheduleRestart: scheduleUpdateRestart,
       })
     : null
-  // 需求分析助手：只在有群开启时装配，避免默认改变存量群的回复行为。
-  // 没绑定项目的群不纳入：分析 Agent 定位不到代码，也生成不了可派单的需求单。
-  const intakeChats = new Set(intakeEnabledChats(config).filter(chatId => {
+  // 普通成员消息处理：只有开了这个开关的群才纳入，
+  // 没绑定项目的群也不纳入：分析 Agent 定位不到代码，也生成不了可派单的需求单。
+  const memberChats = new Set(memberHandledChats(config).filter(chatId => {
     const chat = config.feishu.chats.find(item => item.chat === chatId)
     return Boolean(chat?.repo)
   }))
-  const intakeEngine = model && intakeChats.size > 0
+  // 需求分析引擎始终装配：管理员的需求分级不通过时也要用它澄清几轮再开单。
+  const intakeEngine = model
     ? createIntakeEngine({ config, store, model, logger })
     : undefined
   // 决策层：普通成员消息先过确定性准入，再交 Jev（或 LLM 模拟）分类。
@@ -1458,10 +1459,10 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       logger.info('trigger:admitted-unaddressed', { chat: chatId, actor: actorId, keys: threadKeys.length, reason: 'live-ticket' })
       return true
     }
-    // 需求识别：开启 intake 的群里，不在群级白名单之外的人都可以直接反馈问题。
-    // 群级白名单仍是硬边界（scoped 非空时只有名单内成员可以说话），不会被 intake 放宽。
-    if (intakeChats.has(chatId) && (!scoped || scoped.includes(actorId))) {
-      logger.info('trigger:admitted-unaddressed', { chat: chatId, actor: actorId, keys: threadKeys.length, reason: 'intake' })
+    // 普通成员消息：开启「处理普通成员消息」的群里，不在群级白名单之外的人都可以发言。
+    // 群级白名单仍是硬边界（scoped 非空时只有名单内成员可以说话），不会被这条放宽。
+    if (memberChats.has(chatId) && (!scoped || scoped.includes(actorId))) {
+      logger.info('trigger:admitted-unaddressed', { chat: chatId, actor: actorId, keys: threadKeys.length, reason: 'member-messages' })
       return true
     }
     return false

@@ -7,7 +7,7 @@
 import { ORCA_RUNTIME_ID } from '#runtime/runtimes/catalog.js'
 import { isProjectRepoPath } from '#runtime/runtimes/repo-path.js'
 import type { ConfigDoc } from './api.js'
-import { chatIntakeIssue, type ChatIntakeDraft } from './chat-intake.js'
+import { chatMembersIssue, type ChatMembersDraft } from './chat-members.js'
 
 export interface ProjectDraft {
   name: string
@@ -21,8 +21,8 @@ export interface ChatDraft {
   repo: string
   branch: string
   allowed: string[]
-  /** 群级「需求分析助手」配置；未配置时按默认值处理。 */
-  intake?: ChatIntakeDraft
+  /** 群级「处理普通成员消息」配置；未配置时按默认值处理。 */
+  members?: ChatMembersDraft
 }
 
 /** 项目清单按运行时隔离：orca 用顶层 projects，其它运行时用 runtime.projects.<id>。 */
@@ -52,8 +52,8 @@ export function chatsIssue(chats: unknown): string | null {
   if (!Array.isArray(chats)) return null
   for (const chat of chats as ChatDraft[]) {
     if (!String(chat.chat || '').trim()) return '每行都需要填写 chat_id'
-    const intakeMessage = chatIntakeIssue(chat.intake)
-    if (intakeMessage) return `${chat.chat || '群'}：${intakeMessage}`
+    const membersMessage = chatMembersIssue(chat.members)
+    if (membersMessage) return `${chat.chat || '群'}：${membersMessage}`
   }
   return null
 }

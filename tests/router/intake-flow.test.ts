@@ -4,9 +4,10 @@ import { Engine } from '../../src/core/engine.js'
 import { AgentLoop } from '../../src/router/agent-loop.js'
 import { DEFAULT_ADMISSION, type Policy } from '#core/policy.js'
 import type { Trigger } from '#core/model.js'
+import type { DecisionAgent } from '../../src/router/decision/agent.js'
 import type { IntakeEngine, IntakeRunRequest } from '../../src/router/intake-engine.js'
 import type { DispatchSettings } from '../../src/router/dispatch.js'
-import type { IntakeSettingsView } from '../../src/router/intake-flow.js'
+import type { MemberSettingsView } from '../../src/router/intake-flow.js'
 import { chatEntry } from '../../src/config.js'
 
 /** 按顺序返回预设 JSON 的假识别引擎，并记录每轮请求。 */
@@ -79,13 +80,13 @@ function setup(llm: IntakeEngine, over: { maxQuestions?: number; approvers?: str
   return { store, engine, loop, advance: (at: string) => { now = at } }
 }
 
-/** 群级需求分析配置：默认只有 oc_dev 开启，其它群关闭。 */
+/** 群级普通成员消息配置：默认只有 oc_dev 开启，其它群关闭。 */
 function intakeSettings(over: {
   maxQuestions?: number
   approvers?: string[]
   enabledChats?: string[]
   approversByChat?: Record<string, string[]>
-} = {}): IntakeSettingsView {
+} = {}): MemberSettingsView {
   const enabledChats = new Set(over.enabledChats ?? ['oc_dev'])
   return {
     forChat: (chatId: string) => ({
@@ -132,6 +133,65 @@ describe('需求识别（intake）', () => {
     const outbox = store.listOutbox()
     expect(outbox[0]?.text).toContain('报错原文')
     expect(outbox[0]?.threadId).toBe('om_1')
+  })
+
+  it('普通成员 @机器人 也进决策层：Router 研判不再被调用', async () => {
+    const llm = new FakeIntake([{ action: 'answer', reply: '在设置里打开开关就行' }])
+    const store = new Store(':memory:')
+    const clock = { now: () => now }
+    let n = 0
+    const engine = new Engine({ store, policy, clock, ids: { next: p => `${p}_${++n}` } })
+    let assessed = ''
+    const decided: string[] = []
+    const decisionAgent = {
+      async decide(trigger: Trigger) {
+        decided.push(trigger.id)
+        return {
+          kind: 'verdict' as const,
+          verdict: {
+            specId: 'msg.user.v2',
+            specVersion: 2,
+            msgType: 'consult' as const,
+            needsFollowup: true,
+            projectRelated: true,
+            urgency: 0.5,
+            confidence: 0.8,
+            action: 'reply' as const,
+            toolScope: 'member-analysis-read' as const,
+            degraded: false,
+          },
+        }
+      },
+    } as unknown as DecisionAgent
+    const loop = new AgentLoop({
+      engine,
+      decisionEngine: {
+        async assess(req) {
+          assessed = req.trigger.id
+          return {
+            proposal: { triggerId: req.trigger.id, decision: 'ignore', strength: req.strength, reason: '不该走到这里', rules: [] },
+            audit: { engine: 'pi', triggerId: req.trigger.id, durationMs: 0, toolCalls: [], tokens: { input: 0, output: 0, total: 0 }, promptChars: { system: 0, user: 0 } },
+          }
+        },
+        async reply() { return '' },
+      },
+      clock,
+      batchWindowMs: 0,
+      source: 'feishu',
+      dispatch,
+      replyAlwaysChats: ['oc_dev'],
+      intake: { llm, settings: intakeSettings(), decisionAgent },
+    })
+    // Bob 不在授权名单里：他 @了机器人也要先过决策层。
+    engine.ingest(trigger({ id: 't_member', actorId: 'ou_bob', actorName: 'Bob', addressed: 'mention', text: '这个开关在哪？' }))
+
+    await loop.tick()
+
+    expect(decided).toEqual(['t_member'])
+    expect(assessed).toBe('')
+    // 咨询类消息建咨询会话，不开单。
+    expect(store.latestIntakeByThread('feishu:oc_dev:om_1')?.kind).toBe('question')
+    expect(engine.store.listTickets()).toHaveLength(0)
   })
 
   it('发起人补充信息后收口：生成需求单并 @管理员终审', async () => {
@@ -226,41 +286,71 @@ describe('需求识别（intake）', () => {
     expect(engine.store.listTickets()).toHaveLength(0)
   })
 
-  it('管理员自己提的需求自己终审：「确认派单」直接开单，不重新分析', async () => {
+  it('管理员的需求分级不通过时先澄清再直接开单：不经终审', async () => {
     const llm = new FakeIntake([
-      QUESTIONS,
+      { action: 'reply', reply: '登录这块具体要改什么？超时时长还是失败重试？' },
       {
         action: 'report',
         reply: '整理好了',
-        report: { title: '登录 500', problem: '点击登录返回 500', background: '日常使用', steps: '登录页点登录' },
+        report: { title: '登录超时改 30 秒', problem: '登录超过 10 秒就失败', background: '日常使用' },
       },
     ])
-    // 发起人 Bob 同时是本群终审管理员。
-    const { engine, loop, store, advance } = setup(llm, { approvers: ['ou_bob'], policy: { allowed: ['ou_bob'] } })
-    engine.ingest(trigger())
-    await loop.tick()
-    expect(store.latestIntakeByThread('feishu:oc_dev:om_1')?.status).toBe('ready')
-    const analyzeCalls = llm.requests.length
-
-    advance('2026-11-12T10:03:10.000Z')
+    const store = new Store(':memory:')
+    const clock = { now: () => now }
+    let n = 0
+    const engine = new Engine({ store, policy: { ...policy, allowed: ['ou_admin'] }, clock, ids: { next: p => `${p}_${++n}` } })
+    const loop = new AgentLoop({
+      engine,
+      decisionEngine: {
+        async assess(req) {
+          return {
+            proposal: { triggerId: req.trigger.id, decision: 'stop', strength: req.strength, reason: '需求不明确', rules: [], clarify: true },
+            audit: { engine: 'pi', triggerId: req.trigger.id, durationMs: 0, toolCalls: [], tokens: { input: 0, output: 0, total: 0 }, promptChars: { system: 0, user: 0 } },
+          }
+        },
+        async reply() { return '' },
+      },
+      clock,
+      batchWindowMs: 0,
+      source: 'feishu',
+      dispatch,
+      replyAlwaysChats: ['oc_dev'],
+      intake: { llm, settings: intakeSettings() },
+    })
     engine.ingest(trigger({
-      id: 't_self_approve',
-      externalId: 'om_self_approve',
+      id: 't_admin',
+      externalId: 'om_admin',
+      actorId: 'ou_admin',
+      actorName: '管理员',
+      text: '登录那块改一下',
+      addressed: 'mention',
+    }))
+    await loop.tick()
+
+    // 需求不明确：进澄清会话，还没开单。
+    const intake = store.latestIntakeByThread('feishu:oc_dev:om_1')
+    expect(intake?.kind).toBe('request')
+    expect(intake?.status).toBe('clarifying')
+    expect(engine.store.listTickets()).toHaveLength(0)
+
+    // 讨论清楚后直接开单：发起人就是管理员，不需要再等终审。
+    now = '2026-11-12T10:02:10.000Z'
+    engine.ingest(trigger({
+      id: 't_admin_2',
+      externalId: 'om_admin_2',
       threadId: 'feishu:oc_dev:om_1',
-      actorId: 'ou_bob',
-      actorName: 'Bob',
-      text: '确认派单',
-      addressed: 'none',
-      receivedAt: '2026-11-12T10:03:00.000Z',
+      actorId: 'ou_admin',
+      actorName: '管理员',
+      text: '登录超过 10 秒就失败，改成 30 秒',
+      addressed: 'mention',
+      receivedAt: '2026-11-12T10:02:00.000Z',
     }))
     await loop.tick()
 
     const tickets = engine.store.listTickets()
     expect(tickets).toHaveLength(1)
-    expect(tickets[0]?.title).toBe('登录 500')
+    expect(tickets[0]?.title).toBe('登录超时改 30 秒')
     expect(store.latestIntakeByThread('feishu:oc_dev:om_1')?.status).toBe('approved')
-    // 终审不能再触发一轮分析：否则确认完只会重新整理需求单，永远不派单。
-    expect(llm.requests).toHaveLength(analyzeCalls)
   })
 
   it('管理员驳回后需求单结束，不派单', async () => {
@@ -285,7 +375,7 @@ describe('需求识别（intake）', () => {
     expect(store.latestIntakeByThread('feishu:oc_dev:om_1')?.status).toBe('rejected')
   })
 
-  it('群级白名单拦截的消息不会被 intake 绕过', async () => {
+  it('群级名单外的人只是普通成员：消息进决策层，但开不出工单', async () => {
     const llm = new FakeIntake([QUESTIONS])
     const store = new Store(':memory:')
     const clock = { now: () => '2026-11-12T10:00:10.000Z' }
@@ -311,11 +401,14 @@ describe('需求识别（intake）', () => {
     })
     engine.ingest(trigger({ actorId: 'ou_mallory', actorName: 'Mallory' }))
     await loop.tick()
-    expect(llm.requests).toHaveLength(0)
-    expect(store.latestIntakeByThread('feishu:oc_dev:om_1')).toBeNull()
+    // 名单只决定谁能当管理员，普通成员照样能提需求。
+    expect(llm.requests.length).toBeGreaterThan(0)
+    expect(store.latestIntakeByThread('feishu:oc_dev:om_1')?.kind).toBe('issue')
+    // 但他开不出工单：工单只由管理员终审产生。
+    expect(engine.store.listTickets()).toHaveLength(0)
   })
 
-  it('没开启需求分析助手的群不接管：走原有研判路径', async () => {
+  it('没开启处理普通成员消息的群不接管：普通成员的消息直接忽略，不进研判', async () => {
     const llm = new FakeIntake([QUESTIONS])
     const store = new Store(':memory:')
     const clock = { now: () => now }
@@ -329,7 +422,7 @@ describe('需求识别（intake）', () => {
       source: 'feishu',
       dispatch,
       replyAlwaysChats: ['oc_dev'],
-      // 需求分析助手只在 oc_ops 开启：oc_dev 不受影响。
+      // 处理普通成员消息只在 oc_ops 开启：oc_dev 不受影响。
       intake: { llm, settings: intakeSettings({ enabledChats: ['oc_ops'] }) },
     })
     engine.ingest(trigger())
@@ -437,7 +530,8 @@ describe('需求识别（intake）', () => {
       id: 't_admin_mention',
       externalId: 'om_admin_mention',
       threadId: 'feishu:oc_dev:om_1',
-      actorId: 'ou_admin',
+      actorId: 'ou_alice',
+      actorName: 'Alice',
       text: '把登录超时改到 30 秒',
       addressed: 'mention',
       receivedAt: '2026-11-12T10:02:10.000Z',
@@ -566,39 +660,37 @@ describe('需求识别（intake）', () => {
     expect(intake?.report).toBeUndefined()
   })
 
-  it('发起人被移出群级名单后不能再继续澄清：不调用模型也不回复', async () => {
-    const llm = new FakeIntake([QUESTIONS, { action: 'reply', reply: '补充报错原文' }])
+  it('被移出群级名单的人降级为普通成员：能提需求，但不能自己拍板', async () => {
+    const llm = new FakeIntake([
+      QUESTIONS,
+      { action: 'report', reply: '整理好了', report: { title: '登录 500', problem: '500' } },
+    ])
     const { engine, loop, store, advance } = setup(llm, {
+      approvers: ['ou_bob'],
       policy: {
-        allowedByChat: { oc_dev: ['ou_bob'] },
-        allowedByChatOpenIds: { oc_dev: ['ou_bob'] },
+        allowedByChat: { oc_dev: ['ou_alice'] },
+        allowedByChatOpenIds: { oc_dev: ['ou_alice'] },
       },
     })
-    engine.ingest(trigger({ actorId: 'ou_bob' }))
+    // Bob 不在群名单里：普通成员，消息进决策层并建了需求会话。
+    engine.ingest(trigger({ actorId: 'ou_bob', actorName: 'Bob' }))
     await loop.tick()
-    // 第一轮：初筛 + 分析各调一次模型。
-    const requestsBefore = llm.requests.length
-    expect(requestsBefore).toBe(2)
-    const outboxBefore = store.listOutbox().length
+    expect(store.latestIntakeByThread('feishu:oc_dev:om_1')?.kind).toBe('issue')
 
     advance('2026-11-12T10:01:10.000Z')
-    engine.updatePolicy({
-      ...policy,
-      allowedByChat: { oc_dev: ['ou_alice'] },
-      allowedByChatOpenIds: { oc_dev: ['ou_alice'] },
-    })
     engine.ingest(trigger({
       id: 't2',
       externalId: 'om_2',
       threadId: 'feishu:oc_dev:om_1',
       actorId: 'ou_bob',
-      text: '报错是 internal server error',
+      actorName: 'Bob',
+      text: '确认派单',
       receivedAt: '2026-11-12T10:01:00.000Z',
     }))
     await loop.tick()
 
-    expect(llm.requests).toHaveLength(requestsBefore)
-    expect(store.listOutbox()).toHaveLength(outboxBefore)
+    // 名单外的人不能终审：不会开单。
+    expect(engine.store.listTickets()).toHaveLength(0)
   })
 
   it('终审管理员不在群级名单里时不能派单', async () => {

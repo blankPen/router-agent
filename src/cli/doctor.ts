@@ -70,6 +70,8 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
   checks.push(configRequiredCheck(config, projectCount))
   // 决策层是否真的装上：这是「配了却在用兜底」最容易漏掉的一处。
   checks.push(decisionLayerCheck(config))
+  // 哪些群在处理普通成员的消息：普通成员的消息要不要跟进，全看这个开关。
+  checks.push(memberMessagesCheck(config))
 
   checks.push({
     name: 'accept mode',
@@ -364,6 +366,28 @@ function decisionLayerCheck(config: AppConfig): DoctorCheck {
     name: '决策层',
     status: 'ok',
     detail: `已启用，Provider jev（${jev.model}）`,
+  }
+}
+
+/**
+ * 普通成员消息处理检查：哪些群开了「处理普通成员消息」。
+ *
+ * 没开的群里，普通成员（非授权用户）的消息一律不理——这是排查
+ * 「机器人为什么不回我」时最常问的一条。
+ */
+function memberMessagesCheck(config: AppConfig): DoctorCheck {
+  const chats = config.feishu.chats.filter(chat => chat.members?.enabled)
+  if (chats.length === 0) {
+    return {
+      name: '普通成员消息',
+      status: 'ok',
+      detail: '没有群开启「处理普通成员消息」：普通成员的消息一律不理，管理员的消息照常处理',
+    }
+  }
+  return {
+    name: '普通成员消息',
+    status: 'ok',
+    detail: `已在 ${chats.length} 个群开启：${chats.map(chat => chat.chat).join('、')}`,
   }
 }
 

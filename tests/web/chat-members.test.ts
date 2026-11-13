@@ -1,28 +1,28 @@
 import { describe, expect, it } from 'vitest'
 import {
-  DEFAULT_CHAT_INTAKE,
-  MAX_INTAKE_QUESTIONS,
-  chatIntakeIssue,
-  normalizeChatIntake,
-} from '../../src/web/client/chat-intake.js'
+  DEFAULT_CHAT_MEMBERS,
+  MAX_MEMBER_QUESTIONS,
+  chatMembersIssue,
+  normalizeChatMembers,
+} from '../../src/web/client/chat-members.js'
 import { groupFields, groupsFor } from '../../src/web/client/fields.js'
 
-describe('需求分析助手的群级配置', () => {
+describe('处理普通成员消息的群级配置', () => {
   it('默认关闭、最多 10 轮、允许只读项目代码', () => {
-    expect(DEFAULT_CHAT_INTAKE).toEqual({ enabled: false, approvers: [], maxQuestions: 10, codeAccess: true })
+    expect(DEFAULT_CHAT_MEMBERS).toEqual({ enabled: false, approvers: [], maxQuestions: 10, codeAccess: true })
   })
 
   it('轮次必须是 0–50 的整数', () => {
-    expect(chatIntakeIssue(undefined)).toBeNull()
-    expect(chatIntakeIssue({ ...DEFAULT_CHAT_INTAKE, maxQuestions: 0 })).toBeNull()
-    expect(chatIntakeIssue({ ...DEFAULT_CHAT_INTAKE, maxQuestions: 10 })).toBeNull()
-    expect(chatIntakeIssue({ ...DEFAULT_CHAT_INTAKE, maxQuestions: -1 })).toContain('整数')
-    expect(chatIntakeIssue({ ...DEFAULT_CHAT_INTAKE, maxQuestions: MAX_INTAKE_QUESTIONS + 1 })).toContain('整数')
-    expect(chatIntakeIssue({ ...DEFAULT_CHAT_INTAKE, maxQuestions: 1.5 })).toContain('整数')
+    expect(chatMembersIssue(undefined)).toBeNull()
+    expect(chatMembersIssue({ ...DEFAULT_CHAT_MEMBERS, maxQuestions: 0 })).toBeNull()
+    expect(chatMembersIssue({ ...DEFAULT_CHAT_MEMBERS, maxQuestions: 10 })).toBeNull()
+    expect(chatMembersIssue({ ...DEFAULT_CHAT_MEMBERS, maxQuestions: -1 })).toContain('整数')
+    expect(chatMembersIssue({ ...DEFAULT_CHAT_MEMBERS, maxQuestions: MAX_MEMBER_QUESTIONS + 1 })).toContain('整数')
+    expect(chatMembersIssue({ ...DEFAULT_CHAT_MEMBERS, maxQuestions: 1.5 })).toContain('整数')
   })
 
   it('管理员条目去空白、丢空项', () => {
-    const value = normalizeChatIntake({
+    const value = normalizeChatMembers({
       enabled: true,
       approvers: [' admin@example.com ', '', 'ou_x'],
       maxQuestions: 10,

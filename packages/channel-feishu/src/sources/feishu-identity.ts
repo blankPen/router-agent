@@ -377,7 +377,7 @@ export interface RuntimeIdentity {
    */
   allowedByChatOpenIds: Record<string, string[]>
   /**
-   * 群级「需求分析助手」终审管理员解析出的 open_id。
+   * 群级「普通成员需求」终审管理员解析出的 open_id。
    *
    * 键是 chat_id；没有配管理员的群不会出现在这里（调用方按空名单处理）。
    * 配了邮箱但一个都没解析出来时给 `[]`：这个群没有人能终审，
@@ -549,17 +549,17 @@ export async function resolveRuntimeIdentity(opts: {
     }
   }
 
-  // 需求分析助手的终审管理员：同样支持邮箱，启动时一次解析成 open_id。
+  // 普通成员需求的终审管理员：同样支持邮箱，启动时一次解析成 open_id。
   // 终审是「谁来拍板」的硬边界，配了却解析不到人时不能退回全局名单。
   const approverOpenIdsByChat: Record<string, string[]> = {}
   for (const chat of feishu.chats) {
-    const approvers = chat.intake?.approvers ?? []
+    const approvers = chat.members?.approvers ?? []
     if (approvers.length === 0) continue
     const resolution = await resolver.resolveEntries(approvers)
     collect(resolution)
     approverOpenIdsByChat[chat.chat] = resolution.openIds
     if (resolution.openIds.length === 0) {
-      logger.error('feishu:intake-approver-empty', {
+      logger.error('feishu:member-approver-empty', {
         chat: chat.chat,
         name: opts.chatNames?.(chat.chat) ?? '',
         count: resolution.entries.length,

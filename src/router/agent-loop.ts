@@ -7,7 +7,7 @@ import { messageContext } from '#core/events.js'
 import { noopLogger, errorMessage, type Logger } from '#infra/logger.js'
 import { activeDraft, resolveDispatch, type DispatchMissing, type DispatchSettings } from './dispatch.js'
 import { readRouterPrompt } from '../specs/index.js'
-import { IntakeCoordinator, type IntakeSettingsView } from './intake-flow.js'
+import { IntakeCoordinator, type MemberSettingsView } from './intake-flow.js'
 import type { IntakeEngine } from './intake-engine.js'
 import type { DecisionAgent } from './decision/agent.js'
 import { isSmallTalk as smallTalkRule } from '#core/admission.js'
@@ -52,12 +52,13 @@ export interface AgentLoopOptions {
   /** 关键链路日志：消息处理失败、模型不可用、会话读写失败都会在这里留痕。 */
   logger?: Logger
   /**
-   * 需求识别（intake）：普通成员在群里反馈问题时由它初筛、澄清并整理需求单。
-   * 不传时保持原有行为：群里未 @ 的消息只在 mode=all 时回复，普通成员不能自助提需。
+   * 需求会话（intake）：普通成员在群里反馈问题时由它澄清、整理需求单，
+   * 管理员的需求分级不通过时也用它先讨论几轮。
+   * 不传时保持原有行为：普通成员的消息照旧走研判（工具范围仍是只读）。
    */
   intake?: {
     llm: IntakeEngine
-    settings: IntakeSettingsView
+    settings: MemberSettingsView
     /** 项目选择器 → 本地目录；返回空表示这一轮不读代码。 */
     resolveProjectPath?: (project: { name: string; repo: string }) => Promise<string | undefined>
     /** 决策层（确定性准入 + Jev/LLM 分类）；传入后替代普通成员路径的 LLM 初筛。 */
@@ -75,7 +76,7 @@ export interface ClarifyInfo {
 }
 
 export interface AssessResult {
-  outcome: 'accept' | 'ignore' | 'unavailable' | 'clarify'
+  outcome: 'accept' | 'ignore' | 'unavailable' | 'clarify' | 'clarify-requirement'
   ticket?: Ticket
   clarify?: ClarifyInfo
   /** 研判过程中已经生成好的用户答复（查询 / 清理类工具），直接发送，不再多调一次回复模型。 */
@@ -105,10 +106,13 @@ const THREAD_INTRO = (title: string, id: string) => `工单「${title}」已开�
 const REOPEN_PATTERN = /重新开工|重新开单|重开|继续做|继续干|接着做|接着干|继续|reopen|retry|continue/i
 
 /**
- * 被群级白名单拒绝的 Gate 原因：intake 不得绕过。
- * 「配了白名单但一个都没解析出来」是安全边界，也不允许普通成员自助触发。
+ * 被群级白名单拒绝的 Gate 原因：普通成员路径不得绕过。
+ *
+ * 只有「配了名单但一个都没解析出来」算硬边界——那说明这个群的名单没生效，
+ * 这个群拒绝所有人。名单外但名单本身有效的人只是普通成员，
+ * 他们的消息照常进决策层，需求要经管理员终审才成单。
  */
-const BLOCKED_BY_CHAT_ALLOWLIST = new Set(['admission:chat-allowlist-empty', 'admission:not-in-chat-allowlist'])
+const BLOCKED_BY_CHAT_ALLOWLIST = new Set(['admission:chat-allowlist-empty'])
 
 function isAllowlistBlocked(verdict: ReturnType<typeof gate>): boolean {
   return 'reason' in verdict && BLOCKED_BY_CHAT_ALLOWLIST.has(verdict.reason)
@@ -267,7 +271,7 @@ export class AgentLoop {
         }
       }
 
-      // 需求识别：进行中的澄清会话、待终审的需求单优先处理，不进入研判/派工。
+      // 需求会话：进行中的澄清会话、待终审的需求单优先处理，不进入研判/派工。
       if (this.intake) {
         const intakeAction = await this.intake.handleBeforeGate(trigger)
         if (intakeAction === 'handled') {
@@ -284,15 +288,22 @@ export class AgentLoop {
       }
 
       const verdict = gate(trigger, this.engine.policy())
-      // 需求识别：群里未 @ 的消息统一先过轻量初筛，名单内外的普通反馈一视同仁。
-      // 群级白名单（含「配了但一个都没解析出来」）是硬边界，不允许 intake 绕过。
-      if (this.intake && trigger.addressed === 'none' && !trigger.mediaOnly && !isAllowlistBlocked(verdict)) {
-        const handled = await this.intake.handleUnaddressed(trigger)
+      // 角色分流：管理员直进 Router；普通成员一律先过决策层，由决策层决定要不要跟进。
+      // 群级白名单（含「配了但一个都没解析出来」）是硬边界，不允许普通成员路径绕过。
+      // 没装需求会话链路（没有决策层与分析 Agent）时保持旧行为：普通成员的消息照旧走研判，
+      // 工具范围仍是只读，管理员专属的工单工具拿不到。
+      if (this.intake && !trigger.isBot && !this.isAllowlisted(trigger) && !trigger.mediaOnly && !isAllowlistBlocked(verdict)) {
+        const handled = await this.intake.handleMemberMessage(trigger)
         if (handled) {
           await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}`)
           result.ignored += 1
           return
         }
+        // 本群没开「处理普通成员消息」（或没绑项目）：普通成员的消息一律忽略，不进研判。
+        const reason = verdict.action === 'ignore' && 'reason' in verdict ? verdict.reason : 'member:messages-disabled'
+        this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'inferred', reason })
+        result.ignored += 1
+        return
       }
       if (verdict.action === 'ignore') {
         await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}`)
@@ -341,6 +352,51 @@ export class AgentLoop {
     }
   }
 
+  /**
+   * 派工信息不全时向用户追问 repo / branch。
+   *
+   * 单独成方法：需求分级不通过（要先讨论）但群没绑项目时，也走同一条追问路径。
+   */
+  private async handleClarify(trigger: Trigger, info: ClarifyInfo, result: TickResult, strength: Strength): Promise<void> {
+    // 路由层判定可以开单但派工信息不全：动作仍是 open_ticket，先向用户补齐 repo / branch。
+    this.routerAction(trigger, 'open_ticket', {
+      stage: 'clarify',
+      missing: info.missing,
+      ...(info.rejectedRepo ? { rejectedRepo: info.rejectedRepo } : {}),
+    })
+    // 不在「全量接收」的会话里时，未 @ 的消息不追问，避免群里刷屏。
+    if (!this.shouldReply(trigger)) {
+      this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength, reason: `clarify:unaddressed:missing-${info.missing.join('+')}` })
+      result.ignored += 1
+      return
+    }
+    this.store.saveDispatchDraft({
+      chatId: trigger.chatId,
+      threadId: trigger.threadId,
+      actorId: trigger.actorId,
+      task: info.task,
+      repo: info.repo,
+      branch: info.branch,
+      updatedAt: this.clock.now(),
+    })
+    this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength, reason: `clarify:missing-${info.missing.join('+')}` })
+    result.ignored += 1
+    await this.converse(trigger, clarifyReason(info), {
+      needs: {
+        missing: info.missing,
+        ...(info.rejectedRepo ? { rejected_repo: info.rejectedRepo } : {}),
+        resolved_repo: info.repo,
+        resolved_branch: info.branch,
+      },
+      projects: (this.dispatch?.projects ?? []).map(project => ({
+        name: project.name,
+        defaultBranch: project.defaultBranch,
+      })),
+      draft: { task: info.task },
+    }, failure => `${failure.message}\n${clarifyFallback(info, this.dispatch?.projects)}`)
+    result.replied += 1
+  }
+
   /** 落地研判结果：接单只用一条话题消息确认开单；没接单且消息是在找它说话时，礼貌回一句。 */
   private async applyAssess(trigger: Trigger, assessed: AssessResult, result: TickResult, strength: Strength): Promise<void> {
     if (assessed.outcome === 'accept' && assessed.ticket) {
@@ -352,45 +408,31 @@ export class AgentLoop {
       this.reply(trigger, THREAD_INTRO(assessed.ticket.title, assessed.ticket.id), `thread:${assessed.ticket.id}`, { thread: true })
       return
     }
-    if (assessed.outcome === 'clarify' && assessed.clarify) {
-      const info = assessed.clarify
-      // 路由层判定可以开单但派工信息不全：动作仍是 open_ticket，先向用户补齐 repo / branch。
-      this.routerAction(trigger, 'open_ticket', {
-        stage: 'clarify',
-        missing: info.missing,
-        ...(info.rejectedRepo ? { rejectedRepo: info.rejectedRepo } : {}),
-      })
-      // 不在「全量接收」的会话里时，未 @ 的消息不追问，避免群里刷屏。
-      if (!this.shouldReply(trigger)) {
-        this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength, reason: `clarify:unaddressed:missing-${info.missing.join('+')}` })
-        result.ignored += 1
+    if (assessed.outcome === 'clarify-requirement') {
+      // 管理员的需求太模糊或太复杂：先讨论几轮再开单。
+      this.routerAction(trigger, 'analysis', { reason: 'router:clarify-requirement' })
+      // 先把这条消息落定：否则下一轮 tick 会重新研判它，澄清会话的进展由会话自己接管。
+      this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength, reason: 'router:clarify-requirement' })
+      const started = this.intake
+        ? await this.intake.startAdminRequest(trigger, { triage: 'Router 判定这条需求需要先讨论清楚再开单。' })
+        : false
+      if (started) {
+        result.replied += 1
         return
       }
-      this.store.saveDispatchDraft({
-        chatId: trigger.chatId,
-        threadId: trigger.threadId,
-        actorId: trigger.actorId,
-        task: info.task,
-        repo: info.repo,
-        branch: info.branch,
-        updatedAt: this.clock.now(),
-      })
-      this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength, reason: `clarify:missing-${info.missing.join('+')}` })
-      result.ignored += 1
-      await this.converse(trigger, clarifyReason(info), {
-        needs: {
-          missing: info.missing,
-          ...(info.rejectedRepo ? { rejected_repo: info.rejectedRepo } : {}),
-          resolved_repo: info.repo,
-          resolved_branch: info.branch,
-        },
-        projects: (this.dispatch?.projects ?? []).map(project => ({
-          name: project.name,
-          defaultBranch: project.defaultBranch,
-        })),
-        draft: { task: info.task },
-      }, failure => `${failure.message}\n${clarifyFallback(info, this.dispatch?.projects)}`)
-      result.replied += 1
+      // 没有可用的澄清会话（没装分析引擎，或群没绑定项目）：退回常规追问，先问项目与分支。
+      const resolution = resolveDispatch({ settings: this.dispatch ?? { projects: [], bindings: [] }, chatId: trigger.chatId })
+      await this.handleClarify(trigger, {
+        missing: resolution.missing.length > 0 ? resolution.missing : ['repo'],
+        repo: resolution.repo,
+        branch: resolution.branch,
+        ...(resolution.rejectedRepo ? { rejectedRepo: resolution.rejectedRepo } : {}),
+        task: trigger.text,
+      }, result, strength)
+      return
+    }
+    if (assessed.outcome === 'clarify' && assessed.clarify) {
+      await this.handleClarify(trigger, assessed.clarify, result, strength)
       return
     }
     if (assessed.outcome === 'unavailable') {
@@ -576,6 +618,10 @@ export class AgentLoop {
     if (proposal.decision === 'unavailable') {
       // 模型主动给出的 unavailable 决定：属于模型结论，不是调用失败。
       return this.markUnavailable(trigger, proposal.reason || '模型判定未完成', 'model')
+    }
+    // 需求分级：不明确或复杂到必须先讨论时不开单，交给澄清会话。
+    if (proposal.clarify) {
+      return { outcome: 'clarify-requirement' }
     }
 
     let repo = proposal.repo ?? ''

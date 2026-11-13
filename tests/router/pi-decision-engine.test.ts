@@ -156,13 +156,14 @@ describe('PiDecisionEngine', () => {
     expect(ROUTER_TOOL_SPECS.map(spec => spec.name).sort()).toEqual([...DECISION_TOOL_NAMES].sort())
   })
 
-  it('普通成员 scope 的会话装配结果不含任何工单工具', async () => {
+  it('普通成员 scope 只拿到只读上下文工具：没有任何工单工具', async () => {
     const { enginePi, state } = setup(s => s.finish())
     await enginePi.assess(memberRequest())
 
-    expect(state.captured?.toolNames).toEqual([])
-    expect(state.captured?.tools).toEqual([])
-    expect(state.captured?.tools.some(tool => tool.name.startsWith('router_'))).toBe(false)
+    expect(state.captured?.toolNames).toEqual(['router_context'])
+    expect(state.captured?.tools.map(tool => tool.name)).toEqual(['router_context'])
+    expect(state.captured?.toolNames.some(name => name.includes('ticket'))).toBe(false)
+    expect(state.captured?.toolNames).not.toContain('router_decide')
   })
 
   it('越权调用工单工具被执行时校验拒绝并记 tool:denied', async () => {
@@ -215,6 +216,7 @@ describe('PiDecisionEngine', () => {
     await enginePi.assess(request())
 
     const expected = [
+      'router_context',
       'router_decide',
       'router_read',
       'router_ticket',

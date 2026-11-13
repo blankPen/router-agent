@@ -24,29 +24,46 @@ WorkerRuntime 端口 ── OrcaRuntime（默认）/ ClaudeCodeRuntime / AcpRunt
 
 运行时的差异与选型见 [RUNTIME.md](RUNTIME.md)。
 
-某个群开启「需求分析助手」（`feishu.chats[].intake.enabled`）后，Router 与 Worker 之间多一条**并行**的能力链：
+消息进来先分角色：**授权管理用户**直进 Router，**普通成员**先进决策层。群开关
+`feishu.chats[].members.enabled` 只决定 Router 要不要处理本群普通成员的消息。
 
 ```text
-群消息（普通成员，可不 @）
-        │
-        ▼
-IntakeCoordinator ── 初筛（轻量 LM）── chat / question / issue
-        │                                   │
-        │ question / issue                  │ chat → 静默忽略
-        ▼
-PiIntakeEngine（只读项目代码：code_ls / code_read / code_grep）
-        │ 多轮追问，补齐场景 / 环境 / 复现步骤 / 影响 / 预期
-        ▼
-结构化需求单 ──@管理员终审── 确认派单 → 原有 Engine.decide() → WorkerRuntime
-                              └─ 驳回 / 补要求 → 结束 / 重新分析
+群消息
+  │
+  ├─ 授权管理用户（群级 allowed，没有则用全局 allowed）
+  │      │
+  │      ▼
+  │   Router（Pi 研判 + 需求分级）
+  │      ├─ 闲聊 / 咨询 ──────────────→ 直接回复
+  │      ├─ 工单相关 ────────────────→ 工单工具（查进度 / 关单 / 回收 workspace）
+  │      ├─ 一句话或明确的需求 ──────→ 直接开单
+  │      └─ 模糊或复杂的需求 ────────→ 澄清会话（见下），聊清楚后直接开单
+  │
+  └─ 普通成员（其余所有人）
+         │
+         ▼
+      决策层（确定性准入 + Jev / LLM 分类）
+         ├─ 不跟进 / 闲聊 ──────────→ 忽略
+         ├─ 咨询 ───────────────────→ 咨询会话，直接给结论
+         └─ 需求 ───────────────────→ 需求会话 → @管理员终审 → Engine.decide() → WorkerRuntime
 ```
 
-这条链**不改原有架构**：Router 仍只调度与收尾，读代码与业务判断全部落在子 Agent；派单仍只经 `Engine.decide()`；权限、项目隔离、五阶段工单、Outbox 与 PR 闭环一行不改。详见 [CONFIGURATION.md](CONFIGURATION.md#需求分析助手群级-intake)。
+两条链共用同一个需求会话机制（`IntakeCoordinator` + `PiIntakeEngine`，只读项目代码：
+`code_ls` / `code_read` / `code_grep`），差别只在收尾：
+
+- **管理员发起的澄清会话**：讨论清楚后直接开单，发起人就是管理员，不需要再等终审；
+- **普通成员的需求会话**：整理成结构化需求单 @终审管理员，管理员回「确认派单」才走原有 `Engine.decide()`，回「驳回」结束。
+
+工具权限按角色分层，在工具层强制：管理员拿全套（`router_ticket*` / `router_ticket_close` /
+`router_workspace_remove` / `router_decide` …），普通成员只有只读上下文工具 `router_context`，
+拿不到任何工单能力。
+
+这条链**不改原有架构**：Router 仍只调度与收尾，读代码与业务判断全部落在子 Agent；派工仍只经 `Engine.decide()`；项目隔离、五阶段工单、Outbox 与 PR 闭环一行不改。详见 [CONFIGURATION.md](CONFIGURATION.md#处理普通成员消息群级-members)。
 
 ## 一条消息的四个步骤
 
 1. **听**：常驻消费飞书群 / 私聊消息，按名单与 `@` 规则做确定性准入。
-2. **判**：未被直接指派的候选交给 Pi 研判（可批量），输出 `accept / stop / ignore / unavailable` 四类决定。
+2. **判**：按角色分流——普通成员交给决策层（Jev / LLM 分类）决定要不要跟进；管理员的消息交给 Pi 研判（可批量），输出 `accept / stop / ignore / unavailable` 四类决定，需要先讨论的需求用 `clarify` 标记。
 3. **派**：接单后创建工单与授权（Mandate），先确认「项目 + 起始分支」，再按 `runtime.default` 选择运行时：Orca 用 `orca worktree create --repo ... --base-branch ...` 开 worktree + Agent 终端（默认 Claude Code，可用 `runtime.options.orca.agent` 指定）；Claude Code 用 `git worktree` + `claude --bg` 后台会话；ACP 用 `AcpRuntime` 拉起对应的 ACP Agent。缺项目或分支时不开单，先在会话里追问（群配置里可固定项目和分支，免问答）。
 4. **跟**：Worker 用 `ra report` 上报（失败自动落盘 `state.json`），Router 刷新工单阶段；PR 合并 / 关闭后通知发起人，工单保持开放、可继续追问。
 

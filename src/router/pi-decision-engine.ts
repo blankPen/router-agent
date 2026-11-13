@@ -515,6 +515,9 @@ export class PiDecisionEngine implements DecisionEngine {
             const ctx = { canMutate: 'canMutate' in req && req.canMutate === true }
             let result: unknown
             switch (name) {
+              case 'router_context':
+                result = this.toolbox.context(args)
+                break
               case 'router_read':
                 result = this.toolbox.read(args)
                 break

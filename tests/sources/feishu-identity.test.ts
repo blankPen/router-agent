@@ -732,7 +732,7 @@ describe('运行时身份装配', () => {
     expect(identity.names.get(OPEN_ID)).toBe('阿振(Pz)')
   })
 
-  it('需求分析助手的终审管理员支持邮箱，按群解析成 open_id', async () => {
+  it('普通成员需求的终审管理员支持邮箱，按群解析成 open_id', async () => {
     const runner = makeRunner(argv => {
       if (isBatch(argv)) return OK_BATCH('pengzhen02@dewu.com', OPEN_ID)
       if (requestedUserId(argv) === OPEN_ID) return OK_USER(OPEN_ID, '阿振(Pz)')
@@ -741,7 +741,7 @@ describe('运行时身份装配', () => {
     const config = appConfig({
       appId: 'cli_a',
       chats: [
-        chatEntry('oc_1', { mode: 'all', intake: { enabled: true, maxQuestions: 10, codeAccess: true, approvers: ['pengzhen02@dewu.com'] } }),
+        chatEntry('oc_1', { mode: 'all', members: { enabled: true, maxQuestions: 10, codeAccess: true, approvers: ['pengzhen02@dewu.com'] } }),
         chatEntry('oc_2', { mode: 'all' }),
       ],
     })
@@ -757,13 +757,13 @@ describe('运行时身份装配', () => {
     const { events, logger } = captureLogger()
     const config = appConfig({
       appId: 'cli_a',
-      chats: [chatEntry('oc_1', { mode: 'all', intake: { enabled: true, maxQuestions: 10, codeAccess: true, approvers: ['pengzhen02@dewu.com'] } })],
+      chats: [chatEntry('oc_1', { mode: 'all', members: { enabled: true, maxQuestions: 10, codeAccess: true, approvers: ['pengzhen02@dewu.com'] } })],
     })
 
     const identity = await resolveRuntimeIdentity({ config, lark: runner, logger })
 
     expect(identity.approverOpenIdsByChat).toEqual({ oc_1: [] })
-    const empty = events.find(event => event.message === 'feishu:intake-approver-empty')
+    const empty = events.find(event => event.message === 'feishu:member-approver-empty')
     expect(empty?.level).toBe('error')
     expect(empty?.extra?.chat).toBe('oc_1')
   })

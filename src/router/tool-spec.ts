@@ -27,6 +27,15 @@ const STAGES = [...STAGE_VALUES]
 
 export const ROUTER_TOOL_SPECS: RouterToolSpec[] = [
   {
+    name: 'router_context',
+    description: '读取当前会话（群）绑定的项目信息与这条消息的上下文。普通成员只能用这个只读工具。',
+    requires: 'member',
+    parameters: Type.Object({
+      trigger_id: Type.Optional(Type.String({ description: '要读取的 Trigger ID' })),
+      thread_id: Type.Optional(Type.String({ description: '要读取的线程 ID' })),
+    }),
+  },
+  {
     name: 'router_read',
     description: '读取一条 Trigger、它的 Thread 上下文，或某个工单的完整状态。做决定前可先调用。',
     requires: 'admin',
@@ -97,7 +106,8 @@ export const ROUTER_TOOL_SPECS: RouterToolSpec[] = [
   },
   {
     name: 'router_decide',
-    description: '对一条 Trigger 给出决定。accept 会创建工单并派工；ignore 表示不需要开工；unavailable 表示研判没完成。',
+    description: '对一条 Trigger 给出决定。accept 会创建工单并派工；ignore 表示不需要开工；unavailable 表示研判没完成。'
+      + '需求本身说不清、要先和对方讨论几轮时，把 clarify 置 true（此时不要给 accept），Router 会先澄清再开单。',
     requires: 'admin',
     parameters: Type.Object({
       trigger_id: Type.String(),
@@ -109,11 +119,15 @@ export const ROUTER_TOOL_SPECS: RouterToolSpec[] = [
       repo: Type.Optional(Type.String({ description: 'accept 时必填：项目名或仓库选择器。判断不了就留空，系统会替你追问用户' })),
       branch: Type.Optional(Type.String({ description: 'accept 时必填：worktree 的起始分支。判断不了就留空，系统会替你追问用户' })),
       rules: Type.Optional(Type.Array(Type.String(), { description: '命中的策略规则名' })),
+      clarify: Type.Optional(Type.Boolean({
+        description: '需求描述不明确或复杂到必须先讨论：置 true（此时不要给 accept），Router 会先与用户澄清几轮再开单',
+      })),
     }),
   },
 ]
 
 export const DECISION_TOOL_NAMES = [
+  'router_context',
   'router_read',
   'router_ticket',
   'router_ticket_list',

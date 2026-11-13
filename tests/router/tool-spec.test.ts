@@ -5,6 +5,7 @@ import { DECISION_TOOL_NAMES, ROUTER_TOOL_SPECS, toolSpec } from '../../src/rout
 describe('Pi 工具契约（TypeBox）', () => {
   it('暴露读、查、清理与决定四类工具', () => {
     const expected = [
+      'router_context',
       'router_decide',
       'router_read',
       'router_ticket',
