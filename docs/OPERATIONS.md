@@ -105,9 +105,12 @@ Router 不做对话，只在必要时说话：
 | `thread:backfilled` / `thread:backfill-failed` | CLI | `filled` `failed` / `batch` `code` `detail` | `ra migrate threads --apply` 的回填结果 |
 | `thread:backfill-incomplete` | CLI | `total` `pending` | 回填后仍有线程缺话题 ID 别名，命令以非零退出 |
 | `router:decision` | Engine | `triggerId` `chat` `chatName` `actor` `actorName` `actorType` `decision` `strength` `reason` `ticketId` `title` `scope` | Router 的研判结论 |
-| `launch` | Service | `ticketId` `runtime` `chat` `actor` `handle` `workdir` | 派工到 Orca worktree |
+| `launch` | Service | `ticketId` `runtime` `chat` `actor` `handle` `workdir` `skillMode` | 派工到 Orca worktree；`skillMode=path` 时首轮只发短引导 |
 | `launch:queued` | Service | `maxWorkers` `capacity` `waiting` `ticketIds` | 并发已满，工单排队等待派工 |
 | `launch:queued-input` | Service | `ticketId` `pending` `maxWorkers` | 有新输入但并发满，暂不重建 worker |
+| `launch:skill` | Service | `ticketId` `mode` `name` `version` `sha256` | 本次派工生效的 Worker 技能指纹；回答「这张工单用的哪版手册」 |
+| `launch:skill-meta-failed` | Service | `workdir` `detail` | 技能指纹合并进运行时 `meta.json` 失败；不影响已启动的 worker |
+| `launch:request-write-failed` | Service | `ticketId` `message` | 用户原话落盘 `request.md` 失败；首轮仍带截断后的原文 |
 | `launch:failed` | Service | `ticketId` `title` `repo` `branch` `attempt` `reason` `hint` | 派工失败，已转人工并通知发起人；`hint` 是给用户的处置建议（运行时没给就退回通用的仓库/分支兜底） |
 | `input:queued` | Engine | `ticketId` `seq` `text` | Router 准备发给 worker 的内容 |
 | `input:deduped` | Engine | `ticketId` `inputId` `seq` `kind` `sourceKey` | 同一条来源消息重复到达（飞书重投 / 面板再点一次），复用已有输入，没有重复投给 worker |
@@ -122,7 +125,7 @@ Router 不做对话，只在必要时说话：
 | `input:adopted-handle` | Service | `ticketId` `from` `to` `sessionId` | 运行时投递时接管了新会话（Claude resume fork），Assignment 已切换到新 handle |
 | `worker:stop-stale` | Service | `ticketId` `handle` | 终端句柄已失效（`terminal_handle_stale`），停止动作不再重试 |
 | `worker:stopped` | Service | `ticketId` `handle` | 停止 worker 成功（关单 / 清理收尾） |
-| `report` | Service | `ticketId` `state` `turn` `summary` `reply` `humanAction` `pr` | worker 的 `ra report` 上报 |
+| `report` | Service | `ticketId` `state` `turn` `summary` `humanAction` `pr` `replyChars` `replyBlocks` | worker 的 `ra reply` / `ra report` 上报；结构化载荷只记块数 |
 | `report:evidence-missing` | Service | `ticketId` `mode` `action` `source` `reason` `missing` | UI 工单缺 Before / After 证据；`enforce` 时 action=reject，`warn` 时只记录 |
 | `report:evidence-unverified` | Service | `ticketId` `mode` `unverified` `source` | 无法判断是否有证据（workdir 丢失、git / PR 查询失败），降级放行 |
 | `report:ingest-failed` | Service | `ticketId` `message` | 兜底通道处理上报时的非门禁异常 |
@@ -130,6 +133,14 @@ Router 不做对话，只在必要时说话：
 | `report:unknown-ticket` | Service | `ticketId` | 上报的工单不存在，忽略 |
 | `report:no-assignment` | Service | `ticketId` | 工单没有派工记录，无法确认归属，忽略 |
 | `report:stale-ignored` | Service | `ticketId` `incoming` `latest` | 上报时间早于最后一条已入库报告，重放被忽略 |
+| `question:asked` | Service | `ticketId` `questionId` `turn` `options` `mode` | 选择题入库并出卡片；`mode=text` 时退化为序号回复 |
+| `question:answered` | Service | `ticketId` `questionId` `inputId` `optionIds` `operator` | 按钮点选已落成 Input，并立即投递 |
+| `question:duplicate` | Service | `ticketId` `questionId` `operator` | 同一道题重复点击；只回写卡片，不重复产生输入 |
+| `question:rejected` | Service | `ticketId` `questionId` `reason` `operator` | 点选被拒：过期 / 非发起人 / 非法选项 / 未知题 |
+| `question:expired` | Service | `ticketId` `questionId` `turn` | 选择题超时，已标 expired 并提醒一次 |
+| `question:deliver-failed` | Service | `ticketId` `questionId` `detail` | 答案入库后立即投递失败；后续轮询会继续重投 |
+| `question:card-update-unavailable` / `question:card-update-failed` | Service | `ticketId` `questionId` `channel` / `ticketId` `questionId` `detail` | 通道不支持回写卡片，或回写接口失败；不影响答案投递 |
+| `question:handle-failed` | CLI | `channel` `questionId` `detail` | 卡片回调处理抛错（非业务拒绝） |
 | `progress:synced` / `progress:dedup` | Service | `ticketId` `count` / `skipped` | 进展定时合并同步，或内容重复被跳过 |
 | `progress:probed` | Service | `ticketId` `minutes` `count` `unchanged` | 主动巡检读会话记录 / 终端并把语义摘要同步到话题 |
 | `progress:sync-failed` | Service | `ticketId` `detail` | 进展合并同步抛错，不影响当轮回复 |
@@ -174,6 +185,7 @@ Router 不做对话，只在必要时说话：
 | `plugin:install-failed` | Plugin installer | `home` `package` `version` `detail` | npm 退出码非零、超时、包没落盘或加载器解析不到；`detail` 是截断后的 npm 输出 |
 | `channel:consumer-started` / `channel:consumer-start-failed` | CLI | `channel` / `channel` `detail` | 已加载通道的入站消费启动结果；自定义通道启动失败不会阻塞其它通道 |
 | `channel:feishu-missing` | CLI | `detail` | 配置里没有可用的飞书通道；服务继续启动，但飞书消息不会入站 |
+| `channel:card-actions-started` / `channel:card-actions-failed` | CLI | `channel` / `channel` `detail` | 卡片按钮回调事件流启动结果；失败后 `ask.mode=auto` 退化为序号回复 |
 | `channel:unreact-failed` | CLI | `channel` `messageId` `detail` | 回复发送后撤销回执失败；不影响已发出的回复 |
 | `chats:refreshed` | CLI | `count` | 群名目录刷新成功 |
 | `session:migrated` | CLI | `sessions` `resets` | 人工执行 `ra migrate sessions --apply` 完成 |
@@ -184,7 +196,12 @@ Router 不做对话，只在必要时说话：
 | `spec:migrated` / `spec:migration-failed` | Service | `source` `spec` / `detail` | 旧版 `router.soul` 规范迁移结果 |
 | `feishu:reconnecting` | Source | `attempt` `delayMs` | 事件消费者断开，已安排退避重连 |
 | `feishu:spawn-failed` | Source | `detail` | lark-cli 无法拉起（未安装 / 无权限），会继续重试 |
+| `feishu:card-consumer-error` | Source | `detail` | 卡片按钮回调消费失败（spawn / stderr / 非法 JSON），已通知装配层降级为序号回复 |
 | `feishu:card-fallback` | Sender | `target` `key` `code` `detail` | 互动卡片发送失败，已自动降级为富文本 |
+| `feishu:reply-card-fallback` | Sender | `target` `key` `code` `message` | 结构化回复卡片失败，已按 fallbackText 降级 |
+| `feishu:doc-fallback` | Sender | `title` `message` | 文档块创建失败，已保留正文并内联回复 |
+| `feishu:image-failed` | Sender | `path` `reason` `detail` | 图片不存在 / 上传失败 / 拿不到 img_key；只降级该张图 |
+| `feishu:card-update-skip` / `feishu:card-update-failed` | Sender | `reason` / `code` `message` | 选择题卡片回写跳过（缺 token）或更新失败 |
 | `feishu:quote-fetch-failed` / `feishu:quote-parse-failed` | Source | `messageId` `detail` | 引用消息回查失败，按原消息继续 |
 | `feishu:bus-conflict` | CLI | `detail` | 事件总线冲突：同一机器人被多个消费者占用，停止重连 |
 | `feishu:error` | CLI | `detail` | 事件消费传输级错误（stderr / 非法 JSON 等），已安排重连 |

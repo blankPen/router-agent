@@ -1,8 +1,10 @@
-import { appendFileSync, existsSync, mkdirSync, rmSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import type { Clock, Engine } from './core/engine.js'
-import type { Assignment, Input, Report, Ticket, Trigger } from '#core/model.js'
+import type { Assignment, Input, Question, Report, Ticket, Trigger } from '#core/model.js'
+import type { ReplyBlock, ReplyPayload, ReplyQuestion } from '#core/reply.js'
+import { choiceBlockOf } from '#core/reply.js'
 import type { Store } from './store/db.js'
 import type { AppConfig, RetentionSettings, WorkspaceSettings } from './config.js'
 import { DEFAULT_CHAT_INTAKE, replyAlwaysChatsOf } from './config.js'
@@ -18,7 +20,7 @@ import { ReportPoller, appendEvent, readWorkerMeta, type WorkerMeta, type Worker
 import { classifyAgentStatus } from '#runtime/status.js'
 import { RuntimeRegistry } from '#runtime/registry.js'
 import { normalizeRuntimeId, ORCA_RUNTIME_ID } from '#runtime/runtimes/catalog.js'
-import { buildNeutralContract, buildWorkerPrompt } from '#runtime/spec/index.js'
+import { buildNeutralContract, buildWorkerBrief, buildWorkerPrompt, ensureWorkerSkillDir, workerSkillDir, workerSkillSnapshot, type WorkerSkillSnapshot } from '#runtime/spec/index.js'
 import { migrateLegacySoul } from './specs/index.js'
 import { workBranch } from '#runtime/naming.js'
 import { buildResumeHint } from '#runtime/resume.js'
@@ -35,6 +37,8 @@ import {
 import { EffectsProcessor } from './core/effects.js'
 import { preview } from '#core/events.js'
 import { DEFAULT_CHANNEL_ID } from '#channel/port.js'
+import type { CardAction, QuestionCardUpdate } from '#channel/port.js'
+import type { ChannelRegistry } from '#channel/registry.js'
 import type { CommandRunner } from '#infra/process.js'
 import { realRunner } from '#infra/process.js'
 import { errorMessage, noopLogger, withFieldContext, type Logger } from '#infra/logger.js'
@@ -58,7 +62,7 @@ export interface PrTracker {
 }
 
 export interface OutboundSender {
-  send(item: { channelKind: string; channelId: string; threadId: string; text: string; key: string }): Promise<void>
+  send(item: { channelKind: string; channelId: string; threadId: string; text: string; key: string; blocks?: ReplyBlock[] }): Promise<void>
 }
 
 export interface RouterServiceOptions {
@@ -92,6 +96,8 @@ export interface RouterServiceOptions {
   poller?: { scan(): number; reset?: () => void }
   effects?: EffectsProcessor
   sender?: OutboundSender
+  /** 通道注册表；选择题回写卡片时按工单所在通道找适配器。 */
+  channels?: ChannelRegistry
   agentLoopOptions?: { batchWindowMs?: number }
   onDecisionAudit?: (audit: DecisionAudit) => void
   /** 终端多久没输出算空闲，默认 2 分钟。 */
@@ -521,6 +527,11 @@ export class RouterService {
   private prTracker: PrTracker
   private git: CommandRunner
   private sender: OutboundSender
+  private readonly channels?: ChannelRegistry
+  /** 卡片回调事件流没启动成功的通道；auto 模式下选择题退化为序号回复。 */
+  private readonly cardActionsUnavailable = new Set<string>()
+  /** tick 与卡片回调共用一条投递队列，避免同一 Input 被并发投递两次。 */
+  private deliveryQueue: Promise<void> = Promise.resolve()
   private timers: NodeJS.Timeout[] = []
   private running = false
   private idleAfterMs: number
@@ -630,6 +641,7 @@ export class RouterService {
       onError: (ticketId, error) => this.logger.error('report:invalid', { ticketId, message: error.message }),
     })
     this.sender = opts.sender ?? { send: async () => {} }
+    this.channels = opts.channels
     this.effects = opts.effects ?? new EffectsProcessor({
       store: opts.store,
       sender: this.sender,
@@ -1021,7 +1033,7 @@ export class RouterService {
     this.poller.scan()
     await this.effects.tick()
     await this.launchPending()
-    await this.deliverPendingInputs()
+    await this.serializedDeliverPendingInputs()
   }
 
   async start(): Promise<void> {
@@ -1045,6 +1057,7 @@ export class RouterService {
     every(1000, () => this.runOnce())
     every(5000, () => this.trackPullRequests())
     every(15_000, () => this.checkIdle())
+    every(60_000, () => this.sweepQuestions())
     if (this.config.router.session.enabled) {
       every(60_000, async () => { await this.decisionEngine.evictIdleSessions?.(Date.now()) })
       if (this.config.router.session.retentionDays > 0) {
@@ -1179,31 +1192,68 @@ export class RouterService {
     const statePath = join(workerDir, 'state.json')
     const eventsPath = join(workerDir, 'events.log')
     const branchName = workBranch(ticket)
-    const contract = runtime.id === 'orca'
-      ? buildWorkerPrompt({
-          ticket,
-          mandateScope: ticket.title,
-          statePath,
-          eventsPath,
-          repo: ticket.repo,
-          branch: ticket.branch,
-          workBranch: branchName,
-          workdir: '',
-          home: this.config.home,
-        })
-      : buildNeutralContract({
+    // 授权范围用研判结论（mandate.scope），不是标题：标题只有一句话，
+    // scope 才带「允许做什么 / 不允许做什么」的口径。
+    const mandate = this.store.getMandate(ticket.mandateId)
+    const scope = mandate?.scope?.trim() || ticket.title
+    const skillMode = this.config.worker.skill.mode
+    const skillDir = skillMode === 'path' ? ensureWorkerSkillDir(this.config.home) : undefined
+    const skill = skillDir ? workerSkillSnapshot(this.config.home) : undefined
+    // inline 是回滚开关：旧会话仍能拿到完整手册，行为与拆分前一致。
+    const contract = skillMode === 'path'
+      ? buildWorkerBrief({
           ticketId: ticket.id,
           title: ticket.title,
-          scope: ticket.title,
+          scope,
+          ...(ticket.request ? { request: ticket.request } : {}),
+          ...(ticket.requestActorName ? { requestActorName: ticket.requestActorName } : {}),
+          ...(ticket.requestAt ? { requestAt: ticket.requestAt } : {}),
           repo: ticket.repo,
           branch: ticket.branch,
           workBranch: branchName,
           workdir: '',
-          statePath,
-          eventsPath,
+          workerDir,
+          skillDir: skillDir ?? workerSkillDir(this.config.home),
+          ...(skill ? { skill: { name: skill.name, version: skill.version, sha256: skill.sha256 } } : {}),
+          ...(ticket.request ? { requestPath: join(workerDir, 'request.md') } : {}),
           attachments: ticket.attachments ?? [],
-          home: this.config.home,
         })
+      : runtime.id === ORCA_RUNTIME_ID
+        ? buildWorkerPrompt({
+            ticket,
+            mandateScope: scope,
+            statePath,
+            eventsPath,
+            repo: ticket.repo,
+            branch: ticket.branch,
+            workBranch: branchName,
+            workdir: '',
+            home: this.config.home,
+          })
+        : buildNeutralContract({
+            ticketId: ticket.id,
+            title: ticket.title,
+            scope,
+            repo: ticket.repo,
+            branch: ticket.branch,
+            workBranch: branchName,
+            workdir: '',
+            statePath,
+            eventsPath,
+            attachments: ticket.attachments ?? [],
+            home: this.config.home,
+          })
+    // 原话可能很长，落盘一份供 worker 读全文。
+    if (ticket.request) {
+      try {
+        writeFileSync(join(workerDir, 'request.md'), ticket.request, 'utf8')
+      } catch (error) {
+        this.logger.warn('launch:request-write-failed', {
+          ticketId: ticket.id,
+          message: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
     const ctx: WorkerContext = {
       ticket,
       assignment,
@@ -1212,7 +1262,7 @@ export class RouterService {
       brief: {
         ticketId: ticket.id,
         title: ticket.title,
-        scope: ticket.title,
+        scope,
         workBranch: branchName,
         contract,
       },
@@ -1225,7 +1275,12 @@ export class RouterService {
       this.engine.refreshStage(ticket.id)
       this.clearLaunchFailure(ticket.id)
       this.queueNotified.delete(ticket.id)
-      this.log('launch', ticket.id, { handle: started.handle, workdir: started.workdir })
+      this.log('launch', ticket.id, { handle: started.handle, workdir: started.workdir, skillMode })
+      this.log('launch:skill', ticket.id, {
+        mode: skillMode,
+        ...(skill ? { name: skill.name, version: skill.version, sha256: skill.sha256 } : {}),
+      })
+      if (skill) this.recordSkillMeta(workerDir, skill)
       return updated
     } catch (error) {
       // launch 半成功：把已创建的 workdir 落库，后续 cleanup 才能回收。
@@ -1236,6 +1291,32 @@ export class RouterService {
       if (failedWorkdir) this.enqueueWorkspaceCleanup(ticket, 'launch-failed')
       this.reportLaunchFailure(ticket, error)
       throw error
+    }
+  }
+
+  /**
+  * 把本次生效的技能指纹合并进 runtime 已写好的 meta.json。
+  *
+  * 各运行时在 start() 里先写自己的会话信息；这里只补字段，不覆盖已有内容。
+  */
+  private recordSkillMeta(workerDir: string, skill: WorkerSkillSnapshot): void {
+    const path = join(workerDir, 'meta.json')
+    // 没有 meta 说明运行时没真正记下会话；此时补建空壳会让 resumeHint 误判。
+    if (!existsSync(path)) return
+    try {
+      const existing = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
+      writeFileSync(path, `${JSON.stringify({
+        ...existing,
+        skillName: skill.name,
+        skillVersion: skill.version,
+        skillSha256: skill.sha256,
+        skillPath: skill.path,
+      }, null, 2)}\n`, 'utf8')
+    } catch (error) {
+      this.logger.warn('launch:skill-meta-failed', {
+        workdir: workerDir,
+        detail: errorMessage(error),
+      })
     }
   }
 
@@ -1324,6 +1405,12 @@ export class RouterService {
 
   private activeWorkers(): number {
     return this.store.listOpenTickets().filter(t => t.stage === 'running').length
+  }
+
+  private serializedDeliverPendingInputs(): Promise<void> {
+    const run = this.deliveryQueue.then(() => this.deliverPendingInputs())
+    this.deliveryQueue = run.catch(() => undefined)
+    return run
   }
 
   async deliverPendingInputs(): Promise<void> {
@@ -2019,6 +2106,154 @@ export class RouterService {
   }
 
   /** Worker 通过 state.json 上报；poller 与测试都走这里。 */
+  /**
+   * 卡片按钮回调：把点选结果落成一条 Input，再回写卡片。
+   *
+   * 幂等：同一道题已答后重复点击只回写卡片，不再产生输入；过期或名单外直接拒绝。
+   */
+  async handleCardAction(action: CardAction): Promise<void> {
+    const questionId = String(action.value.questionId ?? action.value.qid ?? '')
+    if (!questionId) {
+      this.logger.warn('question:rejected', { reason: 'missing-question', operator: action.operatorId, messageId: action.messageId })
+      return
+    }
+    const question = this.store.getQuestion(questionId)
+    if (!question) {
+      this.logger.warn('question:rejected', { reason: 'unknown-question', questionId, operator: action.operatorId })
+      return
+    }
+    const ticket = this.store.getTicket(question.ticketId)
+    if (!ticket) {
+      this.logger.warn('question:rejected', { reason: 'unknown-ticket', questionId, ticketId: question.ticketId })
+      return
+    }
+
+    if (question.status === 'answered') {
+      // 重复点击：卡片回写成已选，但不再投递第二条输入。
+      await this.updateQuestionCard(ticket, question, question.answer?.split(',').filter(Boolean) ?? [], action, false)
+      this.log('question:duplicate', ticket.id, { questionId, operator: action.operatorId })
+      return
+    }
+
+    const now = this.clock.now()
+    if (question.status === 'expired' || Date.parse(question.expiresAt) <= Date.parse(now)) {
+      this.store.expireQuestion(questionId, now)
+      await this.updateQuestionCard(ticket, question, [], action, true)
+      this.log('question:rejected', ticket.id, { questionId, reason: 'expired', operator: action.operatorId })
+      return
+    }
+
+    if (this.config.reply.ask.allow === 'requester') {
+      const requester = this.store.getMandate(ticket.mandateId)?.actorId
+      if (requester && requester !== action.operatorId) {
+        // 名单外点击静默：只留审计日志，不给对方任何反馈。
+        this.logger.warn('question:rejected', { ticketId: ticket.id, questionId, reason: 'not-requester', operator: action.operatorId })
+        return
+      }
+    }
+
+    const selected = selectedOptions(action.value)
+    const unknown = selected.filter(id => !question.options.some(option => option.id === id))
+    if (selected.length === 0 || unknown.length > 0) {
+      this.logger.warn('question:rejected', { ticketId: ticket.id, questionId, reason: `invalid-option:${unknown.join(',') || 'none'}`, operator: action.operatorId })
+      return
+    }
+
+    const labels = question.options
+      .filter(option => selected.includes(option.id))
+      .map(option => option.label)
+    let input
+    try {
+      input = this.engine.deliverInput(ticket.id, {
+        kind: 'followup',
+        text: `问题「${question.prompt}」的答案：${labels.join('、')}（${selected.join(',')}）`,
+        sourceKey: `question:${questionId}`,
+      })
+    } catch (error) {
+      this.logger.warn('question:rejected', {
+        ticketId: ticket.id,
+        questionId,
+        reason: 'input-failed',
+        detail: errorMessage(error),
+      })
+      return
+    }
+
+    this.store.answerQuestion(questionId, selected.join(','), action.operatorId, now)
+    await this.updateQuestionCard(ticket, question, selected, action, false)
+    this.appendEventLog(ticket.id, { kind: 'question-answer', questionId, inputId: input.id, operator: action.operatorId, at: now })
+    this.log('question:answered', ticket.id, {
+      questionId,
+      inputId: input.id,
+      optionIds: selected,
+      operator: action.operatorId,
+    })
+    // 用户正在等：立刻把答案投给 worker，不等下一轮 tick。
+    void this.serializedDeliverPendingInputs().catch(error => {
+      this.logger.warn('question:deliver-failed', { ticketId: ticket.id, questionId, detail: errorMessage(error) })
+    })
+  }
+
+  /** 通道订阅卡片回调失败时登记降级，避免 auto 模式继续出无人能点的按钮。 */
+  markCardActionsUnavailable(channelId: string): void {
+    this.cardActionsUnavailable.add(channelId)
+  }
+
+  /** 到期未答的选择题：标 expired 并在话题里提醒一次，worker 下一轮自行决策。 */
+  async sweepQuestions(): Promise<void> {
+    const now = this.clock.now()
+    const expired = this.store.expireQuestions(now, now)
+    for (const question of expired) {
+      const ticket = this.store.getTicket(question.ticketId)
+      if (!ticket || ticket.stage === 'done') continue
+      this.notify(
+        ticket,
+        `工单「${ticket.title}」的选择题已超时：${question.prompt}\nWorker 会在下一轮自行决策；如需重新选择，请直接回复说明。`,
+        `question:expired:${question.id}`,
+      )
+      this.log('question:expired', ticket.id, { questionId: question.id, turn: question.turn })
+    }
+  }
+
+  private async updateQuestionCard(
+    ticket: Ticket,
+    question: Question,
+    selected: string[],
+    action: CardAction,
+    expired: boolean,
+  ): Promise<void> {
+    const adapter = this.channels?.get(ticket.channelId ?? DEFAULT_CHANNEL_ID)
+    if (!adapter?.updateQuestionCard) {
+      this.logger.warn('question:card-update-unavailable', {
+        ticketId: ticket.id,
+        questionId: question.id,
+        channel: ticket.channelId ?? DEFAULT_CHANNEL_ID,
+      })
+      return
+    }
+    const replyQuestion: ReplyQuestion = {
+      id: question.id,
+      prompt: question.prompt,
+      options: question.options,
+      ...(question.multi ? { multi: true } : {}),
+    }
+    try {
+      await adapter.updateQuestionCard({
+        token: action.token,
+        operatorId: action.operatorId,
+        question: replyQuestion,
+        selected,
+        ...(expired ? { expired: true } : {}),
+      })
+    } catch (error) {
+      this.logger.warn('question:card-update-failed', {
+        ticketId: ticket.id,
+        questionId: question.id,
+        detail: errorMessage(error),
+      })
+    }
+  }
+
   onWorkerState(state: WorkerStateFile, meta?: WorkerMeta): void {
     const ticket = this.store.getTicket(state.ticketId)
     if (!ticket) {
@@ -2038,7 +2273,16 @@ export class RouterService {
       this.logger.info('report:stale-ignored', { ticketId: ticket.id, incoming: state.updatedAt, latest: latestReport.at })
       return
     }
-    const reply = state.reply?.trim() ?? ''
+    const replyPayload = state.replyPayload
+    const reply = state.reply?.trim() || replyPayload?.fallbackText.trim() || ''
+    // progress 里的富块（图片 / 卡片 / 文档）不能等文本摘要：立即发结构化载荷，
+    // 同时不把同一段正文再塞进 progress 摘要，避免重复。
+    const richProgress = Boolean(
+      replyPayload
+      && state.state === 'progress'
+      && replyPayload.blocks.some(block => block.type !== 'markdown'),
+    )
+    const reportReply = richProgress ? '' : reply
     const { report, ackedInputs } = this.engine.report(assignment.id, {
       ticketId: ticket.id,
       turn: state.turn,
@@ -2047,7 +2291,7 @@ export class RouterService {
       ...(state.humanAction ? { humanAction: state.humanAction } : {}),
       ...(state.prNumber ? { prNumber: state.prNumber } : {}),
       ...(state.prUrl ? { prUrl: state.prUrl } : {}),
-      ...(reply ? { reply } : {}),
+      ...(reportReply ? { reply: reportReply } : {}),
       ackedInputs: state.ackedInputs,
     })
     // 只清真正落成 acked 的输入：worker 声称 ack 了但库里没匹配到时，
@@ -2061,11 +2305,12 @@ export class RouterService {
       summary: preview(state.summary),
       ...(state.humanAction ? { humanAction: preview(state.humanAction) } : {}),
       ...(state.prNumber ? { pr: state.prNumber } : {}),
-      ...(reply ? { replyChars: reply.length } : {}),
+      ...(reportReply ? { replyChars: reportReply.length } : {}),
+      ...(replyPayload ? { replyBlocks: replyPayload.blocks.length } : {}),
     })
 
     // 追问的回答（ackedInputs 非空）用户正在等，立即发送；其余 progress 交给定时轮询合并。
-    const answersInput = state.state === 'progress' && report.ackedInputs.length > 0 && Boolean(reply)
+    const answersInput = state.state === 'progress' && report.ackedInputs.length > 0 && Boolean(reportReply)
     if (answersInput) rememberProgress(this.seenProgress(ticket.id), progressSignature([report]))
     // 发送终态或追问回答前，先把更早的进展补同步掉，保证话题里的先后顺序。
     if (state.state !== 'progress' || answersInput) {
@@ -2077,10 +2322,14 @@ export class RouterService {
     }
 
     const reportKey = `${state.turn}:${state.updatedAt}`
-    if (reply && (state.state !== 'progress' || answersInput)) {
+    if ((reply || replyPayload) && (state.state !== 'progress' || answersInput || richProgress)) {
       // Worker 给了完整回复就原样发；正文里带文档链接 / PR 链接都照发，Router 不改写。
       const text = state.prUrl && !reply.includes(state.prUrl) ? `${reply}\n\nPR：${state.prUrl}` : reply
-      this.queueLong(ticket, '', text, `reply:${ticket.id}:${reportKey}`)
+      if (replyPayload) {
+        this.queuePayload(ticket, { ...replyPayload, fallbackText: text }, `reply:${ticket.id}:${reportKey}`, report.turn)
+      } else {
+        this.queueLong(ticket, '', text, `reply:${ticket.id}:${reportKey}`)
+      }
     } else if (state.state === 'ready') {
       const key = `ready:${ticket.id}:${reportKey}`
       const base = `工单「${ticket.title}」已完成：${state.prUrl || state.summary}`
@@ -2614,6 +2863,74 @@ let repo = ticket.repo
     })
   }
 
+  /** 结构化回复只发一条：卡片内部自行排版，切块会拆散图片与按钮。 */
+  private queuePayload(ticket: Ticket, payload: ReplyPayload, key: string, turn: number): void {
+    const prepared = this.prepareQuestion(ticket, payload, turn)
+    this.store.enqueueOutbox({
+      id: `ob_${key.replace(/[^a-zA-Z0-9:_-]/g, '_')}`,
+      key,
+      channelKind: ticket.channelId ?? DEFAULT_CHANNEL_ID,
+      channelId: ticket.chatId,
+      threadId: ticket.threadId.split(':').at(-1) ?? '',
+      text: prepared.fallbackText,
+      blocks: prepared.blocks,
+      now: this.clock.now(),
+    })
+  }
+
+  /**
+   * 选择题入库：
+   * - callback：生成稳定 questionId 并登记 Question，按钮点选后落成 Input；
+   * - text：不登记 Question，题面写序号，用户回复会走普通的追问投递。
+   *
+   * 同一 turn 重复上报只刷新题面与到期时间，不重置已答状态。
+   */
+  private prepareQuestion(ticket: Ticket, payload: ReplyPayload, turn: number): ReplyPayload {
+    const choice = choiceBlockOf(payload)
+    if (!choice) return payload
+    // 按钮一次只能提交一个 optionId；多选必须走序号文本，避免第一次点击就关闭问题。
+    const mode = choice.multi ? 'text' : this.askModeOf(ticket)
+    const questionId = choice.questionId || `q_${ticket.id}_${turn}`
+    if (mode === 'text') return { ...payload, blocks: payload.blocks.map(block => block === choice ? { ...block, questionId, mode } : block) }
+    const owner = this.store.getQuestion(questionId)
+    if (owner && owner.ticketId !== ticket.id) {
+      this.logger.warn('question:rejected', {
+        ticketId: ticket.id,
+        questionId,
+        reason: 'id-owned-by-other-ticket',
+      })
+      return { ...payload, blocks: payload.blocks.map(block => block === choice ? { ...block, mode: 'text' } : block) }
+    }
+
+    const now = this.clock.now()
+    const created = Date.parse(now)
+    const expiresAt = new Date((Number.isFinite(created) ? created : Date.now()) + this.config.reply.ask.timeoutMs).toISOString()
+    this.store.upsertQuestion({
+      id: questionId,
+      ticketId: ticket.id,
+      assignmentId: this.store.latestAssignment(ticket.id)?.id ?? '',
+      chatId: ticket.chatId,
+      threadId: ticket.threadId,
+      turn,
+      prompt: choice.prompt,
+      options: choice.options,
+      multi: Boolean(choice.multi),
+      status: 'open',
+      createdAt: now,
+      expiresAt,
+    })
+    this.log('question:asked', ticket.id, { questionId, turn, options: choice.options.length, mode })
+    return { ...payload, blocks: payload.blocks.map(block => block === choice ? { ...block, questionId, mode } : block) }
+  }
+
+  private askModeOf(ticket: Ticket): 'callback' | 'text' {
+    if (this.config.reply.ask.mode === 'text') return 'text'
+    const channelId = ticket.channelId ?? DEFAULT_CHANNEL_ID
+    if (this.cardActionsUnavailable.has(channelId)) return 'text'
+    const adapter = this.channels?.get(channelId)
+    return adapter?.capabilities.choices ? 'callback' : 'text'
+  }
+
   private queue(ticket: Ticket, text: string, key: string): void {
     this.store.enqueueOutbox({
       id: `ob_${key.replace(/[^a-zA-Z0-9:_-]/g, '_')}`,
@@ -2693,6 +3010,13 @@ export function splitMessage(text: string, limit = 3500): string[] {
   }
   if (rest) chunks.push(rest)
   return chunks
+}
+
+/** 按钮 value 支持单选 `optionId` 与多选 `options` 两种形态。 */
+function selectedOptions(value: Record<string, unknown>): string[] {
+  if (Array.isArray(value.options)) return value.options.map(String).filter(Boolean)
+  const single = value.optionId ?? value.option
+  return single ? [String(single)] : []
 }
 
 export interface LaunchErrorDetail {

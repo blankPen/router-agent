@@ -153,12 +153,12 @@ ra config set chatAllow.oc_xxx ""          # 清空，回到全局 allowed
 
 ## 跟：进展合并，追问不断线
 
-Worker **不手写状态文件**，统一用 `ra report` 上报。CLI 会 POST 给本地 Router（`POST /api/reports`）；服务不可达时自动落盘到 `~/.router-agent/workers/<ticketId>/state.json`，由 poller 在 1 秒内捡起。
+Worker **不手写状态文件**，统一用 `ra reply` 上报（旧命令 `ra report` 保留为别名）。CLI 会 POST 给本地 Router（`POST /api/reports`）；服务不可达时自动落盘到 `~/.router-agent/workers/<ticketId>/state.json`，由 poller 在 1 秒内捡起。
 
-- `--reply` 是**用户真正看到的完整内容**（Markdown），支持字面量、`@文件`、`-`（stdin）。
+- `--body` 是**用户真正看到的完整内容**，支持字面量、`@文件`、`-`（stdin）；`--kind` 决定纯文本、Markdown、图片、PR、文档或选择题。
 - `--summary` 只放一句话；只给 summary 会被提示「回复不完整」。
-- Router **只发送 `--reply` 原文**，不判断形态、不改写：里面有 PR 链接就是 PR，有文档链接就是文档。
-- 需要长文档时，Worker 自己执行 `ra doc --title "…" --content @answer.md`，拿到链接后写进 `--reply`。
+- Router 按结构化载荷渲染卡片；通道失败时逐块降级到 `fallbackText`，不改写正文。
+- 需要长文档时用 `--kind doc`，Router 建好飞书文档后把链接写进回复。
 - 追问以 `【Router 输入 in_xxx】` 前缀投递；Worker 用 `--ack in_xxx` 确认，否则会被反复重投。
 - `--state progress` 的 `--reply` / `--summary` 默认不即时发送：Router 按 `progress.syncMs` 定时合并后同步到话题，同一内容只发一次；带 `--ack` 的追问回答，以及 ready / blocked / failed 等终态仍即时发送。
 - **不依赖 worker 上报**：worker 超过 `progress.silenceMs` 没有新上报 / 新输入时，Router 按 `progress.probeMs` 主动取进展——优先读 Agent 自己的结构化会话记录（Claude Code 的 `~/.claude/projects/.../*.jsonl`；Codex 的 `~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl`），读不到再退回 `orca terminal read --screen` 的渲染屏幕；把进展整理成语义摘要（助手文本 + 一行动作概要，工具调用噪音不逐条回放）同步到话题，同一静默期按 `progress.repeatMs` 限流。`review` 之后又收到新输入的工单也会被巡检。
@@ -166,16 +166,17 @@ Worker **不手写状态文件**，统一用 `ra report` 上报。CLI 会 POST �
 - 终端长时间无输出 → 主动发 `status?`；仍无响应 → 标记 stale 并通知人。
 - 审计事件追加到同目录 `events.log`。
 
-Worker 手册会拼进启动 prompt；非 Orca 运行时使用运行时中立的契约文件。两者都不改项目 `AGENTS.md`。详见 [RUNTIME.md](RUNTIME.md#worker-规范注入)。
+Worker 默认只收 ≤25 行短引导，完整手册在技能目录按需读取；`worker.skill.mode=inline` 可回滚到旧的内联手册。都不改项目 `AGENTS.md`。详见 [RUNTIME.md](RUNTIME.md#worker-规范注入)。
 
 ### 上报协议
 
 ```bash
-ra report \
+ra reply \
   --ticket tk-12 \
   --state progress|waiting|ready|blocked|failed|dropped \
   --summary "一句话摘要" \
-  --reply @answer.md \
+  --body @answer.md \
+  [--image before=./before.png --image after=./after.png] \
   --pr-number 12 --pr-url "https://github.com/o/r/pull/12" \
   --ui-change [true|false] \
   --human-action "blocked 时要人做的事" \
@@ -185,7 +186,10 @@ ra report \
 | 参数 | 说明 |
 |-|-|
 | `--summary` | 一句话摘要，只给日志和列表用 |
-| `--reply` | 用户真正看到的完整内容（Markdown），支持字面量、`@文件`、`-`（stdin） |
+| `--body` | 用户真正看到的完整内容，支持字面量、`@文件`、`-`（stdin） |
+| `--kind` | `auto` / `text` / `markdown` / `image` / `images` / `pr` / `doc` / `ask` |
+| `--image` | 图片路径，可重复；`before=` / `after=` 生成对比图块 |
+| `--ask` / `--question` / `--option` | 选择题；点选结果落成一条 Input 再投给 Worker |
 | `--pr-number` / `--pr-url` | 代码类交付时附 PR 编号与链接 |
 | `--ui-change` | 显式声明是否改了 UI；不声明时 Router 按改动文件推断。`worker.evidence.ui: enforce` 下，UI 工单缺 Before / After 证据的 `ready` 会返回 422 |
 | `--human-action` | `blocked` 时需要人做的事 |

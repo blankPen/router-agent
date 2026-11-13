@@ -1,4 +1,5 @@
 import type { Trigger } from '@router-agent/core/model.js'
+import type { ReplyBlock, ReplyQuestion } from '@router-agent/core/reply.js'
 
 /**
  * 默认通道实例 ID。
@@ -24,6 +25,12 @@ export interface ChannelCapabilities {
   attachmentsIn: boolean
   /** 支持发送出站附件（一期全部 false）。 */
   attachmentsOut: boolean
+  /** 支持发送图片（上传后以 img_key 渲染）。 */
+  images?: boolean
+  /** 支持结构化互动卡片。 */
+  cards?: boolean
+  /** 支持卡片按钮回调（不支持时题面退化为序号回复）。 */
+  choices?: boolean
   /** 支持服务端幂等键。 */
   idempotency: boolean
   /** 单条消息字符上限，用于切块。 */
@@ -39,6 +46,8 @@ export interface OutboundMessage {
   /** 希望回复到的话题根；为空时发到 targetId。 */
   threadRef?: string
   text: string
+  /** 结构化回复块；有值时优先于纯文本渲染。 */
+  blocks?: ReplyBlock[]
   format: 'plain' | 'markdown'
   idempotencyKey: string
   /** 触发这条回复的用户消息，用于发送成功后撤销回执。 */
@@ -49,6 +58,28 @@ export interface SendReceipt {
   messageId?: string
   /** 实际发生的降级，便于日志与排障。 */
   degradedTo?: 'plain' | 'rich' | 'document'
+}
+
+/** 卡片按钮回调：中立化的最小字段集，具体事件形态由通道适配器解析。 */
+export interface CardAction {
+  id: string
+  channelId: string
+  chatId: string
+  messageId: string
+  operatorId: string
+  /** 飞书延迟更新卡片的 token；其他通道可为空。 */
+  token: string
+  /** 按钮上携带的 value（已解析成对象）。 */
+  value: Record<string, unknown>
+}
+
+/** 回写一道已答 / 已过期的选择题卡片。 */
+export interface QuestionCardUpdate {
+  token: string
+  operatorId: string
+  question: ReplyQuestion
+  selected: string[]
+  expired?: boolean
 }
 
 /** 归一化结果：要么得到领域 Trigger，要么给出丢弃原因。 */
@@ -100,6 +131,13 @@ export interface ChannelAdapter {
   enrich?(trigger: Trigger): Promise<Trigger>
 
   send(message: OutboundMessage): Promise<SendReceipt>
+
+  /** 启动卡片按钮回调消费；不支持时由内核走序号回复。 */
+  startCardActions?(sink: (action: CardAction) => void, opts?: { onError?: (error: Error) => void }): Promise<void> | void
+  stopCardActions?(): void
+
+  /** 用户点选后把卡片回写成已选 / 已过期状态。 */
+  updateQuestionCard?(update: QuestionCardUpdate): Promise<void>
 
   /** 给一条消息加回执，返回通道侧句柄；不支持时返回 null。 */
   ack?(messageId: string): Promise<string | null>

@@ -1,5 +1,7 @@
 /** 领域内核的实体与取值定义。所有模块共用这里的词汇。 */
 
+import type { ReplyOption } from './reply.js'
+
 /** Router 对一个 Trigger 的四种决定。 */
 export type Decision = 'accept' | 'stop' | 'ignore' | 'unavailable'
 
@@ -117,6 +119,17 @@ export interface Ticket {
   branch: string
   /** 开单消息里随附的原始附件（Router 已落盘），派工时透传给 Worker。 */
   attachments?: Attachment[]
+  /**
+   * 发起人的原始请求正文。
+   *
+   * 研判结论（mandate.scope）是结构化后的授权范围，用户原话才是需求的唯一依据；
+   * 两者冲突时以原话为准，所以派工时必须把两者都传给 Worker。
+   */
+  request?: string
+  /** 发起人显示名；与 request 一起构成「用户原始请求」段。 */
+  requestActorName?: string
+  /** 用户原始请求的到达时间（ISO）。 */
+  requestAt?: string
   prNumber: number
   prUrl: string
   prState: 'none' | 'open' | 'merged' | 'closed'
@@ -186,6 +199,28 @@ export interface Report {
   reply?: string
   ackedInputs: string[]
   at: string
+}
+
+/** Worker 通过 `--ask` 提出的一道选择题。 */
+export interface Question {
+  /** `q_<ticketId>_<turn>`：同一 turn 重复上报只更新同一道题。 */
+  id: string
+  ticketId: string
+  assignmentId: string
+  chatId: string
+  threadId: string
+  turn: number
+  prompt: string
+  options: ReplyOption[]
+  multi: boolean
+  status: 'open' | 'answered' | 'expired'
+  /** 答案选项 id；多选用逗号连接。 */
+  answer?: string
+  operatorId?: string
+  messageId?: string
+  createdAt: string
+  expiresAt: string
+  answeredAt?: string
 }
 
 export interface Subscription {

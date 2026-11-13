@@ -1,10 +1,16 @@
 import { spawn, type ChildProcess } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { basename, dirname, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
 import type { Trigger } from '@router-agent/core/model.js'
+import type { ReplyBlock, ReplyPayload } from '@router-agent/core/reply.js'
+import type { QuestionCardUpdate } from '@router-agent/channel'
 import type { ChatAdmissionSettings } from '@router-agent/core/config.js'
 import type { CommandRunner } from '@router-agent/infra/process.js'
 import { noopLogger, errorMessage, type Logger } from '@router-agent/infra/logger.js'
 import { parseImageKeysFromContent } from './feishu-image.js'
+import { normalizeCardMarkdown } from './card-markdown.js'
+import { buildQuestionCard, buildReplyCard, type ReplyCardImage, type ReplyCardImages } from './feishu-reply.js'
 
 export interface FeishuConfig {
   /** 监控的群：每条含接收方式与派工绑定。 */
@@ -345,6 +351,8 @@ function readParentId(raw: unknown): string {
 
 export interface FeishuConsumerOptions {
   bin?: string
+  /** 订阅的事件名；默认消息入站，卡片按钮回调传 `card.action.trigger`。 */
+  eventKey?: string
   /** 传给 lark-cli 子进程的环境（独立配置目录靠 HOME 隔离）。 */
   env?: NodeJS.ProcessEnv
   as?: 'bot' | 'user'
@@ -388,7 +396,7 @@ export class FeishuConsumer {
     const bin = this.opts.bin ?? 'lark-cli'
     const spawnFn = this.opts.spawnImpl ?? spawn
     // 关键：lark-cli 把 stdin EOF 当作退出信号，stdin 必须是保持打开的管道。
-    const child = spawnFn(bin, ['event', 'consume', 'im.message.receive_v1', '--as', this.opts.as ?? 'bot'], {
+    const child = spawnFn(bin, ['event', 'consume', this.opts.eventKey ?? 'im.message.receive_v1', '--as', this.opts.as ?? 'bot'], {
       stdio: ['pipe', 'pipe', 'pipe'],
       ...(this.opts.env ? { env: this.opts.env } : {}),
     })
@@ -528,87 +536,7 @@ export function shouldSendAsText(text: string, maxLength = SIMPLE_MESSAGE_MAX): 
   return !INLINE_MARKDOWN.some(pattern => pattern.test(trimmed)) && !BLOCK_MARKDOWN.some(pattern => pattern.test(trimmed))
 }
 
-/**
- * 卡片 markdown 元素（Card 1.0）只支持基础语法：不带标题、引用、表格的渲染，
- * 这里把不支持的写法降级为卡片能正常显示的形式，避免用户看到 Markdown 源码。
- */
-export function normalizeCardMarkdown(markdown: string): string {
-  const lines = markdown.replace(/\r\n?/g, '\n').replace(/<!--[\s\S]*?-->/g, '').split('\n')
-  const out: string[] = []
-  let fence: string | null = null
-
-  for (let index = 0; index < lines.length; index += 1) {
-    let line = lines[index]!
-    const fenceMatch = /^\s{0,3}(`{3,}|~{3,})/.exec(line)
-    if (fenceMatch) {
-      if (fence === null) fence = fenceMatch[1]![0]!
-      else if (fenceMatch[1]![0] === fence) fence = null
-      out.push(line)
-      continue
-    }
-    if (fence !== null) {
-      out.push(line)
-      continue
-    }
-
-    // 换行标签与图片语法在卡片里都不成立：<br> 转真换行，图片转可点击链接。
-    line = line.replace(/<br\s*\/?>/gi, '\n')
-    line = line.replace(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g, (_match, alt: string, url: string) =>
-      alt.trim() ? `[${alt.trim()}](${url})` : `[图片](${url})`)
-
-    // 表格：1.0 卡片不渲染表格，降级为「加粗表头 + 列表行」。
-    if (isTableRow(line) && index + 1 < lines.length && isTableDivider(lines[index + 1]!)) {
-      const header = parseTableCells(line)
-      index += 1
-      const rows: string[][] = []
-      while (index + 1 < lines.length && isTableRow(lines[index + 1]!)) {
-        index += 1
-        rows.push(parseTableCells(lines[index]!))
-      }
-      out.push(header.map(cell => `**${cell}**`).join(' · '))
-      for (const row of rows) out.push(`- ${row.join(' · ')}`)
-      continue
-    }
-
-    // 标题：卡片不渲染 #，统一降级成加粗行。
-    const heading = /^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/.exec(line)
-    if (heading) {
-      out.push(`**${heading[1]}**`)
-      continue
-    }
-
-    // 引用：卡片不渲染 >，用竖线前缀保留引用观感。
-    const quote = /^\s{0,3}(?:>\s?)+(.*)$/.exec(line)
-    if (quote) {
-      out.push(`▍${quote[1]}`)
-      continue
-    }
-
-    // 任务列表：卡片不支持 [ ] / [x]，换成勾选框字符。
-    const task = /^(\s*)[-*+]\s+\[([ xX])\]\s+(.*)$/.exec(line)
-    if (task) {
-      out.push(`${task[1]}- ${task[2] === ' ' ? '☐' : '☑'} ${task[3]}`)
-      continue
-    }
-
-    out.push(line)
-  }
-
-  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim()
-}
-
-function isTableRow(line: string): boolean {
-  return /^\s*\|.*\|\s*$/.test(line)
-}
-
-function isTableDivider(line: string): boolean {
-  return /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)+\|?\s*$/.test(line)
-}
-
-function parseTableCells(line: string): string[] {
-  const inner = line.trim().replace(/^\|/, '').replace(/\|$/, '')
-  return inner.split('|').map(cell => cell.trim())
-}
+export { normalizeCardMarkdown } from './card-markdown.js'
 
 /** 把 Markdown 包成互动卡片：正文用 card markdown 元素渲染，不再是源码。 */
 export function feishuCard(markdown: string): string {
@@ -651,6 +579,16 @@ export function parseDocumentUrl(stdout: string): string {
   try {
     const doc = JSON.parse(stdout) as Record<string, any>
     return String(doc?.data?.document?.url ?? doc?.document?.url ?? doc?.data?.url ?? doc?.url ?? '')
+  } catch {
+    return ''
+  }
+}
+
+/** 从 `im images create` 的 JSON 返回里取 image_key。 */
+export function parseImageKey(stdout: string): string {
+  try {
+    const data = JSON.parse(stdout) as Record<string, any>
+    return String(data?.data?.image_key ?? data?.image_key ?? '')
   } catch {
     return ''
   }
@@ -719,6 +657,113 @@ export class FeishuSender {
     const url = parseDocumentUrl(res.stdout)
     if (!url) throw new Error(`feishu:doc-url-missing: ${res.stdout.slice(0, 200)}`)
     return url
+  }
+
+  /** 发送结构化回复；卡片失败时按 fallbackText 继续降级，不让整条回复丢失。 */
+  async sendReply(chatId: string, payload: ReplyPayload, idempotencyKey: string): Promise<void> {
+    const prepared = await this.preparePayload(payload)
+    const card = buildReplyCard({ payload: prepared, images: await this.uploadImages(prepared.blocks) })
+    const res = await this.runner.run(feishuCardSendCommand(chatId, JSON.stringify(card), fitIdempotencyKey(idempotencyKey)))
+    if (res.code === 0) return
+    this.logger.warn('feishu:reply-card-fallback', {
+      target: chatId,
+      key: idempotencyKey,
+      code: res.code,
+      message: res.stderr.slice(0, 200),
+    })
+    await this.sendCard(chatId, prepared.fallbackText, idempotencyKey)
+  }
+
+  async replyReply(messageId: string, payload: ReplyPayload, idempotencyKey: string): Promise<void> {
+    const prepared = await this.preparePayload(payload)
+    const card = buildReplyCard({ payload: prepared, images: await this.uploadImages(prepared.blocks) })
+    const res = await this.runner.run(feishuCardReplyCommand(messageId, JSON.stringify(card), fitIdempotencyKey(idempotencyKey)))
+    if (res.code === 0) return
+    this.logger.warn('feishu:reply-card-fallback', {
+      target: messageId,
+      key: idempotencyKey,
+      code: res.code,
+      message: res.stderr.slice(0, 200),
+    })
+    await this.replyCard(messageId, prepared.fallbackText, idempotencyKey)
+  }
+
+  /** 点选后回写卡片；token 过期或次数用尽只记日志，不影响答案投递。 */
+  async updateQuestionCard(update: QuestionCardUpdate): Promise<void> {
+    if (!update.token) {
+      this.logger.warn('feishu:card-update-skip', { reason: 'missing-token' })
+      return
+    }
+    const card = { ...buildQuestionCard(update), open_ids: [update.operatorId] }
+    const data = JSON.stringify({ token: update.token, card })
+    const res = await this.runner.run(['api', 'POST', '/open-apis/interactive/v1/card/update', '--as', 'bot', '--data', data, '--json'], { timeoutMs: 30_000 })
+    if (res.code !== 0) {
+      this.logger.warn('feishu:card-update-failed', { code: res.code, message: res.stderr.slice(0, 200) })
+    }
+  }
+
+  /** 文档块先建飞书文档，再以链接塞回卡片；建文档失败时保留正文。 */
+  private async preparePayload(payload: ReplyPayload): Promise<ReplyPayload> {
+    const blocks: ReplyBlock[] = []
+    for (const block of payload.blocks) {
+      if (block.type !== 'doc') {
+        blocks.push(block)
+        continue
+      }
+      try {
+        const url = await this.createDocument(block.title, block.markdown)
+        blocks.push({ type: 'markdown', text: `[${block.title}](${url})` })
+      } catch (error) {
+        this.logger.warn('feishu:doc-fallback', {
+          title: block.title,
+          message: errorMessage(error).slice(0, 200),
+        })
+        blocks.push({ type: 'markdown', text: `**${block.title}**（文档创建失败，以下为正文）\n\n${block.markdown}` })
+      }
+    }
+    return { ...payload, blocks }
+  }
+
+  /** 收集载荷里的图片并上传；单张失败只降级那一张。 */
+  private async uploadImages(blocks: ReplyBlock[]): Promise<ReplyCardImages> {
+    const images: ReplyCardImages = new Map()
+    const refs = new Set<string>()
+    for (const block of blocks) {
+      if (block.type === 'image') {
+        const ref = block.image.path ?? block.image.url
+        if (ref) refs.add(ref)
+      } else if (block.type === 'imagePair') {
+        for (const image of [block.before, block.after]) {
+          const ref = image.path ?? image.url
+          if (ref) refs.add(ref)
+        }
+      }
+    }
+    for (const ref of refs) images.set(ref, await this.uploadImage(ref))
+    return images
+  }
+
+  private async uploadImage(ref: string): Promise<ReplyCardImage> {
+    if (/^https?:\/\//i.test(ref)) return { url: ref }
+    const path = resolve(ref)
+    if (!existsSync(path)) {
+      this.logger.warn('feishu:image-failed', { path, reason: 'not-found' })
+      return { failed: true }
+    }
+    const res = await this.runner.run(
+      ['im', 'images', 'create', '--data', '{"image_type":"message"}', '--file', basename(path), '--as', 'bot', '--json'],
+      { cwd: dirname(path), timeoutMs: 60_000 },
+    )
+    if (res.code !== 0) {
+      this.logger.warn('feishu:image-failed', { path, reason: `upload-exit-${res.code}`, detail: res.stderr.slice(0, 200) })
+      return { failed: true }
+    }
+    const key = parseImageKey(res.stdout)
+    if (!key) {
+      this.logger.warn('feishu:image-failed', { path, reason: 'image-key-missing' })
+      return { failed: true }
+    }
+    return { imgKey: key }
   }
 
   /** 收到消息后立即加一个确认表情，返回 reaction_id；失败抛出。 */

@@ -48,6 +48,14 @@ export interface DecideInput {
   reason: string
   title?: string
   scope?: string
+  /**
+   * 发起人原始请求正文。
+   *
+   * 默认取触发消息的正文；需求识别（intake）终审时传的是提出人的原话，
+   * 而不是管理员点「确认派单」的那句话。
+   */
+  request?: string
+  requestActorName?: string
   rules?: string[]
   /** 派工目标仓库；accept 时由 Router 解析后传入。 */
   repo?: string
@@ -179,6 +187,8 @@ export class Engine {
     }
 
     const triggerAttachments = attachmentsOf(trigger.raw)
+    const requestText = (input.request ?? trigger.text).trim()
+    const requestActorName = input.requestActorName ?? trigger.actorName
     const ticket: Ticket = {
       id: formatTicketId(this.store.nextTicketSeq()),
       title: input.title?.trim() || deriveTitle(trigger.text),
@@ -191,6 +201,10 @@ export class Engine {
       repo: input.repo?.trim() ?? '',
       branch: input.branch?.trim() ?? '',
       ...(triggerAttachments.length > 0 ? { attachments: triggerAttachments } : {}),
+      // 用户原话是需求的唯一依据；研判结论是授权范围，两者都要传给 Worker。
+      ...(requestText.trim() ? { request: requestText } : {}),
+      ...(requestActorName ? { requestActorName } : {}),
+      requestAt: trigger.receivedAt,
       prNumber: 0,
       prUrl: '',
       prState: 'none',

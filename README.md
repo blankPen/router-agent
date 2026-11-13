@@ -297,7 +297,8 @@ ra config edit                                   # 用 $EDITOR 编辑全文
 | `ra runtime login <id>` | 交互式登录（由 Agent 自己提供：`acp-claude` 走 `claude`，`acp-codex` 走 `codex-acp login`，`codex-app` 走 `codex login`） |
 | `ra runtime check codex-app` | 探测 Codex App / CLI，并做一次 app-server `initialize` 握手 |
 | `ra config` | 查看配置；`config set <key> <value>` 改单项（含 `project.<名>` / `chatBinding.<群>` / `chatMode.<群>` / `chatAllow.<群>` / `runtime.options.<运行时>.<键>` / `progress.syncMs` / `progress.probeMs`）；`config edit` 编辑全文 |
-| `ra report` | Worker 侧上报：状态、摘要、`--reply`（字面量 / `@文件` / `-`）、PR 链接与 `--ack` |
+| `ra reply` | Worker 侧交付：状态、摘要、文本 / 图片 / PR / 文档 / 选择题；服务不可达时落盘 `state.json` |
+| `ra report` | `ra reply` 的旧别名，参数相同，仍可用 |
 | `ra doc` | Worker 侧创建飞书文档并输出链接，长结论写进 `--reply` |
 
 全局选项 `--home <dir>` 可切换状态目录（测试与多实例用）。上报协议与字段细节见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#上报协议)。

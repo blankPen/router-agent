@@ -77,7 +77,7 @@
 | L7 PR 线索 | `worktree.linkedPR / linkedGitLabMR` | `src/service.ts:1475-1497` | 中耦合，可降级 |
 | L8 仓库发现/自检 | `orca status`、`orca repo list --json`，解析器放在 `sources/lark.ts` | `src/cli/doctor.ts:59-78`、`src/cli/init.ts:124-147`、`src/sources/lark.ts:117-160` | 中耦合，需要抽象 |
 | L9 服务装配 | `new OrcaRuntime(...)` 硬编码；`runtime.default` 只接受 `'orca'` | `src/cli/index.ts:642-649`、`src/config.ts:158/300-304/899-901`、`src/router/api.ts:118` | 中耦合，需要注册表 |
-| L10 Worker 手册 | 手册直接写「你在一个独立的 Orca worktree 里工作」「Claude Code」；agent 模式写入 `~/.claude/agents/` | `packages/runtime/src/spec/prompt-mode.md:3`、`packages/runtime/src/spec/index.ts:46-56` | 中耦合，需要拆分「任务契约」与「启动方式」 |
+| L10 Worker 手册 | 默认技能化：首轮只发短引导 + `SKILL.md` 入口；`inline` 回滚模式仍用旧手册，写死「你在一个独立的 Orca worktree 里工作」「Claude Code」 | `packages/runtime/src/spec/worker/SKILL.md`、`packages/runtime/src/spec/prompt-mode.md:3`、`packages/runtime/src/spec/index.ts` | 中耦合；已拆分「任务契约」与「启动方式」，旧手册只作回滚 |
 | L11 报告通道 | `ra report` HTTP + `state.json` 兜底，与运行时无关 | `src/cli/report.ts`、`packages/runtime/src/orca/report-poller.ts:1-154` | 已解耦，保留 |
 | L12 效果队列 | `launch-worker / stop-worker / cleanup-workspace` 只带 `ticketId` | `src/service.ts:536-552` | 已解耦，保留 |
 
@@ -989,9 +989,9 @@ export interface WorkerMetaV2 {
 | `src/router/api.ts:9 / 118` | import `WorkerStateFile` 旧路径；写死 `runtime.default` | 改从 `worker/port.js` 导入；手工绑定校验 runtimeId 存在 |
 | `worker/orca/report-poller.ts:156-176 judgeIdle` | Orca 字段判定 | 上移到 `worker/status.ts`，输入 `AgentStatus`；映射表见 8.2 |
 | `worker/orca/report-poller.ts:68-110 ReportPoller` | 与运行时无关但路径在 orca 下 | P0 上移到 `worker/report-poller.ts`，旧路径 re-export |
-| `worker/spec/index.ts:22-36 buildWorkerPrompt` | 在 OrcaRuntime 内拼手册 | 抽出 `buildWorkerBrief`（中立）；**Orca 继续使用现有 `prompt-mode.md` 原文**，保证零行为变化；新运行时用 `contract.md` + 自己的启动包装 |
+| `worker/spec/index.ts buildWorkerPrompt` / `buildWorkerBrief` | 在 OrcaRuntime 内拼手册 | 已落地：默认走中立的 `buildWorkerBrief` + `spec/worker/SKILL.md`；`worker.skill.mode=inline` 时回滚到 `prompt-mode.md` / `contract.md` |
 | `worker/naming.ts` | 注释写 Orca | 改成运行时中立说明（逻辑本来就是 git） |
-| `worker/spec/prompt-mode.md` | 写死 Orca / Claude | 拆成 `contract.md`（中立）+ `claude-agent.md`（专属） |
+| `worker/spec/prompt-mode.md` | 写死 Orca / Claude | 已拆成 `spec/worker/SKILL.md` + `references/`；`inline` 模式保留旧文件用于回滚 |
 
 **验收口径**：`grep -rn "Orca\|orca" src/service.ts src/router/api.ts src/core src/store` 应该只剩注释/配置说明；例外只允许 `worker/runtimes/orca/**` 与 re-export 层。
 
@@ -1408,7 +1408,7 @@ Orca 运行时用 fake `CommandRunner` 录放（现有 `tests/worker/orca.test.t
 | doctor Orca 检查 | `src/cli/doctor.ts:59-78` |
 | init 仓库选择 | `src/cli/init.ts:124-147` |
 | Orca JSON 解析器放错文件 | `src/sources/lark.ts:117-160` |
-| Worker 手册 | `packages/runtime/src/spec/prompt-mode.md:3`、`packages/runtime/src/spec/index.ts:46-56` |
+| Worker 手册 | `packages/runtime/src/spec/worker/SKILL.md`、`packages/runtime/src/spec/prompt-mode.md:3`（`inline` 回滚） |
 | 报告协议 | `src/cli/report.ts`、`packages/runtime/src/orca/report-poller.ts:1-154` |
 | 效果队列 | `src/service.ts:536-552`、`src/core/effects.ts` |
 

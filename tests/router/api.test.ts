@@ -619,6 +619,35 @@ describe('HTTP 管理 API', () => {
     expect(reports[0]).toMatchObject({ uiChange: true })
   })
 
+  it('POST /api/reports 透传结构化 replyPayload', async () => {
+    const replyPayload = {
+      blocks: [{ type: 'markdown', text: '## 结论\n- A' }],
+      fallbackText: '## 结论\n- A',
+    }
+    const res = await call(server, 'POST', '/api/reports', {
+      ticketId,
+      state: 'ready',
+      summary: '完成梳理',
+      replyPayload,
+    })
+
+    expect(res.status).toBe(201)
+    expect(reports[0]).toMatchObject({ replyPayload })
+  })
+
+  it('POST /api/reports 拒绝结构不合法的 replyPayload', async () => {
+    const res = await call(server, 'POST', '/api/reports', {
+      ticketId,
+      state: 'ready',
+      summary: '坏载荷',
+      replyPayload: { blocks: [{ type: 'image' }], fallbackText: 'x' },
+    })
+
+    expect(res.status).toBe(400)
+    expect(res.json).toMatchObject({ error: 'invalid-reply-payload' })
+    expect(reports).toHaveLength(0)
+  })
+
   it('POST /api/reports 证据门禁拒绝时返回 422 与补证指引', async () => {
     reportRejection = new ReportRejectedError('evidence-missing', 'UI 工单缺少 PR / MR 证据：Before 标识。', {
       ticketId,

@@ -1,8 +1,9 @@
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { runReport, type ReportDeps } from '../src/cli/report.js'
+import { runReply } from '../src/cli/reply.js'
 
 function makeDeps(home: string, fetchImpl: typeof fetch): ReportDeps & { out: string[]; err: string[] } {
   const out: string[] = []
@@ -90,7 +91,7 @@ describe('ra report', () => {
     const deps = makeDeps(home, fetchImpl)
     const code = await runReport(deps, { ticket: 'tk_1', state: 'ready', summary: '完成', reply: '正文', uiChange: true })
 
-    expect(code).toBe(0)
+    expect(code).toBe(3)
     const file = JSON.parse(readFileSync(join(home, 'workers', 'tk_1', 'state.json'), 'utf8'))
     expect(file).toMatchObject({
       ticket_id: 'tk_1', assignment_id: 'as_1', turn: 4, state: 'ready', summary: '完成',
@@ -124,5 +125,100 @@ describe('ra report', () => {
   it('拒绝非法 state', async () => {
     const deps = makeDeps('/tmp/none', (async () => new Response('{}')) as typeof fetch)
     expect(await runReport(deps, { ticket: 'tk_1', state: 'done', summary: 'x' })).toBe(2)
+  })
+})
+
+describe('ra reply v2', () => {
+  function capture(payloads: any[]): typeof fetch {
+    return (async (_url: string | URL | Request, init?: RequestInit) => {
+      payloads.push(JSON.parse(String(init!.body)))
+      return new Response('{"ok":true,"turn":4}', { status: 201 })
+    }) as typeof fetch
+  }
+
+  it('markdown 正文同时给结构化块与纯文本兜底', async () => {
+    const sent: any[] = []
+    const code = await runReply(makeDeps('/tmp/ra-reply-none', capture(sent)), {
+      ticket: 'tk_1', body: '## 结论\n- A', kind: 'markdown',
+    })
+
+    expect(code).toBe(0)
+    expect(sent[0]).toMatchObject({
+      ticketId: 'tk_1',
+      state: 'ready',
+      summary: '## 结论',
+      reply: '## 结论\n- A',
+      replyPayload: { blocks: [{ type: 'markdown', text: '## 结论\n- A' }], fallbackText: '## 结论\n- A' },
+    })
+  })
+
+  it('before= / after= 合成对比图块，其余图片按单图发送', async () => {
+    const sent: any[] = []
+    const code = await runReply(makeDeps('/tmp/ra-reply-none', capture(sent)), {
+      ticket: 'tk_1', body: 'UI 对比', summary: 'UI 对比',
+      image: ['before=./before.png', 'after=./after.png', './extra.png', 'https://cdn.example.com/raw.png'],
+    })
+
+    expect(code).toBe(0)
+    const blocks = sent[0].replyPayload.blocks
+    expect(blocks).toEqual([
+      { type: 'markdown', text: 'UI 对比' },
+      { type: 'imagePair', before: { path: resolve('./before.png'), alt: 'Before' }, after: { path: resolve('./after.png'), alt: 'After' }, caption: '同一场景、同一视口、同一主题' },
+      { type: 'image', image: { path: resolve('./extra.png'), alt: '图片' } },
+      { type: 'image', image: { path: 'https://cdn.example.com/raw.png', alt: '图片' } },
+    ])
+  })
+
+  it('ask 生成选择题块，questionId 交给 Router 生成', async () => {
+    const sent: any[] = []
+    const code = await runReply(makeDeps('/tmp/ra-reply-none', capture(sent)), {
+      ticket: 'tk_1', ask: true, question: '选哪个方案？',
+      option: ['A|方案一', 'B|方案二'],
+    })
+
+    expect(code).toBe(0)
+    expect(sent[0].replyPayload.blocks[0]).toEqual({
+      type: 'choices',
+      questionId: '',
+      prompt: '选哪个方案？',
+      options: [
+        { id: 'A', label: 'A', description: '方案一' },
+        { id: 'B', label: 'B', description: '方案二' },
+      ],
+    })
+  })
+
+  it('ask 少于两个选项时按参数错误退出', async () => {
+    const deps = makeDeps('/tmp/ra-reply-none', capture([]))
+    const code = await runReply(deps, { ticket: 'tk_1', ask: true, question: '选哪个？', option: ['A'] })
+
+    expect(code).toBe(2)
+    expect(deps.err.join('\n')).toContain('至少需要两个')
+  })
+
+  it('kind pr 把链接做成卡片按钮，并把 PR 链接放进兜底正文', async () => {
+    const sent: any[] = []
+    const code = await runReply(makeDeps('/tmp/ra-reply-none', capture(sent)), {
+      ticket: 'tk_1', kind: 'pr', body: '## 做了什么\n修好了', pr: '42', prUrl: 'https://github.com/o/r/pull/42',
+    })
+
+    expect(code).toBe(0)
+    expect(sent[0].replyPayload.blocks[0]).toMatchObject({
+      type: 'card',
+      title: 'PR #42',
+      markdown: '## 做了什么\n修好了',
+      actions: [{ label: '打开 PR', url: 'https://github.com/o/r/pull/42' }],
+    })
+    expect(sent[0].replyPayload.fallbackText).toContain('https://github.com/o/r/pull/42')
+  })
+
+  it('服务不可达时结构化载荷也写进 state.json 的 reply_payload', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-reply-'))
+    const deps = makeDeps(home, (async () => { throw new Error('ECONNREFUSED') }) as typeof fetch)
+    const code = await runReply(deps, { ticket: 'tk_1', kind: 'markdown', body: '正文', summary: '完成' })
+
+    expect(code).toBe(3)
+    const file = JSON.parse(readFileSync(join(home, 'workers', 'tk_1', 'state.json'), 'utf8'))
+    expect(file.reply_payload.blocks[0]).toEqual({ type: 'markdown', text: '正文' })
   })
 })

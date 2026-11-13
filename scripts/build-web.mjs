@@ -1,4 +1,4 @@
-import { copyFileSync, cpSync, mkdirSync } from 'node:fs'
+import { copyFileSync, cpSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
@@ -40,6 +40,13 @@ for (const asset of packageAssets) {
   const to = join(root, 'dist', asset.replace(/^packages\//, 'packages/'))
   mkdirSync(dirname(to), { recursive: true })
   copyFileSync(join(root, asset), to)
+}
+
+// Worker 技能目录（SKILL.md + references/）整体复制：目录结构要保持，
+// reader 按 `skill/<相对路径>` 定位。
+const skillRoot = join(root, 'packages/runtime/src/spec/worker')
+if (existsSync(skillRoot)) {
+  cpSync(skillRoot, join(root, 'dist/packages/runtime/src/spec/worker'), { recursive: true })
 }
 
 const assets = [
