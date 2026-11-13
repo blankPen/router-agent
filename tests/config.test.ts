@@ -39,7 +39,7 @@ describe('全局状态目录与配置', () => {
     expect(cfg.policy.maxAutoRecover).toBe(1)
     expect(cfg.feishu.reaction).toBe('Typing')
     expect(cfg.worker.evidence.ui).toBe('warn')
-    // 需求分析助手默认关闭：不改变存量群的回复行为；追问轮次默认 10 轮。
+    // 群级「处理普通成员消息」默认关闭：不改变存量群的回复行为；追问轮次默认 10 轮。
     expect(cfg.feishu.chats).toEqual([])
     expect(cfg.runtime.default).toBe('orca')
   })

@@ -387,9 +387,10 @@ export class IntakeCoordinator {
 
   /** 跑一轮分析：用户补充信息、得到答复，或收口成结构化需求单。 */
   private async advance(intake: Intake, trigger: Trigger): Promise<void> {
-    const projectPath = await this.projectPathOf(intake)
     const settings = this.settingsFor(intake.chatId)
-    const readCode = settings.codeAccess && Boolean(projectPath)
+    // 没开「允许只读项目代码」就不解析项目目录：路径既不给模型，也不进提示词。
+    const projectPath = settings.codeAccess ? await this.projectPathOf(intake) : undefined
+    const readCode = Boolean(projectPath)
     let outcome
     try {
       const text = await this.llm.run({

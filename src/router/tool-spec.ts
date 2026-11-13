@@ -28,7 +28,7 @@ const STAGES = [...STAGE_VALUES]
 export const ROUTER_TOOL_SPECS: RouterToolSpec[] = [
   {
     name: 'router_context',
-    description: '读取当前会话（群）绑定的项目信息与这条消息的上下文。普通成员只能用这个只读工具。',
+    description: '读取这条消息与同一话题下的历史消息（会话上下文）。普通成员只能用这个只读工具：看不到项目清单，也看不到任何工单。',
     requires: 'member',
     parameters: Type.Object({
       trigger_id: Type.Optional(Type.String({ description: '要读取的 Trigger ID' })),

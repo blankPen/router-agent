@@ -56,7 +56,16 @@ function trigger(over: Partial<Trigger> = {}): Trigger {
   }
 }
 
-function setup(llm: IntakeEngine, over: { maxQuestions?: number; approvers?: string[]; policy?: Partial<Policy> } = {}) {
+function setup(
+  llm: IntakeEngine,
+  over: {
+    maxQuestions?: number
+    approvers?: string[]
+    policy?: Partial<Policy>
+    codeAccess?: boolean
+    resolveProjectPath?: (project: { name: string; repo: string }) => Promise<string | undefined>
+  } = {},
+) {
   const store = new Store(':memory:')
   const clock = { now: () => now }
   let n = 0
@@ -75,6 +84,7 @@ function setup(llm: IntakeEngine, over: { maxQuestions?: number; approvers?: str
     intake: {
       llm,
       settings: intakeSettings(over),
+      ...(over.resolveProjectPath ? { resolveProjectPath: over.resolveProjectPath } : {}),
     },
   })
   return { store, engine, loop, advance: (at: string) => { now = at } }
@@ -86,13 +96,14 @@ function intakeSettings(over: {
   approvers?: string[]
   enabledChats?: string[]
   approversByChat?: Record<string, string[]>
+  codeAccess?: boolean
 } = {}): MemberSettingsView {
   const enabledChats = new Set(over.enabledChats ?? ['oc_dev'])
   return {
     forChat: (chatId: string) => ({
       enabled: enabledChats.has(chatId),
       maxQuestions: over.maxQuestions ?? 2,
-      codeAccess: false,
+      codeAccess: over.codeAccess ?? false,
       approvers: over.approversByChat?.[chatId] ?? over.approvers ?? ['ou_admin'],
     }),
   }
@@ -194,6 +205,33 @@ describe('需求识别（intake）', () => {
     expect(engine.store.listTickets()).toHaveLength(0)
   })
 
+  it('普通成员的分析可以基于项目代码：群里开了只读代码才读', async () => {
+    // 第一轮是初筛（不看代码），第二轮才是分析 Agent（可读项目代码）。
+    const llm = new FakeIntake([QUESTIONS, { action: 'answer', reply: '是登录态过期' }])
+    const { engine, loop } = setup(llm, {
+      codeAccess: true,
+      resolveProjectPath: async () => '/tmp/project',
+    })
+    engine.ingest(trigger())
+
+    await loop.tick()
+    expect(llm.requests[0]?.readCode).toBe(false)
+    expect(llm.requests[1]?.readCode).toBe(true)
+    expect(llm.requests[1]?.projectPath).toBe('/tmp/project')
+  })
+
+  it('群里没开只读代码时，分析只看对话不读项目文件', async () => {
+    const llm = new FakeIntake([QUESTIONS, { action: 'answer', reply: '先看下报错信息' }])
+    const { engine, loop } = setup(llm, {
+      codeAccess: false,
+      resolveProjectPath: async () => '/tmp/project',
+    })
+    engine.ingest(trigger())
+
+    await loop.tick()
+    expect(llm.requests[1]?.readCode).toBe(false)
+    expect(llm.requests[1]?.projectPath).toBeUndefined()
+  })
   it('发起人补充信息后收口：生成需求单并 @管理员终审', async () => {
     const llm = new FakeIntake([
       QUESTIONS,
