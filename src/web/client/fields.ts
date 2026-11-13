@@ -89,17 +89,6 @@ const ACCEPT_MODE_OPTIONS: FieldOption[] = [
   { value: 'auto', label: 'auto · 研判通过直接开单', hint: '默认模式' },
 ]
 
-const ADMISSION_LISTED_OPTIONS: FieldOption[] = [
-  { value: 'inferred', label: 'inferred · 允许模型推断接单' },
-  { value: 'ignore', label: 'ignore · 必须显式 @ 才算' },
-]
-
-const ADMISSION_ADDRESSED_OPTIONS: FieldOption[] = [
-  { value: 'explicit', label: 'explicit · 只接明确指派' },
-  { value: 'inferred', label: 'inferred · 允许模型推断' },
-  { value: 'ignore', label: 'ignore · 一律忽略' },
-]
-
 const KEY_SCOPE_OPTIONS: FieldOption[] = [
   { value: 'user', label: 'user · 群 + 人' },
   { value: 'thread', label: 'thread · 群 + 话题 + 人' },
@@ -158,9 +147,55 @@ export const LLM_FIELDS: FieldDef[] = [
 ]
 
 /**
+ * 决策层：普通成员消息先过确定性准入，再交决策模型分类。
+ *
+ * 默认关闭——打开后才会改变普通成员消息的处理路径。密钥同样只写不读，
+ * 保存后 `publicConfig` 只回 `apiKeySet`；环境变量 TYPESAFE_API_KEY 优先级更高。
+ */
+export const DECISION_FIELDS: FieldDef[] = [
+  {
+    path: 'decision.enabled',
+    label: '启用决策层',
+    kind: 'switch',
+    hint: '开启后，普通成员消息先过确定性准入（去重 / 媒体 / 噪声门槛），再交决策模型分类；关闭时保持原有初筛行为',
+  },
+  {
+    path: 'decision.provider',
+    label: '决策 Provider',
+    kind: 'select',
+    options: [
+      { value: 'jev', label: 'jev · 决策模型（推荐）', hint: '用结构化问题问决策模型，回答可阈值化' },
+      { value: 'llm', label: 'llm · 用同一份 spec 模拟', hint: 'Jev 不可用时的兜底路径' },
+    ],
+    hint: '两个 Provider 用同一份决策契约，输出格式一致',
+  },
+  {
+    path: 'decision.jev.model',
+    label: 'Jev 模型名',
+    kind: 'text',
+    placeholder: '例如 jev-latest',
+    hint: '留空时读环境变量 TYPESAFE_MODEL',
+  },
+  {
+    path: 'decision.jev.apiKey',
+    label: 'Jev API Key',
+    kind: 'password',
+    placeholder: '留空 = 保持已配置的密钥',
+    hint: '只写入 config.yaml，保存后不回显；环境变量 TYPESAFE_API_KEY 可覆盖',
+  },
+  {
+    path: 'decision.jev.baseUrl',
+    label: 'Jev Base URL',
+    kind: 'text',
+    placeholder: '留空 = 默认地址',
+    hint: '只有走代理时才需要填；环境变量 TYPESAFE_BASE_URL 可覆盖',
+  },
+]
+
+/**
  * 配置页的分组与块。
  *
- * 顺序原则：先「能不能跑起来」（LLM 接入、运行时、渠道、项目），再「谁来叫醒它」
+ * 顺序原则：先「能不能跑起来」（LLM 接入、决策层、运行时、渠道、项目），再「谁来叫醒它」
  * （消息准入），最后是低频的其它设置。
  */
 export const CONFIG_GROUPS: ConfigGroup[] = [
@@ -226,6 +261,19 @@ export const CONFIG_GROUPS: ConfigGroup[] = [
     ],
   },
   {
+    id: 'decision',
+    title: '决策层',
+    description: '普通成员消息先过确定性准入门槛，再交决策模型分类。',
+    blocks: [
+      {
+        id: 'decision',
+        title: '决策模型（Jev）',
+        description: '默认关闭。开启后普通成员消息先过确定性准入（去重 / 媒体 / 噪声门槛），再交决策模型判断是否跟进、属于哪一类；关闭时保持原有初筛行为。',
+        fields: DECISION_FIELDS,
+      },
+    ],
+  },
+  {
     id: 'runtime',
     title: '运行时配置',
     description: '工单交给哪个运行时执行，同时能并发跑几张。',
@@ -258,7 +306,7 @@ export const CONFIG_GROUPS: ConfigGroup[] = [
   {
     id: 'channels',
     title: '渠道配置',
-    description: '消息从哪个渠道进来。先选渠道，再配它的接入、接收范围与消息处理。',
+    description: '消息从哪个渠道进来。先选渠道，再配它的接入、管理员与消息范围。',
     kind: 'channels',
     blocks: [],
   },
@@ -279,7 +327,7 @@ export const CONFIG_GROUPS: ConfigGroup[] = [
   {
     id: 'admission',
     title: '消息准入',
-    description: '哪些消息能开工单、以什么方式接单。保存后立即生效，不需要重启。',
+    description: '哪些群的消息接进来、以什么方式接单。保存后立即生效，不需要重启。',
     blocks: [
       {
         id: 'accept-mode',
@@ -287,33 +335,6 @@ export const CONFIG_GROUPS: ConfigGroup[] = [
         description: '决定 Router 收到消息后是只记录、只研判，还是直接开单派工。',
         fields: [
           { path: 'policy.acceptMode', label: '接单模式', kind: 'select', options: ACCEPT_MODE_OPTIONS },
-        ],
-      },
-      {
-        id: 'admission-rules',
-        title: '谁能叫醒机器人',
-        description: '按「是否在名单里」和「是否 @ 了机器人」两个维度决定一条消息是否进入研判。',
-        fields: [
-          {
-            path: 'policy.admission.listedNotAddressed',
-            label: '名单内成员 · 未 @ 机器人',
-            kind: 'select',
-            options: ADMISSION_LISTED_OPTIONS,
-            hint: '已在允许名单里的人发消息但没 @ 机器人时怎么处理',
-          },
-          {
-            path: 'policy.admission.unlistedAddressed',
-            label: '名单外成员 · @ 了机器人',
-            kind: 'select',
-            options: ADMISSION_ADDRESSED_OPTIONS,
-            hint: '陌生人 @ 机器人时，是只认明确指名，还是允许模型推断',
-          },
-          {
-            path: 'policy.admission.unlistedNotAddressed',
-            label: '名单外成员 · 未 @ 机器人',
-            kind: 'select',
-            options: ADMISSION_LISTED_OPTIONS,
-          },
         ],
       },
     ],

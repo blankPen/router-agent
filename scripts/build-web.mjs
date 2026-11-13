@@ -55,6 +55,8 @@ const assets = [
   'src/router/prompts/conversation.md',
   'src/router/prompts/intake-screener.md',
   'src/router/prompts/intake-analyst.md',
+  'src/router/prompts/decision.md',
+  'src/router/prompts/router-agent.md',
   'src/router/prompts/soul.md',
 ]
 for (const asset of assets) {

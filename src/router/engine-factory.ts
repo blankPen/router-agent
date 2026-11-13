@@ -8,11 +8,16 @@ import { PiIntakeEngine } from './intake-engine.js'
 import { SqliteSessionPersistence } from './session-persistence.js'
 import { RouterToolbox, type RouterToolboxDeps } from './tools.js'
 import type { Logger } from '#infra/logger.js'
+import { effectiveAdmins } from '#core/policy.js'
+import { DecisionAgent, JevDecisionProvider, LlmDecisionProvider, type DecisionProvider } from './decision/agent.js'
+import type { IntakeEngine } from './intake-engine.js'
 
 export interface DecisionEngineFactoryOptions {
   config: AppConfig
   store: Store
   model: PiModelConfig
+  /** 工具越权 / 装配失败等告警日志；缺省 noop。 */
+  logger?: Logger
   /** 关单 / 回收 workspace 等运维工具需要 Engine；只读场景可不传。 */
   engine?: Engine
   /** 版本检查 / 升级；传入后模型才拥有 router_update 工具。 */
@@ -36,6 +41,7 @@ export function createDecisionEngine(opts: DecisionEngineFactoryOptions): PiDeci
     cwd: opts.config.home,
     timeoutMs: opts.config.router.timeoutMs,
     tokenBudget: opts.config.router.tokenBudget,
+    ...(opts.logger ? { logger: opts.logger } : {}),
     ...(session.enabled
       ? {
           sessionPersistence: new SqliteSessionPersistence(opts.store),
@@ -48,6 +54,55 @@ export function createDecisionEngine(opts: DecisionEngineFactoryOptions): PiDeci
           contextWindow: opts.config.llm?.contextWindow ?? 128_000,
         }
       : {}),
+  })
+}
+
+
+/** 决策层装配参数：在研判引擎参数之上多一个分析引擎（LLM 兜底用）。 */
+export interface DecisionAgentFactoryOptions extends DecisionEngineFactoryOptions {
+  intakeEngine?: IntakeEngine
+  logger?: Logger
+}
+
+/**
+ * 装配决策层：普通成员消息先过确定性准入，再交 Jev（或 LLM 模拟）分类。
+ * 未开启（decision.enabled=false）或没有可用 Provider 时返回 null，保持原有 LLM 初筛行为。
+ */
+export function createDecisionAgent(opts: DecisionAgentFactoryOptions): DecisionAgent | null {
+  const decision = opts.config.decision
+  if (!decision.enabled) return null
+  let provider: DecisionProvider
+  if (decision.provider === 'jev' && decision.jev.apiKey && decision.jev.model) {
+    provider = new JevDecisionProvider({
+      apiKey: decision.jev.apiKey,
+      model: decision.jev.model,
+      ...(decision.jev.baseUrl ? { baseUrl: decision.jev.baseUrl } : {}),
+    })
+    // 启动时留痕：日志里能直接看出决策层是否装配、走的哪个 Provider。
+    opts.logger?.info('decision:enabled', { provider: 'jev', model: decision.jev.model })
+  } else if (opts.intakeEngine) {
+    provider = new LlmDecisionProvider(opts.intakeEngine, opts.config.home)
+    opts.logger?.info('decision:enabled', {
+      provider: 'llm',
+      detail: decision.provider === 'jev'
+        ? 'Jev 连接信息不全（API Key 与模型名要都有），用 LLM 模拟同一份决策契约'
+        : '按配置用 LLM 模拟同一份决策契约',
+    })
+  } else {
+    opts.logger?.warn('decision:provider-missing', { detail: 'decision.enabled 但 Jev 密钥与 LLM 引擎都不可用，回退 LLM 初筛' })
+    return null
+  }
+  return new DecisionAgent({
+    provider,
+    isAdmin: trigger => {
+      const policy = opts.engine?.policy()
+      if (!policy) return false
+      return effectiveAdmins(policy, trigger.chatId).includes(trigger.actorId)
+    },
+    // 话题已绑定在办工单的放行消息由 Gate 打标（unaddressedAdmitted），走工单相关路径。
+    hasBoundTicket: trigger => Boolean(trigger.unaddressedAdmitted),
+    isCommand: text => /^\s*(?:@\S+\s+)?\/new\s*$/.test(text),
+    logger: opts.logger,
   })
 }
 

@@ -1,5 +1,6 @@
 import { Type, type TSchema } from 'typebox'
 import { STAGE_VALUES } from '#core/stage.js'
+import type { ToolRequirement } from '#core/tool-scope.js'
 
 /**
  * 研判工具的单一事实来源。
@@ -13,6 +14,11 @@ export interface RouterToolSpec {
   name: string
   description: string
   parameters: TSchema
+  /**
+   * 角色要求（admin / member / all），工具层强制的依据：
+   * 装配时按 toolScope 过滤，执行时再校验发送人身份。
+   */
+  requires: ToolRequirement
 }
 
 const stringEnum = (values: string[]): TSchema => Type.Unsafe({ type: 'string', enum: values })
@@ -21,8 +27,18 @@ const STAGES = [...STAGE_VALUES]
 
 export const ROUTER_TOOL_SPECS: RouterToolSpec[] = [
   {
+    name: 'router_context',
+    description: '读取这条消息与同一话题下的历史消息（会话上下文）。普通成员只能用这个只读工具：看不到项目清单，也看不到任何工单。',
+    requires: 'member',
+    parameters: Type.Object({
+      trigger_id: Type.Optional(Type.String({ description: '要读取的 Trigger ID' })),
+      thread_id: Type.Optional(Type.String({ description: '要读取的线程 ID' })),
+    }),
+  },
+  {
     name: 'router_read',
     description: '读取一条 Trigger、它的 Thread 上下文，或某个工单的完整状态。做决定前可先调用。',
+    requires: 'admin',
     parameters: Type.Object({
       trigger_id: Type.Optional(Type.String({ description: '要读取的 Trigger ID' })),
       ticket_id: Type.Optional(Type.String({ description: '要读取的工单 ID' })),
@@ -32,6 +48,7 @@ export const ROUTER_TOOL_SPECS: RouterToolSpec[] = [
   {
     name: 'router_ticket',
     description: '查询工单：给 ticket_id 取详情，或按 stage 列表。列表查询建议用 router_ticket_list。',
+    requires: 'admin',
     parameters: Type.Object({
       ticket_id: Type.Optional(Type.String()),
       stage: Type.Optional(Type.String()),
@@ -41,6 +58,7 @@ export const ROUTER_TOOL_SPECS: RouterToolSpec[] = [
   {
     name: 'router_ticket_list',
     description: '查询工单列表：可按阶段、会话（chat_id）、关键词（标题或工单 ID）过滤，按创建时间倒序。',
+    requires: 'admin',
     parameters: Type.Object({
       stage: Type.Optional(stringEnum(STAGES)),
       chat_id: Type.Optional(Type.String({ description: '只查某个飞书会话里的工单' })),
@@ -51,6 +69,7 @@ export const ROUTER_TOOL_SPECS: RouterToolSpec[] = [
   {
     name: 'router_ticket_progress',
     description: '查询一张工单的进展：当前阶段、最近上报、待答问题、PR、workspace 与未处理输入。',
+    requires: 'admin',
     parameters: Type.Object({
       ticket_id: Type.String({ description: '工单 ID，例如 tk-8' }),
     }),
@@ -58,6 +77,7 @@ export const ROUTER_TOOL_SPECS: RouterToolSpec[] = [
   {
     name: 'router_ticket_close',
     description: '关闭一张工单，默认只停止 worker、保留它的 workspace（目录之后由定时任务回收，也可手动回收）。PR 仍开着时会被拒绝，除非 force=true。',
+    requires: 'admin',
     parameters: Type.Object({
       ticket_id: Type.String({ description: '要关闭的工单 ID' }),
       reason: Type.String({ description: '关单原因，写给人看' }),
@@ -68,6 +88,7 @@ export const ROUTER_TOOL_SPECS: RouterToolSpec[] = [
   {
     name: 'router_workspace_remove',
     description: '立即回收一张已关闭工单的 workspace（停终端、删 worktree），不改变工单状态。用户明确要清理目录时用它。',
+    requires: 'admin',
     parameters: Type.Object({
       ticket_id: Type.String({ description: '已关闭的工单 ID' }),
       reason: Type.Optional(Type.String({ description: '回收原因' })),
@@ -78,13 +99,16 @@ export const ROUTER_TOOL_SPECS: RouterToolSpec[] = [
     description:
       '检查 router-agent 的 npm 最新版本；不传 check 时会安装最新版，并在本轮回复后自动重启整个服务。'
       + '只有用户明确要求「更新版本 / 升级 ra / 检查有没有新版」时才调用，不要主动升级。',
+    requires: 'admin',
     parameters: Type.Object({
       check: Type.Optional(Type.Boolean({ description: '只检查是否有新版本，不安装也不重启，默认 false' })),
     }),
   },
   {
     name: 'router_decide',
-    description: '对一条 Trigger 给出决定。accept 会创建工单并派工；ignore 表示不需要开工；unavailable 表示研判没完成。',
+    description: '对一条 Trigger 给出决定。accept 会创建工单并派工；ignore 表示不需要开工；unavailable 表示研判没完成。'
+      + '需求本身说不清、要先和对方讨论几轮时，把 clarify 置 true（此时不要给 accept），Router 会先澄清再开单。',
+    requires: 'admin',
     parameters: Type.Object({
       trigger_id: Type.String(),
       decision: stringEnum(['accept', 'stop', 'ignore', 'unavailable']),
@@ -95,11 +119,15 @@ export const ROUTER_TOOL_SPECS: RouterToolSpec[] = [
       repo: Type.Optional(Type.String({ description: 'accept 时必填：项目名或仓库选择器。判断不了就留空，系统会替你追问用户' })),
       branch: Type.Optional(Type.String({ description: 'accept 时必填：worktree 的起始分支。判断不了就留空，系统会替你追问用户' })),
       rules: Type.Optional(Type.Array(Type.String(), { description: '命中的策略规则名' })),
+      clarify: Type.Optional(Type.Boolean({
+        description: '需求描述不明确或复杂到必须先讨论：置 true（此时不要给 accept），Router 会先与用户澄清几轮再开单',
+      })),
     }),
   },
 ]
 
 export const DECISION_TOOL_NAMES = [
+  'router_context',
   'router_read',
   'router_ticket',
   'router_ticket_list',
@@ -109,6 +137,12 @@ export const DECISION_TOOL_NAMES = [
   'router_update',
   'router_decide',
 ] as const
+
+/** 工具角色要求清单：装配与执行两处校验的同一份依据。 */
+export const ROUTER_TOOL_AUTHZ: Array<{ name: string; requires: ToolRequirement }> = ROUTER_TOOL_SPECS.map(spec => ({
+  name: spec.name,
+  requires: spec.requires,
+}))
 
 export function toolSpec(name: string): RouterToolSpec {
   const spec = ROUTER_TOOL_SPECS.find(item => item.name === name)

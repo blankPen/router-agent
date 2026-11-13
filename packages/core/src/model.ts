@@ -260,7 +260,13 @@ export interface Channel {
 export type IntakeStatus = 'clarifying' | 'ready' | 'approved' | 'rejected' | 'dismissed' | 'answered'
 
 /** 初筛结论：闲聊 / 普通咨询 / 疑似故障或需求。 */
-export type IntakeKind = 'chat' | 'question' | 'issue'
+/**
+ * 需求会话的类型：
+ * - question：普通成员的咨询，会话内直接给结论；
+ * - issue：普通成员提的需求，澄清后交管理员终审；
+ * - request：管理员自己提的需求，澄清后直接开单。
+ */
+export type IntakeKind = 'chat' | 'question' | 'issue' | 'request'
 
 /** 一条 intake 会话里的消息；Router 回复也记进来，供下一轮分析看到上下文。 */
 export interface IntakeTurn {

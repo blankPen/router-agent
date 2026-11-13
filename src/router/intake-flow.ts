@@ -1,6 +1,6 @@
 import type { Clock, DecideOutcome, Engine } from '../core/engine.js'
-import type { Intake, IntakeReport, Ticket, Trigger } from '#core/model.js'
-import { effectiveAllowedByChat } from '#core/policy.js'
+import type { Intake, IntakeKind, IntakeReport, IntakeTurn, Ticket, Trigger } from '#core/model.js'
+import { effectiveAdmins, effectiveAllowed, scopeOf } from '#core/policy.js'
 import { readRouterPrompt } from '../specs/index.js'
 import { messageContext, preview } from '#core/events.js'
 import { noopLogger, errorMessage, type Logger } from '#infra/logger.js'
@@ -8,6 +8,7 @@ import type { DispatchSettings } from './dispatch.js'
 import { resolveDispatch } from './dispatch.js'
 import type { Store } from '../store/db.js'
 import type { IntakeEngine } from './intake-engine.js'
+import type { DecisionAgent } from './decision/agent.js'
 import {
   buildAnalystUserPrompt,
   buildScreenerUserPrompt,
@@ -21,23 +22,22 @@ import {
   ticketFromIntake,
 } from './intake.js'
 
-/** 单个群的需求分析配置。 */
-export interface IntakeChatSettings {
-  enabled: boolean
-  /** 终审管理员 open_id；为空时回退到策略里的全局名单。 */
+/** 单个群的普通成员消息处理配置。 */
+export interface MemberChatSettings {
+  /** 终审管理员 open_id；为空时回退到默认管理员名单。 */
   approvers: string[]
   maxQuestions: number
   codeAccess: boolean
 }
 
-export interface IntakeSettingsView {
+export interface MemberSettingsView {
   /**
    * 按群取配置。
    *
-   * 需求分析助手是群级能力：开关、追问轮数、终审管理员都跟着群走，
+   * 只有群级开关决定 Router 要不要处理本群普通成员的消息；
    * 没配的群一律关闭（不会因为别的群开了就跟着开）。
    */
-  forChat: (chatId: string) => IntakeChatSettings
+  forChat: (chatId: string) => MemberChatSettings
 }
 
 export interface IntakeCoordinatorOptions {
@@ -47,7 +47,7 @@ export interface IntakeCoordinatorOptions {
   llm: IntakeEngine
   clock: Clock
   logger?: Logger
-  settings: IntakeSettingsView
+  settings: MemberSettingsView
   dispatch: DispatchSettings
   /** 项目选择器 → 本地目录；拿不到时不读代码，只基于对话判断。 */
   resolveProjectPath?: (project: { name: string; repo: string }) => Promise<string | undefined>
@@ -56,6 +56,8 @@ export interface IntakeCoordinatorOptions {
   /** 终审管理员缺省值（策略里的生效名单）。 */
   fallbackApprovers: () => string[]
   home?: string
+  /** 决策层（确定性准入 + Jev/LLM 分类）；传入后替代 LLM 初筛。 */
+  decisionAgent?: DecisionAgent
   /** intake 会话空闲多久后自动放弃，默认 72 小时。 */
   ttlMs?: number
 }
@@ -64,6 +66,11 @@ export type IntakeGateAction = 'handled' | 'screen'
 
 /** 默认 72 小时没有新消息的 intake 视为放弃，避免陈旧会话一直挡着新问题。 */
 const DEFAULT_TTL_MS = 72 * 3_600_000
+
+/** 会话 id 形如 `it_<triggerId>`，反解出原始触发消息。 */
+export function triggerIdOf(intake: Intake): string {
+  return intake.id.startsWith('it_') ? intake.id.slice(3) : ''
+}
 
 /**
  * 需求识别调度器。
@@ -77,13 +84,14 @@ export class IntakeCoordinator {
   private llm: IntakeEngine
   private clock: Clock
   private logger: Logger
-  private settings: IntakeSettingsView
+  private settings: MemberSettingsView
   private dispatch: DispatchSettings
   private resolveProjectPath?: (project: { name: string; repo: string }) => Promise<string | undefined>
   private replyTo: IntakeCoordinatorOptions['reply']
   private fallbackApprovers: () => string[]
   private home?: string
   private ttlMs: number
+  private decisionAgent?: DecisionAgent
 
   constructor(opts: IntakeCoordinatorOptions) {
     this.store = opts.store
@@ -98,26 +106,43 @@ export class IntakeCoordinator {
     this.fallbackApprovers = opts.fallbackApprovers
     this.home = opts.home
     this.ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS
+    this.decisionAgent = opts.decisionAgent
   }
 
-  /** 这个群是否开启了需求识别。 */
+  /**
+   * 这条消息是否落在需求会话链路里。
+   *
+   * 管理员始终在内：他们的需求不依赖「处理普通成员消息」这个开关。
+   * 普通成员看群开关：没开的群，Router 不处理普通成员的消息。
+   */
   enabledFor(trigger: Trigger): boolean {
     if (trigger.isBot) return false
-    return this.settingsFor(trigger.chatId).enabled
+    if (this.isAdmin(trigger)) return true
+    return this.handlesMembers(trigger.chatId)
   }
 
-  /** 该群是否配了终审管理员；没配时回退到策略里的全局名单。 */
+  /** 这个群是否处理普通成员的消息。 */
+  handlesMembers(chatId: string): boolean {
+    return scopeOf(this.engine.policy(), chatId) !== 'admins'
+  }
+
+  /** 发送人是否是管理员（默认管理员 + 群内扩充）。 */
+  private isAdmin(trigger: Trigger): boolean {
+    return effectiveAdmins(this.engine.policy(), trigger.chatId).includes(trigger.actorId)
+  }
+
+  /** 该群是否配了终审管理员；没配时回退到默认管理员名单。 */
   isApprover(chatId: string, actorId: string): boolean {
     const approvers = this.approversOf(chatId)
     return approvers.includes(actorId)
   }
 
   /** 该群的需求分析配置；没配的群按「关闭」处理。 */
-  private settingsFor(chatId: string): IntakeChatSettings {
+  private settingsFor(chatId: string): MemberChatSettings {
     return this.settings.forChat(chatId)
   }
 
-  /** 该群生效的终审管理员 open_id；没配时回退到全局名单。 */
+  /** 该群生效的终审管理员 open_id；没配时回退到默认管理员名单。 */
   private approversOf(chatId: string): string[] {
     const configured = this.settingsFor(chatId).approvers
     return configured.length > 0 ? configured : this.fallbackApprovers()
@@ -126,30 +151,22 @@ export class IntakeCoordinator {
   /**
    * 这个人能不能在本群发起需求。
    *
-   * 只认群级名单：群没配名单时普通成员都能提需（这正是需求分析助手的用途，
-   * 全局 allowed 管的是谁能派单，不是谁能提需）；群配了名单则只认名单内的人，
-   * 配了却一个都解析不出来 = 该群拒绝所有人。
+   * 授权名单（群级或全局）只决定谁能当管理员、谁能派单，不决定谁能说话：
+   * 普通成员的需求要经管理员终审才成单，所以发起需求不需要在名单里。
    *
-   * 与 AgentLoop 的初筛入口同口径：intake 走的是 Gate 之前的分支，所以必须自己再判一次，
-   * 否则名单外的人能借「继续追问」绕过准入。
+   * 群名单只扩充管理员，不拦人：普通成员照样能提需求。
    */
   private canRequest(trigger: Trigger): boolean {
-    const scoped = effectiveAllowedByChat(this.engine.policy(), trigger.chatId)
-    if (scoped === undefined) return true
-    return scoped.includes(trigger.actorId)
+    return true
   }
 
   /**
    * 能不能给这张需求单终审。
    *
-   * 必须是终审管理员（群级配置优先，没配回退全局名单），
-   * 且群级白名单是硬边界：配了名单的人不在名单里，也不能终审派单。
+   * 必须是终审管理员（群级配置优先，没配回退默认管理员名单）。
    */
   private canApprove(trigger: Trigger): boolean {
-    if (!this.isApprover(trigger.chatId, trigger.actorId)) return false
-    const scoped = effectiveAllowedByChat(this.engine.policy(), trigger.chatId)
-    if (scoped === undefined) return true
-    return scoped.includes(trigger.actorId)
+    return this.isApprover(trigger.chatId, trigger.actorId)
   }
 
   /**
@@ -228,17 +245,62 @@ export class IntakeCoordinator {
   }
 
   /**
-   * 普通成员（未 @、不在派单名单）消息的入口：先轻量初筛，再按类型分流。
-   * 返回 false 表示这条消息不归 intake 管，交给原有研判处理。
+   * 普通成员消息的入口：先进决策层，再按结论决定要不要跟进。
+   *
+   * 返回 false 表示这条消息不归这条链路管（本群没开处理普通成员消息、
+   * 或群没绑定项目），由调用方按「普通成员消息不处理」忽略。
    */
-  async handleUnaddressed(trigger: Trigger): Promise<boolean> {
-    if (!this.enabledFor(trigger) || trigger.mediaOnly) return false
+  async handleMemberMessage(trigger: Trigger): Promise<boolean> {
+    if (!this.handlesMembers(trigger.chatId) || trigger.mediaOnly) return false
     if (!this.hasBoundProject(trigger.chatId)) {
       // 群没绑定项目：分析 Agent 无法定位代码，也不能生成可派单的需求单。
       this.logger.warn('intake:project-unbound', { triggerId: trigger.id, ...messageContext(trigger) })
       return false
     }
+    if (this.decisionAgent) return this.handleByDecision(trigger)
     return this.screen(trigger)
+  }
+
+  /**
+   * 管理员发起的澄清会话：需求太模糊或太复杂时，先讨论几轮再开单。
+   *
+   * 与普通成员的需求会话的区别只在收尾：讨论清楚后直接开单，
+   * 不需要再走管理员终审——发起人本身就是管理员。
+   * 群没绑定项目时返回 false，交回 Router 走常规追问（先问项目与分支）。
+   */
+  async startAdminRequest(trigger: Trigger, opts: { triage?: string } = {}): Promise<boolean> {
+    const resolution = resolveDispatch({ settings: this.dispatch, chatId: trigger.chatId })
+    if (!resolution.repo || !resolution.branch) return false
+    const intake = this.createIntake(trigger, 'request', opts)
+    await this.advance(intake, trigger)
+    return true
+  }
+
+  /**
+   * 决策层路径：确定性准入 + Jev/LLM 分类，替代 LLM 初筛。
+   * dropped（噪声）直接忽略；bypassed（管理员 / 口令 / 媒体 / 会话续接）交回 Router；
+   * verdict 动作映射：ignore / observe 忽略（未 @ 不打扰）；reply（咨询）建咨询会话；
+   * analysis（需求反馈且与项目相关）建需求会话。
+   */
+  private async handleByDecision(trigger: Trigger): Promise<boolean> {
+    const outcome = await this.decisionAgent!.decide(trigger)
+    if (outcome.kind === 'dropped') {
+      this.decideIgnore(trigger, outcome.reason, 'inferred')
+      this.logger.info('intake:decision-dropped', { triggerId: trigger.id, chat: trigger.chatId, rule: outcome.rule })
+      return true
+    }
+    if (outcome.kind === 'bypassed') return false
+    const verdict = outcome.verdict
+    if (verdict.action === 'ignore' || verdict.action === 'observe') {
+      this.decideIgnore(trigger, `decision:${verdict.msgType}:${verdict.confidence.toFixed(2)}`, 'inferred')
+      this.logger.info('intake:decision-ignore', { triggerId: trigger.id, chat: trigger.chatId, msgType: verdict.msgType, action: verdict.action, confidence: verdict.confidence })
+      return true
+    }
+    const intake = this.createIntake(trigger, verdict.action === 'reply' ? 'question' : 'issue', {
+      triage: `决策结论：${verdict.msgType}（${verdict.action}），置信度 ${verdict.confidence.toFixed(2)}${verdict.projectRelated ? '，与本群项目相关' : ''}。`,
+    })
+    await this.advance(intake, trigger)
+    return true
   }
 
   private async screen(trigger: Trigger): Promise<boolean> {
@@ -270,13 +332,19 @@ export class IntakeCoordinator {
     return true
   }
 
-  private createIntake(trigger: Trigger, kind: 'question' | 'issue'): Intake {
+  private createIntake(trigger: Trigger, kind: IntakeKind, opts: { triage?: string } = {}): Intake {
     const resolution = resolveDispatch({ settings: this.dispatch, chatId: trigger.chatId })
     const now = this.clock.now()
     const id = `it_${trigger.id}`
     // 同一个 trigger 被重试时复用已有会话，避免主键冲突把消息卡在重试循环里。
     const existing = this.store.getIntake(id)
     if (existing) return existing
+    const turns: IntakeTurn[] = [{ role: 'user', text: trigger.text, at: trigger.receivedAt, actorId: trigger.actorId }]
+    // 决策层结论以一条 router 转交消息写进会话历史：跨轮可见、无需改表，
+    // 分析 Agent 直接用它做 triage，不再重复判断消息类型。
+    if (opts.triage) {
+      turns.push({ role: 'router', text: `【决策层转交】${opts.triage}`, at: now })
+    }
     const intake: Intake = {
       id,
       threadId: trigger.threadId,
@@ -289,7 +357,7 @@ export class IntakeCoordinator {
       status: 'clarifying',
       kind,
       rawText: trigger.text,
-      turns: [{ role: 'user', text: trigger.text, at: trigger.receivedAt, actorId: trigger.actorId }],
+      turns,
       questions: 0,
       createdAt: now,
       updatedAt: now,
@@ -299,6 +367,7 @@ export class IntakeCoordinator {
       intakeId: intake.id,
       ...messageContext(trigger),
       kind,
+      action: kind === 'question' ? 'reply' : kind === 'request' ? 'clarify' : 'analysis',
       project: intake.project,
     })
     return intake
@@ -306,9 +375,10 @@ export class IntakeCoordinator {
 
   /** 跑一轮分析：用户补充信息、得到答复，或收口成结构化需求单。 */
   private async advance(intake: Intake, trigger: Trigger): Promise<void> {
-    const projectPath = await this.projectPathOf(intake)
     const settings = this.settingsFor(intake.chatId)
-    const readCode = settings.codeAccess && Boolean(projectPath)
+    // 没开「允许只读项目代码」就不解析项目目录：路径既不给模型，也不进提示词。
+    const projectPath = settings.codeAccess ? await this.projectPathOf(intake) : undefined
+    const readCode = Boolean(projectPath)
     let outcome
     try {
       const text = await this.llm.run({
@@ -368,8 +438,12 @@ export class IntakeCoordinator {
     await this.publishReady(intake, trigger)
   }
 
-  /** 需求单就绪：告知发起人已提交审核，并把 @管理员的终审消息挂到同一话题。 */
+  /** 需求单就绪：管理员自己的需求直接开单；普通成员的需求交给管理员终审。 */
   private async publishReady(intake: Intake, trigger: Trigger): Promise<void> {
+    if (intake.kind === 'request') {
+      await this.dispatchRequest(intake, trigger)
+      return
+    }
     intake.status = 'ready'
     intake.updatedAt = this.clock.now()
     this.store.updateIntake(intake)
@@ -387,6 +461,62 @@ export class IntakeCoordinator {
       title: intake.report?.title ?? '',
       approvers: approvers.length,
     })
+  }
+
+  /**
+   * 管理员的需求讨论完成：直接开单。
+   *
+   * 用的还是最初那条触发消息（会话 id 就是 `it_<triggerId>`）：
+   * 工单的请求正文取管理员的原话与后续补充，而不是模型整理出来的结论。
+   */
+  private async dispatchRequest(intake: Intake, trigger: Trigger): Promise<void> {
+    const ticket = ticketFromIntake(intake)
+    if (!ticket) {
+      this.replyTo(trigger, '这次没能整理出可执行的需求，麻烦再补充一下要做什么、改哪里。', `intake:request-invalid:${intake.id}`, { thread: true })
+      this.decideIgnore(trigger, 'intake:request-invalid', 'inferred')
+      return
+    }
+    if (!intake.repo || !intake.branch) {
+      this.replyTo(
+        trigger,
+        `需求已经聊清楚了，但还没确定项目与起始分支，暂时不能开工。请先在群配置里绑定项目（当前项目：${intake.project || '未绑定'}）。`,
+        `intake:request-noproject:${intake.id}`,
+        { thread: true },
+      )
+      this.decideIgnore(trigger, 'intake:request-noproject', 'inferred')
+      return
+    }
+    const triggerId = triggerIdOf(intake)
+    let outcome: DecideOutcome
+    try {
+      outcome = this.engine.decide({
+        triggerId,
+        decision: 'accept',
+        strength: trigger.addressed === 'none' ? 'inferred' : 'explicit',
+        reason: `router:request-ready:${intake.id}`,
+        title: ticket.title,
+        scope: ticket.scope,
+        request: this.originalRequest(intake),
+        requestActorName: intake.actorName || intake.actorId,
+        repo: intake.repo,
+        branch: intake.branch,
+        rules: ['router:request-ready'],
+      })
+    } catch (error) {
+      this.logger.warn('intake:request-failed', { intakeId: intake.id, ...messageContext(trigger), detail: errorMessage(error) })
+      this.replyTo(trigger, '开单没有成功，稍后再描述一次需求试一下。', `intake:request-failed:${intake.id}`, { thread: true })
+      return
+    }
+    if (!outcome.ticket) {
+      this.replyTo(trigger, '当前策略没有自动开单，请直接 @我 说明要做什么。', `intake:request-blocked:${intake.id}`, { thread: true })
+      return
+    }
+    intake.status = 'approved'
+    intake.ticketId = outcome.ticket.id
+    intake.updatedAt = this.clock.now()
+    this.store.updateIntake(intake)
+    this.replyTo(trigger, `需求已经聊清楚，工单「${outcome.ticket.title}」（${outcome.ticket.id}）开始执行。`, `intake:request-dispatched:${intake.id}`, { thread: true })
+    this.logger.info('intake:request-dispatched', { intakeId: intake.id, ticketId: outcome.ticket.id, ...messageContext(trigger) })
   }
 
   private async handleApproval(intake: Intake, trigger: Trigger): Promise<void> {

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
-import { DEFAULT_ADMISSION, type AcceptMode, type AdmissionTable, type InterruptedRecoveryMode, type Policy } from '#core/policy.js'
+import { type AcceptMode, type ChatScope, type InterruptedRecoveryMode, type Policy } from '#core/policy.js'
 import type { ToolPolicy } from '#runtime/port.js'
 import { UI_EVIDENCE_MODES, type UiEvidenceMode } from '#runtime/evidence-gate.js'
 import { ORCA_RUNTIME_ID, isWorkerRuntimeId, normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
@@ -18,7 +18,6 @@ import type { PluginEntry } from '#infra/plugin-loader.js'
 const runtimePackage: Record<string, string> = { ...DEFAULT_RUNTIME_PLUGINS }
 const channelPackage = (id: string): string | undefined => DEFAULT_CHANNEL_PLUGINS[id]
 
-export type ChatMode = 'all' | 'mention'
 
 /** Worker 启动方式：技能目录按需读取，或回退到 prompt 里的旧内联手册。 */
 export type WorkerSkillMode = 'path' | 'inline'
@@ -47,32 +46,35 @@ export const DEFAULT_WORKER_TOOLS: ToolPolicy = {
  */
 export interface ChatSettings {
   chat: string
-  /** all：全部消息，且不 @ 也会回复；mention：只收 @机器人。 */
-  mode: ChatMode
+  /**
+   * 消息处理范围：
+   * - admins：仅接受管理员消息；
+   * - mention：接受普通用户 @ 消息；
+   * - all：接受所有消息。
+   */
+  scope: ChatScope
   /** 群级派工绑定：项目名或仓库选择器；空表示开工前追问。 */
   repo: string
   /** 群级派工绑定：起始分支；空表示开工前追问。 */
   branch: string
-  /** 本群只允许这些 open_id 操作；空表示沿用全局 feishu.allowed。 */
+  /** 本群的管理员扩充：在全局默认管理员之外再加这些人。 */
   allowed: string[]
-  /** 本群的「需求分析助手」配置；默认关闭。 */
-  intake: ChatIntakeSettings
+  /** 本群的普通成员消息处理配置（追问轮数、只读代码、终审管理员）。 */
+  members: ChatMemberSettings
 }
 
 export function chatEntry(chat: string, over: Partial<Omit<ChatSettings, 'chat'>> = {}): ChatSettings {
-  const { intake, ...rest } = over
-  return { chat, mode: 'all', repo: '', branch: '', allowed: [], ...rest, intake: defaultChatIntake(intake ?? {}) }
+  const { members, ...rest } = over
+  return { chat, scope: 'mention', repo: '', branch: '', allowed: [], ...rest, members: defaultChatMembers(members ?? {}) }
 }
 
 /**
- * 「需求分析助手」的群级配置。
+ * 群级普通成员消息处理配置。
  *
- * 默认关闭：开启后，群里的普通成员不 @ 机器人也能触发初筛；
- * 初筛判为故障 / 需求的消息进入多轮澄清，结构化结果必须经管理员终审才派单。
+ * 要不要处理本群普通成员的消息由群的 `scope` 决定（admins = 不处理），
+ * 这里只管处理细节：追问几轮、能不能只读项目代码、谁终审。
  */
-export interface ChatIntakeSettings {
-  /** 是否在这个群开启需求分析助手。 */
-  enabled: boolean
+export interface ChatMemberSettings {
   /** 最多主动追问几轮；达到上限后直接整理现有信息交给管理员终审。 */
   maxQuestions: number
   /**
@@ -84,16 +86,15 @@ export interface ChatIntakeSettings {
   approvers: string[]
 }
 
-/** 需求分析助手的默认配置：关闭、最多追问 10 轮、允许只读项目代码。 */
-export const DEFAULT_CHAT_INTAKE: ChatIntakeSettings = {
-  enabled: false,
+/** 普通成员消息处理的默认配置：最多追问 10 轮、允许只读项目代码。 */
+export const DEFAULT_CHAT_MEMBERS: ChatMemberSettings = {
   maxQuestions: 10,
   codeAccess: true,
   approvers: [],
 }
 
-export function defaultChatIntake(over: Partial<ChatIntakeSettings> = {}): ChatIntakeSettings {
-  return { ...DEFAULT_CHAT_INTAKE, ...over }
+export function defaultChatMembers(over: Partial<ChatMemberSettings> = {}): ChatMemberSettings {
+  return { ...DEFAULT_CHAT_MEMBERS, ...over }
 }
 
 export interface FeishuSettings {
@@ -123,7 +124,6 @@ export interface ImageSettings {
 export interface PolicySettings {
   acceptMode: AcceptMode
   maxWorkers: number
-  admission: AdmissionTable
   /**
    * worker 被服务重启打断后的恢复策略。
    *
@@ -268,6 +268,15 @@ export interface LlmSettings {
   imageApiKey?: string
 }
 
+export interface DecisionSettings {
+  /** 普通成员消息的决策层开关；关闭时保持原有 LLM 初筛行为。 */
+  enabled: boolean
+  /** 决策 Provider：jev 优先，llm 用同一份 spec 模拟（Jev 不可用时兜底）。 */
+  provider: 'jev' | 'llm'
+  /** Jev 连接信息；apiKey / model 缺省从 TYPESAFE_API_KEY / TYPESAFE_MODEL 读取。 */
+  jev: { apiKey: string; model: string; baseUrl?: string }
+}
+
 export interface AppConfig {
   home: string
   projects: ProjectConfig[]
@@ -302,6 +311,7 @@ export interface AppConfig {
   channels?: Record<string, PluginEntry>
   server: { port: number }
   llm?: LlmSettings
+  decision: DecisionSettings
 }
 
 /** 某个 runtime 当前可用的项目清单；orca 兼容顶层 projects。 */
@@ -362,19 +372,9 @@ export function isKnownRuntimeId(config: AppConfig, id: string): boolean {
     || (config.runtime.loadedIds ?? []).includes(value)
 }
 
-/**
- * 「全量接收」的会话：配置了 `mode: all` 的群。
- *
- * 语义对齐：收了就要回。这些群里即使没 @ 机器人，研判后也要正常回一句，
- * 只是判不接单时不开工单。`mode: mention` 的群本来就只收 @，无需处理。
- */
-export function replyAlwaysChatsOf(config: AppConfig): string[] {
-  return config.feishu.chats.filter(chat => chat.mode === 'all').map(chat => chat.chat)
-}
-
-/** 开启了「需求分析助手」的群；一个都没开时不装配需求识别链路。 */
-export function intakeEnabledChats(config: AppConfig): string[] {
-  return config.feishu.chats.filter(chat => chat.intake?.enabled).map(chat => chat.chat)
+/** 处理普通成员消息的群（scope 不是 admins）；一个都没有时不装配普通成员链路。 */
+export function memberHandledChats(config: AppConfig): string[] {
+  return config.feishu.chats.filter(chat => chat.scope !== 'admins').map(chat => chat.chat)
 }
 
 export function defaultConfig(): AppConfig {
@@ -399,7 +399,6 @@ export function defaultConfig(): AppConfig {
     policy: {
       acceptMode: 'auto',
       maxWorkers: 4,
-      admission: { ...DEFAULT_ADMISSION },
       interruptedRecovery: 'auto',
       maxAutoRecover: 1,
     },
@@ -445,6 +444,11 @@ export function defaultConfig(): AppConfig {
       // 用户口径：关单只停 worker，目录保留 1 天后由定时任务回收。
       keepHours: 24,
       sweepMinutes: 30,
+    },
+    decision: {
+      enabled: false,
+      provider: 'jev',
+      jev: { apiKey: '', model: '' },
     },
     worker: { tools: { ...DEFAULT_WORKER_TOOLS }, evidence: { ui: 'warn' }, skill: { mode: 'path' } },
     reply: { ask: { mode: 'auto', allow: 'anyone', timeoutMs: 30 * 60_000 } },
@@ -576,6 +580,16 @@ server:
 #   api: openai-completions   # 或 anthropic-messages（Claude Code / CCSwitch 的 Anthropic 兼容网关）
 #   authHeader: false         # anthropic-messages 用 ANTHROPIC_AUTH_TOKEN 时改成 true
 #   contextWindow: 128000     # 用于会话自动压缩的阈值计算
+
+# 决策层（普通成员消息）：先过确定性准入（身份分流 / 噪声门槛），再交决策模型分类。
+# Jev 密钥从 RA_HOME/.env 读取：TYPESAFE_API_KEY / TYPESAFE_MODEL（可选 TYPESAFE_BASE_URL 指向代理）
+# decision:
+#   enabled: false      # 开启后普通成员消息的初筛改由决策层完成
+#   provider: jev       # jev | llm（llm 用同一份 spec 模拟，Jev 不可用时兜底）
+#   jev:
+#     apiKey: ""
+#     model: ""
+#     baseUrl: https://api.typesafe.ai/v1/systemone
 `
 
 /** 创建 ~/.router-agent 目录结构；不覆盖已有配置。 */
@@ -633,13 +647,6 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
   const runtimePlugins = parsePlugins(doc.runtime?.plugins)
   const channelPlugins = parsePlugins(doc.channels)
 
-  const admissionDoc = doc.policy?.admission ?? {}
-  const admission: AdmissionTable = {
-    listedNotAddressed: pickAdmission(admissionDoc.listedNotAddressed, base.policy.admission.listedNotAddressed, ['inferred', 'ignore']) as never,
-    unlistedAddressed: pickAdmission(admissionDoc.unlistedAddressed, base.policy.admission.unlistedAddressed, ['explicit', 'inferred', 'ignore']) as never,
-    unlistedNotAddressed: pickAdmission(admissionDoc.unlistedNotAddressed, base.policy.admission.unlistedNotAddressed, ['inferred', 'ignore']) as never,
-  }
-
   // 安全参数只由 worker.tools 与 adapter 内置基线决定，不允许 runtime.options 放宽。
   if (doc.runtime?.options && typeof doc.runtime.options === 'object') {
     const forbidden = new Set(['allowedTools', 'permissionMode', 'sandbox', 'shellAllow', 'allowNetwork', 'fileAccess'])
@@ -653,7 +660,8 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
     }
   }
 
-  // 群配置先解析出来：旧版全局 intake 段要迁移到群条目上。
+  // 群配置先解析出来：旧版全局 intake 段要迁移到群条目上，
+  // 旧的「谁能叫醒机器人」准入表也要折算成群级消息处理范围。
   const chats = parseChats(doc)
   migrateLegacyIntake(doc, chats, logger)
 
@@ -678,7 +686,6 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
     policy: {
       acceptMode,
       maxWorkers: Number.isFinite(Number(doc.policy?.maxWorkers)) && Number(doc.policy?.maxWorkers) > 0 ? Number(doc.policy.maxWorkers) : base.policy.maxWorkers,
-      admission,
       interruptedRecovery: pickInterruptedRecovery(doc.policy?.interruptedRecovery, base.policy.interruptedRecovery),
       maxAutoRecover: positiveIntOr(doc.policy?.maxAutoRecover, base.policy.maxAutoRecover, 0, 100),
     },
@@ -736,6 +743,7 @@ runtime: {
     ...(Object.keys(channelPlugins).length > 0 ? { channels: channelPlugins } : {}),
     server: { port: Number.isFinite(port) && port >= 0 && port < 65536 ? port : base.server.port },
     ...(isRecord(doc.llm) ? { llm: parseLlm(doc.llm) } : {}),
+    decision: parseDecision(doc.decision, env),
   }
   // 群绑定分支始终跟随项目清单，避免 YAML 里残留的自定义分支与面板显示不一致。
   alignChatBranches(config)
@@ -767,6 +775,25 @@ function parseLlm(value: unknown): LlmSettings {
 }
 
 /**
+ * 决策层配置：只认 enabled / provider / jev 三个键。
+ * Jev 密钥优先级：环境变量 TYPESAFE_API_KEY / TYPESAFE_MODEL / TYPESAFE_BASE_URL > YAML。
+ */
+function parseDecision(value: unknown, env: NodeJS.ProcessEnv): DecisionSettings {
+  const record = isRecord(value) ? value : {}
+  const jevDoc = isRecord(record.jev) ? record.jev : {}
+  const baseUrl = env.TYPESAFE_BASE_URL ?? stringOr(jevDoc.baseUrl, '')
+  return {
+    enabled: typeof record.enabled === 'boolean' ? record.enabled : false,
+    provider: record.provider === 'llm' ? 'llm' : 'jev',
+    jev: {
+      apiKey: env.TYPESAFE_API_KEY ?? stringOr(jevDoc.apiKey, ''),
+      model: env.TYPESAFE_MODEL ?? stringOr(jevDoc.model, ''),
+      ...(baseUrl ? { baseUrl } : {}),
+    },
+  }
+}
+
+/**
  * 名单条目的解析结果（邮箱 → open_id）。
  *
  * 由解析层在运行时算好后注入：配置层负责把用户填的邮箱变成 open_id，
@@ -783,18 +810,19 @@ export interface PolicyResolution {
 
 /** 把配置折算成领域 Policy；版本号是规则的指纹。 */
 export function policyOf(config: AppConfig, resolved?: PolicyResolution): Policy {
-  const admission = config.policy.admission
   const allowedByChat = Object.fromEntries(
     config.feishu.chats.filter(chat => chat.allowed.length > 0).map(chat => [chat.chat, chat.allowed]),
+  )
+  const scopeByChat = Object.fromEntries(
+    config.feishu.chats.map(chat => [chat.chat, chat.scope]),
   )
   const body = {
     acceptMode: config.policy.acceptMode,
     maxWorkers: config.policy.maxWorkers,
-    admission,
     allowed: config.feishu.allowed,
     allowedByChat,
     bots: config.feishu.bots,
-    receiveAll: config.feishu.chats.some(chat => chat.mode === 'all'),
+    scopeByChat,
   }
   return {
     version: createHash('sha1').update(JSON.stringify(body)).digest('hex').slice(0, 12),
@@ -869,10 +897,6 @@ function booleanOr(value: unknown, fallback: boolean): boolean {
 function positiveIntOr(value: unknown, fallback: number, min: number, max: number): number {
   const n = Number(value)
   return Number.isInteger(n) && n >= min && n <= max ? n : fallback
-}
-
-function pickAdmission(value: unknown, fallback: string, allowed: string[]): string {
-  return typeof value === 'string' && allowed.includes(value) ? value : fallback
 }
 
 function stringArray(value: unknown, fallback: string[]): string[] {
@@ -960,13 +984,58 @@ function parseProjectLists(value: unknown): { orca?: ProjectConfig[]; others: Ru
   return { ...(orca ? { orca } : {}), others }
 }
 
+/** 旧版全局准入表：只用于把老配置折算成群级消息处理范围。 */
+interface LegacyAdmission {
+  listedNotAddressed: string
+  unlistedAddressed: string
+  unlistedNotAddressed: string
+}
+
+/** 旧准入表的默认值，与删除前的 DEFAULT_ADMISSION 一致。 */
+const DEFAULT_LEGACY_ADMISSION: LegacyAdmission = {
+  listedNotAddressed: 'inferred',
+  unlistedAddressed: 'inferred',
+  unlistedNotAddressed: 'ignore',
+}
+
+function legacyAdmissionOf(doc: Record<string, any>): LegacyAdmission {
+  const raw = (doc.policy?.admission ?? {}) as Record<string, unknown>
+  const pick = (value: unknown, fallback: string): string => (typeof value === 'string' && value ? value : fallback)
+  return {
+    listedNotAddressed: pick(raw.listedNotAddressed, DEFAULT_LEGACY_ADMISSION.listedNotAddressed),
+    unlistedAddressed: pick(raw.unlistedAddressed, DEFAULT_LEGACY_ADMISSION.unlistedAddressed),
+    unlistedNotAddressed: pick(raw.unlistedNotAddressed, DEFAULT_LEGACY_ADMISSION.unlistedNotAddressed),
+  }
+}
+
+/**
+ * 群级消息处理范围。
+ *
+ * 新配置直接写 `scope:`；旧配置按老口径折算：
+ * - 旧「处理普通成员消息」开关打开：普通成员 @ 处理 → `mention`；旧接收方式是全量时普通消息也处理 → `all`。
+ * - 旧开关关闭：普通成员 @ 是否处理由旧全局准入表决定；ignore → `admins`，
+ *   普通消息也处理（旧 mode=all 且未忽略）→ `all`，否则 `mention`。
+ */
+function scopeOfEntry(entry: Record<string, unknown> | undefined, legacyAdmission: LegacyAdmission, legacyMode?: 'all' | 'mention'): ChatScope {
+  const explicit = entry?.scope
+  if (explicit === 'admins' || explicit === 'mention' || explicit === 'all') return explicit
+  const mode = legacyMode ?? (entry?.mode === 'mention' ? 'mention' : 'all')
+  const legacyMembers = entry?.members ?? entry?.intake
+  const membersEnabled = isRecord(legacyMembers) && legacyMembers.enabled === true
+  if (membersEnabled) return mode === 'all' ? 'all' : 'mention'
+  if (legacyAdmission.unlistedAddressed === 'ignore') return 'admins'
+  if (mode === 'all' && legacyAdmission.unlistedNotAddressed !== 'ignore') return 'all'
+  return 'mention'
+}
+
 /**
  * 统一的群配置解析：
- * - 新写法 `feishu.chats: [{ chat, mode, repo, branch }]`（字符串条目等价于 mode=all）
+ * - 新写法 `feishu.chats: [{ chat, scope, repo, branch }]`（字符串条目等价于 scope=mention）
  * - 兼容旧写法 `otherChats`（mention）与顶层 `chatBindings`（补 repo/branch，
  *   且只要绑定了就视为监控该群——避免「绑定了却收不到消息」的割裂）。
  */
 function parseChats(doc: Record<string, any>): ChatSettings[] {
+  const legacyAdmission = legacyAdmissionOf(doc)
   const byChat = new Map<string, ChatSettings>()
   const ensure = (chat: string): ChatSettings => {
     const existing = byChat.get(chat)
@@ -991,17 +1060,18 @@ function parseChats(doc: Record<string, any>): ChatSettings[] {
     const chat = typeof entry.chat === 'string' ? entry.chat.trim() : typeof entry.id === 'string' ? entry.id.trim() : ''
     if (!chat) continue
     const settings = ensure(chat)
-    settings.mode = entry.mode === 'mention' ? 'mention' : 'all'
+    settings.scope = scopeOfEntry(entry, legacyAdmission)
     if (typeof entry.repo === 'string') settings.repo = entry.repo.trim()
     if (typeof entry.branch === 'string') settings.branch = entry.branch.trim()
     settings.allowed = stringArray(entry.allowed, settings.allowed).map(id => id.trim()).filter(Boolean)
-    settings.intake = parseChatIntake(entry.intake, settings.intake)
+    // 旧配置的 `intake:` 段按同一口径迁到 `members:`，用户不用手工改 YAML。
+    settings.members = parseChatMembers(entry.members ?? entry.intake, settings.members)
     explicit.add(chat)
   }
 
   for (const chat of stringArray(feishu.otherChats, [])) {
     if (!chat || explicit.has(chat)) continue
-    ensure(chat).mode = 'mention'
+    ensure(chat).scope = scopeOfEntry(undefined, legacyAdmission, 'mention')
   }
   for (const binding of parseLegacyBindings(doc.chatBindings)) {
     const settings = ensure(binding.chat)
@@ -1015,11 +1085,10 @@ function parseChats(doc: Record<string, any>): ChatSettings[] {
 /** 最多追问轮数的上限：再大就会让群里一直追问下去，反而收不敛。 */
 const MAX_INTAKE_QUESTIONS = 50
 
-/** 解析群级的需求分析配置；缺字段时沿用默认值。 */
-function parseChatIntake(value: unknown, fallback: ChatIntakeSettings): ChatIntakeSettings {
+/** 解析群级的普通成员消息处理配置；缺字段时沿用默认值。 */
+function parseChatMembers(value: unknown, fallback: ChatMemberSettings): ChatMemberSettings {
   if (!isRecord(value)) return fallback
   return {
-    enabled: booleanOr(value.enabled, fallback.enabled),
     maxQuestions: positiveIntOr(value.maxQuestions, fallback.maxQuestions, 0, MAX_INTAKE_QUESTIONS),
     codeAccess: booleanOr(value.codeAccess, fallback.codeAccess),
     approvers: stringArray(value.approvers, fallback.approvers).map(item => item.trim()).filter(Boolean),
@@ -1045,13 +1114,13 @@ function migrateLegacyIntake(doc: Record<string, any>, chats: ChatSettings[], lo
   const approvers = stringArray(legacy.approvers, []).map(item => item.trim()).filter(Boolean)
   // 旧段里没有任何有效内容：直接按新默认值走，不必打扰用户。
   if (!enabled && approvers.length === 0 && targets.size === 0) return
-  const maxQuestions = positiveIntOr(legacy.maxQuestions, DEFAULT_CHAT_INTAKE.maxQuestions, 0, MAX_INTAKE_QUESTIONS)
-  const codeAccess = booleanOr(legacy.codeAccess, DEFAULT_CHAT_INTAKE.codeAccess)
+  const maxQuestions = positiveIntOr(legacy.maxQuestions, DEFAULT_CHAT_MEMBERS.maxQuestions, 0, MAX_INTAKE_QUESTIONS)
+  const codeAccess = booleanOr(legacy.codeAccess, DEFAULT_CHAT_MEMBERS.codeAccess)
   const scope = targets.size > 0 ? targets : new Set(chats.map(chat => chat.chat))
   // 已经写过群级配置的群不动：用户手写的比旧全局段更具体。
   const explicit = new Set<string>()
   for (const item of Array.isArray(doc.feishu?.chats) ? doc.feishu.chats : []) {
-    if (item && typeof item === 'object' && isRecord((item as Record<string, unknown>).intake)) {
+    if (item && typeof item === 'object' && (isRecord((item as Record<string, unknown>).members) || isRecord((item as Record<string, unknown>).intake))) {
       const chat = typeof (item as Record<string, any>).chat === 'string' ? String((item as Record<string, any>).chat).trim() : ''
       if (chat) explicit.add(chat)
     }
@@ -1059,7 +1128,9 @@ function migrateLegacyIntake(doc: Record<string, any>, chats: ChatSettings[], lo
   const migrated: string[] = []
   for (const chat of chats) {
     if (!scope.has(chat.chat) || explicit.has(chat.chat)) continue
-    chat.intake = { enabled, maxQuestions, codeAccess, approvers: [...approvers] }
+    chat.members = { maxQuestions, codeAccess, approvers: [...approvers] }
+    // 旧全局开关「处理普通成员消息」= 现在这个群的范围要放开给普通成员。
+    if (enabled) chat.scope = chat.scope === 'admins' ? 'mention' : chat.scope
     migrated.push(chat.chat)
   }
   logger.info('config:intake-migrated', { chats: migrated, enabled, maxQuestions })
@@ -1099,21 +1170,19 @@ export function projectNameOf(repo: string): string {
 }
 
 /**
- * 群级需求分析配置的落盘形态。
+ * 群级普通成员消息处理配置的落盘形态。
  *
  * 与默认值完全一致时不写这一段：配置文件里只留下用户真正改过的项。
  */
-function intakeDocOf(intake: ChatIntakeSettings): Record<string, unknown> | undefined {
-  const same = intake.enabled === DEFAULT_CHAT_INTAKE.enabled
-    && intake.maxQuestions === DEFAULT_CHAT_INTAKE.maxQuestions
-    && intake.codeAccess === DEFAULT_CHAT_INTAKE.codeAccess
-    && intake.approvers.length === 0
+function membersDocOf(members: ChatMemberSettings): Record<string, unknown> | undefined {
+  const same = members.maxQuestions === DEFAULT_CHAT_MEMBERS.maxQuestions
+    && members.codeAccess === DEFAULT_CHAT_MEMBERS.codeAccess
+    && members.approvers.length === 0
   if (same) return undefined
   return {
-    enabled: intake.enabled,
-    maxQuestions: intake.maxQuestions,
-    codeAccess: intake.codeAccess,
-    ...(intake.approvers.length > 0 ? { approvers: intake.approvers } : {}),
+    maxQuestions: members.maxQuestions,
+    codeAccess: members.codeAccess,
+    ...(members.approvers.length > 0 ? { approvers: members.approvers } : {}),
   }
 }
 
@@ -1125,14 +1194,14 @@ export function writeConfig(home: string, config: AppConfig): void {
       appId: config.feishu.appId,
       reaction: config.feishu.reaction,
       chats: config.feishu.chats.map(chat => {
-        const intake = intakeDocOf(chat.intake)
+        const members = membersDocOf(chat.members)
         return {
           chat: chat.chat,
-          mode: chat.mode,
+          scope: chat.scope,
           ...(chat.repo ? { repo: chat.repo } : {}),
           ...(chat.branch ? { branch: chat.branch } : {}),
           ...(chat.allowed.length > 0 ? { allowed: chat.allowed } : {}),
-          ...(intake ? { intake } : {}),
+          ...(members ? { members } : {}),
         }
       }),
       directMessages: config.feishu.directMessages,
@@ -1145,7 +1214,6 @@ export function writeConfig(home: string, config: AppConfig): void {
     policy: {
       acceptMode: config.policy.acceptMode,
       maxWorkers: config.policy.maxWorkers,
-      admission: config.policy.admission,
       interruptedRecovery: config.policy.interruptedRecovery,
       maxAutoRecover: config.policy.maxAutoRecover,
     },
@@ -1181,6 +1249,17 @@ export function writeConfig(home: string, config: AppConfig): void {
     },
     worker: { tools: config.worker.tools, evidence: config.worker.evidence, skill: config.worker.skill },
     reply: config.reply,
+    // 决策层（普通成员消息）：enabled / provider / Jev 连接信息都要写回，
+    // 否则面板保存任何其它配置都会把这一段冲掉，决策层会被悄悄关掉。
+    decision: {
+      enabled: config.decision.enabled,
+      provider: config.decision.provider,
+      jev: {
+        apiKey: config.decision.jev.apiKey,
+        model: config.decision.jev.model,
+        ...(config.decision.jev.baseUrl ? { baseUrl: config.decision.jev.baseUrl } : {}),
+      },
+    },
     runtime: {
       default: config.runtime.default,
       ...(config.runtime.options ? { options: config.runtime.options } : {}),
@@ -1255,6 +1334,15 @@ export function publicConfig(config: AppConfig): Record<string, unknown> {
     ...(typeof llm.contextWindow === 'number' ? { contextWindow: llm.contextWindow } : {}),
     apiKeySet: Boolean(llm.apiKey),
   }
+  // Jev 密钥明文不下发；apiKeySet 只告诉面板「已经配过」。
+  const decisionDoc = (doc.decision ?? {}) as Record<string, unknown>
+  const jev = (decisionDoc.jev ?? {}) as Record<string, unknown>
+  decisionDoc.jev = {
+    ...(typeof jev.model === 'string' && jev.model ? { model: jev.model } : {}),
+    ...(typeof jev.baseUrl === 'string' && jev.baseUrl ? { baseUrl: jev.baseUrl } : {}),
+    apiKeySet: Boolean(jev.apiKey),
+  }
+
   // ACP 适配器的 env 可能包含 API key：只下发 key 名，不下发明文。
   const options = runtime?.options
   if (runtime && options && typeof options === 'object' && !Array.isArray(options)) {
@@ -1525,8 +1613,6 @@ function stringListValue(): Validator {
 
 const ACCEPT_MODES = ['off', 'observe', 'auto']
 const INTERRUPTED_RECOVERY_MODES = ['auto', 'notify', 'off']
-const ADMISSION_LISTED = ['inferred', 'ignore']
-const ADMISSION_UNLISTED_ADDRESSED = ['explicit', 'inferred', 'ignore']
 
 /**
  * 一份显式的路径白名单：校验规则跟着路径走，不再让请求体直接 merge 进配置。
@@ -1548,9 +1634,6 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
   'policy.maxWorkers': intValue(1, 64),
   'policy.interruptedRecovery': enumValue(INTERRUPTED_RECOVERY_MODES),
   'policy.maxAutoRecover': intValue(0, 100),
-  'policy.admission.listedNotAddressed': enumValue(ADMISSION_LISTED),
-  'policy.admission.unlistedAddressed': enumValue(ADMISSION_UNLISTED_ADDRESSED),
-  'policy.admission.unlistedNotAddressed': enumValue(ADMISSION_LISTED),
 
   'router.timeoutMs': intValue(1_000, 600_000, ' 毫秒'),
   'router.tokenBudget': intValue(0, 10_000_000),
@@ -1570,6 +1653,12 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
   'router.persona.name': stringValue,
   'router.persona.style': enumValue(['friendly', 'concise', 'professional']),
   'router.persona.language': stringValue,
+
+  'decision.enabled': boolValue(),
+  'decision.provider': enumValue(['jev', 'llm']),
+  'decision.jev.apiKey': stringValue,
+  'decision.jev.model': stringValue,
+  'decision.jev.baseUrl': stringValue,
 
   'progress.syncMs': intValue(0, 3_600_000, ' 毫秒'),
   'progress.probeMs': intValue(0, 3_600_000, ' 毫秒'),
@@ -1640,36 +1729,33 @@ function validateChats(value: unknown): { error: string | null; value: ChatSetti
     if (!chat) return { error: `第 ${index + 1} 项缺少 chat_id`, value: [] }
     if (seen.has(chat)) return { error: `群重复：${chat}`, value: [] }
     seen.add(chat)
-    const mode = item.mode === 'mention' ? 'mention' : 'all'
+    const scope = item.scope === 'admins' || item.scope === 'all' ? item.scope : 'mention'
     const allowed = Array.isArray(item.allowed) ? item.allowed.map(String).map(id => id.trim()).filter(Boolean) : []
-    const intake = validateChatIntake(item.intake)
-    if (intake.error) return { error: `第 ${index + 1} 项：${intake.error}`, value: [] }
+    const members = validateChatMembers(item.members ?? item.intake)
+    if (members.error) return { error: `第 ${index + 1} 项：${members.error}`, value: [] }
     chats.push(chatEntry(chat, {
-      mode,
+      scope,
       repo: typeof item.repo === 'string' ? item.repo.trim() : '',
       branch: typeof item.branch === 'string' ? item.branch.trim() : '',
       allowed,
-      intake: intake.value,
+      members: members.value,
     }))
   }
   return { error: null, value: chats }
 }
 
-/** 群级需求分析配置校验：轮数必须是 0–50 的整数，管理员按逗号分隔的条目列表存。 */
-function validateChatIntake(value: unknown): { error: string | null; value: ChatIntakeSettings } {
-  if (value === undefined || value === null) return { error: null, value: defaultChatIntake() }
-  if (!isRecord(value)) return { error: '需求分析助手配置必须是对象', value: defaultChatIntake() }
-  if (value.enabled !== undefined && typeof value.enabled !== 'boolean') {
-    return { error: '需求分析助手的启用开关必须是布尔值', value: defaultChatIntake() }
-  }
+/** 群级普通成员消息处理配置校验：轮数必须是 0–50 的整数，管理员按逗号分隔的条目列表存。 */
+function validateChatMembers(value: unknown): { error: string | null; value: ChatMemberSettings } {
+  if (value === undefined || value === null) return { error: null, value: defaultChatMembers() }
+  if (!isRecord(value)) return { error: '普通成员消息处理配置必须是对象', value: defaultChatMembers() }
   if (value.codeAccess !== undefined && typeof value.codeAccess !== 'boolean') {
-    return { error: '需求分析助手的代码读取开关必须是布尔值', value: defaultChatIntake() }
+    return { error: '普通成员分析的代码读取开关必须是布尔值', value: defaultChatMembers() }
   }
   const maxQuestions = value.maxQuestions === undefined
-    ? DEFAULT_CHAT_INTAKE.maxQuestions
+    ? DEFAULT_CHAT_MEMBERS.maxQuestions
     : Number(value.maxQuestions)
   if (!Number.isInteger(maxQuestions) || maxQuestions < 0 || maxQuestions > MAX_INTAKE_QUESTIONS) {
-    return { error: `最大对话轮次必须是 0–${MAX_INTAKE_QUESTIONS} 的整数`, value: defaultChatIntake() }
+    return { error: `最大对话轮次必须是 0–${MAX_INTAKE_QUESTIONS} 的整数`, value: defaultChatMembers() }
   }
   const approvers = value.approvers === undefined
     ? []
@@ -1677,9 +1763,8 @@ function validateChatIntake(value: unknown): { error: string | null; value: Chat
   return {
     error: null,
     value: {
-      enabled: booleanOr(value.enabled, DEFAULT_CHAT_INTAKE.enabled),
       maxQuestions,
-      codeAccess: booleanOr(value.codeAccess, DEFAULT_CHAT_INTAKE.codeAccess),
+      codeAccess: booleanOr(value.codeAccess, DEFAULT_CHAT_MEMBERS.codeAccess),
       approvers: approvers.map(item => String(item).trim()).filter(Boolean),
     },
   }
@@ -1769,7 +1854,7 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
       ? value
       : path === 'runtime.default'
         ? normalizeRuntimeId(value)
-        : path.startsWith('llm.')
+        : path.startsWith('llm.') || path.startsWith('decision.jev.')
           ? value.trim()
           : value
     const message = validator.check(next)
@@ -1889,11 +1974,11 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
     return true
   }
 
-  // 群接收方式：`ra config set chatMode.<chatId> all|mention`
-  if (path.startsWith('chatMode.')) {
-    const chat = path.slice('chatMode.'.length).trim()
-    if (!chat || (value !== 'all' && value !== 'mention')) return false
-    ensureChat(config, chat).mode = value
+  // 群消息范围：`ra config set chatScope.<chatId> admins|mention|all`
+  if (path.startsWith('chatScope.')) {
+    const chat = path.slice('chatScope.'.length).trim()
+    if (!chat || (value !== 'admins' && value !== 'mention' && value !== 'all')) return false
+    ensureChat(config, chat).scope = value
     return true
   }
 
@@ -1975,6 +2060,25 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
       config.policy.maxAutoRecover = v
       return true
     }
+    case 'decision.enabled': {
+      const v = bool()
+      if (v === null) return false
+      config.decision.enabled = v
+      return true
+    }
+    case 'decision.provider':
+      if (value !== 'jev' && value !== 'llm') return false
+      config.decision.provider = value
+      return true
+    case 'decision.jev.apiKey':
+      config.decision.jev.apiKey = value
+      return true
+    case 'decision.jev.model':
+      config.decision.jev.model = value
+      return true
+    case 'decision.jev.baseUrl':
+      config.decision.jev.baseUrl = value
+      return true
     case 'progress.syncMs': {
       // 0 表示关闭工单进展定时同步
       const n = Number(value)
@@ -2049,18 +2153,6 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
       config.workspace.sweepMinutes = v
       return true
     }
-    case 'policy.admission.listedNotAddressed':
-      if (!ADMISSION_LISTED.includes(value)) return false
-      config.policy.admission.listedNotAddressed = value as never
-      return true
-    case 'policy.admission.unlistedAddressed':
-      if (!ADMISSION_UNLISTED_ADDRESSED.includes(value)) return false
-      config.policy.admission.unlistedAddressed = value as never
-      return true
-    case 'policy.admission.unlistedNotAddressed':
-      if (!ADMISSION_LISTED.includes(value)) return false
-      config.policy.admission.unlistedNotAddressed = value as never
-      return true
     case 'worker.evidence.ui':
       if (!UI_EVIDENCE_MODES.includes(value as UiEvidenceMode)) return false
       config.worker.evidence.ui = value as UiEvidenceMode

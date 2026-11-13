@@ -39,7 +39,7 @@ describe('全局状态目录与配置', () => {
     expect(cfg.policy.maxAutoRecover).toBe(1)
     expect(cfg.feishu.reaction).toBe('Typing')
     expect(cfg.worker.evidence.ui).toBe('warn')
-    // 需求分析助手默认关闭：不改变存量群的回复行为；追问轮次默认 10 轮。
+    // 群级「处理普通成员消息」默认关闭：不改变存量群的回复行为；追问轮次默认 10 轮。
     expect(cfg.feishu.chats).toEqual([])
     expect(cfg.runtime.default).toBe('orca')
   })
@@ -91,7 +91,7 @@ describe('全局状态目录与配置', () => {
     expect(cfg.server.port).toBe(3999)
     expect(cfg.policy.maxWorkers).toBe(2)
     expect(cfg.worker.evidence.ui).toBe('enforce')
-    expect(cfg.feishu.chats).toEqual([chatEntry('oc_a'), chatEntry('oc_b', { mode: 'mention' })])
+    expect(cfg.feishu.chats).toEqual([chatEntry('oc_a'), chatEntry('oc_b', { scope: 'mention' })])
   })
 
   it('非法 acceptMode / port 回退到默认值而不是崩溃', () => {
@@ -132,7 +132,7 @@ describe('全局状态目录与配置', () => {
     const p2 = policyOf({ ...base, policy: { ...base.policy, acceptMode: 'observe' } })
     expect(p1.version).not.toBe(p2.version)
     expect(p1.allowed).toEqual(['ou_alice'])
-    expect(p1.receiveAll).toBe(true)
+    expect(p1.scopeByChat).toEqual({ oc_a: 'mention' })
   })
 
   it('名单解析结果写进 Policy，但不进版本指纹', () => {
@@ -177,10 +177,13 @@ describe('全局状态目录与配置', () => {
     expect(loadConfig(dir).feishu.chats[0]?.allowed).toEqual(['ou_alice'])
   })
 
-  it('只有 mode=all 的群才算 receiveAll（影响机器人推断候选）', () => {
+  it('每个群的消息范围都折算进 Policy', () => {
     const base = loadConfig(home())
-    expect(policyOf({ ...base, feishu: { ...base.feishu, chats: [chatEntry('oc_a', { mode: 'mention' })] } }).receiveAll).toBe(false)
-    expect(policyOf({ ...base, feishu: { ...base.feishu, chats: [chatEntry('oc_a', { mode: 'mention' }), chatEntry('oc_b')] } }).receiveAll).toBe(true)
+    const policy = policyOf({
+      ...base,
+      feishu: { ...base.feishu, chats: [chatEntry('oc_a', { scope: 'admins' }), chatEntry('oc_b', { scope: 'all' })] },
+    })
+    expect(policy.scopeByChat).toEqual({ oc_a: 'admins', oc_b: 'all' })
   })
 
   it('旧配置里的 feishu.larkHome 被忽略，保存后不再写回', () => {
@@ -196,7 +199,7 @@ describe('全局状态目录与配置', () => {
   it('writeConfig 写回后能被 loadConfig 读回，且保留可选字段', () => {
     const dir = home()
     const cfg = loadConfig(dir)
-    cfg.feishu.chats = [chatEntry('oc_a', { mode: 'mention', repo: 'router-agent', branch: 'main' })]
+    cfg.feishu.chats = [chatEntry('oc_a', { scope: 'mention', repo: 'router-agent', branch: 'main' })]
     cfg.feishu.allowed = ['ou_me']
     cfg.feishu.botOpenIds = ['ou_bot', 'cli_bot']
     cfg.feishu.appId = 'cli_dedicated'
@@ -213,7 +216,7 @@ describe('全局状态目录与配置', () => {
     writeConfig(dir, cfg)
 
     const loaded = loadConfig(dir)
-    expect(loaded.feishu.chats).toEqual([chatEntry('oc_a', { mode: 'mention', repo: 'router-agent', branch: 'main' })])
+    expect(loaded.feishu.chats).toEqual([chatEntry('oc_a', { scope: 'mention', repo: 'router-agent', branch: 'main' })])
     expect(loaded.feishu.allowed).toEqual(['ou_me'])
     expect(loaded.feishu.botOpenIds).toEqual(['ou_bot', 'cli_bot'])
     expect(loaded.feishu.appId).toBe('cli_dedicated')
@@ -324,11 +327,11 @@ describe('多项目与群绑定配置', () => {
     ].join('\n'))
     const cfg = loadConfig(dir)
     expect(cfg.feishu.chats).toEqual([
-      chatEntry('oc_all', { mode: 'all' }),
-      chatEntry('oc_at', { mode: 'mention' }),
+      chatEntry('oc_all'),
+      chatEntry('oc_at', { scope: 'mention' }),
     ])
-    // otherChats 不会覆盖 chats 里的 all 模式
-    expect(cfg.feishu.chats[0]?.mode).toBe('all')
+    // otherChats 不会覆盖 chats 里的范围
+    expect(cfg.feishu.chats[0]?.scope).toBe('mention')
   })
 
   it('setConfigValue 支持 project.<name> 与 chatBinding.<chat>，非法值被拒绝', () => {
@@ -349,12 +352,12 @@ describe('多项目与群绑定配置', () => {
     expect(cfg.feishu.chats).toHaveLength(1)
     expect(cfg.feishu.chats[0]?.branch).toBe('release')
 
-    // 群列表替换时保留已有条目的绑定 / 模式
-    expect(setConfigValue(cfg, 'chatMode.oc_a', 'mention')).toBe(true)
-    expect(cfg.feishu.chats[0]?.mode).toBe('mention')
+    // 群列表替换时保留已有条目的绑定 / 消息范围
+    expect(setConfigValue(cfg, 'chatScope.oc_a', 'admins')).toBe(true)
+    expect(cfg.feishu.chats[0]?.scope).toBe('admins')
     expect(setConfigValue(cfg, 'feishu.chats', 'oc_a,oc_b')).toBe(true)
     expect(cfg.feishu.chats).toEqual([
-      chatEntry('oc_a', { mode: 'mention', repo: 'router-agent', branch: 'release' }),
+      chatEntry('oc_a', { scope: 'admins', repo: 'router-agent', branch: 'release' }),
       chatEntry('oc_b'),
     ])
     // 补拉功能已移除，旧路径不再可用
@@ -362,7 +365,7 @@ describe('多项目与群绑定配置', () => {
 
     expect(setConfigValue(cfg, 'project.', 'x')).toBe(false)
     expect(setConfigValue(cfg, 'chatBinding.oc_a', '')).toBe(false)
-    expect(setConfigValue(cfg, 'chatMode.oc_a', 'yolo')).toBe(false)
+    expect(setConfigValue(cfg, 'chatScope.oc_a', 'yolo')).toBe(false)
   })
 
   it('writeConfig 写回后仍能读回 projects / 群配置', () => {
@@ -370,7 +373,7 @@ describe('多项目与群绑定配置', () => {
     const cfg = loadConfig(dir)
     cfg.projects = [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }]
     cfg.feishu.chats = [
-      chatEntry('oc_a', { mode: 'mention', repo: 'router-agent', branch: 'main' }),
+      chatEntry('oc_a', { scope: 'mention', repo: 'router-agent', branch: 'main' }),
       chatEntry('oc_b'),
     ]
     writeConfig(dir, cfg)
@@ -432,41 +435,42 @@ describe('Pi 研判层配置', () => {
     expect(loaded.router.tokenBudget).toBe(16000)
   })
 
-  it('需求分析助手是群级配置：可写回并读回，patch 做类型与范围校验', () => {
+  it('普通成员消息是群级配置：可写回并读回，patch 做类型与范围校验', () => {
     const dir = home()
     const cfg = loadConfig(dir)
     const patch = applyConfigPatch(cfg, {
       'feishu.chats': [{
         chat: 'oc_dev',
-        mode: 'all',
+        scope: 'all',
         repo: '',
         branch: '',
         allowed: [],
-        intake: { enabled: true, maxQuestions: 2, codeAccess: false, approvers: ['admin@example.com'] },
+        members: { maxQuestions: 2, codeAccess: false, approvers: ['admin@example.com'] },
       }],
     })
     expect(patch.errors).toEqual([])
     writeConfig(dir, cfg)
 
     const loaded = loadConfig(dir)
-    expect(loaded.feishu.chats[0]?.intake).toEqual({
-      enabled: true,
+    expect(loaded.feishu.chats[0]?.members).toEqual({
       maxQuestions: 2,
       codeAccess: false,
       approvers: ['admin@example.com'],
     })
+    expect(loaded.feishu.chats[0]?.scope).toBe('all')
 
     // 轮次越界：0–50 的整数。
     expect(applyConfigPatch(loadConfig(home()), {
-      'feishu.chats': [{ chat: 'oc_dev', mode: 'all', repo: '', branch: '', allowed: [], intake: { enabled: true, maxQuestions: 51, codeAccess: true, approvers: [] } }],
+      'feishu.chats': [{ chat: 'oc_dev', scope: 'all', repo: '', branch: '', allowed: [], members: { maxQuestions: 51, codeAccess: true, approvers: [] } }],
     }).errors).toHaveLength(1)
     // 全局路径已经下沉到群级，不再是合法的配置项。
     expect(applyConfigPatch(loadConfig(home()), { 'intake.enabled': true }).errors).toHaveLength(1)
   })
 
-  it('新建群默认带需求分析助手配置：关闭、10 轮、允许只读代码', () => {
+  it('新建群默认：消息范围 mention、10 轮追问、允许只读代码', () => {
     const cfg = loadConfig(home())
-    expect(chatEntry('oc_new').intake).toEqual({ enabled: false, maxQuestions: 10, codeAccess: true, approvers: [] })
+    expect(chatEntry('oc_new').scope).toBe('mention')
+    expect(chatEntry('oc_new').members).toEqual({ maxQuestions: 10, codeAccess: true, approvers: [] })
     expect(cfg.feishu.chats).toEqual([])
   })
 
@@ -488,19 +492,20 @@ describe('Pi 研判层配置', () => {
       '',
     ].join('\n'))
     const cfg = loadConfig(dir)
-    expect(cfg.feishu.chats.find(chat => chat.chat === 'oc_dev')?.intake).toEqual({
-      enabled: true,
+    expect(cfg.feishu.chats.find(chat => chat.chat === 'oc_dev')?.members).toEqual({
       maxQuestions: 6,
       codeAccess: false,
       approvers: ['admin@example.com'],
     })
-    // 不在旧白名单里的群保持关闭。
-    expect(cfg.feishu.chats.find(chat => chat.chat === 'oc_ops')?.intake?.enabled).toBe(false)
+    // 旧 intake 开启过的群：消息范围至少接受普通成员 @ 消息。
+    expect(cfg.feishu.chats.find(chat => chat.chat === 'oc_dev')?.scope).toBe('mention')
+    // 不在旧白名单里的群只迁参数，不迁开关。
+    expect(cfg.feishu.chats.find(chat => chat.chat === 'oc_ops')?.members?.maxQuestions).toBe(10)
     // 写回后全局段消失，只剩群级配置。
     writeConfig(dir, cfg)
     const text = readFileSync(join(dir, 'config.yaml'), 'utf8')
     expect(text).not.toContain('\nintake:')
-    expect(text).toContain('intake:')
+    expect(text).toContain('members:')
   })
 
   it('旧版全局 intake 段没写生效群时迁移到所有已监控的群', () => {
@@ -517,19 +522,18 @@ describe('Pi 研判层配置', () => {
     ].join('\n'))
     const cfg = loadConfig(dir)
     for (const chat of cfg.feishu.chats) {
-      expect(chat.intake.enabled).toBe(true)
-      expect(chat.intake.maxQuestions).toBe(4)
+      expect(chat.members.maxQuestions).toBe(4)
+      expect(chat.scope).not.toBe('admins')
     }
   })
 
-  it('群上已经写了需求分析配置时，旧全局段不再覆盖它', () => {
+  it('群上已经写了普通成员配置时，旧全局段不再覆盖它', () => {
     const dir = home()
     writeFileSync(join(dir, 'config.yaml'), [
       'feishu:',
       '  chats:',
       '    - chat: oc_dev',
-      '      intake:',
-      '        enabled: true',
+      '      members:',
       '        maxQuestions: 7',
       'intake:',
       '  enabled: true',
@@ -537,7 +541,85 @@ describe('Pi 研判层配置', () => {
       '',
     ].join('\n'))
     const cfg = loadConfig(dir)
-    expect(cfg.feishu.chats[0]?.intake).toMatchObject({ enabled: true, maxQuestions: 7 })
+    expect(cfg.feishu.chats[0]?.members).toMatchObject({ maxQuestions: 7 })
+  })
+
+  it('群上旧的 intake 段按同一口径读成普通成员配置', () => {
+    const dir = home()
+    writeFileSync(join(dir, 'config.yaml'), [
+      'feishu:',
+      '  chats:',
+      '    - chat: oc_dev',
+      '      intake:',
+      '        maxQuestions: 3',
+      '',
+    ].join('\n'))
+    const cfg = loadConfig(dir)
+    expect(cfg.feishu.chats[0]?.members).toMatchObject({ maxQuestions: 3 })
+  })
+})
+
+describe('决策层配置（Jev）', () => {
+  it('决策层默认关闭，Provider 默认走 Jev', () => {
+    const cfg = loadConfig(home(), {})
+    expect(cfg.decision.enabled).toBe(false)
+    expect(cfg.decision.provider).toBe('jev')
+    expect(cfg.decision.jev.apiKey).toBe('')
+    expect(cfg.decision.jev.model).toBe('')
+  })
+
+  it('面板保存其它配置后，手写的 decision 段不被冲掉', () => {
+    const dir = home()
+    ensureHome(dir)
+    // 环境变量优先级高于 YAML：这里用空 env，保证断言的是配置里写的值。
+    const cfg = loadConfig(dir, {})
+    cfg.decision.enabled = true
+    cfg.decision.jev.model = 'jev-latest'
+    cfg.decision.jev.apiKey = 'sk-jev'
+    writeConfig(dir, cfg)
+
+    // 面板保存一个无关字段：走的是「读配置 → 打补丁 → 整体写回」。
+    const loaded = loadConfig(dir, {})
+    const patched = applyConfigPatch(loaded, { 'policy.maxWorkers': 3 })
+    expect(patched.errors).toEqual([])
+    writeConfig(dir, loaded)
+
+    const after = loadConfig(dir, {})
+    expect(after.decision.enabled).toBe(true)
+    expect(after.decision.jev.model).toBe('jev-latest')
+    expect(after.decision.jev.apiKey).toBe('sk-jev')
+  })
+
+  it('面板可以保存决策层开关、Provider 与 Jev 连接信息', () => {
+    const cfg = defaultConfig()
+    const result = applyConfigPatch(cfg, {
+      'decision.enabled': true,
+      'decision.provider': 'llm',
+      'decision.jev.model': 'jev-latest',
+      'decision.jev.apiKey': ' sk-jev ',
+    })
+    expect(result.errors).toEqual([])
+    expect(cfg.decision.enabled).toBe(true)
+    expect(cfg.decision.provider).toBe('llm')
+    expect(cfg.decision.jev.model).toBe('jev-latest')
+    expect(cfg.decision.jev.apiKey).toBe('sk-jev')
+  })
+
+  it('决策层配置非法值被拒绝', () => {
+    const cfg = defaultConfig()
+    expect(applyConfigPatch(cfg, { 'decision.provider': 'nope' }).errors).toHaveLength(1)
+    expect(applyConfigPatch(cfg, { 'decision.enabled': 'yes' }).errors).toHaveLength(1)
+  })
+
+  it('config set 支持 decision.*，非法值拒绝', () => {
+    const cfg = defaultConfig()
+    expect(setConfigValue(cfg, 'decision.enabled', 'true')).toBe(true)
+    expect(setConfigValue(cfg, 'decision.provider', 'llm')).toBe(true)
+    expect(setConfigValue(cfg, 'decision.jev.model', 'jev-latest')).toBe(true)
+    expect(setConfigValue(cfg, 'decision.provider', 'nope')).toBe(false)
+    expect(cfg.decision.enabled).toBe(true)
+    expect(cfg.decision.provider).toBe('llm')
+    expect(cfg.decision.jev.model).toBe('jev-latest')
   })
 })
 
@@ -932,5 +1014,47 @@ describe('关单后的工作区回收配置', () => {
     expect(setConfigValue(cfg, 'workspace.sweepMinutes', '15')).toBe(true)
     expect(cfg.workspace.sweepMinutes).toBe(15)
     expect(setConfigValue(cfg, 'workspace.sweepMinutes', '0')).toBe(false)
+  })
+
+  it('decision 默认关闭，Jev 密钥优先读环境变量', () => {
+    const cfg = loadConfig(home(), { TYPESAFE_API_KEY: 'env-key', TYPESAFE_MODEL: 'jev-latest' })
+    expect(cfg.decision.enabled).toBe(false)
+    expect(cfg.decision.provider).toBe('jev')
+    expect(cfg.decision.jev).toEqual({ apiKey: 'env-key', model: 'jev-latest' })
+  })
+
+  it('decision YAML 可开启并配置 Jev，环境变量覆盖密钥', () => {
+    const dir = home()
+    ensureHome(dir)
+    const { writeFileSync } = require('node:fs') as typeof import('node:fs')
+    writeFileSync(join(dir, 'config.yaml'), [
+      'decision:',
+      '  enabled: true',
+      '  provider: jev',
+      '  jev:',
+      '    apiKey: yaml-key',
+      '    model: jev-latest',
+      '    baseUrl: https://proxy.example/j',
+    ].join('\n'))
+    const cfg = loadConfig(dir, { TYPESAFE_API_KEY: 'env-key' })
+    expect(cfg.decision.enabled).toBe(true)
+    expect(cfg.decision.provider).toBe('jev')
+    expect(cfg.decision.jev).toEqual({ apiKey: 'env-key', model: 'jev-latest', baseUrl: 'https://proxy.example/j' })
+  })
+
+  it('decision provider 只认 jev / llm 两种取值', () => {
+    const dir = home()
+    ensureHome(dir)
+    const { writeFileSync } = require('node:fs') as typeof import('node:fs')
+    writeFileSync(join(dir, 'config.yaml'), ['decision:', '  enabled: true', '  provider: other'].join('\n'))
+    expect(loadConfig(dir).decision.provider).toBe('jev')
+  })
+
+  it('publicConfig 遮蔽 decision.jev 明文密钥', () => {
+    const cfg = defaultConfig()
+    cfg.decision = { enabled: true, provider: 'jev', jev: { apiKey: 'jev-secret', model: 'jev-latest' } }
+    const published = publicConfig(cfg) as { decision: { jev: Record<string, unknown> } }
+    expect(published.decision.jev).toEqual({ model: 'jev-latest', apiKeySet: true })
+    expect(JSON.stringify(published)).not.toContain('jev-secret')
   })
 })

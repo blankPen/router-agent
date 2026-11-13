@@ -1,4 +1,5 @@
 import type { Decision, Strength, Trigger } from '#core/model.js'
+import type { ToolScope } from '#core/tool-scope.js'
 import type { SessionKeyParts } from './session-registry.js'
 
 /**
@@ -20,6 +21,13 @@ export interface DecisionProposal {
   branch?: string
   rules: string[]
   strength: Strength
+  /**
+   * 需求要先讨论几轮再开单。
+   *
+   * 管理员的需求分级用：信息充分走 accept 直接开单，模糊或复杂走 clarify，
+   * 由 Router 先与用户把需求讨论清楚，再落成工单。
+   */
+  clarify?: boolean
 }
 
 /** 一次研判的输入。system/user prompt 由 AgentLoop 统一构造。 */
@@ -36,6 +44,12 @@ export interface DecisionRequest {
   canMutate?: boolean
   /** 会话复用：本轮落在哪个 session；不传则保持旧的「一次一建」行为。 */
   session?: SessionKeyParts
+  /**
+   * 发送人的工具范围（权限与工具白名单的硬边界）。
+   * 由 AgentLoop 按发送人身份计算：管理员 admin-full，名单外普通成员 member-analysis-read。
+   * 缺省按 admin-full 处理（保持既有调用方行为），AgentLoop 始终显式声明。
+   */
+  toolScope?: ToolScope
 }
 
 /** 一次礼貌回复的输入。 */
@@ -143,6 +157,8 @@ export function proposalFromJson(json: Record<string, unknown>, triggerId: strin
       ...(json.scope === undefined ? {} : { scope: String(json.scope) }),
       ...(json.repo === undefined ? {} : { repo: String(json.repo).trim() }),
       ...(json.branch === undefined ? {} : { branch: String(json.branch).trim() }),
+      // JSON 兜底路径也要认 clarify：模型没走工具时同样能表达「先讨论再开单」。
+      ...(json.clarify === true ? { clarify: true } : {}),
     },
   }
 }

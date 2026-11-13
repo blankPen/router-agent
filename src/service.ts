@@ -7,14 +7,15 @@ import type { ReplyBlock, ReplyPayload, ReplyQuestion } from '#core/reply.js'
 import { choiceBlockOf } from '#core/reply.js'
 import type { Store } from './store/db.js'
 import type { AppConfig, RetentionSettings, WorkspaceSettings } from './config.js'
-import { DEFAULT_CHAT_INTAKE, replyAlwaysChatsOf } from './config.js'
+import { DEFAULT_CHAT_MEMBERS } from './config.js'
 import { STAGE_LABELS } from '#core/stage.js'
 import { WorkerRuntimeError, type WorkerRuntime, type WorkerContext, type SessionEvent, type WorkerRef, type AgentStatus, type ResumeHint } from '#runtime/port.js'
 import { AgentLoop } from './router/agent-loop.js'
 import type { DecisionAudit, DecisionEngine } from './router/decision-engine.js'
 import { dispatchSettingsOf } from './router/dispatch.js'
 import type { IntakeEngine } from './router/intake-engine.js'
-import type { IntakeChatSettings } from './router/intake-flow.js'
+import type { DecisionAgent } from './router/decision/agent.js'
+import type { MemberChatSettings } from './router/intake-flow.js'
 import { createRepoPathResolver } from './router/repo-paths.js'
 import { ReportPoller, appendEvent, readWorkerMeta, type WorkerMeta, type WorkerStateFile } from '#runtime/report-poller.js'
 import { classifyAgentStatus } from '#runtime/status.js'
@@ -75,13 +76,15 @@ export interface RouterServiceOptions {
   /** 唯一研判引擎（Pi）。 */
   decisionEngine: DecisionEngine
   /**
-   * 需求识别引擎（初筛 + 分析子 Agent）。
-   * 只在有群开启「需求分析助手」时装配；不传则普通成员仍无法自助提需。
+   * 需求会话引擎（初筛 + 分析子 Agent）。
+   * 不传则普通成员的消息只能走研判，无法自助提需。
    */
+  /** 决策层（确定性准入 + Jev/LLM 分类）；传入后替代普通成员路径的 LLM 初筛。 */
+  decisionAgent?: DecisionAgent
   intakeEngine?: IntakeEngine
   /**
    * 群 id → 终审管理员 open_id（启动时已把邮箱解析成 open_id）。
-   * 没传时按「没配管理员」处理，终审回退到全局允许名单。
+   * 没传时按「没配管理员」处理，终审回退到默认管理员名单。
    */
   intakeApprovers?: Record<string, string[]>
   /** intake 读代码时把 repo 选择器解析成本地目录；不传则只基于对话分析。 */
@@ -617,7 +620,6 @@ export class RouterService {
       home: opts.config.home,
       batchWindowMs: opts.agentLoopOptions?.batchWindowMs ?? 8000,
       dispatch: dispatchSettingsOf(opts.config),
-      replyAlwaysChats: replyAlwaysChatsOf(opts.config),
       sessionsEnabled: opts.config.router.session.enabled,
       sessionKeyScope: opts.config.router.session.keyScope,
       persona: opts.config.router.persona,
@@ -626,7 +628,8 @@ export class RouterService {
         ? {
             intake: {
               llm: opts.intakeEngine,
-              settings: { forChat: (chatId: string) => this.intakeSettingsOf(opts, chatId) },
+              ...(opts.decisionAgent ? { decisionAgent: opts.decisionAgent } : {}),
+              settings: { forChat: (chatId: string) => this.memberSettingsOf(opts, chatId) },
               resolveProjectPath: this.intakeProjectPathOf(opts),
             },
           }
@@ -701,19 +704,18 @@ export class RouterService {
   }
 
   /**
-   * 某个群的需求分析配置。
+   * 某个群的普通成员消息处理配置。
    *
    * 管理员取解析后的 open_id：配置里写邮箱时原始条目是邮箱，
    * 拿邮箱去比 open_id 永远匹配不上，终审就没人能过。
    */
-  private intakeSettingsOf(opts: RouterServiceOptions, chatId: string): IntakeChatSettings {
+  private memberSettingsOf(opts: RouterServiceOptions, chatId: string): MemberChatSettings {
     const chat = opts.config.feishu.chats.find(item => item.chat === chatId)
-    const intake = chat?.intake
+    const members = chat?.members
     return {
-      enabled: intake?.enabled ?? false,
       approvers: opts.intakeApprovers?.[chatId] ?? [],
-      maxQuestions: intake?.maxQuestions ?? DEFAULT_CHAT_INTAKE.maxQuestions,
-      codeAccess: intake?.codeAccess ?? DEFAULT_CHAT_INTAKE.codeAccess,
+      maxQuestions: members?.maxQuestions ?? DEFAULT_CHAT_MEMBERS.maxQuestions,
+      codeAccess: members?.codeAccess ?? DEFAULT_CHAT_MEMBERS.codeAccess,
     }
   }
 

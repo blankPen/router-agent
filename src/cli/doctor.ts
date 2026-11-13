@@ -35,6 +35,7 @@ export interface DoctorCheck {
 /** 配置页的分组 id；与 `src/web/client/fields.ts` 的 CONFIG_GROUPS 对齐。 */
 export const CONFIG_SECTIONS = {
   llm: 'llm',
+  decision: 'decision',
   runtime: 'runtime',
   channels: 'channels',
   projects: 'projects',
@@ -62,11 +63,15 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
   const checks: DoctorCheck[] = []
   /** 手填了机器人身份就按手填的匹配；留空则按 feishu.appId 自动识别（与启动装配同一规则）。 */
   const manualBot = config.feishu.botOpenIds.length > 0 || config.feishu.botNames.length > 0
-  /** 只有 mode=mention 的群靠 @ 机器人判定收不收消息，也只有它们需要识别机器人身份。 */
-  const mentionChatIds = config.feishu.chats.filter(chat => chat.mode === 'mention').map(chat => chat.chat)
+  /** 任何范围都要判断消息有没有 @ 机器人，所以所有监控群都要识别机器人身份。 */
+  const mentionChatIds = config.feishu.chats.map(chat => chat.chat)
   const projects = projectsForRuntime(config)
   const projectCount = projects.length
   checks.push(configRequiredCheck(config, projectCount))
+  // 决策层是否真的装上：这是「配了却在用兜底」最容易漏掉的一处。
+  checks.push(decisionLayerCheck(config))
+  // 哪些群在处理普通成员的消息：普通成员的消息要不要跟进，全看这个开关。
+  checks.push(memberMessagesCheck(config))
 
   checks.push({
     name: 'accept mode',
@@ -299,6 +304,7 @@ export function configRequiredCheck(config: AppConfig, projectCount = projectsFo
 export function runConfigDoctor(deps: { config: AppConfig; llm: () => { ok: boolean; detail: string } }): DoctorCheck[] {
   const { config } = deps
   const checks: DoctorCheck[] = [configRequiredCheck(config)]
+  checks.push(decisionLayerCheck(config))
   const llm = deps.llm()
   checks.push({
     name: '模型配置',
@@ -321,6 +327,69 @@ export function runConfigDoctor(deps: { config: AppConfig; llm: () => { ok: bool
     })
   }
   return checks
+}
+
+/**
+ * 决策层检查：是否启用、Provider 是谁、Jev 连接信息是否齐全。
+ *
+ * apiKey 与 model 两项都要有才真的走 Jev——只给密钥时服务会退回 LLM 兜底，
+ * 这里必须说清楚，否则「配了却在用 LLM」会很难排查。
+ */
+function decisionLayerCheck(config: AppConfig): DoctorCheck {
+  const decision = config.decision
+  if (!decision.enabled) {
+    return {
+      name: '决策层',
+      status: 'ok',
+      detail: '未启用：普通成员消息仍走原来的 LLM 初筛（需要时在面板「配置 → 决策层」打开）',
+    }
+  }
+  const jev = decision.jev
+  if (decision.provider !== 'jev') {
+    return {
+      name: '决策层',
+      status: 'ok',
+      detail: '已启用，Provider llm（用同一份决策契约模拟）',
+    }
+  }
+  const missing = [!jev.apiKey ? 'API Key' : '', !jev.model ? '模型名' : ''].filter(Boolean)
+  if (missing.length > 0) {
+    return {
+      name: '决策层',
+      status: 'fail',
+      detail: `已启用，但 Jev 连接信息缺${missing.join('、')}：会退回 LLM 兜底，不会真的走 Jev`,
+      hint: '在面板「配置 → 决策层」把模型名与 API Key 都填上（两项都要有）',
+      section: CONFIG_SECTIONS.decision,
+    }
+  }
+  return {
+    name: '决策层',
+    status: 'ok',
+    detail: `已启用，Provider jev（${jev.model}）`,
+  }
+}
+
+/**
+ * 群消息范围检查：每个群处理到哪一层。
+ *
+ * 「仅接受管理员消息」的群里普通成员说什么都不理——这是排查
+ * 「机器人为什么不回我」时最常问的一条。
+ */
+function memberMessagesCheck(config: AppConfig): DoctorCheck {
+  const label = (scope: string): string => (
+    scope === 'admins' ? '仅接受管理员消息' : scope === 'all' ? '接受所有消息' : '接受普通用户@消息'
+  )
+  const adminsOnly = config.feishu.chats.filter(chat => chat.scope === 'admins')
+  const members = config.feishu.chats.filter(chat => chat.scope !== 'admins')
+  const detail = [
+    adminsOnly.length > 0 ? `仅管理员：${adminsOnly.map(chat => chat.chat).join('、')}` : '',
+    members.length > 0 ? `普通成员也可发言：${members.map(chat => `${chat.chat}（${label(chat.scope)}）`).join('、')}` : '',
+  ].filter(Boolean).join('；')
+  return {
+    name: '群消息范围',
+    status: 'ok',
+    detail: detail || '没有配置任何群',
+  }
 }
 
 async function check(name: string, probe: () => Promise<Omit<DoctorCheck, 'name'>>): Promise<DoctorCheck> {

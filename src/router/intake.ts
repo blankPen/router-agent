@@ -158,6 +158,9 @@ export function buildAnalystUserPrompt(input: AnalystPromptInput): string {
     codeAccess: input.readCode && Boolean(input.projectPath),
     questionsAsked: intake.questions,
     maxQuestions: input.maxQuestions,
+    // requester 决定收口方式：管理员自己的需求讨论完直接开单，
+    // 普通成员的需求整理成需求单后交管理员终审。
+    requester: intake.kind === 'request' ? 'admin' : 'member',
     reporter: { id: intake.actorId, name: intake.actorName },
     // 当前这条消息在分析前已经落进 turns，这里去掉重复的那条，只留更早的历史。
     history: intake.turns
