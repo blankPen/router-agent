@@ -122,7 +122,7 @@ Router：工单「调整登录超时」（tk_1）已开始执行。后续进展�
 
 ```bash
 # 命令行
-ra config set project.router-agent "name:dsh/router-agent@main"
+ra config set project.router-agent "/Users/me/router-agent@main"
 ra config set chatBinding.oc_xxx "router-agent@main"   # 绑定同时意味着监控该群
 ra config set chatMode.oc_xxx mention                  # 可选：只收 @ 消息
 ```

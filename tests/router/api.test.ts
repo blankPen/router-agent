@@ -395,7 +395,7 @@ describe('HTTP 管理 API', () => {
     const res = await call(server, 'PUT', '/api/config', {
       patch: {
         'runtime.default': 'claude-code',
-        'projects': [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }],
+        'projects': [{ name: 'router-agent', repo: '/Users/me/router-agent', defaultBranch: 'main' }],
         'runtime.projects.claude-code': [{ name: 'router-agent', repo: '/Users/me/router-agent', defaultBranch: 'main' }],
       },
     })
@@ -403,11 +403,11 @@ describe('HTTP 管理 API', () => {
     expect(res.json.config.runtime.projects['claude-code']).toHaveLength(1)
     const saved = loadConfig(config.home!)
     expect(saved.runtime.default).toBe('claude-code')
-    expect(saved.projects[0]?.repo).toBe('name:dsh/router-agent')
+    expect(saved.projects[0]?.repo).toBe('/Users/me/router-agent')
     expect(projectsForRuntime(saved, 'claude-code')[0]?.repo).toBe('/Users/me/router-agent')
   })
 
-  it('PUT /api/config 拒绝 claude-code 清单里的 Orca 选择器', async () => {
+  it('PUT /api/config 拒绝清单里的 Orca 选择器（所有 runtime 统一要本地绝对路径）', async () => {
     config.home = mkdtempSync(join(tmpdir(), 'ra-api-config-'))
     const res = await call(server, 'PUT', '/api/config', {
       patch: {
@@ -416,6 +416,17 @@ describe('HTTP 管理 API', () => {
     })
     expect(res.status).toBe(400)
     expect(res.json.errors[0].path).toBe('runtime.projects.claude-code')
+  })
+
+  it('PUT /api/config 拒绝 orca 清单里的 name: 选择器', async () => {
+    config.home = mkdtempSync(join(tmpdir(), 'ra-api-config-'))
+    const res = await call(server, 'PUT', '/api/config', {
+      patch: {
+        'projects': [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }],
+      },
+    })
+    expect(res.status).toBe(400)
+    expect(res.json.errors[0].path).toBe('projects')
   })
 
   it('GET /api/status 汇总活跃工单与运行时状态', async () => {

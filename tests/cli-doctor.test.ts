@@ -5,7 +5,8 @@ import type { CommandRunner } from '#infra/process.js'
 
 function healthyConfig(): AppConfig {
   const config = defaultConfig()
-  config.projects = [{ name: 'teamwork-repos', repo: 'teamwork-repos', defaultBranch: 'main' }]
+  // 项目路径统一是本地仓库绝对路径：用真实存在的目录代表项目。
+  config.projects = [{ name: 'teamwork-repos', repo: process.cwd(), defaultBranch: 'main' }]
   config.feishu.chats = [chatEntry('oc_dsh')]
   config.feishu.allowed = ['ou_me']
   config.feishu.botOpenIds = ['ou_bot', 'cli_bot']
@@ -118,15 +119,17 @@ describe('ra doctor', () => {
     expect(item.hint).toContain('ra config set')
   })
 
-  it('机器人身份不可用 / 事件未就绪 / 仓库不存在 / 端口被占 都会 fail', async () => {
+  it('机器人身份不可用 / 事件未就绪 / 项目路径不存在 / 端口被占 都会 fail', async () => {
+    const config = healthyConfig()
+    config.projects = [{ name: 'teamwork-repos', repo: '/Users/me/not-exist-repo', defaultBranch: 'main' }]
     const checks = await runDoctor(deps({
+      config,
       lark: lark({ bot: false, event: false }),
-      orca: orca({ repo: JSON.stringify({ result: { repos: [] } }) }),
       portFree: async () => false,
     }))
     expect(checks.find(item => item.name === '飞书机器人身份')?.status).toBe('fail')
     expect(checks.find(item => item.name === '事件订阅预检')?.status).toBe('fail')
-    expect(checks.find(item => item.name === 'Orca 仓库')?.status).toBe('fail')
+    expect(checks.find(item => item.name === '本地项目路径')?.status).toBe('fail')
     expect(checks.find(item => item.name === '服务端口')?.status).toBe('fail')
   })
 

@@ -124,7 +124,7 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
   ra init
   ra tickets --stage blocked
   ra config set policy.acceptMode observe
-  ra config set project.router-agent "name:dsh/router-agent@main"
+  ra config set project.router-agent "/Users/me/router-agent@main"
   ra config set chatBinding.oc_xxx "router-agent@main"
   ra config --edit`)
 
@@ -291,7 +291,7 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
 示例:
   ra config                      查看全部配置
   ra config set policy.acceptMode observe
-  ra config set project.router-agent "name:dsh/router-agent@main"
+  ra config set project.router-agent "/Users/me/router-agent@main"
   ra config set chatBinding.oc_xxx "router-agent@main"
   ra config edit                 用 $EDITOR 打开`)
     .action(async (action: string | undefined, key: string | undefined, value: string | undefined, opts: { home?: string }) => {

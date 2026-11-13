@@ -185,7 +185,7 @@ Workers don't run inside the Router process. The Router picks an adapter from `r
 | `t3code` | ra creates the worktree with git, T3 Code runs the agent in a thread there | You already use T3 Code and want tickets visible from its phone or desktop app |
 | `acp` / `acp-*` | ACP child process (Claude / Codex / Gemini / OpenCode and friends) | You want to plug in another ACP agent |
 
-Project lists are kept per runtime: Orca uses repository selectors, other runtimes need absolute local paths. Switching the default only affects new tickets. The full comparison, ACP agent catalog, tool policy and spec injection are in [docs/RUNTIME.md](docs/RUNTIME.md) (Chinese).
+Project lists are kept per runtime, but the path format is unified: every runtime stores the absolute local repository path, and the Orca adapter turns it into a `path:` selector and registers the directory as an Orca project before dispatching. Switching the default only affects new tickets. The full comparison, ACP agent catalog, tool policy and spec injection are in [docs/RUNTIME.md](docs/RUNTIME.md) (Chinese).
 
 ## Configuration
 
@@ -210,7 +210,7 @@ policy:
 
 projects:
   - name: router-agent
-    repo: name:dsh/router-agent
+    repo: /Users/me/router-agent
     defaultBranch: main
 ```
 
@@ -220,7 +220,7 @@ Common tweaks don't require editing the whole file:
 
 ```bash
 ra config set policy.acceptMode observe          # observe first, no dispatch
-ra config set project.router-agent "name:dsh/router-agent@main"
+ra config set project.router-agent "/Users/me/router-agent@main"
 ra config set chatBinding.oc_xxx "router-agent@main"
 ra config set runtime.default claude-code
 ra config set runtime.options.orca.agent codex   # Orca dispatches with Codex; default is Claude Code

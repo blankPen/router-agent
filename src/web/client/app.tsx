@@ -1339,7 +1339,7 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
       }
     }
     for (const runtime of runtimeCatalog) {
-      const issue = projectIssue(runtime.id, projectsOf(draft, runtime.id))
+      const issue = projectIssue(projectsOf(draft, runtime.id))
       if (issue) map.set(projectPatchPath(runtime.id), `${runtimeDisplayName(runtime)}：${issue}`)
     }
     return map
@@ -2024,7 +2024,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
       const path = projectPatchPath(runtime.id)
       // 只校验当前运行时的清单 + 本次确实要提交的其它清单，避免历史脏数据挡住保存。
       if (runtime.id !== runtimeId && !changedSet.has(path)) continue
-      const issue = projectIssue(runtime.id, projectsOf(draft, runtime.id))
+      const issue = projectIssue(projectsOf(draft, runtime.id))
       if (issue) map.set(path, `${runtimeDisplayName(runtime)}：${issue}`)
     }
     // 自定义 acp 没有 command 时重启会直接启动失败，保存前就挡住。
@@ -2117,7 +2117,7 @@ function SetupView({ restarting, onRestart, onOpenConfig, onDirtyChange }: {
   const chats = (draft.feishu?.chats ?? []) as ChatDraft[]
   const runtimeChoice = runtimeCatalog.find(choice => choice.id === runtimeId)
   const runtimeReady = runtimeChoice?.status === 'ready' || runtimeChoice?.status === 'unverified'
-  const projectReady = activeProjects.length > 0 && !projectIssue(runtimeId, activeProjects)
+  const projectReady = activeProjects.length > 0 && !projectIssue(activeProjects)
   const chatReady = chats.length > 0 && !chatsIssue(chats)
   const llmConfig = (draft.llm ?? {}) as { baseUrl?: string; model?: string; apiKey?: string; apiKeySet?: boolean }
   // LLM Provider 必填：baseUrl + model + apiKey 缺一不可（本次新填、尚未保存的密钥也算）。
@@ -2573,7 +2573,7 @@ function ProjectsEditor({ runtimeId, projects, error, onChange }: {
       {projects.length > 0 && (
         <div className="editor-head">
           <span>项目名</span>
-          <span>{isOrca ? 'Orca 选择器' : '本地仓库路径'}</span>
+          <span>本地仓库路径</span>
           <span>默认分支</span>
           <span />
         </div>
@@ -2583,7 +2583,7 @@ function ProjectsEditor({ runtimeId, projects, error, onChange }: {
           <input value={project.name} placeholder="router-agent" onChange={event => update(index, { name: event.target.value })} />
           <input
             value={project.repo}
-            placeholder={isOrca ? 'name:dsh/router-agent' : '/Users/me/router-agent'}
+            placeholder="/Users/me/router-agent"
             onChange={event => update(index, { repo: event.target.value })}
           />
           <input value={project.defaultBranch} placeholder="main" onChange={event => update(index, { defaultBranch: event.target.value })} />

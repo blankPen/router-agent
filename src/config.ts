@@ -7,6 +7,7 @@ import { DEFAULT_ADMISSION, type AcceptMode, type AdmissionTable, type Interrupt
 import type { ToolPolicy } from '#runtime/port.js'
 import { UI_EVIDENCE_MODES, type UiEvidenceMode } from '#runtime/evidence-gate.js'
 import { ORCA_RUNTIME_ID, isWorkerRuntimeId, normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
+import { isProjectRepoPath } from '#runtime/runtimes/repo-path.js'
 import { WORKER_RUNTIMES } from '#runtime/runtimes/catalog.js'
 import { optionFieldOf, parseRuntimeOptionPath, validateRuntimeOption, type RuntimeOptionSpec } from '#runtime/runtimes/options.js'
 import { DEFAULT_RUNTIME_PLUGINS } from '#runtime/plugins/loader.js'
@@ -534,13 +535,13 @@ runtime:
   # projects:
   #   claude-code:
   #     - name: router-agent
-  #       repo: /Users/me/router-agent   # Claude Code 需要本地仓库绝对路径
+  #       repo: /Users/me/router-agent   # 所有 runtime 统一是本地仓库绝对路径
   #       defaultBranch: main
 
 # orca 项目清单（顶层 projects 只属于 orca runtime）
 projects: []
 #  - name: router-agent            # 用户/模型引用的项目名
-#    repo: name:dsh/router-agent   # 交给 Orca 的仓库选择器
+#    repo: /Users/me/router-agent   # 本地仓库绝对路径；派工时自动登记成 Orca 项目
 #    defaultBranch: main           # 未指定分支时使用；留空则必须问用户
 
 server:
@@ -1567,15 +1568,13 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
 /** 整段替换的复杂字段（项目、群、白名单这类不适合逐项点路径编辑的配置）。 */
 const LIST_PATHS = ['projects', 'feishu.chats'] as const
 
-/** 后端本地仓库路径：接受 `/abs` 与 `path:/abs`，不接受 Orca 的 name:/id: 选择器。 */
+/** 本地仓库绝对路径：接受 `/abs` 与 `path:/abs`，不接受 Orca 的 name:/id: 选择器。 */
 export function isLocalRepoPath(repo: string): boolean {
-  const path = repo.trim().replace(/^path:/, '')
-  return path.startsWith('/')
+  return isProjectRepoPath(repo)
 }
 
-function validateProjects(value: unknown, runtimeId: string = ORCA_RUNTIME_ID): { error: string | null; value: ProjectConfig[] } {
+function validateProjects(value: unknown): { error: string | null; value: ProjectConfig[] } {
   if (!Array.isArray(value)) return { error: '需要项目数组', value: [] }
-  const id = normalizeRuntimeId(runtimeId)
   const projects: ProjectConfig[] = []
   const names = new Set<string>()
   for (const [index, item] of value.entries()) {
@@ -1586,10 +1585,10 @@ function validateProjects(value: unknown, runtimeId: string = ORCA_RUNTIME_ID): 
     const finalName = name || projectNameOf(repo)
     if (names.has(finalName)) return { error: `项目名重复：${finalName}`, value: [] }
     names.add(finalName)
-    // 两套清单各自独立：claude-code 只认本地绝对路径，避免把 Orca 选择器当路径用。
-    if (id !== ORCA_RUNTIME_ID && !isLocalRepoPath(repo)) {
+    // 所有 runtime 统一用本地绝对路径，避免把 Orca 的 name:/id: 选择器当路径用。
+    if (!isLocalRepoPath(repo)) {
       return {
-        error: `项目 ${finalName} 的 repo 必须是本地仓库绝对路径（例如 /Users/me/project 或 path:/Users/me/project），${id} 不接受 name:/id: 选择器`,
+        error: `项目 ${finalName} 的 repo 必须是本地仓库绝对路径（例如 /Users/me/project），Orca 的 name:/id: 选择器不再支持`,
         value: [],
       }
     }
@@ -1692,7 +1691,7 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
       if (!isKnownRuntimeId(config, id) && !declared.has(id)) {
         errors.push({ path, message: `未知 runtime: ${runtimeProjectPath[1]}` })
       } else {
-        const result = validateProjects(value, id)
+        const result = validateProjects(value)
         if (result.error) errors.push({ path, message: result.error })
         else accepted.push({ path, value: result.value })
       }
@@ -1717,7 +1716,7 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
     }
     if ((LIST_PATHS as readonly string[]).includes(path)) {
       if (path === 'projects') {
-        const result = validateProjects(value, ORCA_RUNTIME_ID)
+        const result = validateProjects(value)
         if (result.error) errors.push({ path, message: result.error })
         else accepted.push({ path, value: result.value })
       } else {
@@ -1826,7 +1825,8 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
     const [repo, defaultBranch] = splitBranch(value)
     if (!name || !repo) return false
     const runtimeId = config.runtime.default
-    if (normalizeRuntimeId(runtimeId) !== ORCA_RUNTIME_ID && !isLocalRepoPath(repo)) return false
+    // 所有 runtime 统一写本地绝对路径；Orca 侧由适配器翻译成 path: 选择器并自动登记。
+    if (!isLocalRepoPath(repo)) return false
     const project: ProjectConfig = { name, repo, defaultBranch }
     const projects = projectsForRuntime(config, runtimeId)
     const index = projects.findIndex(item => item.name === name)

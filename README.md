@@ -169,7 +169,7 @@ Worker 不在 Router 进程里跑。Router 按 `runtime.default` 选择适配器
 | `t3code` | ra 用 git worktree 建检出，T3 Code 在检出里开线程跑 Agent | 本机已装 T3 Code，想在 T3 手机端 / 桌面端看到工单 |
 | `acp` / `acp-*` | ACP 子进程（Claude / Codex / Gemini / OpenCode / Copilot / Cursor / Goose） | 想接其它 ACP Agent |
 
-换运行时只加一个 adapter，内核与 Router 一行不改。项目清单按运行时分开维护：Orca 用仓库选择器，其它运行时用本地仓库绝对路径；切换默认运行时只影响新工单。完整的运行时对比、ACP Agent 目录、工具策略与规范注入见 [docs/RUNTIME.md](docs/RUNTIME.md)。
+换运行时只加一个 adapter，内核与 Router 一行不改。项目清单按运行时分开维护，但清单里的项目路径口径统一：所有运行时都填本地仓库绝对路径，Orca 侧由适配器翻译成 `path:` 选择器并在派工前自动登记成 Orca 项目；切换默认运行时只影响新工单。完整的运行时对比、ACP Agent 目录、工具策略与规范注入见 [docs/RUNTIME.md](docs/RUNTIME.md)。
 
 ![运行时选择：Orca、Claude Code 与 ACP Agent 卡片](docs/assets/readme/runtime-cards.png)
 
@@ -253,7 +253,7 @@ policy:
 
 projects:
   - name: router-agent
-    repo: name:dsh/router-agent
+    repo: /Users/me/router-agent
     defaultBranch: main
 ```
 
@@ -265,7 +265,7 @@ projects:
 
 ```bash
 ra config set policy.acceptMode observe          # 先观察，不开工
-ra config set project.router-agent "name:dsh/router-agent@main"
+ra config set project.router-agent "/Users/me/router-agent@main"
 ra config set chatBinding.oc_xxx "router-agent@main"
 ra config set runtime.default claude-code
 ra config set runtime.options.orca.agent codex   # Orca 派工时用 Codex；不配 = 默认 Claude Code

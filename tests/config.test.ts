@@ -325,10 +325,12 @@ describe('多项目与群绑定配置', () => {
 
   it('setConfigValue 支持 project.<name> 与 chatBinding.<chat>，非法值被拒绝', () => {
     const cfg = loadConfig(home())
-    expect(setConfigValue(cfg, 'project.router-agent', 'name:dsh/router-agent@main')).toBe(true)
-    expect(cfg.projects).toEqual([{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }])
+    expect(setConfigValue(cfg, 'project.router-agent', '/Users/me/router-agent@main')).toBe(true)
+    expect(cfg.projects).toEqual([{ name: 'router-agent', repo: '/Users/me/router-agent', defaultBranch: 'main' }])
+    // 项目路径统一是本地绝对路径：Orca 的 name:/id: 选择器不再接受
+    expect(setConfigValue(cfg, 'project.router-agent', 'name:dsh/router-agent@main')).toBe(false)
     // 同名再设一次是覆盖，不是追加
-    expect(setConfigValue(cfg, 'project.router-agent', 'name:dsh/router-agent@release')).toBe(true)
+    expect(setConfigValue(cfg, 'project.router-agent', '/Users/me/router-agent@release')).toBe(true)
     expect(cfg.projects).toHaveLength(1)
     expect(cfg.projects[0]?.defaultBranch).toBe('release')
 
@@ -754,6 +756,29 @@ describe('项目清单按运行时隔离', () => {
     })
     expect(bad.errors[0]?.path).toBe('runtime.projects.claude-code')
     expect(bad.errors[0]?.message).toContain('本地仓库绝对路径')
+  })
+
+  it('orca 清单同样要求本地绝对路径（所有 runtime 统一口径）', () => {
+    const cfg = defaultConfig()
+    const bad = applyConfigPatch(cfg, {
+      projects: [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }],
+    })
+    expect(bad.errors[0]?.path).toBe('projects')
+    expect(bad.errors[0]?.message).toContain('本地仓库绝对路径')
+
+    const ok = applyConfigPatch(cfg, {
+      projects: [{ name: 'router-agent', repo: '/Users/me/router-agent', defaultBranch: 'main' }],
+    })
+    expect(ok.errors).toEqual([])
+    expect(cfg.projects[0]?.repo).toBe('/Users/me/router-agent')
+  })
+
+  it('CLI setConfigValue 对 orca 也只接受本地绝对路径', () => {
+    const cfg = defaultConfig()
+    expect(cfg.runtime.default).toBe('orca')
+    expect(setConfigValue(cfg, 'project.router-agent', '/Users/me/router-agent@main')).toBe(true)
+    expect(cfg.projects[0]).toMatchObject({ name: 'router-agent', repo: '/Users/me/router-agent', defaultBranch: 'main' })
+    expect(setConfigValue(cfg, 'project.other', 'name:dsh/other@main')).toBe(false)
   })
 
   it('writeConfig 保留两套清单并重新读回', () => {
