@@ -348,6 +348,7 @@ src/               宿主：Engine / Store、Router、HTTP API、Web 面板、CL
 | [docs/API.md](docs/API.md) | 本地 HTTP API |
 | [docs/COMPARISON.md](docs/COMPARISON.md) | 与 dsh-superagent 原型的差距分析与可迁移机制 |
 | [docs/AGENT-ADAPTER-DESIGN.md](docs/AGENT-ADAPTER-DESIGN.md) | Agent 工具适配器接口设计：Orca / Claude Code / Codex 的契约与迁移方案 |
+| [docs/DIAGNOSIS-REDESIGN.md](docs/DIAGNOSIS-REDESIGN.md) | 智能诊断工具改造设计：doctor 自检 → 日志扫描 → 结论分流的诊断管线 |
 | [docs/VERIFICATION.md](docs/VERIFICATION.md) | 真实环境验证记录与需要人工执行的剩余步骤 |
 | [docs/show-me-router-flow.html](docs/show-me-router-flow.html) | 消息 → 研判 → 派工 → 上报 → 闭环的可视化流程 |
 | [README.en.md](README.en.md) | English version |
