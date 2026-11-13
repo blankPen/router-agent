@@ -16,6 +16,11 @@ function log(entry) {
 
 log({ direction: 'argv', argv: process.argv, env: { CODEX_HOME: process.env.CODEX_HOME ?? null } })
 
+// 模拟 Codex 启动时打印交互式提示（非协议输出）后卡住不回应 initialize。
+if (process.env.FAKE_CODEX_PROMPT) {
+  process.stdout.write(`${process.env.FAKE_CODEX_PROMPT}\n`)
+}
+
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`)
 }
@@ -75,6 +80,7 @@ rl.on('line', line => {
 
   switch (message.method) {
     case 'initialize':
+      if (process.env.FAKE_CODEX_PROMPT) return
       send({ id: message.id, result: { userAgent: 'fake-codex-app-server/0.0.0', codexHome: process.env.CODEX_HOME ?? '' } })
       return
     case 'initialized':

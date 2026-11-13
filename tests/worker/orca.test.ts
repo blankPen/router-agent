@@ -227,6 +227,85 @@ describe('OrcaRuntime', () => {
     ])
   })
 
+  it('用 codex 启动时先消掉版本更新提示，避免会话卡在只能手选的浮层上', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ra-workers-'))
+    const codexHome = mkdtempSync(join(tmpdir(), 'ra-codex-'))
+    const versionPath = join(codexHome, 'version.json')
+    writeFileSync(versionPath, JSON.stringify({ latest_version: '0.167.2', dismissed_version: '0.167.1' }))
+    const logs: { level: string; message: string; extra?: Record<string, unknown> }[] = []
+    const runner = new FakeRunner([{ code: 0, stdout: JSON.stringify({ ok: true, result: { launch: { outcome: { handle: 'term-9' } } } }), stderr: '' }])
+    const adapter = new OrcaRuntime({
+      runner,
+      workersDir: dir,
+      agent: 'codex',
+      env: { CODEX_HOME: codexHome },
+      logger: {
+        info: (message, extra) => { logs.push({ level: 'info', message, extra: extra as Record<string, unknown> }) },
+        warn: (message, extra) => { logs.push({ level: 'warn', message, extra: extra as Record<string, unknown> }) },
+        error: (message, extra) => { logs.push({ level: 'error', message, extra: extra as Record<string, unknown> }) },
+      },
+    })
+
+    await adapter.start({ ticket, assignment, workdir: '/tmp/wt-9' })
+
+    expect(JSON.parse(readFileSync(versionPath, 'utf8'))).toMatchObject({ dismissed_version: '0.167.2' })
+    expect(logs.find(item => item.message === 'orca:codex-update-dismissed')?.extra).toMatchObject({ version: '0.167.2' })
+  })
+
+  it('Agent 停在交互式提示上时回执标记为需要人工处理', async () => {
+    const runner = new FakeRunner([{
+      code: 1,
+      stdout: JSON.stringify({
+        ok: false,
+        error: {
+          code: 'agent_prompt_blocked',
+          message: 'agent_prompt_blocked The agent is showing a permission or trust prompt',
+        },
+      }),
+      stderr: '',
+    }])
+    const adapter = new OrcaRuntime({ runner, workersDir: '/tmp' })
+
+    const receipt = await adapter.deliver('term-1', [{ id: 'in_1', kind: 'followup', text: '继续' }])
+
+    expect(receipt).toMatchObject({
+      status: 'rejected',
+      reason: 'orca:agent-prompt-blocked',
+      needsHuman: true,
+      retryable: true,
+    })
+    expect(receipt.status === 'rejected' ? receipt.detail : '').toContain('permission or trust prompt')
+  })
+
+  it('探活撞上交互式提示后，status 报 blocked 让 Router 转人工', async () => {
+    const runner = new FakeRunner([
+      {
+        code: 1,
+        stdout: JSON.stringify({
+          ok: false,
+          error: { code: 'agent_prompt_blocked', message: 'agent_prompt_blocked The agent is showing a permission or trust prompt' },
+        }),
+        stderr: '',
+      },
+      {
+        code: 0,
+        stdout: JSON.stringify({
+          ok: true,
+          result: { terminals: [{ handle: 'term-1', connected: true, writable: true, orphaned: false, lastOutputAt: '2026-11-06T10:00:00.000Z', worktreePath: '/tmp/wt', branch: 'main' }] },
+        }),
+        stderr: '',
+      },
+    ])
+    const adapter = new OrcaRuntime({ runner, workersDir: '/tmp' })
+
+    await adapter.nudge('term-1')
+    const status = await adapter.status('term-1')
+
+    expect(status?.phase).toBe('blocked')
+    expect(status?.acceptingInput).toBe(false)
+    expect(String(status?.detail?.waitingFor ?? '')).toContain('交互式提示')
+  })
+
   it('registerContext 把上下文拼成一段发送', async () => {
     const runner = new FakeRunner()
     const adapter = new OrcaRuntime({ runner, workersDir: '/tmp' })

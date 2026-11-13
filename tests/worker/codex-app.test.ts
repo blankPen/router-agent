@@ -212,6 +212,39 @@ describe('CodexAppRuntime', () => {
     }
   })
 
+  it('启动时打印交互式提示：握手超时的报错里带上这段提示', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-codex-prompt-'))
+    const previous = process.env.FAKE_CODEX_PROMPT
+    process.env.FAKE_CODEX_PROMPT = 'Trust this folder? [y/N]'
+    const rt = new CodexAppRuntime({
+      command: process.execPath,
+      prependArgs: [fixture],
+      workersDir: join(home, 'workers'),
+      home,
+      git,
+      permissions: 'full',
+      approvalPolicy: 'never',
+      network: true,
+      initializeTimeoutMs: 1_000,
+      workspaceProvider: new FakeWorkspace(home),
+      detectBinary: async () => ({
+        command: process.execPath,
+        source: 'config',
+        candidates: [],
+        version: 'fake',
+        compatible: true,
+        installHint: '',
+        installUrl: '',
+      }),
+    })
+    try {
+      await expect(rt.start(context(home))).rejects.toThrow(/Trust this folder\?/)
+    } finally {
+      restoreEnv('FAKE_CODEX_PROMPT', previous)
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
   it('interruptedTurn：正常完成的轮次不算被打断', async () => {
     const home = mkdtempSync(join(tmpdir(), 'ra-codex-interrupted-ok-'))
     const previousTurns = process.env.FAKE_CODEX_TURNS

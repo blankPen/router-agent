@@ -91,7 +91,7 @@ describe('ClaudeCodeRuntime', () => {
       if (argv[0] === 'agents') return { code: 0, stdout: JSON.stringify(agents), stderr: '' }
       return { code: 0, stdout: '', stderr: '' }
     })
-    const runtime = new ClaudeCodeRuntime({ claude, git, home, workersDir: join(home, 'workers') })
+    const runtime = new ClaudeCodeRuntime({ claude, git, home, workersDir: join(home, 'workers'), env: { HOME: home } })
     const started = await runtime.start(context(home))
     expect(started.handle).toBe('e46aaf7e')
     expect(started.sessionId).toBe('11111111-1111-1111-1111-111111111111')
@@ -106,6 +106,53 @@ describe('ClaudeCodeRuntime', () => {
     expect(bg?.argv).not.toContain('--resume')
   })
 
+  it('start 前补齐 Claude 的目录信任与免责提示，避免 --bg 被交互确认挡住', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-claude-'))
+    const git = gitRunner()
+    const agents = [{ id: 'e46aaf7e', kind: 'background', state: 'working', status: 'busy', sessionId: 's1' }]
+    const claude = scripted(argv => {
+      if (argv[0] === '--bg') return { code: 0, stdout: 'backgrounded · e46aaf7e · ra-tk-1-demo\n', stderr: '' }
+      if (argv[0] === 'agents') return { code: 0, stdout: JSON.stringify(agents), stderr: '' }
+      return { code: 0, stdout: '', stderr: '' }
+    })
+    const infos: { message: string; extra?: Record<string, unknown> }[] = []
+    const runtime = new ClaudeCodeRuntime({
+      claude,
+      git,
+      home,
+      workersDir: join(home, 'workers'),
+      env: { HOME: home },
+      logger: {
+        info: (message, extra) => { infos.push({ message, ...(extra ? { extra } : {}) }) },
+        warn: () => {},
+        error: () => {},
+      },
+    })
+
+    await runtime.start(context(home))
+
+    const workdir = join(home, 'worktrees', 'ra-tk-1-demo')
+    const config = JSON.parse(readFileSync(join(home, '.claude.json'), 'utf8'))
+    expect(config.bypassPermissionsModeAccepted).toBe(true)
+    expect(config.projects[workdir].hasTrustDialogAccepted).toBe(true)
+    const trusted = infos.find(entry => entry.message === 'claude:workspace-trusted')
+    expect(trusted?.extra?.ticketId).toBe('tk-1')
+    expect(trusted?.extra?.added).toEqual(['bypassPermissionsModeAccepted', 'workspaceTrust'])
+  })
+
+  it('claude 因目录未信任拒绝启动时，报错里给出能照着做的一句话', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-claude-'))
+    const claude = scripted(argv => {
+      if (argv[0] === '--bg') {
+        return { code: 1, stdout: '', stderr: 'Workspace not trusted. Run `claude` in /tmp/x once and accept the trust prompt, then retry.' }
+      }
+      return { code: 0, stdout: '', stderr: '' }
+    })
+    const runtime = new ClaudeCodeRuntime({ claude, git: gitRunner(), home, workersDir: join(home, 'workers'), env: { HOME: home } })
+
+    await expect(runtime.start(context(home))).rejects.toThrow(/不信任这个工作目录/)
+  })
+
   it('parseBackgroundId 兼容带 ANSI 颜色的 backgrounded 输出', async () => {
     const home = mkdtempSync(join(tmpdir(), 'ra-claude-'))
     const agents = [{ id: 'e46aaf7e', kind: 'background', state: 'working', status: 'busy', sessionId: 's1' }]
@@ -114,7 +161,7 @@ describe('ClaudeCodeRuntime', () => {
       if (argv[0] === 'agents') return { code: 0, stdout: JSON.stringify(agents), stderr: '' }
       return { code: 0, stdout: '', stderr: '' }
     })
-    const runtime = new ClaudeCodeRuntime({ claude, git: gitRunner(), home, workersDir: join(home, 'workers') })
+    const runtime = new ClaudeCodeRuntime({ claude, git: gitRunner(), home, workersDir: join(home, 'workers'), env: { HOME: home } })
     const started = await runtime.start(context(home))
     expect(started.handle).toBe('e46aaf7e')
   })
@@ -127,7 +174,7 @@ describe('ClaudeCodeRuntime', () => {
       if (argv[0] === 'agents') return { code: 0, stdout: JSON.stringify(agents), stderr: '' }
       return { code: 0, stdout: '', stderr: '' }
     })
-    const runtime = new ClaudeCodeRuntime({ claude, git, home, workersDir: join(home, 'workers') })
+    const runtime = new ClaudeCodeRuntime({ claude, git, home, workersDir: join(home, 'workers'), env: { HOME: home } })
     const receipt = await runtime.deliver(ref(home, { sessionId: 's1' }), [{ id: 'in_1', kind: 'followup', text: '补测试' }])
     expect(receipt.status).toBe('queued')
     expect(claude.calls.some(call => call.argv.includes('--resume'))).toBe(false)
@@ -149,7 +196,7 @@ describe('ClaudeCodeRuntime', () => {
     })
     let injected = ''
     const runtime = new ClaudeCodeRuntime({
-      claude, git: gitRunner(), home, workersDir: join(home, 'workers'), claudeProjectsDir: projects,
+      claude, git: gitRunner(), home, workersDir: join(home, 'workers'), env: { HOME: home }, claudeProjectsDir: projects,
       inject: async (_handle, text) => {
         injected = text
         // 模拟 TUI 把这句话作为本轮输入写进会话记录。
@@ -187,7 +234,7 @@ describe('ClaudeCodeRuntime', () => {
       return { code: 0, stdout: '', stderr: '' }
     })
     const runtime = new ClaudeCodeRuntime({
-      claude, git: gitRunner(), home, workersDir: join(home, 'workers'), claudeProjectsDir: projects,
+      claude, git: gitRunner(), home, workersDir: join(home, 'workers'), env: { HOME: home }, claudeProjectsDir: projects,
       inject: async () => ({ ok: false, reason: 'not-recorded' }),
     })
     const receipt = await runtime.deliver(ref(home, { sessionId }), [{ id: 'in_lost', kind: 'followup', text: '继续' }])
@@ -211,7 +258,7 @@ describe('ClaudeCodeRuntime', () => {
     })
     let calls = 0
     const runtime = new ClaudeCodeRuntime({
-      claude, git: gitRunner(), home, workersDir: join(home, 'workers'), claudeProjectsDir: projects,
+      claude, git: gitRunner(), home, workersDir: join(home, 'workers'), env: { HOME: home }, claudeProjectsDir: projects,
       inject: async (_handle, text) => {
         calls++
         writeFileSync(join(dir, `${sessionId}.jsonl`), `${JSON.stringify({
@@ -241,7 +288,7 @@ describe('ClaudeCodeRuntime', () => {
       return { code: 0, stdout: '', stderr: '' }
     })
     const runtime = new ClaudeCodeRuntime({
-      claude, git: gitRunner(), home, workersDir: join(home, 'workers'),
+      claude, git: gitRunner(), home, workersDir: join(home, 'workers'), env: { HOME: home },
       inject: async () => { injected = true; return { ok: true } },
     })
     const receipt = await runtime.deliver(ref(home, { sessionId: 's1' }), [{ id: 'in_blocked', kind: 'followup', text: '继续' }])
@@ -258,7 +305,7 @@ describe('ClaudeCodeRuntime', () => {
       if (argv[0] === '--bg') return { code: 0, stdout: 'backgrounded · e46aaf7e · ra-tk-1-demo\n', stderr: '' }
       return { code: 0, stdout: '', stderr: '' }
     })
-    const runtime = new ClaudeCodeRuntime({ claude, git, home, workersDir: join(home, 'workers') })
+    const runtime = new ClaudeCodeRuntime({ claude, git, home, workersDir: join(home, 'workers'), env: { HOME: home } })
     // 先写 meta，模拟 start 时没来得及捕获 sessionId
     mkdirSync(join(home, 'workers', 'tk-1'), { recursive: true })
     writeFileSync(join(home, 'workers', 'tk-1', 'meta.json'), JSON.stringify({
@@ -293,7 +340,7 @@ describe('ClaudeCodeRuntime', () => {
       }
       return { code: 0, stdout: '', stderr: '' }
     })
-    const runtime = new ClaudeCodeRuntime({ claude, git, home, workersDir: join(home, 'workers') })
+    const runtime = new ClaudeCodeRuntime({ claude, git, home, workersDir: join(home, 'workers'), env: { HOME: home } })
     mkdirSync(join(home, 'workers', 'tk-1'), { recursive: true })
     writeFileSync(join(home, 'workers', 'tk-1', 'meta.json'), JSON.stringify({
       ticketId: 'tk-1', assignmentId: 'as-1', runtime: 'claude-code', handle: 'e46aaf7e',
@@ -329,7 +376,7 @@ describe('ClaudeCodeRuntime', () => {
       }
       return { code: 0, stdout: '', stderr: '' }
     })
-    const runtime = new ClaudeCodeRuntime({ claude, git, home, workersDir: join(home, 'workers') })
+    const runtime = new ClaudeCodeRuntime({ claude, git, home, workersDir: join(home, 'workers'), env: { HOME: home } })
     mkdirSync(join(home, 'workers', 'tk-1'), { recursive: true })
     writeFileSync(join(home, 'workers', 'tk-1', 'meta.json'), JSON.stringify({
       ticketId: 'tk-1', assignmentId: 'as-1', runtime: 'claude-code', handle: 'e46aaf7e',
@@ -363,7 +410,7 @@ describe('ClaudeCodeRuntime', () => {
       }
       return { code: 0, stdout: '', stderr: '' }
     })
-    const runtime = new ClaudeCodeRuntime({ claude, git, home, workersDir: join(home, 'workers') })
+    const runtime = new ClaudeCodeRuntime({ claude, git, home, workersDir: join(home, 'workers'), env: { HOME: home } })
     mkdirSync(join(home, 'workers', 'tk-1'), { recursive: true })
     writeFileSync(join(home, 'workers', 'tk-1', 'meta.json'), JSON.stringify({
       ticketId: 'tk-1', assignmentId: 'as-1', runtime: 'claude-code', handle: 'e46aaf7e',
@@ -399,7 +446,7 @@ describe('ClaudeCodeRuntime', () => {
       }
       return { code: 0, stdout: '', stderr: '' }
     })
-    const runtime = new ClaudeCodeRuntime({ claude, git: gitRunner(), home, workersDir: join(home, 'workers') })
+    const runtime = new ClaudeCodeRuntime({ claude, git: gitRunner(), home, workersDir: join(home, 'workers'), env: { HOME: home } })
     mkdirSync(join(home, 'workers', 'tk-1'), { recursive: true })
     writeFileSync(join(home, 'workers', 'tk-1', 'meta.json'), JSON.stringify({
       ticketId: 'tk-1', assignmentId: 'as-1', runtime: 'claude-code', handle: 'e46aaf7e',
@@ -427,7 +474,7 @@ describe('ClaudeCodeRuntime', () => {
       }
       return { code: 0, stdout: '', stderr: '' }
     })
-    const runtime = new ClaudeCodeRuntime({ claude, git: gitRunner(), home, workersDir: join(home, 'workers') })
+    const runtime = new ClaudeCodeRuntime({ claude, git: gitRunner(), home, workersDir: join(home, 'workers'), env: { HOME: home } })
     mkdirSync(join(home, 'workers', 'tk-1'), { recursive: true })
     writeFileSync(join(home, 'workers', 'tk-1', 'meta.json'), JSON.stringify({
       ticketId: 'tk-1', assignmentId: 'as-1', runtime: 'claude-code', handle: 'e46aaf7e',
@@ -444,7 +491,7 @@ describe('ClaudeCodeRuntime', () => {
       if (argv[0] === 'agents') return { code: 1, stdout: '', stderr: 'temporary failure' }
       return { code: 0, stdout: '', stderr: '' }
     })
-    const runtime = new ClaudeCodeRuntime({ claude, git: gitRunner(), home, workersDir: join(home, 'workers') })
+    const runtime = new ClaudeCodeRuntime({ claude, git: gitRunner(), home, workersDir: join(home, 'workers'), env: { HOME: home } })
     const receipt = await runtime.deliver(ref(home, { sessionId: 's1' }), [{ id: 'in_q', kind: 'followup', text: '继续' }])
     expect(receipt.status).toBe('queued')
     expect(claude.calls.some(call => call.argv.includes('--resume'))).toBe(false)
@@ -456,7 +503,7 @@ describe('ClaudeCodeRuntime', () => {
       if (argv[0] === 'agents') return { code: 0, stdout: '[]', stderr: '' }
       return { code: 0, stdout: '', stderr: '' }
     })
-    const runtime = new ClaudeCodeRuntime({ claude, git: gitRunner(), home, workersDir: join(home, 'workers') })
+    const runtime = new ClaudeCodeRuntime({ claude, git: gitRunner(), home, workersDir: join(home, 'workers'), env: { HOME: home } })
     const receipt = await runtime.deliver(ref(home, { sessionId: 's1' }), [{ id: 'in_l', kind: 'followup', text: '继续' }])
     expect(receipt.status).toBe('rejected')
     expect(claude.calls.some(call => call.argv.includes('--resume'))).toBe(false)
@@ -465,7 +512,7 @@ describe('ClaudeCodeRuntime', () => {
   it('stop 对不存在的会话幂等', async () => {
     const home = mkdtempSync(join(tmpdir(), 'ra-claude-'))
     const claude = scripted(() => ({ code: 1, stdout: "No job matching 'gone'. Run `claude agents` to list running sessions.", stderr: '' }))
-    const runtime = new ClaudeCodeRuntime({ claude, git: gitRunner(), home, workersDir: join(home, 'workers') })
+    const runtime = new ClaudeCodeRuntime({ claude, git: gitRunner(), home, workersDir: join(home, 'workers'), env: { HOME: home } })
     await expect(runtime.stop(ref(home, { handle: 'gone' }), 'test')).resolves.toBeUndefined()
   })
 
@@ -477,7 +524,7 @@ describe('ClaudeCodeRuntime', () => {
       if (argv[0] === 'agents') return { code: 0, stdout: JSON.stringify(agents), stderr: '' }
       return { code: 0, stdout: '', stderr: '' }
     })
-    const runtime = new ClaudeCodeRuntime({ claude, git, home, workersDir: join(home, 'workers') })
+    const runtime = new ClaudeCodeRuntime({ claude, git, home, workersDir: join(home, 'workers'), env: { HOME: home } })
     agents = [{ id: 'e46aaf7e', kind: 'background', state: 'working', status: 'busy', sessionId: 's1', startedAt: Date.now() }]
     expect((await runtime.status(ref(home)))?.phase).toBe('running')
     agents = [{ id: 'e46aaf7e', kind: 'background', state: 'blocked', status: 'waiting', waitingFor: 'permission prompt', sessionId: 's1' }]
@@ -500,7 +547,7 @@ describe('ClaudeCodeRuntime', () => {
       message: { content: [{ type: 'text', text: '正在补测试' }] },
     })}\n`)
     const claude = scripted(() => ({ code: 0, stdout: '[]', stderr: '' }))
-    const runtime = new ClaudeCodeRuntime({ claude, git: gitRunner(), home, workersDir: join(home, 'workers'), claudeProjectsDir: projects })
+    const runtime = new ClaudeCodeRuntime({ claude, git: gitRunner(), home, workersDir: join(home, 'workers'), env: { HOME: home }, claudeProjectsDir: projects })
     const snapshot = await runtime.activity({ ref: ref(home, { sessionId }) })
     expect(snapshot?.events[0]?.text).toBe('正在补测试')
   })
@@ -516,7 +563,7 @@ describe('ClaudeCodeRuntime', () => {
     }))
     const claude = scripted(() => ({ code: 0, stdout: '', stderr: '' }))
     const git = gitRunner()
-    const runtime = new ClaudeCodeRuntime({ claude, git, home, workersDir: join(home, 'workers') })
+    const runtime = new ClaudeCodeRuntime({ claude, git, home, workersDir: join(home, 'workers'), env: { HOME: home } })
 
     await runtime.removeWorkspace({ ticketId: 'tk-1', workdir })
     expect(claude.calls.map(call => call.argv)).toEqual([['rm', 'e46aaf7e']])
@@ -537,7 +584,7 @@ describe('ClaudeCodeRuntime', () => {
       return { code: 0, stdout: '', stderr: '' }
     })
     const git = gitRunner()
-    const runtime = new ClaudeCodeRuntime({ claude, git, home, workersDir: join(home, 'workers') })
+    const runtime = new ClaudeCodeRuntime({ claude, git, home, workersDir: join(home, 'workers'), env: { HOME: home } })
 
     await expect(runtime.removeWorkspace({ ticketId: 'tk-1', workdir })).resolves.toBeUndefined()
     expect(git.calls.some(call => call.argv[0] === 'worktree' && call.argv[1] === 'remove')).toBe(true)

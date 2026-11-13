@@ -48,6 +48,8 @@ export class CodexAppClient {
   private nextId = 1
   private closed = false
   private stderr = ''
+  /** stdout 上的非协议输出（Codex 的日志或启动提示），握手超时时用来解释原因。 */
+  private noise = ''
   private exitCode: number | null = null
   private exitSignal: NodeJS.Signals | null = null
   readonly pid: number | undefined
@@ -89,6 +91,11 @@ export class CodexAppClient {
     return this.stderr
   }
 
+  /** stdout 上的非协议输出；为空说明没收到过提示类文本。 */
+  get protocolNoise(): string {
+    return this.noise
+  }
+
   get exit(): { code: number | null; signal: NodeJS.Signals | null } {
     return { code: this.exitCode, signal: this.exitSignal }
   }
@@ -101,7 +108,10 @@ export class CodexAppClient {
       if (timeoutMs > 0) {
         entry.timer = setTimeout(() => {
           this.pending.delete(String(id))
-          reject(new CodexProtocolError(-32001, `Codex 请求超时: ${method}`))
+          // 启动时如果 Codex 打印了交互式提示（非协议输出），握手就会一直等不到回应；
+          // 把这段提示带进报错，避免只剩一句没有线索的「请求超时」。
+          const hint = this.noise ? `（stdout 出现非协议输出：${this.noise.trim().slice(0, 200)}）` : ''
+          reject(new CodexProtocolError(-32001, `Codex 请求超时: ${method}${hint}`))
         }, timeoutMs)
       }
       this.pending.set(String(id), entry)
@@ -160,7 +170,9 @@ export class CodexAppClient {
       if (!parsed || typeof parsed !== 'object') return
       message = parsed as Record<string, unknown>
     } catch {
-      // Codex 可能把日志写到 stdout；非 JSON 输出忽略。
+      // Codex 可能把日志写到 stdout；非 JSON 输出忽略，但要记住它：
+      // 启动时的交互式提示也走这条路，握手超时时得能看到。
+      this.noteNoise(line)
       return
     }
     const method = typeof message.method === 'string' ? message.method : undefined
@@ -197,6 +209,10 @@ export class CodexAppClient {
         entry.resolve(message.result)
       }
     }
+  }
+
+  private noteNoise(line: string): void {
+    this.noise = `${this.noise}${line}\n`.slice(-800)
   }
 
   private write(message: Record<string, unknown>): void {

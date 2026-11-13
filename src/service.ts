@@ -1370,6 +1370,27 @@ export class RouterService {
           })
         }
         if (receipt.status === 'rejected') {
+          // Agent 停在交互式提示上（如 Codex 的版本更新浮层）：Router 代答不了，
+          // 立刻转人工并通知话题，否则工单只会一直卡着没人知道。
+          if (receipt.needsHuman) {
+            this.engine.setAttention(
+              ticket.id,
+              `Agent 停在交互式提示上，需要人工处理${receipt.detail ? '：' + receipt.detail : ''}`,
+            )
+            // 同一轮里反复重投不重复打扰；下一轮再卡住才重新通知。
+            const turn = this.store.latestReport(ticket.id)?.turn ?? 0
+            this.notify(
+              ticket,
+              `工单「${ticket.title}」的 Agent 停在交互式提示上（例如 Codex 的版本更新选择），Router 无法代答，请到 Orca 终端手动选一下，处理完在本话题回复即可继续。`,
+              `prompt-blocked:${ticket.id}:${turn}`,
+            )
+            this.logger.warn('input:prompt-blocked', {
+              ticketId: ticket.id,
+              reason: receipt.reason,
+              attempt,
+              detail: receipt.detail ?? '',
+            })
+          }
           if (receipt.retryable === false) {
             this.handleLostWorker(ticket, `input-rejected:${receipt.reason}`)
             continue
@@ -1504,8 +1525,9 @@ export class RouterService {
       if (status?.phase === 'blocked') {
         if (!current.blocked) {
           current.blocked = true
-          this.engine.setAttention(ticket.id, `worker 正在等待人工处理：${status.detail?.waitingFor ?? '权限或输入'}`)
-          this.notify(ticket, `工单「${ticket.title}」的 worker 正在等待人工处理（权限/输入），请到 Claude 会话或 Orca 终端确认。`, `blocked:${ticket.id}:${turn}`)
+          const waitingFor = status.detail?.waitingFor ?? '权限/输入'
+          this.engine.setAttention(ticket.id, `worker 正在等待人工处理：${waitingFor}`)
+          this.notify(ticket, `工单「${ticket.title}」的 worker 正在等待人工处理（${waitingFor}），请到 Claude 会话或 Orca 终端确认。`, `blocked:${ticket.id}:${turn}`)
           this.log('idle:blocked', ticket.id, { detail: status.detail })
         }
         continue

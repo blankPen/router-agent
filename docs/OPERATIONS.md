@@ -259,6 +259,12 @@ Router 不做对话，只在必要时说话：
 | `codex:interrupted-turn-check-failed` | Codex runtime | `ticketId` `threadId` `reason` | `thread/turns/list` 读不回轮次状态；判定不了有没有被中断，不触发恢复动作 |
 | `codex:error` | Codex runtime | `ticketId` `threadId` `reason` | Codex 返回的警告/错误事件 |
 | `codex:launch-failed` | Codex runtime | `workdir` `branch` `reason` | 派工启动失败 |
+| `claude:workspace-trusted` | Claude Code runtime | `ticketId` `workdir` `added` `configPath` | 启动前补齐 Claude 的目录信任与「跳过权限确认」免责提示；`--bg` 缺这两项会直接退出 |
+| `claude:workspace-untrusted` | Claude Code runtime | `ticketId` `workdir` `reason` `configPath` | 补写失败（Claude 配置损坏或不可写）；仍会尝试启动，失败时按 CLI 的提示转人工 |
+| `orca:codex-update-dismissed` | Orca runtime | `ticketId` `version` `path` | 启动 Codex 前把版本更新提示记成已忽略，等价于用户选「Skip until next version」 |
+| `orca:codex-update-dismiss-failed` | Orca runtime | `ticketId` `reason` `path` | 版本缓存读不到 / 写不进；Codex 仍可能弹更新浮层，随后由 `orca:agent-prompt-blocked` 转人工 |
+| `orca:agent-prompt-blocked` | Orca runtime | `handle` `inputId` `reason` | Agent 停在交互式提示上（Codex 版本更新浮层、权限确认等），Orca 拒收输入；Router 代答不了，转人工 |
+| `input:prompt-blocked` | Router | `ticketId` `reason` `attempt` `detail` | 投递被交互式提示挡住：已转人工并通知话题，不再静默重投 |
 | `claude:resume-forked` | Claude Code runtime | `handle` `sessionId` `copy` `detail` | 后台 worker 被 resume 成副本，已 stop 副本并把本轮输入退避重投回原会话（5 次后转人工） |
 | `claude:inject-skipped` | Claude Code runtime | `handle` `reason` | 轮内插话未注入成功，退回排队等本轮结束 |
 | `claude:stop-original-failed` | Claude Code runtime | `handle` `code` `detail` | 处理副本前停掉原会话失败 |
