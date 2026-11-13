@@ -1,6 +1,6 @@
 {
   "name": "@router-agent/runtime-herdr",
-  "version": "0.3.36",
+  "version": "0.3.37",
   "type": "module",
   "description": "Herdr 运行时插件：git worktree + Herdr 终端",
   "license": "MIT",
@@ -31,8 +31,8 @@
     "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
-    "@router-agent/runtime": "0.3.36",
-    "@router-agent/core": "0.3.36",
-    "@router-agent/infra": "0.3.36"
+    "@router-agent/runtime": "0.3.37",
+    "@router-agent/core": "0.3.37",
+    "@router-agent/infra": "0.3.37"
   }
 }

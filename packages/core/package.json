@@ -1,6 +1,6 @@
 {
   "name": "@router-agent/core",
-  "version": "0.3.36",
+  "version": "0.3.37",
   "type": "module",
   "description": "领域内核：工单、授权、阶段、策略与共享类型",
   "license": "MIT",
