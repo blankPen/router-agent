@@ -1,6 +1,6 @@
 {
   "name": "@router-agent/infra",
-  "version": "0.3.33",
+  "version": "0.3.34",
   "type": "module",
   "description": "基础设施：日志、子进程、对话模型与图片识别",
   "license": "MIT",
