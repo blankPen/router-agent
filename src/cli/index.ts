@@ -5,10 +5,10 @@ import { dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { Command, CommanderError } from 'commander'
-import { ensureHome, memberHandledChats, loadConfig, policyOf, projectsForRuntime, publicConfig, replyAlwaysChatsOf, setConfigValue, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
+import { ensureHome, memberHandledChats, loadConfig, policyOf, projectsForRuntime, publicConfig, setConfigValue, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
 import { Store, type SessionMigrationState } from '../store/db.js'
 import { Engine } from '../core/engine.js'
-import { effectiveAllowed, effectiveAllowedByChat, shouldAcknowledge } from '#core/policy.js'
+import { admitsByScope, effectiveAdmins, scopeOf, shouldAcknowledge } from '#core/policy.js'
 import { logDimensions } from '#core/events.js'
 import { loadRuntimePlugins, type LoadedRuntimePlugins } from '#runtime/plugins/loader.js'
 import { loadChannelPlugins, type LoadedChannelPlugins } from '#channel/plugins/loader.js'
@@ -25,7 +25,7 @@ import { ChannelRouter } from '#channel/router.js'
 import { ChatDirectory } from '@router-agent/channel-feishu'
 import { resolveRuntimeIdentity, detailText, type IdentityCache, type IdentityStatusView, type RuntimeIdentity } from '@router-agent/channel-feishu'
 import { createLarkRunner, larkEnv } from '@router-agent/channel-feishu'
-import { parseMessageThreadIds, type UnaddressedAdmission } from '@router-agent/channel-feishu'
+import { parseMessageThreadIds, type MessageAdmission, type UnaddressedAdmission } from '@router-agent/channel-feishu'
 import { createVisionTranscriber, type ImageTranscriber } from '#infra/vision.js'
 import { runInitWizard } from './init.js'
 import { formatChecks, runConfigDoctor, runDoctor } from './doctor.js'
@@ -1275,7 +1275,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     home,
     projects: projectsForRuntime(config).map(project => `${project.name}@${project.defaultBranch || '(未设默认分支)'}`),
     runtime: config.runtime.default,
-    chats: config.feishu.chats.map(chat => `${chat.chat}:${chat.mode}${chat.repo ? `→${chat.repo}@${chat.branch || '?'}` : ''}`),
+    chats: config.feishu.chats.map(chat => `${chat.chat}:${chat.scope}${chat.repo ? `→${chat.repo}@${chat.branch || '?'}` : ''}`),
     decisionEngine: 'pi',
     timeoutMs: config.router.timeoutMs,
     tokenBudget: config.router.tokenBudget,
@@ -1295,7 +1295,6 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     try { unlinkSync(join(home, 'router-agent.pid')) } catch { /* 文件可能不存在 */ }
     return 1
   }
-  const replyAlwaysChats = new Set(replyAlwaysChatsOf(config))
   const repaired = store.repairOutbox()
   if (repaired > 0) logger.warn('outbox:repaired', { count: repaired })
   const orcaRunner = realRunner('orca')
@@ -1441,31 +1440,39 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   /**
    * 未 @ 机器人的消息要不要放行：已绑定工单的话题内，名单内成员也触发回复（tk-59）。
    *
-   * 两个条件同时成立才放行：话题上订阅着在办工单，且发送者在该群白名单（未配则用全局名单）内。
+   * 两个条件同时成立才放行：话题上订阅着在办工单，且发送者是该群管理员（默认管理员 + 群内扩充）内。
    * 放行后由 agent-loop 的订阅扇出把消息投给 worker，无需再走开单研判。
    *
-   * 名单口径必须和 gate() 一致：群级名单优先、否则全局名单，且要按解析后的 open_id 匹配
+   * 名单口径必须和 gate() 一致：默认管理员 + 群内扩充，且要按解析后的 open_id 匹配
    * （allowedOpenIds / allowedByChatOpenIds）——名单改成邮箱后，原始条目里存的是邮箱，
    * 直接拿 allowed 去比 open_id 会永远匹配不上。
    */
   const allowUnaddressed: UnaddressedAdmission = ({ chatId, actorId, threadKeys }) => {
     const policy = engine.policy()
-    const scoped = effectiveAllowedByChat(policy, chatId)
-    // 配了群名单但一个都没解析出来：该群谁都不许进，不能退回全局名单（与 gate() 同口径）。
-    if (scoped && scoped.length === 0) return false
-    const allowed = scoped ?? effectiveAllowed(policy)
-    // 已绑定工单的话题：名单内成员不 @ 也要触发回复（tk-59）。
-    if (allowed.includes(actorId) && store.hasLiveTicketForThreadKeys('feishu', threadKeys)) {
+    const admins = effectiveAdmins(policy, chatId)
+    // 已绑定工单的话题：管理员不 @ 也要触发回复（tk-59）。
+    if (admins.includes(actorId) && store.hasLiveTicketForThreadKeys('feishu', threadKeys)) {
       logger.info('trigger:admitted-unaddressed', { chat: chatId, actor: actorId, keys: threadKeys.length, reason: 'live-ticket' })
       return true
     }
-    // 普通成员消息：开启「处理普通成员消息」的群里，不在群级白名单之外的人都可以发言。
-    // 群级白名单仍是硬边界（scoped 非空时只有名单内成员可以说话），不会被这条放宽。
-    if (memberChats.has(chatId) && (!scoped || scoped.includes(actorId))) {
+    // 普通成员消息：范围放开给普通成员的群里（且该群在普通成员链路里），普通成员也可以说话。
+    if (memberChats.has(chatId)) {
       logger.info('trigger:admitted-unaddressed', { chat: chatId, actor: actorId, keys: threadKeys.length, reason: 'member-messages' })
       return true
     }
     return false
+  }
+  /**
+   * 群的消息范围判定：这条消息要不要进领域。
+   *
+   * 与 gate() 同一口径：管理员（默认名单 + 群内扩充）在任何范围里都算数；
+   * 普通成员按范围：仅接受管理员消息 → 不进；接受普通用户@消息 → 只有 @ 才进；接受所有消息 → 都进。
+   */
+  const admitMessage: MessageAdmission = ({ chatId, actorId, addressed }) => {
+    const policy = engine.policy()
+    const scope = scopeOf(policy, chatId)
+    const admins = effectiveAdmins(policy, chatId)
+    return admitsByScope(scope, admins.includes(actorId), addressed)
   }
   // 通道也走插件：飞书是默认内置包，用户可以在 channels.<id> 里覆盖或新增自己的通道。
   const channelPlugins = await loadChannelPlugins(config, {
@@ -1480,6 +1487,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
         directory,
         transcriber: imageTranscriber,
         allowUnaddressed,
+        admitMessage,
         cardActions: config.reply.ask.mode !== 'text',
         hooks: {
           onReady: () => logger.info('feishu:ready', {}),
@@ -1671,8 +1679,8 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
         engine,
         store,
         logger,
-        // 只对「会被处理」的消息加回执：@ / 私聊 / 全量接收群，且没被准入拦截。
-        shouldReply: trigger => shouldAcknowledge(trigger, engine.policy(), replyAlwaysChats),
+        // 只对「会被处理」的消息加回执：@ / 私聊 / 管理员 / 接受所有消息的群，且没被拦截。
+        shouldReply: trigger => shouldAcknowledge(trigger, engine.policy()),
         onAck: (messageId, handle) => store.saveReaction(messageId, handle, new Date().toISOString(), adapter.id),
       }),
     }))

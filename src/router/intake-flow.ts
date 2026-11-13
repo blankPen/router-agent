@@ -1,6 +1,6 @@
 import type { Clock, DecideOutcome, Engine } from '../core/engine.js'
 import type { Intake, IntakeKind, IntakeReport, IntakeTurn, Ticket, Trigger } from '#core/model.js'
-import { effectiveAllowed, effectiveAllowedByChat } from '#core/policy.js'
+import { effectiveAdmins, effectiveAllowed, scopeOf } from '#core/policy.js'
 import { readRouterPrompt } from '../specs/index.js'
 import { messageContext, preview } from '#core/events.js'
 import { noopLogger, errorMessage, type Logger } from '#infra/logger.js'
@@ -24,9 +24,7 @@ import {
 
 /** 单个群的普通成员消息处理配置。 */
 export interface MemberChatSettings {
-  /** 本群是否处理普通成员的消息。 */
-  enabled: boolean
-  /** 终审管理员 open_id；为空时回退到策略里的全局名单。 */
+  /** 终审管理员 open_id；为空时回退到默认管理员名单。 */
   approvers: string[]
   maxQuestions: number
   codeAccess: boolean
@@ -125,18 +123,15 @@ export class IntakeCoordinator {
 
   /** 这个群是否处理普通成员的消息。 */
   handlesMembers(chatId: string): boolean {
-    return this.settingsFor(chatId).enabled
+    return scopeOf(this.engine.policy(), chatId) !== 'admins'
   }
 
-  /** 发送人是否是管理员（在生效允许名单内）。 */
+  /** 发送人是否是管理员（默认管理员 + 群内扩充）。 */
   private isAdmin(trigger: Trigger): boolean {
-    const policy = this.engine.policy()
-    const scoped = effectiveAllowedByChat(policy, trigger.chatId)
-    const allowed = scoped ?? effectiveAllowed(policy)
-    return allowed.includes(trigger.actorId)
+    return effectiveAdmins(this.engine.policy(), trigger.chatId).includes(trigger.actorId)
   }
 
-  /** 该群是否配了终审管理员；没配时回退到策略里的全局名单。 */
+  /** 该群是否配了终审管理员；没配时回退到默认管理员名单。 */
   isApprover(chatId: string, actorId: string): boolean {
     const approvers = this.approversOf(chatId)
     return approvers.includes(actorId)
@@ -147,7 +142,7 @@ export class IntakeCoordinator {
     return this.settings.forChat(chatId)
   }
 
-  /** 该群生效的终审管理员 open_id；没配时回退到全局名单。 */
+  /** 该群生效的终审管理员 open_id；没配时回退到默认管理员名单。 */
   private approversOf(chatId: string): string[] {
     const configured = this.settingsFor(chatId).approvers
     return configured.length > 0 ? configured : this.fallbackApprovers()
@@ -159,26 +154,19 @@ export class IntakeCoordinator {
    * 授权名单（群级或全局）只决定谁能当管理员、谁能派单，不决定谁能说话：
    * 普通成员的需求要经管理员终审才成单，所以发起需求不需要在名单里。
    *
-   * 唯一的例外是群级名单配了却一个都解析不出来——那说明这个群的名单没生效，
-   * 这个群拒绝所有人，不能让任何人借澄清绕过。
+   * 群名单只扩充管理员，不拦人：普通成员照样能提需求。
    */
   private canRequest(trigger: Trigger): boolean {
-    const scoped = effectiveAllowedByChat(this.engine.policy(), trigger.chatId)
-    if (scoped && scoped.length === 0) return false
     return true
   }
 
   /**
    * 能不能给这张需求单终审。
    *
-   * 必须是终审管理员（群级配置优先，没配回退全局名单），
-   * 且群级白名单是硬边界：配了名单的人不在名单里，也不能终审派单。
+   * 必须是终审管理员（群级配置优先，没配回退默认管理员名单）。
    */
   private canApprove(trigger: Trigger): boolean {
-    if (!this.isApprover(trigger.chatId, trigger.actorId)) return false
-    const scoped = effectiveAllowedByChat(this.engine.policy(), trigger.chatId)
-    if (scoped === undefined) return true
-    return scoped.includes(trigger.actorId)
+    return this.isApprover(trigger.chatId, trigger.actorId)
   }
 
   /**

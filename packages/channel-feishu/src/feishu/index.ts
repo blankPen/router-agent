@@ -12,6 +12,7 @@ import {
   normalizeFeishuEventDetailed,
   shouldSendAsText,
   type FeishuConfig,
+  type MessageAdmission,
   type UnaddressedAdmission,
 } from '../sources/feishu.js'
 import { createLarkRunner, larkEnv } from '../sources/lark.js'
@@ -67,6 +68,13 @@ export interface FeishuChannelOptions {
    * 这个判定需要 store（话题有没有绑在办工单）与 policy（谁在名单里），由装配层注入。
    */
   allowUnaddressed?: UnaddressedAdmission
+  /**
+   * 群的消息范围判定：这条消息要不要进领域。
+   *
+   * 范围（仅接受管理员消息 / 接受普通用户@消息 / 接受所有消息）与发送人身份都在宿主侧，
+   * 由装配层注入这个只读判定；不注入时按「都收」处理。
+   */
+  admitMessage?: MessageAdmission
 }
 
 /**
@@ -123,7 +131,7 @@ export class FeishuChannel implements ChannelAdapter {
     const event = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
     const chatId = String(event.chat_id ?? '')
     const targetName = this.directory?.nameOf(chatId) ?? ''
-    const result = normalizeFeishuEventDetailed(event, this.config, targetName, this.opts.allowUnaddressed)
+    const result = normalizeFeishuEventDetailed(event, this.config, targetName, this.opts.allowUnaddressed, this.opts.admitMessage)
     if (!result.trigger) {
       return {
         dropped: result.dropped,

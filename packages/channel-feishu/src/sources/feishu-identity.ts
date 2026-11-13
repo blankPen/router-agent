@@ -399,7 +399,7 @@ const MEMBER_TIMEOUT_MS = 20_000
  * 机器人没有邮箱，只能按 `app_id` 匹配群成员列表里的 bot 条目：
  * 用户不再需要手填 `ou_xxx`（那是「应用 × 用户」维度的 id，用户既看不到也校验不了）。
  *
- * 扫描范围只给 `mode: mention` 的群——只有这些群靠 @ 机器人判定消息是否该收，
+ * 扫描范围给所有监控群——任何范围都要判断消息有没有 @ 机器人，
  * 识别不到就会把整群消息丢掉（2026-11-11 事故的形态）。
  */
 export async function resolveBotIdentity(opts: {
@@ -421,7 +421,7 @@ export async function resolveBotIdentity(opts: {
   // 没有 mention 群时不需要识别：不是故障，不写错误日志。
   // resolved 的语义是「机器人身份可用或无需识别」，所以这里必须是 true，否则面板会误报成解析失败。
   if (opts.chatIds.length === 0) {
-    return { botOpenIds: [], botNames: [], resolved: true, detail: '没有配置 mode=mention 的群，无需识别机器人身份' }
+    return { botOpenIds: [], botNames: [], resolved: true, detail: '没有配置任何群，无需识别机器人身份' }
   }
   if (!opts.appId) {
     const detail = '没有配置 feishu.appId，无法识别机器人身份'
@@ -602,7 +602,7 @@ async function resolveBotIdentityOf(config: FeishuIdentityConfigView, lark: Comm
       detail: '使用配置里手动填写的机器人身份',
     }
   }
-  const chatIds = feishu.chats.filter(chat => chat.mode === 'mention').map(chat => chat.chat)
+  const chatIds = feishu.chats.map(chat => chat.chat)
   return resolveBotIdentity({ appId: feishu.appId, chatIds, lark, logger })
 }
 

@@ -12,3 +12,18 @@
 | `after-members-modal.png` | 改造后：弹窗标题「处理普通成员消息」，说明改成「打开后，非管理员的消息先由决策层判断要不要跟进」 |
 
 截图取自本地真实运行的服务（`node dist/cli/main.js serve --home <临时目录>`），配置内容是占位值（`oc_demo_group` / `oc_demo_ops` / `router-agent`），未包含任何真实密钥、群 id 或用户数据。
+
+---
+
+# 群级「消息范围」开关 · 界面 Before / After
+
+同一场景（Web 面板「配置 → 渠道配置 → 飞书」）、同一视口（1440×900 @1x）、同一主题（浅色）、同一份占位配置（`oc_demo_dev` / `oc_demo_ops` / `router-agent`）。
+
+基线：`origin/main`（`502f5b6`）；改动版本：分支 `ra/tk-86-llm`（本轮改动）。截图取自本地真实运行的服务（`node dist/cli/main.js start --home <临时目录>`），未包含任何真实密钥、群 id 或用户数据。
+
+| 截图 | 说明 |
+|-|-|
+| `before-global-admission.png` | 改造前：「消息准入」分组里有一块全局的「谁能叫醒机器人」，按「名单内外 × 是否 @」逐格配置 |
+| `after-global-admission.png` | 改造后：全局准入表整块删除，「消息准入」只剩「接单方式」 |
+| `before-chat-scope.png` | 改造前：「群与绑定」第二列是「接收」（全部消息 / 仅 @），最后一列是「需求分析助手」 |
+| `after-chat-scope.png` | 改造后：第二列变成「消息范围」（仅接受管理员消息 / 接受普通用户 @ 消息 / 接受所有消息），最后一列变成「普通成员设置」，本群名单改为「本群管理员」 |

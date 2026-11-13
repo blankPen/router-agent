@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { Store } from '../../src/store/db.js'
 import { Engine } from '../../src/core/engine.js'
 import { AgentLoop } from '../../src/router/agent-loop.js'
-import { DEFAULT_ADMISSION, type Policy } from '#core/policy.js'
+import { type Policy } from '#core/policy.js'
 import type { Trigger } from '#core/model.js'
 import type { DecisionAgent } from '../../src/router/decision/agent.js'
 import type { IntakeEngine, IntakeRunRequest } from '../../src/router/intake-engine.js'
@@ -27,13 +27,11 @@ const policy: Policy = {
   maxWorkers: 4,
   allowed: ['ou_alice'],
   bots: [],
-  admission: DEFAULT_ADMISSION,
-  receiveAll: true,
 }
 
 const dispatch: DispatchSettings = {
   projects: [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }],
-  bindings: [chatEntry('oc_dev', { mode: 'all', repo: 'router-agent', branch: 'main' })],
+  bindings: [chatEntry('oc_dev', { scope: 'all', repo: 'router-agent', branch: 'main' })],
 }
 
 function trigger(over: Partial<Trigger> = {}): Trigger {
@@ -446,12 +444,12 @@ describe('需求识别（intake）', () => {
     expect(engine.store.listTickets()).toHaveLength(0)
   })
 
-  it('没开启处理普通成员消息的群不接管：普通成员的消息直接忽略，不进研判', async () => {
+  it('「仅接受管理员消息」的群不接管普通成员：普通成员的消息直接忽略，不进研判', async () => {
     const llm = new FakeIntake([QUESTIONS])
     const store = new Store(':memory:')
     const clock = { now: () => now }
     let n = 0
-    const engine = new Engine({ store, policy, clock, ids: { next: p => `${p}_${++n}` } })
+    const engine = new Engine({ store, policy: { ...policy, scopeByChat: { oc_dev: 'admins' } }, clock, ids: { next: p => `${p}_${++n}` } })
     const loop = new AgentLoop({
       engine,
       decisionEngine: { async assess() { throw new Error('不应研判') }, async reply() { throw new Error('不应回复') } },
@@ -460,7 +458,7 @@ describe('需求识别（intake）', () => {
       source: 'feishu',
       dispatch,
       replyAlwaysChats: ['oc_dev'],
-      // 处理普通成员消息只在 oc_ops 开启：oc_dev 不受影响。
+      // 消息范围按群配置：oc_dev 只接受管理员消息，普通成员不接管。
       intake: { llm, settings: intakeSettings({ enabledChats: ['oc_ops'] }) },
     })
     engine.ingest(trigger())
@@ -487,8 +485,8 @@ describe('需求识别（intake）', () => {
       dispatch: {
         projects: [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }],
         bindings: [
-          chatEntry('oc_dev', { mode: 'all', repo: 'router-agent', branch: 'main' }),
-          chatEntry('oc_ops', { mode: 'all', repo: 'router-agent', branch: 'main' }),
+          chatEntry('oc_dev', { scope: 'all', repo: 'router-agent', branch: 'main' }),
+          chatEntry('oc_ops', { scope: 'all', repo: 'router-agent', branch: 'main' }),
         ],
       },
       replyAlwaysChats: ['oc_dev', 'oc_ops'],
@@ -698,13 +696,13 @@ describe('需求识别（intake）', () => {
     expect(intake?.report).toBeUndefined()
   })
 
-  it('被移出群级名单的人降级为普通成员：能提需求，但不能自己拍板', async () => {
+  it('普通成员能提需求，但不能自己拍板：不在终审名单里确认不开单', async () => {
     const llm = new FakeIntake([
       QUESTIONS,
       { action: 'report', reply: '整理好了', report: { title: '登录 500', problem: '500' } },
     ])
     const { engine, loop, store, advance } = setup(llm, {
-      approvers: ['ou_bob'],
+      approvers: ['ou_alice'],
       policy: {
         allowedByChat: { oc_dev: ['ou_alice'] },
         allowedByChatOpenIds: { oc_dev: ['ou_alice'] },
@@ -727,11 +725,11 @@ describe('需求识别（intake）', () => {
     }))
     await loop.tick()
 
-    // 名单外的人不能终审：不会开单。
+    // Bob 不在终审名单里：不能自己拍板，不会开单。
     expect(engine.store.listTickets()).toHaveLength(0)
   })
 
-  it('终审管理员不在群级名单里时不能派单', async () => {
+  it('群里配的终审管理员可以拍板，不要求同时在管理员名单里', async () => {
     const llm = new FakeIntake([
       QUESTIONS,
       { action: 'report', reply: '整理好了', report: { title: '登录 500', problem: '500' } },
@@ -739,8 +737,8 @@ describe('需求识别（intake）', () => {
     const { engine, loop, store, advance } = setup(llm, {
       approvers: ['ou_admin'],
       policy: {
-        allowedByChat: { oc_dev: ['ou_bob'] },
-        allowedByChatOpenIds: { oc_dev: ['ou_bob'] },
+        allowedByChat: { oc_dev: ['ou_alice'] },
+        allowedByChatOpenIds: { oc_dev: ['ou_alice'] },
       },
     })
     engine.ingest(trigger())
@@ -756,8 +754,7 @@ describe('需求识别（intake）', () => {
       receivedAt: '2026-11-12T10:02:00.000Z',
     }))
     await loop.tick()
-    expect(engine.store.listTickets()).toHaveLength(0)
-    expect(store.latestIntakeByThread('feishu:oc_dev:om_1')?.status).toBe('ready')
+    expect(engine.store.listTickets()).toHaveLength(1)
   })
 
   it('终审重试不重复建单：复用已存在的工单', async () => {

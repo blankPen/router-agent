@@ -1,11 +1,11 @@
 /**
- * 群列表编辑器：监控哪些群、收全部消息还是只收 @、绑定到哪个项目。
+ * 群列表编辑器：监控哪些群、消息处理范围、绑定到哪个项目。
  *
- * 渠道专属表单复用它（飞书渠道的「接收范围」），所以独立成模块。
+ * 渠道专属表单复用它（飞书渠道的「群与绑定」），所以独立成模块。
  */
 import { useState } from 'react'
 import { Icon } from './icons.js'
-import type { ChatDraft, ProjectDraft } from './config-shared.js'
+import { CHAT_SCOPE_LABELS, type ChatDraft, type ProjectDraft } from './config-shared.js'
 import {
   DEFAULT_CHAT_MEMBERS,
   MAX_MEMBER_QUESTIONS,
@@ -32,10 +32,10 @@ export function ChatsEditor({ chats, projects, error, onChange }: {
       {chats.length > 0 && (
         <div className="editor-head chat-head">
           <span>chat_id</span>
-          <span>接收</span>
+          <span>消息范围</span>
           <span>绑定项目</span>
-          <span>本群名单（推荐邮箱）</span>
-          <span>普通成员消息</span>
+          <span>本群管理员（推荐邮箱）</span>
+          <span>普通成员设置</span>
           <span />
         </div>
       )}
@@ -43,9 +43,10 @@ export function ChatsEditor({ chats, projects, error, onChange }: {
         <div key={index} className="editor-row chat-row">
           <input value={chat.chat} placeholder="oc_xxx" onChange={event => update(index, { chat: event.target.value })} />
           <span className="select-wrap compact">
-            <select value={chat.mode} onChange={event => update(index, { mode: event.target.value })}>
-              <option value="all">全部消息</option>
-              <option value="mention">仅 @</option>
+            <select value={chat.scope} onChange={event => update(index, { scope: event.target.value as ChatDraft['scope'] })}>
+              <option value="admins">仅接受管理员消息</option>
+              <option value="mention">接受普通用户@消息</option>
+              <option value="all">接受所有消息</option>
             </select>
             <Icon name="chevron" size={12} className="select-chevron" />
           </span>
@@ -65,15 +66,15 @@ export function ChatsEditor({ chats, projects, error, onChange }: {
           </span>
           <input
             value={chat.allowed.join(', ')}
-            placeholder="可空，沿用全局；推荐填邮箱"
+            placeholder="可空，沿用默认管理员；推荐填邮箱"
             onChange={event => update(index, { allowed: event.target.value.split(',').map(item => item.trim()).filter(Boolean) })}
           />
           <button
-            className={`btn tiny ${chat.members?.enabled ? 'primary' : 'ghost'}`}
-            title="配置是否处理普通成员的消息"
+            className="btn tiny ghost"
+            title="普通成员消息的追问轮数、终审管理员与只读代码设置"
             onClick={() => setMembersIndex(index)}
           >
-            {chat.members?.enabled ? '已开启' : '处理普通成员消息'}
+            普通成员设置
           </button>
           <button className="icon-btn danger" title="删除群" onClick={() => onChange(chats.filter((_, i) => i !== index))}>
             <Icon name="trash" size={14} />
@@ -81,7 +82,7 @@ export function ChatsEditor({ chats, projects, error, onChange }: {
         </div>
       ))}
       {error && <p className="field-error">{error}</p>}
-      <button className="btn add" onClick={() => onChange([...chats, { chat: '', mode: 'all', repo: '', branch: '', allowed: [] }])}>
+      <button className="btn add" onClick={() => onChange([...chats, { chat: '', scope: 'mention', repo: '', branch: '', allowed: [] }])}>
         <Icon name="plus" size={13} />添加群
       </button>
       {membersChat && (
@@ -99,10 +100,11 @@ export function ChatsEditor({ chats, projects, error, onChange }: {
 }
 
 /**
- * 群级「处理普通成员消息」配置弹窗。
+ * 群级普通成员消息处理配置弹窗。
  *
- * 开关、轮数、终审管理员、是否读代码都跟着群走：多群互不影响，
+ * 轮数、终审管理员、是否读代码都跟着群走：多群互不影响，
  * 改完随群配置一起保存（保存后重启服务生效）。
+ * 要不要处理普通成员的消息由上面的「消息范围」决定。
  */
 function MemberSettingsModal({ chat, onClose, onSave }: {
   chat: ChatDraft
@@ -110,7 +112,6 @@ function MemberSettingsModal({ chat, onClose, onSave }: {
   onSave: (value: ChatMembersDraft) => void
 }): JSX.Element {
   const current = chat.members ?? DEFAULT_CHAT_MEMBERS
-  const [enabled, setEnabled] = useState(current.enabled)
   const [maxQuestions, setMaxQuestions] = useState(String(current.maxQuestions))
   const [approvers, setApprovers] = useState(current.approvers.join(', '))
   const [codeAccess, setCodeAccess] = useState(current.codeAccess)
@@ -119,12 +120,13 @@ function MemberSettingsModal({ chat, onClose, onSave }: {
   return (
     <div className="modal-layer">
       <button className="modal-backdrop" aria-label="关闭" onClick={onClose} />
-      <div className="modal" role="dialog" aria-modal="true" aria-label="处理普通成员消息">
+      <div className="modal" role="dialog" aria-modal="true" aria-label="普通成员消息设置">
         <header className="modal-head">
           <div>
-            <h3>处理普通成员消息</h3>
+            <h3>普通成员消息设置</h3>
             <p>
-              群 {chat.chat || '（未填写 chat_id）'}：打开后，非管理员的消息先由决策层判断要不要跟进；要跟进的会进入多轮澄清，整理成结构化需求单后必须经管理员终审才派单。关闭时本群只处理管理员的消息。
+              群 {chat.chat || '（未填写 chat_id）'}：非管理员的消息先由决策层判断要不要跟进；要跟进的会进入多轮澄清，整理成结构化需求单后必须经管理员终审才派单。
+              本群当前的消息范围是「{CHAT_SCOPE_LABELS[chat.scope]}」{chat.scope === 'admins' ? '，普通成员的消息不会被处理，这里的设置暂不生效。' : '。'}
             </p>
           </div>
           <button className="icon-btn" title="关闭" onClick={onClose}>
@@ -132,10 +134,6 @@ function MemberSettingsModal({ chat, onClose, onSave }: {
           </button>
         </header>
         <div className="modal-body">
-          <button type="button" role="switch" aria-checked={enabled} className={`toggle ${enabled ? 'on' : ''}`} onClick={() => setEnabled(!enabled)}>
-            <span className="toggle-track"><span className="toggle-knob" /></span>
-            <span className="toggle-label">{enabled ? '已开启' : '已关闭'}</span>
-          </button>
           <label className="modal-field">
             <span>最大对话轮次</span>
             <span className="input-box">
@@ -157,7 +155,7 @@ function MemberSettingsModal({ chat, onClose, onSave }: {
               placeholder="admin@example.com, ou_xxx"
               onChange={event => setApprovers(event.target.value)}
             />
-            <small>只有这些管理员能确认派单或驳回；留空则沿用全局允许名单。邮箱会在启动时解析成对应的人。</small>
+            <small>只有这些管理员能确认派单或驳回；留空则沿用默认管理员名单。邮箱会在启动时解析成对应的人。</small>
           </label>
           <button type="button" role="switch" aria-checked={codeAccess} className={`toggle ${codeAccess ? 'on' : ''}`} onClick={() => setCodeAccess(!codeAccess)}>
             <span className="toggle-track"><span className="toggle-knob" /></span>
@@ -175,7 +173,6 @@ function MemberSettingsModal({ chat, onClose, onSave }: {
             className="btn primary"
             disabled={Boolean(issue)}
             onClick={() => onSave(normalizeChatMembers({
-              enabled,
               maxQuestions: rounds,
               approvers: approvers.split(','),
               codeAccess,

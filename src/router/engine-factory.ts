@@ -8,7 +8,7 @@ import { PiIntakeEngine } from './intake-engine.js'
 import { SqliteSessionPersistence } from './session-persistence.js'
 import { RouterToolbox, type RouterToolboxDeps } from './tools.js'
 import type { Logger } from '#infra/logger.js'
-import { effectiveAllowed, effectiveAllowedByChat } from '#core/policy.js'
+import { effectiveAdmins } from '#core/policy.js'
 import { DecisionAgent, JevDecisionProvider, LlmDecisionProvider, type DecisionProvider } from './decision/agent.js'
 import type { IntakeEngine } from './intake-engine.js'
 
@@ -97,9 +97,7 @@ export function createDecisionAgent(opts: DecisionAgentFactoryOptions): Decision
     isAdmin: trigger => {
       const policy = opts.engine?.policy()
       if (!policy) return false
-      const scoped = effectiveAllowedByChat(policy, trigger.chatId)
-      const allowed = scoped ?? effectiveAllowed(policy)
-      return allowed.includes(trigger.actorId)
+      return effectiveAdmins(policy, trigger.chatId).includes(trigger.actorId)
     },
     // 话题已绑定在办工单的放行消息由 Gate 打标（unaddressedAdmitted），走工单相关路径。
     hasBoundTicket: trigger => Boolean(trigger.unaddressedAdmitted),

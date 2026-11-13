@@ -1,6 +1,6 @@
 import type { Store } from '../store/db.js'
 import type { Clock, Engine } from '../core/engine.js'
-import { effectiveAllowed, effectiveAllowedByChat, gate, type Policy } from '#core/policy.js'
+import { effectiveAdmins, effectiveAllowed, gate, handlesUnaddressed, scopeOf, type Policy } from '#core/policy.js'
 import type { SourceKind, Strength, Ticket, Trigger } from '#core/model.js'
 import { DEFAULT_CHANNEL_ID } from '#channel/port.js'
 import { messageContext } from '#core/events.js'
@@ -33,8 +33,10 @@ export interface AgentLoopOptions {
   /** 多项目 / 多分支派工设置；不传则不校验 repo/branch（兼容旧测试与嵌入用法）。 */
   dispatch?: DispatchSettings
   /**
-   * 「全量接收」的会话：配置了 `mode: all` 的群。
-   * 这些群里的消息无论有没有 @，都要正常回复；判不接单就回一句，不开单。
+   * 哪些群对「没 @ 机器人」的消息也要回话。
+   *
+   * 现在的口径在核心里按角色算：管理员在哪个群都会被处理，
+   * 普通成员只在「接受所有消息」的群里会被处理。这里只作兼容覆盖。
    */
   replyAlwaysChats?: string[]
   /** 是否启用「一个会话一个落盘 session」。关闭时退回旧行为。 */
@@ -605,12 +607,9 @@ export class AgentLoop {
     return this.isAllowlisted(trigger)
   }
 
-  /** 发送人是否在有效允许名单内（管理员身份，工具范围 admin-full 的依据）。 */
+  /** 发送人是否是管理员（默认管理员 + 群内扩充；工具范围 admin-full 的依据）。 */
   private isAllowlisted(trigger: Trigger): boolean {
-    const policy = this.engine.policy()
-    const scoped = effectiveAllowedByChat(policy, trigger.chatId)
-    const allowed = scoped ?? effectiveAllowed(policy)
-    return allowed.includes(trigger.actorId)
+    return effectiveAdmins(this.engine.policy(), trigger.chatId).includes(trigger.actorId)
   }
 
   /** 只有这里会写库：派工解析 + Engine.decide。 */
@@ -689,12 +688,9 @@ export class AgentLoop {
     }
   }
 
-  /** 发送人是否在当前群的 allowed 名单内（不看 @）。 */
+  /** 发送人是否是管理员（默认管理员 + 群内扩充；不看 @）。 */
   private isAllowed(trigger: Trigger): boolean {
-    const policy = this.engine.policy()
-    const scoped = effectiveAllowedByChat(policy, trigger.chatId)
-    const allowed = scoped ?? effectiveAllowed(policy)
-    return allowed.includes(trigger.actorId)
+    return effectiveAdmins(this.engine.policy(), trigger.chatId).includes(trigger.actorId)
   }
 
   /**
@@ -705,7 +701,9 @@ export class AgentLoop {
   private shouldTrackConversation(trigger: Trigger): boolean {
     if (!this.sessionsEnabled || trigger.isBot) return false
     if (!this.isAllowed(trigger)) return false
-    return trigger.addressed !== 'none' || this.replyAlwaysChats.has(trigger.chatId)
+    if (trigger.addressed !== 'none') return true
+    if (this.replyAlwaysChats.has(trigger.chatId)) return true
+    return handlesUnaddressed(this.engine.policy(), trigger.chatId)
   }
 
   /** 只有应该进会话的消息才返回 session；没 @ 的 mention 群消息保持一次性调用。 */
@@ -778,13 +776,13 @@ export class AgentLoop {
    * - 私聊、@机器人：一定回；
    * - 群里没 @ 但话题已绑定在办工单、被放行处理（tk-59）：也回，
    *   否则用户既看不到确认表情，也等不到任何回应；
-   * - 群里没 @：只有配置为 `mode: all` 的会话才回。
-   *   全量接收意味着「所有消息都当对话听」，不能只听不回。
+   * - 群里没 @：管理员一律回；普通成员只在「接受所有消息」的群里回。
    */
   private shouldReply(trigger: Trigger): boolean {
     if (trigger.addressed !== 'none') return true
     if (trigger.unaddressedAdmitted) return true
-    return this.replyAlwaysChats.has(trigger.chatId)
+    if (this.replyAlwaysChats.has(trigger.chatId)) return true
+    return handlesUnaddressed(this.engine.policy(), trigger.chatId)
   }
 
   /** 回一句到原会话；key 保证同一件事只发一次。 */
@@ -949,7 +947,7 @@ export class AgentLoop {
         version: policy.version,
         acceptMode: policy.acceptMode,
         allowed: displayAllowed(policy),
-        admission: policy.admission,
+        scope: scopeOf(policy, trigger.chatId),
       },
       trigger: {
         id: trigger.id,
@@ -1092,7 +1090,7 @@ function policySection(policy: Policy): string {
 - 版本：${policy.version}
 - accept mode：${policy.acceptMode}（off 不开工 / observe 只记录 / auto 自动接单）
 - 并发上限：${policy.maxWorkers}
-- 准入表：名单内未 @ → ${policy.admission.listedNotAddressed}；名单外 @ → ${policy.admission.unlistedAddressed}；名单外未 @ → ${policy.admission.unlistedNotAddressed}`
+- 消息范围按群配置：管理员不受范围限制，普通成员按范围决定要不要处理`
 }
 
 function readPrompt(file: string, home?: string): string {

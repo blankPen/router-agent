@@ -7,7 +7,7 @@ import type { ReplyBlock, ReplyPayload, ReplyQuestion } from '#core/reply.js'
 import { choiceBlockOf } from '#core/reply.js'
 import type { Store } from './store/db.js'
 import type { AppConfig, RetentionSettings, WorkspaceSettings } from './config.js'
-import { DEFAULT_CHAT_MEMBERS, replyAlwaysChatsOf } from './config.js'
+import { DEFAULT_CHAT_MEMBERS } from './config.js'
 import { STAGE_LABELS } from '#core/stage.js'
 import { WorkerRuntimeError, type WorkerRuntime, type WorkerContext, type SessionEvent, type WorkerRef, type AgentStatus, type ResumeHint } from '#runtime/port.js'
 import { AgentLoop } from './router/agent-loop.js'
@@ -84,7 +84,7 @@ export interface RouterServiceOptions {
   intakeEngine?: IntakeEngine
   /**
    * 群 id → 终审管理员 open_id（启动时已把邮箱解析成 open_id）。
-   * 没传时按「没配管理员」处理，终审回退到全局允许名单。
+   * 没传时按「没配管理员」处理，终审回退到默认管理员名单。
    */
   intakeApprovers?: Record<string, string[]>
   /** intake 读代码时把 repo 选择器解析成本地目录；不传则只基于对话分析。 */
@@ -620,7 +620,6 @@ export class RouterService {
       home: opts.config.home,
       batchWindowMs: opts.agentLoopOptions?.batchWindowMs ?? 8000,
       dispatch: dispatchSettingsOf(opts.config),
-      replyAlwaysChats: replyAlwaysChatsOf(opts.config),
       sessionsEnabled: opts.config.router.session.enabled,
       sessionKeyScope: opts.config.router.session.keyScope,
       persona: opts.config.router.persona,
@@ -714,7 +713,6 @@ export class RouterService {
     const chat = opts.config.feishu.chats.find(item => item.chat === chatId)
     const members = chat?.members
     return {
-      enabled: members?.enabled ?? false,
       approvers: opts.intakeApprovers?.[chatId] ?? [],
       maxQuestions: members?.maxQuestions ?? DEFAULT_CHAT_MEMBERS.maxQuestions,
       codeAccess: members?.codeAccess ?? DEFAULT_CHAT_MEMBERS.codeAccess,

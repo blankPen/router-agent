@@ -11,17 +11,16 @@ feishu:
   # 监控的群：一条配置同时决定「收什么消息 + 派工绑定」
   chats:
     - chat: oc_xxx     # 群 chat_id
-      mode: all        # all=全部消息且不 @ 也回复；mention=只收 @机器人
+      scope: mention   # admins=仅接受管理员消息；mention=接受普通用户 @ 消息；all=接受所有消息
       repo: router-agent   # 可选：群绑定项目（只能是当前后端项目清单里的项目名）
       branch: main         # 由项目默认分支自动决定，面板不可单独编辑
-      allowed: [ou_xxx]    # 可选：本群只允许这些人操作（空=沿用全局 allowed）；支持邮箱（推荐）或 ou_xxx
-      members:         # 可选：本群的「处理普通成员消息」（Web 面板里点群配置里的「处理普通成员消息」按钮编辑）
-        enabled: false     # 开启后，本群非授权用户的消息先过决策层，由决策层判断要不要跟进
+      allowed: [ou_xxx]    # 可选：本群管理员扩充（在默认管理员之外再加这些人）；支持邮箱（推荐）或 ou_xxx
+      members:         # 可选：本群普通成员消息的处理细节（Web 面板里点群配置里的「普通成员设置」按钮编辑）
         maxQuestions: 10  # 最多主动追问几轮；达到上限按现有信息收口
         codeAccess: true   # 分析子 Agent 是否只读本群绑定项目的本地代码
-        approvers: []      # 终审管理员；支持邮箱（推荐）或 ou_xxx；空 = 回退到全局 allowed 名单
+        approvers: []      # 终审管理员；支持邮箱（推荐）或 ou_xxx；空 = 回退到默认管理员名单
   directMessages: true
-  allowed: []          # 允许发起工作的人（邮箱，推荐；兼容 ou_xxx）
+  allowed: []          # 默认管理员：所有群的基线名单（邮箱，推荐；兼容 ou_xxx）
   bots: []             # 允许产生推断候选的机器人
   botOpenIds: []       # 机器人自己的 open_id（留空=按 appId 自动识别群成员里的机器人；填了就不自动识别）
   botNames: []         # 机器人显示名
@@ -40,11 +39,6 @@ policy:
   #   off    = 不处理
   interruptedRecovery: auto
   maxAutoRecover: 1    # 同一工单最多自动恢复几次，超出后降级为 notify
-  # 准入表：按「名单内外 × 是否 @」逐格配置，默认值如下（含义见「准入规则」）
-  admission:
-    listedNotAddressed: inferred    # 名单内、未 @：inferred | ignore
-    unlistedAddressed: inferred     # 名单外、@bot：explicit | inferred | ignore
-    unlistedNotAddressed: ignore    # 名单外、未 @：inferred | ignore
 
 # 研判层：Pi 单引擎；超时、token 预算与独立配置目录
 router:
@@ -158,10 +152,10 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 | `policy.maxWorkers` | 1–64 |
 | `policy.interruptedRecovery` | `auto` / `notify` / `off` |
 | `policy.maxAutoRecover` | 0–100 |
-| `policy.admission.listedNotAddressed` / `unlistedAddressed` / `unlistedNotAddressed` | 见「准入规则」 |
 | `router.timeoutMs` / `router.tokenBudget` / `router.agentDir` | 毫秒（1s–600s） / token（0=不限） / Pi 配置目录 |
 | `progress.syncMs` / `probeMs` / `silenceMs` / `repeatMs` | 毫秒；前两项 0 = 关闭 |
-| `feishu.chats[].members.enabled` / `maxQuestions` / `codeAccess` / `approvers` | 见「处理普通成员消息」 |
+| `feishu.chats[].scope` | `admins` / `mention` / `all`；见「准入规则」 |
+| `feishu.chats[].members.maxQuestions` / `codeAccess` / `approvers` | 见「处理普通成员消息」 |
 | `retention.enabled` / `idleHours` / `closeGraceHours` / `zombieHours` / `sweepMinutes` | 见「闲置工单治理」 |
 | `workspace.enabled` / `keepHours` / `sweepMinutes` | 见「关单后的工作区回收」 |
 | `worker.evidence.ui` | `off` / `warn` / `enforce`；UI 证据门禁档位（保存后需重启） |
@@ -170,7 +164,7 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 | `runtime.plugins.<runtime id>` | npm 包名、`./path`，或 `{ package / path / plugin, entry?, enabled? }`；id 取自插件包声明的 `meta.id`，见 [RUNTIME.md](RUNTIME.md) |
 | `server.port` | 1–65535 |
 | `feishu.appId` / `reaction` / `directMessages` / `allowed` / `bots` / `botOpenIds` / `botNames` | 字符串、布尔或逗号分隔列表 |
-| `feishu.chats` | 逗号分隔 chat_id；已有条目的 mode / 绑定 / sync 保留，新条目默认 `all` |
+| `feishu.chats` | 逗号分隔 chat_id；已有条目的消息范围 / 绑定 / sync 保留，新条目默认 `mention` |
 | `llm.baseUrl` / `llm.model` / `llm.apiKey` | 模型连接信息 |
 | `decision.enabled` | `true` / `false`；开启普通成员消息的决策层 |
 | `decision.provider` | `jev` / `llm`；决策模型来源 |
@@ -182,9 +176,9 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 |-|-|-|
 | `project.<名>` | `ra config set project.router-agent "/Users/me/router-agent@main"` | `@` 后可带默认起始分支；`repo` 必须是本地仓库绝对路径 |
 | `chatBinding.<chatId>` | `ra config set chatBinding.oc_xxx "router-agent@main"` | 绑定群的项目与起始分支 |
-| `chatMode.<chatId>` | `ra config set chatMode.oc_xxx mention` | `all` / `mention` |
+| `chatScope.<chatId>` | `ra config set chatScope.oc_xxx mention` | `admins` / `mention` / `all` |
 | `chatSync.<chatId>` | `ra config set chatSync.oc_xxx true` | 启动时补拉该群历史 |
-| `chatAllow.<chatId>` | `ra config set chatAllow.oc_xxx ou_a,ou_b` | 空值 = 沿用全局 `feishu.allowed` |
+| `chatAllow.<chatId>` | `ra config set chatAllow.oc_xxx ou_a,ou_b` | 群管理员扩充；空值 = 只用默认 `feishu.allowed` |
 | `runtime.options.<运行时>.<键>` | `ra config set runtime.options.orca.agent codex` | 运行时专属选项；按该运行时的声明校验 |
 | `runtime.plugins.<runtime id>` | `ra runtime add '@acme/runtime-demo'` | 装好包并读出它声明的 id 后写入配置 |
 
@@ -356,37 +350,46 @@ orca repo list --json | jq -r '.result.repos[] | "\(.displayName)\t\(.path)\t\(.
 
 另外，旧版的全局 `repo` 配置已移除（`ra` 不再读取它）。已有配置文件请改成 `projects`，`ra doctor` 会在没有任何项目时直接报错并给出命令。
 
-## 准入规则
+## 准入规则（群级消息范围）
+
+准入不再由全局开关逐格配置，而是**按群配一个消息范围**。全局只保留「默认管理员是谁」，每个群再按自己的范围决定接不接普通成员的消息。
+
+| 消息范围（`feishu.chats[].scope`） | 管理员的消息 | 普通成员的消息 |
+|-|-|-|
+| `admins`（仅接受管理员消息） | 都处理 | 一律忽略 |
+| `mention`（接受普通用户 @ 消息） | 都处理 | 必须 @ 机器人 |
+| `all`（接受所有消息） | 都处理 | 都处理（由决策层判断要不要跟进） |
+
+管理员 = 默认管理员（`feishu.allowed`）+ 群内扩充（`feishu.chats[].allowed`）。群名单只扩充、不覆盖：默认管理员在任何一个群里都还是管理员。
+
+```bash
+ra config set chatScope.oc_xxx admins|mention|all   # 群消息范围
+ra config set chatAllow.oc_xxx a@b.com,ou_xxx        # 群管理员扩充
+```
 
 | 场景 | off | observe | auto |
 |-|-|-|-|
-| 名单内、@bot / 私聊 | 显式接单 | 显式接单 | 显式接单 |
-| 名单内、未 @ | 只回复说明 | 研判但不开工 | 研判通过开单 |
-| 名单外、@bot | 只回复说明 | 研判但不开工 | 研判通过开单 |
-| 名单外、未 @ | 忽略 | 忽略 | 忽略 |
+| 管理员、@bot / 私聊 | 显式接单 | 显式接单 | 显式接单 |
+| 管理员、未 @ | 只回复说明 | 研判但不开工 | 研判通过开单 |
+| 普通成员、@bot（范围含普通成员时） | 只回复说明 | 研判但不开工 | 研判通过开单 |
+| 普通成员、未 @（只有 `all` 范围会走到） | 只回复说明 | 研判但不开工 | 研判通过开单 |
 
-准入表在 `config.yaml` 的 `policy.admission` 里逐格调整：
+范围之外的组合一律忽略。`inferred` 进入研判（再由 `acceptMode` 决定 observe 时是否真的开工），`explicit` 直接按显式请求开单。Web 面板保存后立即生效；`ra config set` 写的是文件，重启服务后生效。
 
-| 配置项 | 对应场景 | 可取值 | 默认 |
-|-|-|-|-|
-| `policy.admission.listedNotAddressed` | 名单内、未 @ | `inferred` / `ignore` | `inferred` |
-| `policy.admission.unlistedAddressed` | 名单外、@bot | `explicit` / `inferred` / `ignore` | `inferred` |
-| `policy.admission.unlistedNotAddressed` | 名单外、未 @ | `inferred` / `ignore` | `ignore` |
+旧配置（`policy.admission` 三格准入表 + 群级 `mode: all/mention`）会在启动时折算成新的群级范围：旧「名单外 @bot 一律忽略」→ `admins`；旧「普通消息也处理」→ `all`；其余 → `mention`。
 
-`inferred` 进入研判（再由 `acceptMode` 决定 observe 时是否真的开工），`explicit` 直接按显式请求开单，`ignore` 直接丢弃。这三项属于 `policy.*`：Web 面板保存后立即生效；`ra config set` 写的是文件，重启服务后生效。
+## 处理普通成员消息（群级 scope + members）
 
-## 处理普通成员消息（群级 members）
+每个群单独配消息范围（`scope`），默认 `mention`（只接普通成员的 @ 消息）。范围决定 Router 要不要处理本群非授权用户的消息；`members` 只管处理细节（追问几轮、能不能读代码、谁终审）。
 
-每个群单独开关，默认关闭。这个开关只回答一件事：**Router 要不要处理本群非授权用户的消息**。
-
-关掉时（本组消息的路由方式）：
+范围是 `admins` 时（本组消息的路由方式）：
 
 | 发送人 | 处理方式 |
 |-|-|
-| 授权管理用户（群级 `allowed`，没有则用全局 `allowed`） | 直进 Router：闲聊回复、简单需求直接开单、复杂需求先讨论几轮再开单 |
+| 管理员（默认管理员 + 群内扩充） | 直进 Router：闲聊回复、简单需求直接开单、复杂需求先讨论几轮再开单 |
 | 普通成员 | 不处理，消息被忽略 |
 
-打开时，普通成员的消息先过**决策层**（Jev / LLM 分类），由决策层决定要不要跟进：
+范围是 `mention` / `all` 时，普通成员的消息先过**决策层**（Jev / LLM 分类），由决策层决定要不要跟进：
 
 1. **决策**：确定性准入先挡掉机器人、纯附件、口令、已在会话里的消息；其余交给决策模型分类成「不跟进 / 观察 / 咨询 / 需求反馈」；
 2. **不跟进**：闲聊、吐槽直接忽略，不打扰用户；
@@ -394,24 +397,23 @@ orca repo list --json | jq -r '.result.repos[] | "\(.displayName)\t\(.path)\t\(.
 4. **需求**：建需求会话，分析子 Agent 主动追问补齐信息，整理成结构化需求单 @终审管理员；
 5. **终审与派单**：管理员回复「确认派单」才走原有 `Engine.decide()` 生成工单；回复「驳回」结束这条需求。
 
-配置入口在 Web 面板：**「配置 → 项目清单 → 群与绑定」**里每一行都有一个「处理普通成员消息」按钮，点开弹窗就能开关、填管理员、调轮次、决定是否读代码；也可以直接改 `config.yaml`：
+配置入口在 Web 面板：**「配置 → 渠道配置 → 飞书 → 群与绑定」**里每一行都有一个消息范围下拉框和一个「普通成员设置」按钮，点开弹窗就能填终审管理员、调轮次、决定是否读代码；也可以直接改 `config.yaml`：
 
 ```bash
 feishu:
   chats:
     - chat: oc_dev
-      mode: all
+      scope: all
       repo: router-agent
       members:
-        enabled: true
         maxQuestions: 10          # 最多追问 10 轮（默认 10，0 = 不追问）
         codeAccess: true          # false = 分析 Agent 不读代码，只基于对话判断
-        approvers: [lead@example.com]   # 终审管理员：邮箱（推荐）或 ou_xxx；空 = 回退到全局 allowed
+        approvers: [lead@example.com]   # 终审管理员：邮箱（推荐）或 ou_xxx；空 = 回退到默认管理员名单
 ```
 
 | 字段 | 含义 |
 |-|-|
-| `enabled` | 是否在这个群处理普通成员的消息；一个群开了不影响别的群 |
+| `scope` | 消息范围：`admins` / `mention` / `all`；要不要处理普通成员的消息由它决定 |
 | `maxQuestions` | 最多主动追问几轮，默认 **10**，上限 50；到顶后按现有信息收口成需求单 |
 | `codeAccess` | 分析子 Agent 是否只读本群绑定项目的代码；关闭后只依据对话与通用业务知识判断 |
 | `approvers` | 终审管理员：支持**邮箱**（推荐）或 `ou_xxx`；启动时把邮箱解析成 open_id，解析不到就没人能终审（不会退回全局名单） |
@@ -422,7 +424,7 @@ feishu:
 | 权限分层 | 授权用户拿全套工单工具（查单、关单、回收 workspace）；普通成员只有只读上下文工具，没有任何工单权限 |
 | 项目隔离 | 分析工具（`code_ls` / `code_read` / `code_grep`）只接受项目目录内的相对路径，越界直接拒绝 |
 | 名单只管权限，不管说话 | 授权名单决定谁能当管理员、谁能派单；普通成员照样能提需求，只是要走管理员终审 |
-| 名单没解析出来 | 群配了 `allowed` 却一个都没解析出来时，这个群拒绝所有人（安全边界） |
+| 名单只扩充不覆盖 | 群 `allowed` 只往默认管理员名单上加人；默认管理员在群里仍是管理员 |
 | 不干扰存量派单流程 | 同一话题里管理员 @机器人 的新指令仍走原研判，不会被待审需求单截走 |
 | 旧配置自动迁移 | 旧的群级 `intake:` 段与旧版全局 `intake:` 段（`enabled` / `chats` / `maxQuestions` / `codeAccess` / `approvers`）在启动时迁移到 `members:`；写回配置后旧段消失 |
 

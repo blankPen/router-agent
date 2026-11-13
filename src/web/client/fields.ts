@@ -89,17 +89,6 @@ const ACCEPT_MODE_OPTIONS: FieldOption[] = [
   { value: 'auto', label: 'auto · 研判通过直接开单', hint: '默认模式' },
 ]
 
-const ADMISSION_LISTED_OPTIONS: FieldOption[] = [
-  { value: 'inferred', label: 'inferred · 允许模型推断接单' },
-  { value: 'ignore', label: 'ignore · 必须显式 @ 才算' },
-]
-
-const ADMISSION_ADDRESSED_OPTIONS: FieldOption[] = [
-  { value: 'explicit', label: 'explicit · 只接明确指派' },
-  { value: 'inferred', label: 'inferred · 允许模型推断' },
-  { value: 'ignore', label: 'ignore · 一律忽略' },
-]
-
 const KEY_SCOPE_OPTIONS: FieldOption[] = [
   { value: 'user', label: 'user · 群 + 人' },
   { value: 'thread', label: 'thread · 群 + 话题 + 人' },
@@ -317,7 +306,7 @@ export const CONFIG_GROUPS: ConfigGroup[] = [
   {
     id: 'channels',
     title: '渠道配置',
-    description: '消息从哪个渠道进来。先选渠道，再配它的接入、接收范围与消息处理。',
+    description: '消息从哪个渠道进来。先选渠道，再配它的接入、管理员与消息范围。',
     kind: 'channels',
     blocks: [],
   },
@@ -338,7 +327,7 @@ export const CONFIG_GROUPS: ConfigGroup[] = [
   {
     id: 'admission',
     title: '消息准入',
-    description: '哪些消息能开工单、以什么方式接单。保存后立即生效，不需要重启。',
+    description: '哪些群的消息接进来、以什么方式接单。保存后立即生效，不需要重启。',
     blocks: [
       {
         id: 'accept-mode',
@@ -346,33 +335,6 @@ export const CONFIG_GROUPS: ConfigGroup[] = [
         description: '决定 Router 收到消息后是只记录、只研判，还是直接开单派工。',
         fields: [
           { path: 'policy.acceptMode', label: '接单模式', kind: 'select', options: ACCEPT_MODE_OPTIONS },
-        ],
-      },
-      {
-        id: 'admission-rules',
-        title: '谁能叫醒机器人',
-        description: '按「是否在名单里」和「是否 @ 了机器人」两个维度决定一条消息是否进入研判。',
-        fields: [
-          {
-            path: 'policy.admission.listedNotAddressed',
-            label: '名单内成员 · 未 @ 机器人',
-            kind: 'select',
-            options: ADMISSION_LISTED_OPTIONS,
-            hint: '已在允许名单里的人发消息但没 @ 机器人时怎么处理',
-          },
-          {
-            path: 'policy.admission.unlistedAddressed',
-            label: '名单外成员 · @ 了机器人',
-            kind: 'select',
-            options: ADMISSION_ADDRESSED_OPTIONS,
-            hint: '陌生人 @ 机器人时，是只认明确指名，还是允许模型推断',
-          },
-          {
-            path: 'policy.admission.unlistedNotAddressed',
-            label: '名单外成员 · 未 @ 机器人',
-            kind: 'select',
-            options: ADMISSION_LISTED_OPTIONS,
-          },
         ],
       },
     ],

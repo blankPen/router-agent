@@ -40,7 +40,7 @@ function writeConfig(dir: string): void {
     feishu: {
       appId: 'cli_a',
       allowed: ['ou_alice'],
-      chats: [{ chat: 'oc_1', mode: 'mention' }],
+      chats: [{ chat: 'oc_1', scope: 'mention' }],
     },
     policy: { admission: { unlistedAddressed: 'ignore' } },
   }), 'utf8')

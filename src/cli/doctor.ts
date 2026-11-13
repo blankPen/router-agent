@@ -63,8 +63,8 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
   const checks: DoctorCheck[] = []
   /** 手填了机器人身份就按手填的匹配；留空则按 feishu.appId 自动识别（与启动装配同一规则）。 */
   const manualBot = config.feishu.botOpenIds.length > 0 || config.feishu.botNames.length > 0
-  /** 只有 mode=mention 的群靠 @ 机器人判定收不收消息，也只有它们需要识别机器人身份。 */
-  const mentionChatIds = config.feishu.chats.filter(chat => chat.mode === 'mention').map(chat => chat.chat)
+  /** 任何范围都要判断消息有没有 @ 机器人，所以所有监控群都要识别机器人身份。 */
+  const mentionChatIds = config.feishu.chats.map(chat => chat.chat)
   const projects = projectsForRuntime(config)
   const projectCount = projects.length
   checks.push(configRequiredCheck(config, projectCount))
@@ -370,24 +370,25 @@ function decisionLayerCheck(config: AppConfig): DoctorCheck {
 }
 
 /**
- * 普通成员消息处理检查：哪些群开了「处理普通成员消息」。
+ * 群消息范围检查：每个群处理到哪一层。
  *
- * 没开的群里，普通成员（非授权用户）的消息一律不理——这是排查
+ * 「仅接受管理员消息」的群里普通成员说什么都不理——这是排查
  * 「机器人为什么不回我」时最常问的一条。
  */
 function memberMessagesCheck(config: AppConfig): DoctorCheck {
-  const chats = config.feishu.chats.filter(chat => chat.members?.enabled)
-  if (chats.length === 0) {
-    return {
-      name: '普通成员消息',
-      status: 'ok',
-      detail: '没有群开启「处理普通成员消息」：普通成员的消息一律不理，管理员的消息照常处理',
-    }
-  }
+  const label = (scope: string): string => (
+    scope === 'admins' ? '仅接受管理员消息' : scope === 'all' ? '接受所有消息' : '接受普通用户@消息'
+  )
+  const adminsOnly = config.feishu.chats.filter(chat => chat.scope === 'admins')
+  const members = config.feishu.chats.filter(chat => chat.scope !== 'admins')
+  const detail = [
+    adminsOnly.length > 0 ? `仅管理员：${adminsOnly.map(chat => chat.chat).join('、')}` : '',
+    members.length > 0 ? `普通成员也可发言：${members.map(chat => `${chat.chat}（${label(chat.scope)}）`).join('、')}` : '',
+  ].filter(Boolean).join('；')
   return {
-    name: '普通成员消息',
+    name: '群消息范围',
     status: 'ok',
-    detail: `已在 ${chats.length} 个群开启：${chats.map(chat => chat.chat).join('、')}`,
+    detail: detail || '没有配置任何群',
   }
 }
 

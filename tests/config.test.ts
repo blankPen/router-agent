@@ -91,7 +91,7 @@ describe('全局状态目录与配置', () => {
     expect(cfg.server.port).toBe(3999)
     expect(cfg.policy.maxWorkers).toBe(2)
     expect(cfg.worker.evidence.ui).toBe('enforce')
-    expect(cfg.feishu.chats).toEqual([chatEntry('oc_a'), chatEntry('oc_b', { mode: 'mention' })])
+    expect(cfg.feishu.chats).toEqual([chatEntry('oc_a'), chatEntry('oc_b', { scope: 'mention' })])
   })
 
   it('非法 acceptMode / port 回退到默认值而不是崩溃', () => {
@@ -132,7 +132,7 @@ describe('全局状态目录与配置', () => {
     const p2 = policyOf({ ...base, policy: { ...base.policy, acceptMode: 'observe' } })
     expect(p1.version).not.toBe(p2.version)
     expect(p1.allowed).toEqual(['ou_alice'])
-    expect(p1.receiveAll).toBe(true)
+    expect(p1.scopeByChat).toEqual({ oc_a: 'mention' })
   })
 
   it('名单解析结果写进 Policy，但不进版本指纹', () => {
@@ -177,10 +177,13 @@ describe('全局状态目录与配置', () => {
     expect(loadConfig(dir).feishu.chats[0]?.allowed).toEqual(['ou_alice'])
   })
 
-  it('只有 mode=all 的群才算 receiveAll（影响机器人推断候选）', () => {
+  it('每个群的消息范围都折算进 Policy', () => {
     const base = loadConfig(home())
-    expect(policyOf({ ...base, feishu: { ...base.feishu, chats: [chatEntry('oc_a', { mode: 'mention' })] } }).receiveAll).toBe(false)
-    expect(policyOf({ ...base, feishu: { ...base.feishu, chats: [chatEntry('oc_a', { mode: 'mention' }), chatEntry('oc_b')] } }).receiveAll).toBe(true)
+    const policy = policyOf({
+      ...base,
+      feishu: { ...base.feishu, chats: [chatEntry('oc_a', { scope: 'admins' }), chatEntry('oc_b', { scope: 'all' })] },
+    })
+    expect(policy.scopeByChat).toEqual({ oc_a: 'admins', oc_b: 'all' })
   })
 
   it('旧配置里的 feishu.larkHome 被忽略，保存后不再写回', () => {
@@ -196,7 +199,7 @@ describe('全局状态目录与配置', () => {
   it('writeConfig 写回后能被 loadConfig 读回，且保留可选字段', () => {
     const dir = home()
     const cfg = loadConfig(dir)
-    cfg.feishu.chats = [chatEntry('oc_a', { mode: 'mention', repo: 'router-agent', branch: 'main' })]
+    cfg.feishu.chats = [chatEntry('oc_a', { scope: 'mention', repo: 'router-agent', branch: 'main' })]
     cfg.feishu.allowed = ['ou_me']
     cfg.feishu.botOpenIds = ['ou_bot', 'cli_bot']
     cfg.feishu.appId = 'cli_dedicated'
@@ -213,7 +216,7 @@ describe('全局状态目录与配置', () => {
     writeConfig(dir, cfg)
 
     const loaded = loadConfig(dir)
-    expect(loaded.feishu.chats).toEqual([chatEntry('oc_a', { mode: 'mention', repo: 'router-agent', branch: 'main' })])
+    expect(loaded.feishu.chats).toEqual([chatEntry('oc_a', { scope: 'mention', repo: 'router-agent', branch: 'main' })])
     expect(loaded.feishu.allowed).toEqual(['ou_me'])
     expect(loaded.feishu.botOpenIds).toEqual(['ou_bot', 'cli_bot'])
     expect(loaded.feishu.appId).toBe('cli_dedicated')
@@ -324,11 +327,11 @@ describe('多项目与群绑定配置', () => {
     ].join('\n'))
     const cfg = loadConfig(dir)
     expect(cfg.feishu.chats).toEqual([
-      chatEntry('oc_all', { mode: 'all' }),
-      chatEntry('oc_at', { mode: 'mention' }),
+      chatEntry('oc_all'),
+      chatEntry('oc_at', { scope: 'mention' }),
     ])
-    // otherChats 不会覆盖 chats 里的 all 模式
-    expect(cfg.feishu.chats[0]?.mode).toBe('all')
+    // otherChats 不会覆盖 chats 里的范围
+    expect(cfg.feishu.chats[0]?.scope).toBe('mention')
   })
 
   it('setConfigValue 支持 project.<name> 与 chatBinding.<chat>，非法值被拒绝', () => {
@@ -349,12 +352,12 @@ describe('多项目与群绑定配置', () => {
     expect(cfg.feishu.chats).toHaveLength(1)
     expect(cfg.feishu.chats[0]?.branch).toBe('release')
 
-    // 群列表替换时保留已有条目的绑定 / 模式
-    expect(setConfigValue(cfg, 'chatMode.oc_a', 'mention')).toBe(true)
-    expect(cfg.feishu.chats[0]?.mode).toBe('mention')
+    // 群列表替换时保留已有条目的绑定 / 消息范围
+    expect(setConfigValue(cfg, 'chatScope.oc_a', 'admins')).toBe(true)
+    expect(cfg.feishu.chats[0]?.scope).toBe('admins')
     expect(setConfigValue(cfg, 'feishu.chats', 'oc_a,oc_b')).toBe(true)
     expect(cfg.feishu.chats).toEqual([
-      chatEntry('oc_a', { mode: 'mention', repo: 'router-agent', branch: 'release' }),
+      chatEntry('oc_a', { scope: 'admins', repo: 'router-agent', branch: 'release' }),
       chatEntry('oc_b'),
     ])
     // 补拉功能已移除，旧路径不再可用
@@ -362,7 +365,7 @@ describe('多项目与群绑定配置', () => {
 
     expect(setConfigValue(cfg, 'project.', 'x')).toBe(false)
     expect(setConfigValue(cfg, 'chatBinding.oc_a', '')).toBe(false)
-    expect(setConfigValue(cfg, 'chatMode.oc_a', 'yolo')).toBe(false)
+    expect(setConfigValue(cfg, 'chatScope.oc_a', 'yolo')).toBe(false)
   })
 
   it('writeConfig 写回后仍能读回 projects / 群配置', () => {
@@ -370,7 +373,7 @@ describe('多项目与群绑定配置', () => {
     const cfg = loadConfig(dir)
     cfg.projects = [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }]
     cfg.feishu.chats = [
-      chatEntry('oc_a', { mode: 'mention', repo: 'router-agent', branch: 'main' }),
+      chatEntry('oc_a', { scope: 'mention', repo: 'router-agent', branch: 'main' }),
       chatEntry('oc_b'),
     ]
     writeConfig(dir, cfg)
@@ -432,17 +435,17 @@ describe('Pi 研判层配置', () => {
     expect(loaded.router.tokenBudget).toBe(16000)
   })
 
-  it('处理普通成员消息是群级配置：可写回并读回，patch 做类型与范围校验', () => {
+  it('普通成员消息是群级配置：可写回并读回，patch 做类型与范围校验', () => {
     const dir = home()
     const cfg = loadConfig(dir)
     const patch = applyConfigPatch(cfg, {
       'feishu.chats': [{
         chat: 'oc_dev',
-        mode: 'all',
+        scope: 'all',
         repo: '',
         branch: '',
         allowed: [],
-        members: { enabled: true, maxQuestions: 2, codeAccess: false, approvers: ['admin@example.com'] },
+        members: { maxQuestions: 2, codeAccess: false, approvers: ['admin@example.com'] },
       }],
     })
     expect(patch.errors).toEqual([])
@@ -450,23 +453,24 @@ describe('Pi 研判层配置', () => {
 
     const loaded = loadConfig(dir)
     expect(loaded.feishu.chats[0]?.members).toEqual({
-      enabled: true,
       maxQuestions: 2,
       codeAccess: false,
       approvers: ['admin@example.com'],
     })
+    expect(loaded.feishu.chats[0]?.scope).toBe('all')
 
     // 轮次越界：0–50 的整数。
     expect(applyConfigPatch(loadConfig(home()), {
-      'feishu.chats': [{ chat: 'oc_dev', mode: 'all', repo: '', branch: '', allowed: [], members: { enabled: true, maxQuestions: 51, codeAccess: true, approvers: [] } }],
+      'feishu.chats': [{ chat: 'oc_dev', scope: 'all', repo: '', branch: '', allowed: [], members: { maxQuestions: 51, codeAccess: true, approvers: [] } }],
     }).errors).toHaveLength(1)
     // 全局路径已经下沉到群级，不再是合法的配置项。
     expect(applyConfigPatch(loadConfig(home()), { 'intake.enabled': true }).errors).toHaveLength(1)
   })
 
-  it('新建群默认带普通成员消息配置：关闭、10 轮、允许只读代码', () => {
+  it('新建群默认：消息范围 mention、10 轮追问、允许只读代码', () => {
     const cfg = loadConfig(home())
-    expect(chatEntry('oc_new').members).toEqual({ enabled: false, maxQuestions: 10, codeAccess: true, approvers: [] })
+    expect(chatEntry('oc_new').scope).toBe('mention')
+    expect(chatEntry('oc_new').members).toEqual({ maxQuestions: 10, codeAccess: true, approvers: [] })
     expect(cfg.feishu.chats).toEqual([])
   })
 
@@ -489,13 +493,14 @@ describe('Pi 研判层配置', () => {
     ].join('\n'))
     const cfg = loadConfig(dir)
     expect(cfg.feishu.chats.find(chat => chat.chat === 'oc_dev')?.members).toEqual({
-      enabled: true,
       maxQuestions: 6,
       codeAccess: false,
       approvers: ['admin@example.com'],
     })
-    // 不在旧白名单里的群保持关闭。
-    expect(cfg.feishu.chats.find(chat => chat.chat === 'oc_ops')?.members?.enabled).toBe(false)
+    // 旧 intake 开启过的群：消息范围至少接受普通成员 @ 消息。
+    expect(cfg.feishu.chats.find(chat => chat.chat === 'oc_dev')?.scope).toBe('mention')
+    // 不在旧白名单里的群只迁参数，不迁开关。
+    expect(cfg.feishu.chats.find(chat => chat.chat === 'oc_ops')?.members?.maxQuestions).toBe(10)
     // 写回后全局段消失，只剩群级配置。
     writeConfig(dir, cfg)
     const text = readFileSync(join(dir, 'config.yaml'), 'utf8')
@@ -517,8 +522,8 @@ describe('Pi 研判层配置', () => {
     ].join('\n'))
     const cfg = loadConfig(dir)
     for (const chat of cfg.feishu.chats) {
-      expect(chat.members.enabled).toBe(true)
       expect(chat.members.maxQuestions).toBe(4)
+      expect(chat.scope).not.toBe('admins')
     }
   })
 
@@ -529,7 +534,6 @@ describe('Pi 研判层配置', () => {
       '  chats:',
       '    - chat: oc_dev',
       '      members:',
-      '        enabled: true',
       '        maxQuestions: 7',
       'intake:',
       '  enabled: true',
@@ -537,7 +541,7 @@ describe('Pi 研判层配置', () => {
       '',
     ].join('\n'))
     const cfg = loadConfig(dir)
-    expect(cfg.feishu.chats[0]?.members).toMatchObject({ enabled: true, maxQuestions: 7 })
+    expect(cfg.feishu.chats[0]?.members).toMatchObject({ maxQuestions: 7 })
   })
 
   it('群上旧的 intake 段按同一口径读成普通成员配置', () => {
@@ -547,12 +551,11 @@ describe('Pi 研判层配置', () => {
       '  chats:',
       '    - chat: oc_dev',
       '      intake:',
-      '        enabled: true',
       '        maxQuestions: 3',
       '',
     ].join('\n'))
     const cfg = loadConfig(dir)
-    expect(cfg.feishu.chats[0]?.members).toMatchObject({ enabled: true, maxQuestions: 3 })
+    expect(cfg.feishu.chats[0]?.members).toMatchObject({ maxQuestions: 3 })
   })
 })
 

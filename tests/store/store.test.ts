@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Store } from '../../src/store/db.js'
 import type { Assignment, Input, Intake, Report, Ticket, Trigger } from '#core/model.js'
-import { DEFAULT_ADMISSION, type Policy } from '#core/policy.js'
+import { type Policy } from '#core/policy.js'
 
 function store(): Store {
   return new Store(':memory:')
@@ -17,8 +17,6 @@ const policy: Policy = {
   maxWorkers: 4,
   allowed: ['ou_alice'],
   bots: [],
-  admission: DEFAULT_ADMISSION,
-  receiveAll: true,
 }
 
 function trigger(over: Partial<Trigger> = {}): Trigger {

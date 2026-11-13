@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { Store } from '../../src/store/db.js'
 import { Engine } from '../../src/core/engine.js'
-import { DEFAULT_ADMISSION, type Policy } from '#core/policy.js'
+import { type Policy } from '#core/policy.js'
 import type { Trigger } from '#core/model.js'
 import type { PiModelConfig } from '../../src/router/model-config.js'
 import { RouterToolbox } from '../../src/router/tools.js'
@@ -23,8 +23,6 @@ const policy: Policy = {
   maxWorkers: 4,
   allowed: ['ou_alice', 'ou_bob'],
   bots: [],
-  admission: DEFAULT_ADMISSION,
-  receiveAll: true,
 }
 
 const model: PiModelConfig = { baseUrl: 'https://example.invalid/v1', apiKey: 'sk-test', model: 'test-model' }

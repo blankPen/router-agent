@@ -2904,7 +2904,7 @@ function ProjectsEditor({ runtimeId, projects, error, onChange }: {
 
 function SourcesView(): JSX.Element {
   const [data, setData] = useState<{
-    chats: { chat: string; mode: string; repo: string; branch: string; allowed?: string[] }[]
+    chats: { chat: string; scope: string; repo: string; branch: string; allowed?: string[] }[]
     directMessages: boolean
     allowed: string[]
   } | null>(null)
@@ -2963,9 +2963,9 @@ function SourcesView(): JSX.Element {
               {data.chats.map(chat => (
                 <tr key={chat.chat}>
                   <td className="mono">{chat.chat}</td>
-                  <td>{chat.mode === 'mention' ? '仅 @ 机器人' : '全部消息'}</td>
+                  <td>{chat.scope === 'admins' ? '仅接受管理员消息' : chat.scope === 'all' ? '接受所有消息' : '接受普通用户@消息'}</td>
                   <td>{chat.repo ? <span className="mono">{chat.repo}@{chat.branch || '?'}</span> : <span className="muted">开工前追问</span>}</td>
-                  <td>{chat.allowed && chat.allowed.length > 0 ? `${chat.allowed.length} 人` : <span className="muted">沿用全局</span>}</td>
+                  <td>{chat.allowed && chat.allowed.length > 0 ? `${chat.allowed.length} 人` : <span className="muted">沿用默认管理员</span>}</td>
                 </tr>
               ))}
             </tbody>
@@ -2978,12 +2978,12 @@ function SourcesView(): JSX.Element {
         <header className="settings-head">
           <div>
             <h2>接收范围</h2>
-            <p>私聊与全局许可名单；群级名单在「项目与群绑定」里单独配置。</p>
+            <p>私聊与默认管理员；每个群的消息范围与管理员扩充在「项目与群绑定」里单独配置。</p>
           </div>
         </header>
         <div className="meta-card flush">
           <MetaItem label="私聊" value={data.directMessages ? '接收' : '关闭'} />
-          <MetaItem label="全局许可名单" value={data.allowed.join('，') || '—'} />
+          <MetaItem label="默认管理员" value={data.allowed.join('，') || '—'} />
         </div>
       </section>
     </>

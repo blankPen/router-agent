@@ -7,9 +7,9 @@ import {
 } from '../../src/web/client/chat-members.js'
 import { groupFields, groupsFor } from '../../src/web/client/fields.js'
 
-describe('处理普通成员消息的群级配置', () => {
-  it('默认关闭、最多 10 轮、允许只读项目代码', () => {
-    expect(DEFAULT_CHAT_MEMBERS).toEqual({ enabled: false, approvers: [], maxQuestions: 10, codeAccess: true })
+describe('普通成员消息的群级配置', () => {
+  it('默认最多 10 轮、允许只读项目代码', () => {
+    expect(DEFAULT_CHAT_MEMBERS).toEqual({ approvers: [], maxQuestions: 10, codeAccess: true })
   })
 
   it('轮次必须是 0–50 的整数', () => {
@@ -23,13 +23,11 @@ describe('处理普通成员消息的群级配置', () => {
 
   it('管理员条目去空白、丢空项', () => {
     const value = normalizeChatMembers({
-      enabled: true,
       approvers: [' admin@example.com ', '', 'ou_x'],
       maxQuestions: 10,
       codeAccess: false,
     })
     expect(value.approvers).toEqual(['admin@example.com', 'ou_x'])
-    expect(value.enabled).toBe(true)
     expect(value.codeAccess).toBe(false)
   })
 

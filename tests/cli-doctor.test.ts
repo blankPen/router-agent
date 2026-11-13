@@ -67,7 +67,7 @@ function autoBotConfig(appId = 'cli_bot'): AppConfig {
   config.feishu.appId = appId
   config.feishu.botOpenIds = []
   config.feishu.botNames = []
-  config.feishu.chats = [chatEntry('oc_dsh', { mode: 'mention' })]
+  config.feishu.chats = [chatEntry('oc_dsh', { scope: 'mention' })]
   return config
 }
 
@@ -165,7 +165,7 @@ describe('ra doctor', () => {
 
   it('手填机器人身份时不再自动识别，只由「机器人在群内」扫一次成员', async () => {
     const config = healthyConfig()
-    config.feishu.chats = [chatEntry('oc_dsh', { mode: 'mention' })]
+    config.feishu.chats = [chatEntry('oc_dsh', { scope: 'mention' })]
     let memberCalls = 0
     const base = lark()
     const runner: CommandRunner = {

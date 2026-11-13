@@ -5,12 +5,17 @@
  * 这里只放适配器真正需要的、稳定的字段形状，AppConfig 结构上天然兼容。
  */
 
-/** 群级准入配置：适配器只关心「哪些群、什么接收方式、名单是谁」。 */
+/** 群级准入配置：适配器只关心「哪些群、消息范围是什么、名单是谁」。 */
 export interface ChatAdmissionSettings {
   chat: string
-  /** all：全部消息，且不 @ 也会回复；mention：只收 @机器人。 */
-  mode: 'all' | 'mention'
-  /** 本群只允许这些 open_id 操作；空表示沿用全局名单。 */
+  /**
+   * 消息处理范围：
+   * - admins：仅接受管理员消息；
+   * - mention：接受普通用户 @ 消息；
+   * - all：接受所有消息。
+   */
+  scope: 'admins' | 'mention' | 'all'
+  /** 本群的管理员扩充：在全局默认管理员之外再加这些人。 */
   allowed: string[]
   /** 普通成员消息的终审管理员；邮箱或 open_id。 */
   members?: { approvers?: string[] }

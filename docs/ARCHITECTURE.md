@@ -24,13 +24,15 @@ WorkerRuntime 端口 ── OrcaRuntime（默认）/ ClaudeCodeRuntime / AcpRunt
 
 运行时的差异与选型见 [RUNTIME.md](RUNTIME.md)。
 
-消息进来先分角色：**授权管理用户**直进 Router，**普通成员**先进决策层。群开关
-`feishu.chats[].members.enabled` 只决定 Router 要不要处理本群普通成员的消息。
+消息进来先分角色：**管理员**直进 Router，**普通成员**先进决策层。管理员 =
+默认管理员（`feishu.allowed`）+ 群内扩充（`feishu.chats[].allowed`）。群级
+`feishu.chats[].scope` 决定这个群接谁的话：仅接受管理员消息 / 接受普通用户 @ 消息 /
+接受所有消息。
 
 ```text
 群消息
   │
-  ├─ 授权管理用户（群级 allowed，没有则用全局 allowed）
+  ├─ 管理员（默认管理员 + 群内扩充）
   │      │
   │      ▼
   │   Router（Pi 研判 + 需求分级）
@@ -157,14 +159,17 @@ feishu:
 
 绑定后该群开工不再追问项目；项目配了默认分支时也不再追问分支。没写 `repo` 的群仍会按规则追问。
 
-**群级白名单**：`allowed` 非空时，这个群**只有名单内的人能触发**——名单外的人 @ 机器人也会被静默忽略（不进研判、不回复、不开单），并且覆盖全局 `feishu.allowed`。
+**群消息范围**：`feishu.chats[].scope` 决定这个群接谁的话——`admins`（仅接受管理员消息）/
+`mention`（接受普通用户 @ 消息）/ `all`（接受所有消息）。范围之外的消息在通道层就被丢掉，
+不进研判、不回复、不开单。
 
 ```bash
-ra config set chatAllow.oc_xxx "ou_alice,ou_bob"
-ra config set chatAllow.oc_xxx ""          # 清空，回到全局 allowed
+ra config set chatScope.oc_xxx mention     # admins / mention / all
+ra config set chatAllow.oc_xxx "ou_alice,ou_bob"   # 本群管理员扩充
+ra config set chatAllow.oc_xxx ""          # 清空，只留默认管理员
 ```
 
-> 注意：全局 `feishu.allowed` 只区分「显式 / 推断」，名单外的人 @ 机器人默认仍可能被研判接单；要严格限制某群人，请用群级 `allowed`。
+> 注意：群级 `allowed` 只在默认管理员（`feishu.allowed`）之上扩充，不覆盖它；默认管理员在任何一个群里都还是管理员。
 
 项目清单与仓库选择见 [CONFIGURATION.md](CONFIGURATION.md#项目与仓库选择)。
 

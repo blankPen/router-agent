@@ -41,7 +41,7 @@ function configWith(allowed: string[]): AppConfig {
       ...defaultConfig().feishu,
       appId: 'cli_a',
       allowed,
-      chats: [chatEntry('oc_dev', { mode: 'mention' })],
+      chats: [chatEntry('oc_dev', { scope: 'mention' })],
     },
   }
 }
