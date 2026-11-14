@@ -69,6 +69,8 @@ import { RuntimeCards, type RuntimeNotice } from './runtime-cards.js'
 import { FeishuBotPanel } from './feishu-panel.js'
 import { LogAssistantFab } from './log-assistant.js'
 import { EventsView } from './events-panel.js'
+import { EventSourcesConfig } from './events-config.js'
+import { eventSourceFields, eventSourcePaths, type SourceMeta } from './event-sources.js'
 import { SpecsEditor } from './specs-editor.js'
 import {
   mergeRuntimeChoices,
@@ -1264,6 +1266,14 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
   const [notice, setNotice] = useState<RuntimeNotice | null>(null)
   const [pendingRestart, setPendingRestart] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [eventSources, setEventSources] = useState<SourceMeta[]>([])
+
+  // 事件来源的字段是来源自己声明的，配置页要按它们渲染并追踪改动。
+  useEffect(() => {
+    void getJson<{ sources?: SourceMeta[] }>('/api/events')
+      .then(data => setEventSources(data.sources ?? []))
+      .catch(() => undefined)
+  }, [])
 
   // 重启开始后不再提示「需重启」。
   useEffect(() => {
@@ -1313,7 +1323,10 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
   const groupBlocks = useMemo(() => groups.flatMap(group => group.blocks), [groups])
   const channelBlocks = useMemo(() => channels.flatMap(channel => channel.blocks), [channels])
   const allBlocks = useMemo(() => [...groupBlocks, ...channelBlocks], [groupBlocks, channelBlocks])
-  const trackedPaths = useMemo(() => allBlocks.flatMap(block => blockPaths(block)), [allBlocks])
+  const trackedPaths = useMemo(() => [
+    ...allBlocks.flatMap(block => blockPaths(block)),
+    ...eventSourcePaths(eventSources),
+  ], [allBlocks, eventSources])
 
   const changed = useMemo(() => {
     if (!draft || !original) return []
@@ -1372,6 +1385,13 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
     }
     // 运行时专属选项是动态字段，默认值来自各运行时的声明。
     for (const field of optionFields) {
+      const message = fieldError(field, fieldValue(draft, field.path, optionDefaults))
+      if (message) map.set(field.path, message)
+    }
+    // 事件来源的字段同样是动态的，只校验本次确实要提交的路径。
+    const changedSet = new Set(changed)
+    for (const field of eventSourceFields(eventSources)) {
+      if (!changedSet.has(field.path)) continue
       const message = fieldError(field, fieldValue(draft, field.path, optionDefaults))
       if (message) map.set(field.path, message)
     }
@@ -1569,6 +1589,17 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
         )
       }
       if (block.render === 'specs') return <SpecsEditor />
+      if (block.render === 'events') {
+        return (
+          <EventSourcesConfig
+            sources={eventSources}
+            draft={draft}
+            defaults={defaults}
+            setField={setField}
+            errors={errors}
+          />
+        )
+      }
       // 块标题命中时整块保留，否则只留下命中的字段。
       const fields = blockHit ? block.fields : block.fields.filter(field => matches(field.label, field.path, field.hint))
       if (fields.length === 0) return <p className="editor-empty">没有匹配的配置项。</p>

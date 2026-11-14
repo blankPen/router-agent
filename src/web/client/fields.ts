@@ -24,7 +24,7 @@ import { isDeprecatedRuntime, runtimeOptionLabel, runtimeStatusLabel, type Runti
 
 export type { RuntimeChoiceView } from './runtime-model.js'
 
-export type FieldKind = 'text' | 'password' | 'number' | 'switch' | 'select' | 'list'
+export type FieldKind = 'text' | 'password' | 'number' | 'switch' | 'select' | 'list' | 'textarea'
 
 export interface FieldOption {
   value: string
@@ -49,6 +49,8 @@ export interface FieldDef {
   /** 毫秒字段：额外展示「≈ 1 分钟」这类可读换算。 */
   ms?: boolean
   placeholder?: string
+  /** textarea 的默认行数。 */
+  rows?: number
   /** 字段自带默认值（运行时选项用它，页面「默认值快照」里没有这些动态路径）。 */
   defaultValue?: unknown
 }
@@ -63,7 +65,7 @@ export interface ConfigBlock {
   id: string
   title: string
   description?: string
-  render?: 'fields' | 'runtime' | 'projects' | 'specs' | 'custom'
+  render?: 'fields' | 'runtime' | 'projects' | 'specs' | 'custom' | 'events'
   fields: FieldDef[]
   /** 块自己管理的、不是普通字段的配置路径（如群列表）。 */
   paths?: string[]
@@ -335,6 +337,87 @@ export const CONFIG_GROUPS: ConfigGroup[] = [
         description: '决定 Router 收到消息后是只记录、只研判，还是直接开单派工。',
         fields: [
           { path: 'policy.acceptMode', label: '接单模式', kind: 'select', options: ACCEPT_MODE_OPTIONS },
+        ],
+      },
+    ],
+  },
+  {
+    id: 'events',
+    title: '事件总线',
+    description: '事件从哪来、怎么判、什么时候处理。事件本身不绑项目，归属哪个项目由决策策略判定。',
+    blocks: [
+      {
+        id: 'events-switch',
+        title: '启用事件总线',
+        description: '总开关。关闭后所有来源停止采集，已入队的事件不再判定与派发。',
+        fields: [
+          { path: 'events.enabled', label: '启用事件总线', kind: 'switch' },
+        ],
+      },
+      {
+        id: 'events-sources',
+        title: '事件来源',
+        description: '来源只负责「把事件收进来」：GitHub Issue 轮询、HTTP 推送、定时任务等。启用与参数保存后立即生效，不需要重启。',
+        render: 'events',
+        fields: [],
+      },
+      {
+        id: 'events-decision',
+        title: '决策策略',
+        description: '事件进队列后由决策模型一次判定：要不要处理、多急、归哪个项目、用哪种处理方式。判定依据就是下面这段 prompt。',
+        fields: [
+          {
+            path: 'events.decision.provider',
+            label: '判定方式',
+            kind: 'select',
+            options: [
+              { value: 'jev', label: 'jev · 决策模型打分' },
+              { value: 'llm', label: 'llm · 模型直接给结论' },
+              { value: 'rule', label: 'rule · 只用确定性规则' },
+            ],
+            hint: '没有可用模型时自动退回 rule',
+          },
+          {
+            path: 'events.decision.prompt',
+            label: '判定 prompt',
+            kind: 'textarea',
+            hint: '写清「哪类事件归哪个项目、走哪种处理方式、什么算急、拿不准怎么办」',
+          },
+          {
+            path: 'events.decision.confidenceThreshold',
+            label: '置信度阈值',
+            kind: 'number',
+            min: 0,
+            max: 1,
+            hint: '低于阈值不硬跑，转人工审核',
+          },
+          {
+            path: 'events.decision.fallback',
+            label: '判定失败兜底',
+            kind: 'select',
+            options: [
+              { value: 'review', label: 'review · 转人工审核' },
+              { value: 'pending', label: 'pending · 留在队列里重试' },
+            ],
+          },
+        ],
+      },
+      {
+        id: 'events-policy',
+        title: '成本与时间窗',
+        description: '高低峰窗口内允许自动执行的优先级、每日事件配额与审核通知。',
+        folded: true,
+        fields: [
+          { path: 'events.policy.peak.start', label: '高峰窗口开始', kind: 'text', placeholder: '09:00' },
+          { path: 'events.policy.peak.end', label: '高峰窗口结束', kind: 'text', placeholder: '20:00' },
+          { path: 'events.policy.peak.priorities', label: '高峰可自动执行的优先级', kind: 'list', hint: '逗号分隔，例如 P0, P1' },
+          { path: 'events.policy.offPeak.start', label: '低峰窗口开始', kind: 'text', placeholder: '20:00' },
+          { path: 'events.policy.offPeak.end', label: '低峰窗口结束', kind: 'text', placeholder: '09:00' },
+          { path: 'events.policy.offPeak.priorities', label: '低峰可自动执行的优先级', kind: 'list', hint: '逗号分隔，例如 P2, P3' },
+          { path: 'events.policy.dailyEventLimit', label: '每日事件总量上限', kind: 'number', min: 0, max: 1_000_000, unit: '条', hint: '0 = 不限制；超出的事件顺延到下个窗口，不丢弃' },
+          { path: 'events.policy.perSourceDailyLimit', label: '单来源每日上限', kind: 'number', min: 0, max: 1_000_000, unit: '条', hint: '0 = 不限制' },
+          { path: 'events.policy.reviewNotify', label: '有待审核事件时通知 admin', kind: 'switch' },
+          { path: 'events.policy.reviewChatId', label: '审核通知群', kind: 'text', hint: '留空 = 发给默认 admin 群' },
         ],
       },
     ],

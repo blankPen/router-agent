@@ -301,7 +301,7 @@ ra logs --follow | grep '"message":"decision:'
 
 事件本身**不绑定项目** —— 归属项目由决策模型按下面的决策 prompt 判定。**默认关闭**。
 
-在 Web 面板「事件」页配（也可以写 `config.yaml`）：
+在 Web 面板「配置 → 事件总线」里配（也可以写 `config.yaml`）：
 
 ```yaml
 events:
@@ -366,7 +366,7 @@ curl -X POST http://127.0.0.1:3083/api/events/inject \
   -d '{"sourceId":"http","externalId":"alert-42","title":"磁盘告警","body":"data 分区使用率 92%"}'
 ```
 
-返回的事件会进队列，等下一次决策 tick 判定。判定结论与派发结果都在面板「事件」页能看到。
+返回的事件会进队列，等下一次决策 tick 判定。判定结论与派发结果都在面板「事件」页能看到（事件页只做查看与审核，来源与判定策略一律回「配置 → 事件总线」改）。
 
 **候选处理方式（skill）是内置闭集**：`bug-triage`、`clarify-intake`、`ci-fix`、`daily-digest`、`question-answer`。执行环境默认在 Worker 里，skill 只决定「这类事件按什么套路做」，不在面板单独配置。
 

@@ -37,7 +37,7 @@ const BUILTIN_FIELDS: Record<string, EventSourceView['fields']> = {
   github: [
     { key: 'repo', label: '仓库', kind: 'text', hint: 'owner/repo' },
     { key: 'intervalMs', label: '轮询间隔（毫秒）', kind: 'number' },
-    { key: 'labels', label: '标签白名单', kind: 'textarea', hint: '逗号分隔；留空表示全部' },
+    { key: 'labels', label: '标签白名单', kind: 'list', hint: '逗号分隔；留空表示全部' },
     { key: 'project', label: '已知项目线索', kind: 'text', hint: '作为决策上下文，不直接决定归属' },
     { key: 'branch', label: '起始分支', kind: 'text' },
     { key: 'defaultPriority', label: '默认优先级', kind: 'select', options: ['P0', 'P1', 'P2', 'P3', 'P4'] },
