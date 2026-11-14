@@ -266,6 +266,8 @@ Router 不做对话，只在必要时说话：
 | `event:source-unsupported` | Event | `sourceId` `kind` | 来源种类不认识，未装配 |
 | `event:source-placeholder` | Event | `sourceId` `kind` | 占位来源（飞书消息订阅本期只留开关） |
 | `event:ingested` | Event | `eventId` `sourceId` `sourceKind` `externalId` `title` | 事件进入队列 |
+| `event:inject-rejected` | Event | `sourceId` `reason` / `path` `reason` | HTTP 注入被拒：密钥不对（`secret-mismatch`）或这条路径没有对应的 http 来源（`no-source-for-path`） |
+| `event:rate-limited` | Event | `sourceId` `limit` | 来源每分钟条数已达上限，本次推送被拒 |
 | `event:duplicate` | Event | `eventId` `sourceId` `externalId` | 同一来源的同一事件重复到达，按幂等忽略 |
 | `event:invalid` | Event | `eventId` `sourceId` `reason` | 事件被判为无效（P4），只留记录不再处理 |
 | `event:review-queued` | Event | `eventId` `sourceId` `priority` `reason` | 事件需要人审，已进待审核队列 |

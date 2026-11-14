@@ -53,6 +53,23 @@ describe('事件来源', () => {
     expect(first[0]?.title).toBe('巡检')
   })
 
+  it('HTTP 来源按每分钟条数上限拦截超量推送', () => {
+    const at = new Date('2026-11-13T10:00:30Z')
+    const source = new HttpEventSource('http', { enabled: true, kind: 'http', rateLimitPerMin: 2 }, { now: () => at })
+    expect(() => source.inject({ externalId: 'x#1', title: 'a', body: 'b' })).not.toThrow()
+    expect(() => source.inject({ externalId: 'x#2', title: 'a', body: 'b' })).not.toThrow()
+    expect(() => source.inject({ externalId: 'x#3', title: 'a', body: 'b' })).toThrow(/rate-limited/)
+  })
+
+  it('HTTP 来源的每分钟计数到下一分钟重新开始', () => {
+    let at = new Date('2026-11-13T10:00:30Z')
+    const source = new HttpEventSource('http', { enabled: true, kind: 'http', rateLimitPerMin: 1 }, { now: () => at })
+    source.inject({ externalId: 'x#1', title: 'a', body: 'b' })
+    expect(() => source.inject({ externalId: 'x#2', title: 'a', body: 'b' })).toThrow(/rate-limited/)
+    at = new Date('2026-11-13T10:01:10Z')
+    expect(() => source.inject({ externalId: 'x#3', title: 'a', body: 'b' })).not.toThrow()
+  })
+
   it('HTTP 来源拒绝没有 externalId 或空正文的事件', () => {
     const source = new HttpEventSource('http', { enabled: true, kind: 'http' })
     expect(() => source.inject({ externalId: '', title: 'a', body: 'b' })).toThrow(/external-id/)

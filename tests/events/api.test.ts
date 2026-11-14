@@ -78,6 +78,66 @@ describe('事件 API', () => {
     }
   })
 
+  it('注入接口按来源配置的路径接收事件，挪走路径后默认路径不再接收', async () => {
+    const store = new Store(':memory:')
+    const config: AppConfig = defaultConfig()
+    config.events.sources.http = { enabled: true, kind: 'http', path: '/api/events/hook' }
+    const engine = new Engine({ store, policy: policyOf(config), ids: { next: p => `${p}_1` } })
+    const injected: Array<{ sourceId: string; externalId: string }> = []
+    const api = await createApiServer({
+      engine,
+      store,
+      config,
+      events: {
+        listEvents: () => [],
+        listSources: () => [],
+        apply: async () => null,
+        inject: (sourceId, envelope) => {
+          injected.push({ sourceId, externalId: envelope.externalId })
+          return { id: 'evt_2' }
+        },
+        decision: () => ({ provider: 'rule', prompt: '', confidenceThreshold: 0.6, fallback: 'review', version: 1 }),
+        sourceSecrets: () => ({ http: true }),
+      },
+    })
+    try {
+      const hooked = await call(api, 'POST', '/api/events/hook', { externalId: 'x#1', title: 't', body: 'b' })
+      expect(hooked.status).toBe(201)
+      expect(injected[0]).toEqual({ sourceId: 'http', externalId: 'x#1' })
+
+      const legacy = await call(api, 'POST', '/api/events/inject', { externalId: 'x#2', title: 't', body: 'b' })
+      expect(legacy.status).toBe(404)
+      expect(injected).toHaveLength(1)
+    } finally {
+      await api.close()
+    }
+  })
+
+  it('注入超过来源每分钟上限时返回 429', async () => {
+    const store = new Store(':memory:')
+    const config: AppConfig = defaultConfig()
+    const engine = new Engine({ store, policy: policyOf(config), ids: { next: p => `${p}_1` } })
+    const api = await createApiServer({
+      engine,
+      store,
+      config,
+      events: {
+        listEvents: () => [],
+        listSources: () => [],
+        apply: async () => null,
+        inject: () => { throw new Error('event:rate-limited') },
+        decision: () => ({ provider: 'rule', prompt: '', confidenceThreshold: 0.6, fallback: 'review', version: 1 }),
+        sourceSecrets: () => ({ http: true }),
+      },
+    })
+    try {
+      const limited = await call(api, 'POST', '/api/events/inject', { sourceId: 'http', externalId: 'x#1', title: 't', body: 'b' })
+      expect(limited.status).toBe(429)
+    } finally {
+      await api.close()
+    }
+  })
+
   it('注入的密钥不对时拒绝', async () => {
     const store = new Store(':memory:')
     const config: AppConfig = defaultConfig()

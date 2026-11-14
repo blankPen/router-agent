@@ -346,7 +346,8 @@ export class EventPipeline {
         return { allowed: false, reason: `今日全局配额 ${globalLimit} 条已用完，顺延等待` }
       }
     }
-    const sourceLimit = policy.perSourceDailyLimit
+    // 来源自己配了每日配额就以它为准，否则用策略里的统一值。
+    const sourceLimit = config.events.sources[event.sourceId]?.dailyLimit ?? policy.perSourceDailyLimit
     if (sourceLimit > 0) {
       const since = startOfDay(this.clock())
       const count = this.store.countEventsSince(event.sourceId, since)

@@ -44,12 +44,12 @@ const BUILTIN_FIELDS: Record<string, EventSourceView['fields']> = {
     { key: 'project', label: '已知项目线索', kind: 'text', hint: '作为决策上下文，不直接决定归属' },
     { key: 'branch', label: '起始分支', kind: 'text' },
     { key: 'defaultPriority', label: '默认优先级', kind: 'select', options: ['P0', 'P1', 'P2', 'P3', 'P4'] },
-    { key: 'dailyLimit', label: '每日配额', kind: 'number' },
+    { key: 'dailyLimit', label: '每日配额', kind: 'number', hint: '本来源单独的上限；留空用「成本与时间窗」里的单来源配额' },
   ],
   http: [
-    { key: 'path', label: '接口路径', kind: 'text' },
+    { key: 'path', label: '接口路径', kind: 'text', hint: '外部系统注入事件的接口；改了就换路径' },
     { key: 'secret', label: '验签密钥', kind: 'text' },
-    { key: 'rateLimitPerMin', label: '每分钟条数上限', kind: 'number' },
+    { key: 'rateLimitPerMin', label: '每分钟条数上限', kind: 'number', hint: '超了直接拒（429）；填 0 表示不限' },
     { key: 'defaultPriority', label: '默认优先级', kind: 'select', options: ['P0', 'P1', 'P2', 'P3', 'P4'] },
   ],
   schedule: [
@@ -304,7 +304,7 @@ export class EventManager {
       case 'github':
         return new GithubEventSource(id, config, { runner: this.runner, logger: this.logger })
       case 'http':
-        return new HttpEventSource(id, config, { logger: this.logger })
+        return new HttpEventSource(id, config, { logger: this.logger, now: () => new Date(this.clock()) })
       case 'schedule':
         return new ScheduleEventSource(id, config)
       case 'feishu':

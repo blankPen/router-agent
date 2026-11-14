@@ -104,6 +104,18 @@ describe('事件管线', () => {
     expect(store.getEvent(event.id)?.status).toBe('invalid')
   })
 
+  it('来源自己配的每日配额以它为准，超了的事件顺延等下一轮', async () => {
+    const { store, pipeline, config } = setup()
+    config.events.sources.github = { ...SOURCE, dailyLimit: 1 }
+    const first = pipeline.ingest('github', SOURCE, { externalId: 'issue:a#7', title: '崩溃', body: '崩了' })
+    await pipeline.process(first)
+    const second = pipeline.ingest('github', SOURCE, { externalId: 'issue:a#8', title: '崩溃', body: '崩了' })
+    await pipeline.process(second)
+    expect(store.getEvent(first.id)?.ticketId).toBeTruthy()
+    expect(store.getEvent(second.id)?.execution).toBe('deferred')
+    expect(store.getEvent(second.id)?.ticketId).toBeUndefined()
+  })
+
   it('高优事件不受时间窗限制，低优事件在高峰顺延', async () => {
     const { store, pipeline } = setup()
     const event = pipeline.ingest('github', SOURCE, { externalId: 'issue:a#6', title: '崩溃', body: '崩了' })
