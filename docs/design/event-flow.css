@@ -215,3 +215,19 @@ footer{margin-top:66px;padding-top:20px;border-top:1px solid var(--line);color:v
 .relchain .ar{color:var(--line-strong);font-family:var(--mono);font-size:11px}
 .relout{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:4px}
 @media (max-width:980px){.relout{grid-template-columns:1fr}}
+
+/* ---------- v3：决策 prompt ---------- */
+.prompt{background:#fffdf6;border:1px solid #e8dfc2;border-radius:10px;padding:14px 16px;font-family:var(--mono);font-size:11.6px;line-height:1.8;color:#5c4a1c;white-space:pre-wrap;margin:0}
+.prompt b{color:#3f3313}
+.decide{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.decide .box{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:17px 18px}
+.decide .box h3{margin:0 0 3px;font-size:15px}
+.decide .box .sub{font-family:var(--mono);font-size:10.8px;color:var(--ink-3);margin-bottom:13px}
+.verdict{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:15px 17px}
+.verdict .t{font-weight:670;font-size:14.5px;margin-bottom:9px}
+.verdict .out{display:flex;flex-wrap:wrap;gap:7px}
+.verdict .out span{font-family:var(--mono);font-size:11px;border:1px solid var(--line);background:#fbfaf7;border-radius:7px;padding:4px 10px;color:var(--ink-2)}
+.verdict .out span.k{border-color:#d9c9f8;color:var(--rule);background:#f6f1ff}
+.verdict .out span.g{border-color:#cfe0d7;color:var(--pb);background:#f1f7f4}
+.verdict .out span.r{border-color:#f0cfcf;color:var(--rv);background:#fdf3f3}
+@media (max-width:980px){.decide{grid-template-columns:1fr}}

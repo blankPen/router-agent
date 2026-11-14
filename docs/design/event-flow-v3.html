@@ -77,7 +77,7 @@
   <div class="flow">
     <div class="fstep"><div class="n">1</div><div class="t">订阅器接到</div><div class="d">GitHub 轮询/订阅、HTTP 注入、定时任务触发</div><span class="m">插件可扩展</span></div>
     <div class="fstep"><div class="n">2</div><div class="t">归一 + 排队</div><div class="d">统一成事件信封，重复的合并，按优先级排队</div></div>
-    <div class="fstep"><div class="n">3</div><div class="t">判断一次</div><div class="d">要不要做？多急？什么类型？要不要人审？</div><span class="m">规则先判，模型兜底</span></div>
+    <div class="fstep"><div class="n">3</div><div class="t">决策模型判定一次</div><div class="d">要不要做？多急？落到哪个项目？用哪个 skill？要不要人审？</div><span class="m">依据：可配置的决策 prompt</span></div>
     <div class="fstep"><div class="n">4</div><div class="t">选处理方式</div><div class="d">匹配剧本：这类型事件按哪套流程走</div></div>
     <div class="fstep gate"><div class="n">4b · 分支</div><div class="t">补不齐时转人工</div><div class="d">只在缺关键信息或高风险时走：进待审核队列，等 admin 拍板</div><span class="m">排队等人，不阻塞</span></div>
     <div class="fstep"><div class="n">5</div><div class="t">出方案</div><div class="d">补齐信息，产出可执行方案（假设要写明）</div></div>
@@ -92,10 +92,10 @@
   <p class="sec-sub">分派不是写一堆 if-else，而是「先选处理方式，再选执行者」。</p>
   <div class="tree">
     <div class="tnode"><span class="tbox q">事件出队 · 判断通过</span><span class="arrowdown">↓</span></div>
-    <div class="tnode"><span class="tbox">① 这类事件该怎么处理？</span><span class="arrowdown">↓ 先找特化方式，找不到用通用方式</span></div>
+    <div class="tnode"><span class="tbox">① 这类事件该怎么处理？</span><span class="arrowdown">↓ 决策模型按决策 prompt 判定：落到哪个项目、用哪个 skill</span></div>
     <div class="branches3">
-      <div class="bx b1"><div class="h">特化方式</div><div class="t">已注册的类型</div><p>这类事件有固定套路，直接按套路走，不做多余的澄清。</p><div class="when">例：GitHub bug、CI 失败、定时巡检</div></div>
-      <div class="bx b2"><div class="h">通用方式</div><div class="t">没注册的类型</div><p>先自动补信息、出方案，再执行。任何事件都有出路。</p><div class="when">例：HTTP 注入的未知事件</div></div>
+      <div class="bx b1"><div class="h">特化 skill</div><div class="t">已注册的处理方式</div><p>决策 prompt 指定这类事件用哪个 skill，按该 skill 的固定套路走，不做多余澄清。</p><div class="when">例：bug-triage、ci-fix、daily-digest</div></div>
+      <div class="bx b2"><div class="h">通用 skill</div><div class="t">没指定时的兜底</div><p>prompt 没点名时用通用 skill：先自动补信息、出方案，再执行。任何事件都有出路。</p><div class="when">例：HTTP 注入的未知事件</div></div>
       <div class="bx b3"><div class="h">转人工</div><div class="t">缺关键信息 / 高风险</div><p>不执行，直接进待审核 + 飞书卡片通知 admin。</p><div class="when">例：定位不到项目、影响生产</div></div>
     </div>
     <div class="tnode"><span class="tbox mut">② 信息够不够？</span><span class="arrowdown">↓ 够 → 办；不够但能猜 → 带假设办；不够且关键 → 转人工</span></div>
@@ -123,18 +123,20 @@
       <div class="t">刚进来的时候，它只有来源、类型、优先级、正文</div>
       <div class="d">还没有项目 —— 项目要等派工前才解析</div>
     </div>
-    <div class="relarrow">↓ <b>派工前解析项目</b>（拿不到就转人工，不阻塞）</div>
+    <div class="relarrow">↓ <b>决策模型一次判定</b>（判定依据 = 可配置的决策 prompt）</div>
     <div class="relnode">
-      <div class="kind">项目解析链</div>
-      <div class="t">按可信度依次找，找到就用</div>
-      <div class="relchain">
-        <span class="ch hard">① 订阅器写明的仓库</span><span class="ar">›</span>
-        <span class="ch hard">② 剧本声明的默认项目</span><span class="ar">›</span>
-        <span class="ch">③ 事件内容里提到的项目名</span><span class="ar">›</span>
-        <span class="ch">④ 全局只有一个项目</span><span class="ar">›</span>
-        <span class="ch last">⑤ 都没有 → 转人工</span>
+      <div class="kind">决策模型一次判定</div>
+      <div class="t">同一层里一起判完：优先级、类型、归属项目、执行方式</div>
+      <div class="verdict" style="margin-top:10px">
+        <div class="out">
+          <span class="k">优先级 P0–P4</span>
+          <span class="k">事件类型</span>
+          <span class="k">归属项目</span>
+          <span class="k">执行方式 / skill</span>
+          <span class="r">要不要人审</span>
+        </div>
       </div>
-      <div class="d" style="margin-top:9px;font-size:12.8px;color:var(--ink-2)">解析结果会回填到事件上：事件始终带着「它落到哪个项目」，面板和工单页都能看到。</div>
+      <div class="d" style="margin-top:10px;font-size:12.8px;color:var(--ink-2)">判定依据写在可编辑的<b>决策 prompt</b> 里：哪类事件归哪个项目、走哪种处理方式。候选项目与 skill 由宿主给出（闭集），模型只能从中选；拿不准就标「需人审」。判定结果回填事件。</div>
     </div>
     <div class="relarrow">↓</div>
     <div class="relout">
@@ -290,8 +292,50 @@
   </div>
 </section>
 
+<section data-figure="fig-v3-prompt">
+  <div class="sec-head"><span class="sec-num">10</span><h2>配置界面（三）：决策 prompt</h2></div>
+  <p class="sec-sub">决策模型的判断依据就是一份可编辑的自然语言规则。写清楚「哪类事件归哪个项目、走哪种处理方式、什么算紧急」，模型按它一次判定出优先级、项目与 skill。</p>
+  <div class="decide">
+    <div class="box">
+      <h3>决策 prompt 示例</h3>
+      <div class="sub">面板里可直接编辑，保存后立即生效</div>
+      <div class="prompt"># 项目归属
+- 来自 GitHub 仓库 xxx 的事件 → 归属项目「router-agent」
+- 标题含「客服 / 退款」→ 归属项目「customer-service」
+- 定时日报类 → 归属项目「ops-daily」（只读）
+
+# 处理方式
+- bug 类 → skill「bug-triage」：先复现再出根因，不要直接改代码
+- 需求 / 咨询类 → skill「clarify-intake」：信息不足先补齐，别急着执行
+- 纯信息通报 → 只记录不执行
+
+# 优先级
+- 线上告警、生产故障 → P0，立即执行
+- 明确的 bug → P1
+- 其它 → P2 / P3；明显无关 → P4
+
+# 拿不准时
+- 判断不了项目或优先级 → 标记需人审，转待审核</div>
+    </div>
+    <div class="box">
+      <h3>和 prompt 配套的护栏</h3>
+      <div class="sub">prompt 是自然语言，但输出必须可控</div>
+      <div class="fields">
+        <div class="field"><span class="k">候选项目</span><span class="v">来自项目清单，模型只能选其中一个</span></div>
+        <div class="field"><span class="k">候选 skill</span><span class="v">来自已安装的处理方式，模型只能点名其中一个</span></div>
+        <div class="field"><span class="k">已知线索</span><span class="v">订阅器写明的仓库会作为上下文喂给模型</span></div>
+        <div class="field"><span class="k">兜底</span><span class="v">模型失败 → 降级为「待审核」，不丢事件</span></div>
+        <div class="field"><span class="k">置信度</span><span class="v">低于阈值 → 直接转待审核</span></div>
+        <div class="field"><span class="k">版本与审计</span><span class="v">每次判定记录用的 prompt 版本与模型输出，可回放</span></div>
+        <div class="field"><span class="k">效果回看</span><span class="v">统计「选错项目 / 选错 skill」的次数，反过来改 prompt</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="note"><span class="k">为什么 prompt 里能写项目</span><span>因为项目清单和 skill 清单由宿主提供，是闭集；prompt 只描述「怎么选」，不新增东西。模型输出选不中的项目或 skill 时按无效处理并降级，不会凭空造一个项目。</span></div>
+</section>
+
 <section data-figure="fig-v3-cost">
-  <div class="sec-head"><span class="sec-num">10</span><h2>成本与时段</h2></div>
+  <div class="sec-head"><span class="sec-num">11</span><h2>成本与时段</h2></div>
   <p class="sec-sub">事件量不可控，所以预算与时段是硬约束：高峰期只做重要的事，超预算就顺延，不丢弃。</p>
   <div class="matrix" style="grid-template-columns:150px 1fr 1fr 1fr">
     <div class="mx head">约束</div><div class="mx head c1">单条事件</div><div class="mx head">单个来源</div><div class="mx head">全局</div>
