@@ -19,6 +19,13 @@ import type {
   Trigger,
   TriggerDisposition,
 } from '#core/model.js'
+import type {
+  EventExecution,
+  EventPriority,
+  EventRecord,
+  EventStatus,
+} from '#core/event.js'
+import { compareEventPriority, normalizeEventPriority, normalizeEventStatus } from '#core/event.js'
 import type { Policy } from '#core/policy.js'
 import type { ReplyBlock } from '#core/reply.js'
 import { normalizeStage, stageAliases } from '#core/stage.js'
@@ -438,6 +445,41 @@ CREATE TABLE IF NOT EXISTS effects (
 );
 CREATE INDEX IF NOT EXISTS idx_effects_due ON effects (status, next_at);
 
+-- 事件队列：多来源事件统一落库，等决策模型判定后再派工。
+CREATE TABLE IF NOT EXISTS events (
+  id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL,
+  source_kind TEXT NOT NULL,
+  external_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  url TEXT,
+  raw TEXT,
+  received_at TEXT NOT NULL,
+  status TEXT NOT NULL,
+  execution TEXT NOT NULL DEFAULT 'none',
+  priority TEXT NOT NULL,
+  event_type TEXT NOT NULL DEFAULT '',
+  project TEXT,
+  repo TEXT,
+  branch TEXT,
+  skill TEXT,
+  needs_review INTEGER NOT NULL DEFAULT 0,
+  reason TEXT,
+  confidence REAL,
+  prompt_version INTEGER,
+  basis TEXT,
+  ticket_id TEXT,
+  trigger_id TEXT,
+  decided_at TEXT,
+  updated_at TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  UNIQUE (source_id, external_id)
+);
+CREATE INDEX IF NOT EXISTS idx_events_status ON events (status, received_at);
+CREATE INDEX IF NOT EXISTS idx_events_priority ON events (priority, received_at);
+
 -- 身份别名缓存：邮箱 / open_id 解析成 open_id 的结果。
 -- 键里必须带 app_id：open_id 是「应用 × 用户」维度的，换个应用同一个人的 open_id 就变了，
 -- 旧应用的缓存不能被新应用复用。
@@ -665,6 +707,130 @@ export class Store {
   upsertThread(thread: { id: string; source: SourceKind; channelId?: string; rootId: string; chatId: string; createdAt: string }): void {
     this.db.prepare('INSERT OR IGNORE INTO threads (id, source, channel_id, root_id, chat_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
       .run(thread.id, thread.source, thread.channelId ?? null, thread.rootId, thread.chatId, thread.createdAt)
+  }
+
+  // ---------- 事件队列 ----------
+
+  /** 幂等写入一条事件；同一来源的同一 externalId 不会重复入库。 */
+  insertEvent(event: EventRecord): boolean {
+    const result = this.db.prepare(`INSERT OR IGNORE INTO events
+      (id, source_id, source_kind, external_id, title, body, url, raw, received_at, status, execution, priority, event_type,
+       project, repo, branch, skill, needs_review, reason, confidence, prompt_version, basis, ticket_id, trigger_id,
+       decided_at, updated_at, attempts, last_error)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(
+        event.id,
+        event.sourceId,
+        event.sourceKind,
+        event.externalId,
+        event.title,
+        event.body,
+        event.url ?? null,
+        event.raw === undefined ? null : JSON.stringify(event.raw),
+        event.receivedAt,
+        event.status,
+        event.execution,
+        event.priority,
+        event.eventType,
+        event.project ?? null,
+        event.repo ?? null,
+        event.branch ?? null,
+        event.skill ?? null,
+        event.needsReview ? 1 : 0,
+        event.reason ?? null,
+        event.confidence ?? null,
+        event.promptVersion ?? null,
+        event.basis ?? null,
+        event.ticketId ?? null,
+        event.triggerId ?? null,
+        event.decidedAt ?? null,
+        event.updatedAt,
+        event.attempts,
+        event.lastError ?? null,
+      )
+    return Number(result.changes) > 0
+  }
+
+  getEvent(id: string): EventRecord | null {
+    const row = this.db.prepare('SELECT * FROM events WHERE id = ?').get(id) as Row | undefined
+    return row ? eventFromRow(row) : null
+  }
+
+  listEvents(filter: { status?: EventStatus; priority?: EventPriority; sourceId?: string; limit?: number } = {}): EventRecord[] {
+    const clauses: string[] = []
+    const params: string[] = []
+    if (filter.status) {
+      clauses.push('status = ?')
+      params.push(filter.status)
+    }
+    if (filter.priority) {
+      clauses.push('priority = ?')
+      params.push(filter.priority)
+    }
+    if (filter.sourceId) {
+      clauses.push('source_id = ?')
+      params.push(filter.sourceId)
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
+    const limit = filter.limit ?? 200
+    const rows = (this.db.prepare(`SELECT * FROM events ${where} ORDER BY received_at DESC LIMIT ?`).all(...params, limit) as Row[])
+    // 面板默认按优先级排：P0 在最前；同级按到达时间新的在前。
+    return rows.map(eventFromRow).sort((a, b) => compareEventPriority(a.priority, b.priority) || b.receivedAt.localeCompare(a.receivedAt))
+  }
+
+  updateEvent(event: EventRecord): void {
+    this.db.prepare(`UPDATE events SET title = ?, body = ?, url = ?, status = ?, execution = ?, priority = ?, event_type = ?,
+      project = ?, repo = ?, branch = ?, skill = ?, needs_review = ?, reason = ?, confidence = ?, prompt_version = ?, basis = ?,
+      ticket_id = ?, trigger_id = ?, decided_at = ?, updated_at = ?, attempts = ?, last_error = ? WHERE id = ?`)
+      .run(
+        event.title,
+        event.body,
+        event.url ?? null,
+        event.status,
+        event.execution,
+        event.priority,
+        event.eventType,
+        event.project ?? null,
+        event.repo ?? null,
+        event.branch ?? null,
+        event.skill ?? null,
+        event.needsReview ? 1 : 0,
+        event.reason ?? null,
+        event.confidence ?? null,
+        event.promptVersion ?? null,
+        event.basis ?? null,
+        event.ticketId ?? null,
+        event.triggerId ?? null,
+        event.decidedAt ?? null,
+        event.updatedAt,
+        event.attempts,
+        event.lastError ?? null,
+        event.id,
+      )
+  }
+
+  /**
+   * 原子领取一批待判定事件：把 attempts 往上加并占住，避免重叠的 tick 重复判定。
+   * 判定失败后事件回到 pending，attempts 继续累加，超过上限由管线标成 failed。
+   */
+  claimPendingEvents(limit = 20): EventRecord[] {
+    const rows = (this.db.prepare("SELECT * FROM events WHERE status = 'pending' ORDER BY received_at LIMIT ?").all(limit) as Row[])
+    const claimed: EventRecord[] = []
+    for (const row of rows) {
+      const event = eventFromRow(row)
+      const result = this.db.prepare("UPDATE events SET attempts = attempts + 1, updated_at = ? WHERE id = ? AND status = 'pending' AND attempts = ?")
+        .run(event.updatedAt, event.id, event.attempts)
+      if (Number(result.changes) > 0) claimed.push(event)
+    }
+    return claimed
+  }
+
+  /** 统计给定时间之后收到的事件条数（配额用）；sourceId 省略时统计全部来源。 */
+  countEventsSince(sourceId: string | null, since: string): number {
+    const row = sourceId
+      ? this.db.prepare('SELECT COUNT(*) AS n FROM events WHERE source_id = ? AND received_at >= ?').get(sourceId, since) as Row | undefined
+      : this.db.prepare('SELECT COUNT(*) AS n FROM events WHERE received_at >= ?').get(since) as Row | undefined
+    return Number(row?.n ?? 0)
   }
 
   // ---------- Thread alias ----------
@@ -1621,6 +1787,39 @@ function triggerFromRow(row: Row): Trigger {
     disposition: row.disposition as TriggerDisposition,
     ...(row.decision_id ? { decisionId: String(row.decision_id) } : {}),
     ...(row.raw ? { raw: JSON.parse(String(row.raw)) } : {}),
+  }
+}
+
+function eventFromRow(row: Row): EventRecord {
+  return {
+    id: String(row.id),
+    sourceId: String(row.source_id),
+    sourceKind: String(row.source_kind),
+    externalId: String(row.external_id),
+    title: String(row.title),
+    body: String(row.body),
+    ...(row.url ? { url: String(row.url) } : {}),
+    ...(row.raw ? { raw: JSON.parse(String(row.raw)) } : {}),
+    receivedAt: String(row.received_at),
+    status: normalizeEventStatus(row.status),
+    execution: (row.execution as EventExecution) ?? 'none',
+    priority: normalizeEventPriority(row.priority),
+    eventType: String(row.event_type ?? ''),
+    ...(row.project ? { project: String(row.project) } : {}),
+    ...(row.repo ? { repo: String(row.repo) } : {}),
+    ...(row.branch ? { branch: String(row.branch) } : {}),
+    ...(row.skill ? { skill: String(row.skill) } : {}),
+    needsReview: Number(row.needs_review) === 1,
+    ...(row.reason ? { reason: String(row.reason) } : {}),
+    ...(row.confidence !== null && row.confidence !== undefined ? { confidence: Number(row.confidence) } : {}),
+    ...(row.prompt_version !== null && row.prompt_version !== undefined ? { promptVersion: Number(row.prompt_version) } : {}),
+    ...(row.basis ? { basis: String(row.basis) } : {}),
+    ...(row.ticket_id ? { ticketId: String(row.ticket_id) } : {}),
+    ...(row.trigger_id ? { triggerId: String(row.trigger_id) } : {}),
+    ...(row.decided_at ? { decidedAt: String(row.decided_at) } : {}),
+    updatedAt: String(row.updated_at),
+    attempts: Number(row.attempts ?? 0),
+    ...(row.last_error ? { lastError: String(row.last_error) } : {}),
   }
 }
 

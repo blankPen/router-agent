@@ -35,6 +35,7 @@ describe('配置分组与块', () => {
       'channels',
       'projects',
       'admission',
+      'events',
       'ops',
     ])
     expect(CONFIG_GROUPS.map(group => group.title)).toEqual([
@@ -44,6 +45,7 @@ describe('配置分组与块', () => {
       '渠道配置',
       '项目配置',
       '消息准入',
+      '事件总线',
       '其他设置',
     ])
   })

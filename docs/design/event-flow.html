@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>router-agent · 事件流程方案（分派设计）</title>
+<link rel="stylesheet" href="./event-flow.css">
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <span class="eyebrow">router-agent · event pipeline design</span>
+  <h1>事件流程方案：<em>事件进来之后，分给谁、怎么分</em></h1>
+  <p class="lede">两条并行流程：飞书 channel 保持现状不动（用户主动触发、Root Agent 被动接指令）；新增事件管线（订阅 → 队列 → 判定 → 剧本路由 → 澄清/计划 → 派工 → 回写），Root Agent 主动接信息自动处理。</p>
+  <div class="metrics">
+    <span class="metric">工单 <b>tk-87</b></span>
+    <span class="metric">版本 <b>v2 · 重做分派设计</b></span>
+    <span class="metric">订阅器 <b>github / feishu(空壳) / http</b></span>
+    <span class="metric">优先级 <b>P0–P4</b></span>
+    <span class="metric">本轮 <b>只出设计</b></span>
+  </div>
+</header>
+
+<section data-figure="fig-tracks">
+  <div class="sec-head"><span class="sec-num">01</span><h2>两条流程：被动交互 vs 主动处理</h2></div>
+  <p class="sec-sub">左轨完全不动；右轨是新增的事件管线。两条轨在「派工 → Worker → 回写」这一段汇合，共用现有的工单、派工、运行时与回报机制。</p>
+  <div class="tracks">
+    <div class="track ch">
+      <div class="tag">轨道 A · 保持现状</div>
+      <h3>飞书 Channel（交互式）</h3>
+      <div class="mode">用户主动触发 · Root Agent 被动接收指令</div>
+      <div class="steps">
+        <div class="step chk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">飞书消息 → Trigger</div><span class="m">lark-cli event consume 长连接</span><div class="d">唯一入站，幂等入库</div></div></div>
+        <div class="step chk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">准入 Gate / admission</div><span class="m">packages/core/src/policy.ts</span><div class="d">管理员直进；普通成员进决策层</div></div></div>
+        <div class="step chk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">需求分析 + 澄清（intake）</div><span class="m">src/router/intake-flow.ts</span><div class="d">多轮对话补齐需求</div></div></div>
+        <div class="step chk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">管理员终审 → 开单</div><span class="m">Engine.decide()</span><div class="d">Ticket + Mandate</div></div></div>
+        <div class="step chk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">派工 → Worker</div><span class="m">src/service.ts launch()</span><div class="d">worktree + 任务简报</div></div></div>
+        <div class="step chk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">回报 → 回到群里</div><span class="m">outbox → 飞书</span><div class="d">结论、PR 链接</div></div></div>
+      </div>
+    </div>
+    <div class="track ev">
+      <div class="tag">轨道 B · 本轮新增</div>
+      <h3>事件管线（无交互）</h3>
+      <div class="mode">外部事件主动推入 · Root Agent 自动处理</div>
+      <div class="steps">
+        <div class="step evk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">事件订阅器接入</div><span class="m">packages/event-source 插件</span><div class="d">github 轮询/订阅 · http 接口 · feishu(空壳)</div></div></div>
+        <div class="step evk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">归一 + 去重 → 事件队列</div><span class="m">统一信封 EventEnvelope</span><div class="d">幂等键、优先级基线、落库</div></div></div>
+        <div class="step evk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">Jev 判定一次</div><span class="m">规则先判，模型兜底</span><div class="d">输出四象限优先级 + 事件分类 + 是否需人审</div></div></div>
+        <div class="step evk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">剧本路由（分派核心）</div><span class="m">Playbook 匹配</span><div class="d">选出处理路径、目标运行时、澄清策略</div></div></div>
+        <div class="step evk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">澄清 / 计划（Plan）</div><span class="m">无对话，靠上下文自动补齐</span><div class="d">产出可执行方案或转人工</div></div></div>
+        <div class="step evk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">开单 → 派工 → Worker</div><span class="m">复用现有 launch()</span><div class="d">与轨道 A 同一套派工</div></div></div>
+        <div class="step evk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">回写事件 + 通知</div><span class="m">Issue 评论 / webhook 回调 / 卡片</span><div class="d">事件状态、结论、关联工单</div></div></div>
+      </div>
+    </div>
+  </div>
+  <div class="note"><span class="k">分工</span><span>轨道 A 负责「人说的话」，轨道 B 负责「系统发生的事」。轨道 B 不重写派工与 Worker，只新增「订阅 → 判定 → 路由」这三段。</span></div>
+</section>
+
+<section data-figure="fig-pipe">
+  <div class="sec-head"><span class="sec-num">02</span><h2>事件管线全景</h2></div>
+  <p class="sec-sub">从订阅器到回写一共七段，橙色段是本轮新增，紫色/蓝色段复用现有能力。</p>
+  <div class="pipe">
+    <div class="col c1">
+      <div class="n">① 订阅</div><div class="t">事件源插件</div>
+      <ul><li><b>github</b>：轮询 / 订阅</li><li><b>http</b>：外部注入</li><li><b>feishu</b>：本期空壳</li><li>npm 三方插件</li></ul>
+    </div>
+    <div class="col c2">
+      <div class="n">② 归一</div><div class="t">事件信封</div>
+      <ul><li>统一字段与正文</li><li>幂等键去重</li><li>优先级基线</li><li>正文截断防超长</li></ul>
+    </div>
+    <div class="col c2">
+      <div class="n">③ 判定</div><div class="t">规则 + Jev</div>
+      <ul><li>规则先判（不烧 token）</li><li>Jev 一次判定四象限</li><li>输出：优先级 / 分类 / 是否需人审</li><li>失败降级不丢事件</li></ul>
+    </div>
+    <div class="col c4">
+      <div class="n">④ 路由</div><div class="t">剧本匹配</div>
+      <ul><li>类型 → 剧本</li><li>兜底通用剧本</li><li>产出处理路径与目标运行时</li></ul>
+    </div>
+    <div class="col c5">
+      <div class="n">⑤ 澄清计划</div><div class="t">Plan</div>
+      <ul><li>自动澄清 / 带假设 / 转人工</li><li>产出执行方案</li><li>写明授权范围</li></ul>
+    </div>
+    <div class="col c6">
+      <div class="n">⑥ 执行</div><div class="t">开单派工</div>
+      <ul><li>Ticket + Mandate</li><li>复用 launch()</li><li>指定 repo / branch / 运行时</li></ul>
+    </div>
+    <div class="col c5">
+      <div class="n">⑦ 回写</div><div class="t">收口</div>
+      <ul><li>事件状态 → 已处理完成</li><li>结论回写来源</li><li>关联工单 / PR</li><li>成本记账</li></ul>
+    </div>
+  </div>
+</section>
+
+<section data-figure="fig-dispatch">
+  <div class="sec-head"><span class="sec-num">03</span><h2>分派设计：事件分给谁、依据什么、怎么收口</h2></div>
+  <p class="sec-sub">这是上一版最没想清楚的部分。核心结论：<b>不新造 worker 类型</b>，分派 = 「选剧本 + 选运行时 + 定授权范围」，执行仍然交给现有 Worker。</p>
+  <div class="tree">
+    <div class="tnode"><span class="tbox q">事件出队 · 判定通过</span><span class="arrowdown">↓</span></div>
+    <div class="tnode"><span class="tbox">① 匹配剧本 Playbook</span><span class="arrowdown">↓ 类型精确 &gt; 标签 &gt; 来源默认 &gt; 通用兜底</span></div>
+    <div class="branches3">
+      <div class="bx b1">
+        <div class="h">特化剧本（点对点）</div><div class="t">github-bug-triage</div>
+        <p>固定 SOP：拉取 issue 上下文 → 复现与定位 → 产出根因与修复计划。跳过澄清，直接进计划阶段。</p>
+        <div class="when">例子：已注册的 issue / PR / CI / 定时巡检</div>
+      </div>
+      <div class="bx b2">
+        <div class="h">通用剧本（澄清优先）</div><div class="t">generic-intake</div>
+        <p>先做需求分析与澄清，产出明确执行方案后再执行。未注册类型默认走这条。</p>
+        <div class="when">例子：http 注入的未知事件、运营群转来的事件</div>
+      </div>
+      <div class="bx b3">
+        <div class="h">审核剧本</div><div class="t">human-gate</div>
+        <p>缺关键信息、或命中风险清单（安全 / 生产 / 付费 / 对外发布）时，不执行，直接进待审核。</p>
+        <div class="when">例子：无法定位项目、影响生产的告警</div>
+      </div>
+    </div>
+    <div class="tnode"><span class="tbox mut">② 澄清策略三档（仅通用剧本需要）</span></div>
+    <div class="branches3">
+      <div class="bx b2"><div class="h">自动澄清</div><div class="t">信息足够 → 直接执行</div><p>从事件上下文（标题、正文、标签、仓库、作者）自动补齐项目、分支、复现信息。</p><div class="when">置信度高</div></div>
+      <div class="bx b2"><div class="h">带假设执行</div><div class="t">信息不全 → 标注假设</div><p>Plan 里写明假设与影响范围，执行后回报中同时给出假设，便于复核。</p><div class="when">置信度中等</div></div>
+      <div class="bx b3"><div class="h">转人工</div><div class="t">缺关键项 → 待审核</div><p>不阻塞在队列里等人对话，直接进待审核队列 + 飞书卡片通知 admin。</p><div class="when">置信度低 / 高风险</div></div>
+    </div>
+    <div class="tnode"><span class="tbox">③ 选目标 Worker：按能力匹配现有运行时</span><span class="arrowdown">↓</span></div>
+    <div class="tnode"><span class="tbox ok">④ 生成任务包 → 开单 → 复用 launch() 派工 → Worker 执行</span><span class="arrowdown">↓</span></div>
+    <div class="tnode"><span class="tbox">⑤ 回写事件：状态、结论、关联工单 / PR、成本</span></div>
+  </div>
+  <div class="note"><span class="k">取舍</span><span>「每类事件一套固定 worker」与「所有事件统一澄清再执行」不是二选一：<b>统一澄清再执行是骨架</b>（保证任何事件都有可执行方案再动手），<b>点对点剧本是特例</b>（已注册类型跳过澄清走固定 SOP）。特例仍复用同一条澄清/计划/执行代码路径，不会出现两套逻辑漂移。</span></div>
+</section>
+
+<section data-figure="fig-playbook">
+  <div class="sec-head"><span class="sec-num">04</span><h2>剧本（Playbook）是什么</h2></div>
+  <p class="sec-sub">剧本是一份声明式配置，回答「这类事件该怎么处理」。它不是新进程、不是新 Worker 类型，只是给现有 Worker 换一套判定问题、提示词与工具范围。</p>
+  <div class="pbs">
+    <div class="pb fixed">
+      <div class="h">特化剧本</div><div class="t">github-bug-triage</div>
+      <div class="row"><span>匹配</span><span>sourceType=github-issue ∧ labels∋bug</span></div>
+      <div class="row"><span>澄清</span><span>跳过（用 issue 上下文自动补齐）</span></div>
+      <div class="row"><span>产物</span><span>复现路径 + 根因 + 修复计划</span></div>
+      <div class="row"><span>运行时</span><span>按 capability 选（默认 codex）</span></div>
+      <div class="row"><span>工具范围</span><span>只读 + 可写代码仓（不含生产）</span></div>
+      <div class="row"><span>审核</span><span>命中安全标签则强制审核</span></div>
+    </div>
+    <div class="pb fixed">
+      <div class="h">特化剧本</div><div class="t">ci-failure-followup</div>
+      <div class="row"><span>匹配</span><span>eventType=ci.failed</span></div>
+      <div class="row"><span>澄清</span><span>跳过</span></div>
+      <div class="row"><span>产物</span><span>失败归因 + 是否重跑</span></div>
+      <div class="row"><span>运行时</span><span>轻量运行时（只读日志）</span></div>
+      <div class="row"><span>工具范围</span><span>只读</span></div>
+      <div class="row"><span>审核</span><span>否</span></div>
+    </div>
+    <div class="pb fixed">
+      <div class="h">特化剧本</div><div class="t">schedule-digest</div>
+      <div class="row"><span>匹配</span><span>sourceType=schedule</span></div>
+      <div class="row"><span>澄清</span><span>跳过</span></div>
+      <div class="row"><span>产物</span><span>日报 / 巡检报告</span></div>
+      <div class="row"><span>运行时</span><span>轻量运行时</span></div>
+      <div class="row"><span>工具范围</span><span>只读</span></div>
+      <div class="row"><span>审核</span><span>否</span></div>
+    </div>
+    <div class="pb generic">
+      <div class="h">通用剧本（兜底）</div><div class="t">generic-intake</div>
+      <div class="row"><span>匹配</span><span>任何未匹配事件</span></div>
+      <div class="row"><span>澄清</span><span>自动澄清 → 带假设 → 转人工</span></div>
+      <div class="row"><span>产物</span><span>结构化需求 + 执行方案</span></div>
+      <div class="row"><span>运行时</span><span>默认运行时</span></div>
+      <div class="row"><span>工具范围</span><span>默认只读 + 授权后写</span></div>
+      <div class="row"><span>审核</span><span>信息不足时转人工</span></div>
+    </div>
+  </div>
+  <table style="margin-top:16px">
+    <thead><tr><th style="width:22%">剧本字段</th><th style="width:30%">含义</th><th>例子</th></tr></thead>
+    <tbody>
+      <tr><td><code>match</code></td><td>命中条件：来源类型 / 事件类型 / 标签 / 仓库</td><td><code>sourceType=github-issue ∧ labels∋bug</code></td></tr>
+      <tr><td><code>clarify</code></td><td>澄清策略：<code>skip</code> / <code>auto</code> / <code>human</code></td><td>特化剧本 <code>skip</code>；通用剧本 <code>auto→human</code></td></tr>
+      <tr><td><code>plan</code></td><td>计划产物模板与必填项</td><td>「复现路径 / 根因 / 修复步骤 / 验证方式」</td></tr>
+      <tr><td><code>runtime</code></td><td>目标运行时或能力标签</td><td><code>capability: code-read, code-write</code></td></tr>
+      <tr><td><code>toolScope</code></td><td>工具与权限边界</td><td>只读 / 可写代码仓 / 禁生产操作</td></tr>
+      <tr><td><code>review</code></td><td>审核门：强制 / 条件触发 / 不需要</td><td><code>when: labels∋security</code></td></tr>
+      <tr><td><code>budget</code></td><td>单事件 token / 时长上限与窗口</td><td><code>maxTokens: 60k, window: offPeak</code></td></tr>
+      <tr><td><code>notify</code></td><td>回写方式与通知</td><td><code>reply: issue-comment</code></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section data-figure="fig-priority">
+  <div class="sec-head"><span class="sec-num">05</span><h2>优先级 P0–P4：四象限 + 噪声</h2></div>
+  <p class="sec-sub">按「重要 / 紧急」四象限划分，由 Jev 一次判定给出；P4 单独留给明确无效的噪声事件，直接忽略。</p>
+  <div class="matrix">
+    <div class="mx head">象限</div><div class="mx head c1">紧急</div><div class="mx head">不紧急</div>
+    <div class="mx p0"><div class="lv">P0</div><div class="t">重要且紧急</div><div class="w">立刻执行 · 可插队 · 全天窗口</div></div>
+    <div class="mx p1"><div class="lv">P1</div><div class="t">重要不紧急</div><div class="w">必须做 · 排期执行 · 低峰批量</div></div>
+    <div class="mx head">—</div>
+    <div class="mx p2"><div class="lv">P2</div><div class="t">紧急不重要</div><div class="w">快处理但低成本 · 低优运行时 · 合并执行</div></div>
+    <div class="mx p3"><div class="lv">P3</div><div class="t">不重要不紧急</div><div class="w">仅记录 · 不自动执行 · 面板可见</div></div>
+    <div class="mx head">—</div>
+    <div class="mx p4"><div class="lv">P4</div><div class="t">明确无效 / 噪声</div><div class="w">直接忽略 · 保留审计记录</div></div>
+  </div>
+  <div class="note"><span class="k">为什么多一档</span><span>四象限只能表达「要不要做」，表达不了「明确是噪声」。「P4 无效」把噪声与「低价值但有效」区分开：P3 保留记录可回溯，P4 直接丢弃，二者都不占用执行预算。</span></div>
+</section>
+
+<section data-figure="fig-queue">
+  <div class="sec-head"><span class="sec-num">06</span><h2>事件队列状态</h2></div>
+  <p class="sec-sub">四类业务状态（无效 / 待处理 / 已处理完成 / 待审核）为主，另有三个执行态用于重试与延后，不打乱业务分类。</p>
+  <div class="fsm">
+    <span class="st">订阅接入</span><span class="sep">→</span>
+    <span class="st invalid">P4 无效事件</span><span class="sep">｜</span>
+    <span class="st pending">待处理</span><span class="sep">→</span>
+    <span class="st review">待审核</span><span class="sep">→</span>
+    <span class="st done">已处理完成</span>
+    <span class="st" style="margin-left:14px">执行态：延后 / 重试中 / 失败</span>
+  </div>
+  <table style="margin-top:16px">
+    <thead><tr><th style="width:18%">状态</th><th style="width:34%">含义</th><th>下一步</th></tr></thead>
+    <tbody>
+      <tr><td><span class="pill q">无效事件</span></td><td>判定为噪声或与项目无关</td><td>归档保留，可回溯为什么没处理</td></tr>
+      <tr><td><span class="pill ev">待处理</span></td><td>已判定该做，等待执行</td><td>按优先级 + 窗口出队 → 澄清/计划 → 派工</td></tr>
+      <tr><td><span class="pill rv">待审核</span></td><td>需要人介入才能继续</td><td>飞书卡片 + 面板红点；批准 → 回到待处理</td></tr>
+      <tr><td><span class="pill pb">已处理完成</span></td><td>Worker 已执行并回报</td><td>回写来源（Issue 评论 / 回调 / 通知），关联工单与 PR</td></tr>
+      <tr><td>执行态</td><td>延后（窗口外）、重试中、失败</td><td>仍属于「待处理」的子状态，超限转「待审核」</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section data-figure="fig-ui">
+  <div class="sec-head"><span class="sec-num">07</span><h2>Web 界面</h2></div>
+  <p class="sec-sub">两页：事件订阅（卡片 + 设置弹窗 + 自定义插件）、事件队列（优先级分栏 + 待审核）。</p>
+  <div class="ui">
+    <div class="bar"><span>router-agent</span><span>·</span><span>事件订阅</span><span style="margin-left:auto">＋ 添加自定义插件</span></div>
+    <div class="body">
+      <div class="cards">
+        <div class="pcard on"><div class="n">github</div><div class="t">GitHub 订阅</div><div class="m">3 个仓库 · 轮询 5min · issue / PR / action</div><div class="acts"><span>设置</span><span>暂停</span></div></div>
+        <div="pcard on"><div class="n">http</div><div class="t">HTTP 事件</div><div class="m">POST /api/events · HMAC 验签 · 限流 60/min</div><div class="acts"><span>设置</span><span>查看密钥</span></div></div>
+        <div class="pcard off"><div class="n">feishu</div><div class="t">飞书消息订阅</div><div class="m">本期空壳占位</div><div class="acts"><span>设置</span></div></div>
+        <div class="pcard"><div class="n">custom</div><div class="t">自定义插件</div><div class="m">npm 包 · 事件源插件接口</div><div class="acts"><span>添加</span></div></div>
+      </div>
+      <div class="queue">
+        <div class="qcol q0"><div class="h"><span>P0 插队</span><span>2</span></div><div class="it">飞书·王工：帮忙看堆栈<span class="m">feishu-direct · 派发中</span></div></div>
+        <div class="qcol q1"><div class="h"><span>P1 重要不紧急</span><span>5</span></div><div class="it">Issue #318 登录态丢失<span class="m">github · 低峰执行</span></div></div>
+        <div class="qcol q2"><div class="h"><span>P2 紧急不重要</span><span>11</span></div><div class="it">ci.failed（合并队列）<span class="m">ci · 合并中</span></div></div>
+        <div class="qcol q3"><div class="h"><span>P3 / P4</span><span>34</span></div><div class="it">每日汇总<span class="m">schedule · 排队中</span></div></div>
+      </div>
+    </div>
+  </div>
+  <table style="margin-top:16px">
+    <thead><tr><th style="width:26%">界面</th><th>要点</th></tr></thead>
+    <tbody>
+      <tr><td>事件订阅</td><td>卡片式展示每个订阅器（名称、状态、关键配置摘要）；点「设置」弹窗配置该插件自己的字段；「＋ 添加自定义插件」支持安装 npm 事件源包，机制与 runtime 插件一致</td></tr>
+      <tr><td>事件队列</td><td>按 P0–P4 分栏；每条显示来源、判定理由、等待时长、当前剧本与目标运行时；支持提升/降级、立即执行、忽略、合并</td></tr>
+      <tr><td>待审核</td><td>独立列表 + 红点计数；卡片通知 admin；批准/驳回/降级三个动作直接回写事件状态</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section data-figure="fig-cost">
+  <div class="sec-head"><span class="sec-num">08</span><h2>成本与时间窗口</h2></div>
+  <p class="sec-sub">事件量不可控、成本不可控，所以预算与窗口是硬约束，不是优化项。</p>
+  <div class="matrix" style="grid-template-columns:160px 1fr 1fr 1fr">
+    <div class="mx head">档位</div><div class="mx head c1">单事件</div><div class="mx head">来源日配额</div><div class="mx head">全局日配额</div>
+    <div class="mx p0"><div class="lv">作用</div><div class="t">防止单条长 Issue 烧光额度</div><div class="t">防止 webhook 风暴 / issue 洪水</div><div class="t">总 token 兜底</div></div>
+    <div class="mx p1"><div class="lv">超限</div><div class="t">截断正文后判定</div><div class="t">延后到次日低峰 / 告警</div><div class="t">低优事件自动延后，P0 不受影响</div></div>
+    <div class="mx p2"><div class="lv">窗口</div><div class="t">高峰 09:00–20:00 只跑 P0/P1</div><div class="t">低峰批量跑 P2/P3</div><div class="t">同类事件合并成一次判定</div></div>
+  </div>
+  <div class="note"><span class="k">省 token 的大头</span><span>不是「把 prompt 写短」，而是<b>规则先判、模型兜底</b>：规则能定案的根本不调模型；模型只在灰区调用，且按事件类型分级（通用剧本用小模型，特化剧本的问题模板更短）。</span></div>
+</section>
+
+<footer>
+  router-agent · 事件流程方案 v2（分派设计）· 工单 tk-87 · 仅设计稿，不含实现代码 · 基线分支 ra/tk-86-llm
+</footer>
+
+</div>
+</body>
+</html>

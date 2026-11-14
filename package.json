@@ -52,9 +52,12 @@
     ]
   },
   "dependencies": {
-    "@router-agent/channel-feishu": "0.3.39",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@inquirer/prompts": "7.8.6",
     "@router-agent/channel": "0.3.39",
+    "@router-agent/channel-feishu": "0.3.39",
     "@router-agent/core": "0.3.39",
+    "@router-agent/event": "0.3.39",
     "@router-agent/infra": "0.3.39",
     "@router-agent/runtime": "0.3.39",
     "@router-agent/runtime-acp": "0.3.39",
@@ -63,8 +66,6 @@
     "@router-agent/runtime-herdr": "0.3.39",
     "@router-agent/runtime-orca": "0.3.39",
     "@router-agent/runtime-t3code": "0.3.39",
-    "@inquirer/prompts": "7.8.6",
-    "@earendil-works/pi-coding-agent": "1.5.0",
     "commander": "12.1.0",
     "typebox": "1.1.24",
     "yaml": "2.8.1",
@@ -84,6 +85,7 @@
     "#core/*": "./dist/packages/core/src/*",
     "#infra/*": "./dist/packages/infra/src/*",
     "#runtime/*": "./dist/packages/runtime/src/*",
-    "#channel/*": "./dist/packages/channel/src/*"
+    "#channel/*": "./dist/packages/channel/src/*",
+    "#event/*": "./dist/packages/event/src/*"
   }
 }
