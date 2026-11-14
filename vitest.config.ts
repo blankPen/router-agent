@@ -11,6 +11,7 @@ const alias = {
   '#infra': resolve(import.meta.dirname, 'packages/infra/src'),
   '#runtime': resolve(import.meta.dirname, 'packages/runtime/src'),
   '#channel': resolve(import.meta.dirname, 'packages/channel/src'),
+  '#event': resolve(import.meta.dirname, 'packages/event/src'),
   '@router-agent/core': resolve(import.meta.dirname, 'packages/core/src'),
   '@router-agent/infra': resolve(import.meta.dirname, 'packages/infra/src'),
   '@router-agent/runtime': resolve(import.meta.dirname, 'packages/runtime/src'),
@@ -22,6 +23,7 @@ const alias = {
   '@router-agent/runtime-t3code': resolve(import.meta.dirname, 'packages/runtime-t3code/src'),
   '@router-agent/channel': resolve(import.meta.dirname, 'packages/channel/src'),
   '@router-agent/channel-feishu': resolve(import.meta.dirname, 'packages/channel-feishu/src'),
+  '@router-agent/event': resolve(import.meta.dirname, 'packages/event/src'),
 }
 
 export default defineConfig({

@@ -3,7 +3,7 @@
  *
  * `ra start` 会把浏览器打开到 `#setup`，刷新页面时也靠 hash 保持当前页签。
  */
-export const TABS = ['setup', 'tickets', 'logs', 'config', 'sources'] as const
+export const TABS = ['setup', 'tickets', 'events', 'logs', 'config', 'sources'] as const
 
 export type Tab = typeof TABS[number]
 

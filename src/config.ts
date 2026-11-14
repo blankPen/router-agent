@@ -14,6 +14,7 @@ import { DEFAULT_RUNTIME_PLUGINS } from '#runtime/plugins/loader.js'
 import { DEFAULT_CHANNEL_PLUGINS } from '#channel/plugins/loader.js'
 import { noopLogger, errorMessage, type Logger } from '#infra/logger.js'
 import type { PluginEntry } from '#infra/plugin-loader.js'
+import { EVENT_PRIORITIES, normalizeEventPriority, type EventPriority } from '#core/event.js'
 
 const runtimePackage: Record<string, string> = { ...DEFAULT_RUNTIME_PLUGINS }
 const channelPackage = (id: string): string | undefined => DEFAULT_CHANNEL_PLUGINS[id]
@@ -277,6 +278,71 @@ export interface DecisionSettings {
   jev: { apiKey: string; model: string; baseUrl?: string }
 }
 
+/** 事件来源的订阅配置：一个来源 id 一份。 */
+export interface EventSourceConfig {
+  enabled: boolean
+  /** 内置来源种类；自定义插件来源留空。 */
+  kind?: 'github' | 'http' | 'schedule' | 'feishu'
+  /** 自定义来源插件入口：npm 包名或本地路径。 */
+  plugin?: string
+  /** 插件自己声明的字段取值。 */
+  options?: Record<string, unknown>
+  /** GitHub 来源：仓库（owner/repo）。 */
+  repo?: string
+  /** 轮询间隔（毫秒）。 */
+  intervalMs?: number
+  /** 只处理带这些标签的事件（GitHub）。 */
+  labels?: string[]
+  /** 订阅已知的仓库 → 候选项目；作为决策上下文线索，不绕过决策模型。 */
+  project?: string
+  /** 派工起始分支。 */
+  branch?: string
+  /** HTTP 来源：对外注入事件的接口路径。 */
+  path?: string
+  /** HTTP 来源：验签密钥，防重放。 */
+  secret?: string
+  /** HTTP 来源：每分钟条数上限。 */
+  rateLimitPerMin?: number
+  /** 定时任务来源：任务标题。 */
+  title?: string
+  /** 定时任务来源：任务正文。 */
+  body?: string
+  /** 事件默认优先级。 */
+  defaultPriority?: EventPriority
+  /** 事件默认类型。 */
+  defaultType?: string
+  /** 该来源每日配额（条）。 */
+  dailyLimit?: number
+}
+
+/** 事件决策策略：判定依据（自然语言 prompt）与护栏。 */
+export interface EventDecisionConfig {
+  provider: 'jev' | 'llm' | 'rule'
+  prompt: string
+  confidenceThreshold: number
+  fallback: 'review' | 'pending'
+}
+
+/** 事件管线策略：高低峰时段、预算、审核通知。 */
+export interface EventPolicyConfig {
+  peak: { start: string; end: string; priorities: EventPriority[] }
+  offPeak: { start: string; end: string; priorities: EventPriority[] }
+  /** 全局每日自动执行事件条数上限；0 表示不限。 */
+  dailyEventLimit: number
+  /** 单来源每日事件条数上限；0 表示不限。 */
+  perSourceDailyLimit: number
+  reviewNotify: boolean
+  reviewChatId: string
+}
+
+/** 事件总线配置：来源订阅 + 决策策略 + 管线策略。 */
+export interface EventsSettings {
+  enabled: boolean
+  sources: Record<string, EventSourceConfig>
+  decision: EventDecisionConfig
+  policy: EventPolicyConfig
+}
+
 export interface AppConfig {
   home: string
   projects: ProjectConfig[]
@@ -309,6 +375,8 @@ export interface AppConfig {
   }
   /** 通道插件入口；id 可覆盖内置飞书包，也可以新增自定义 channel。 */
   channels?: Record<string, PluginEntry>
+  /** 事件总线：来源订阅、决策策略与管线策略。 */
+  events: EventsSettings
   server: { port: number }
   llm?: LlmSettings
   decision: DecisionSettings
@@ -376,6 +444,25 @@ export function isKnownRuntimeId(config: AppConfig, id: string): boolean {
 export function memberHandledChats(config: AppConfig): string[] {
   return config.feishu.chats.filter(chat => chat.scope !== 'admins').map(chat => chat.chat)
 }
+
+/** 默认决策 prompt：写清「哪类事件归哪个项目、走哪种处理方式、什么算急、拿不准怎么办」。 */
+export const DEFAULT_EVENT_DECISION_PROMPT = `# 项目归属
+- 事件来自哪个 GitHub 仓库，就归该仓库对应的项目
+- 标题或正文提到某个项目名，就归那个项目
+- 提到客服、退款、投诉，归 customer-service 项目
+- 提到部署、监控、告警，归 ops 项目
+
+# 处理方式
+- bug 类事件用 bug-triage：先复现再出根因，不要直接改代码
+- 需求或咨询类事件用 clarify-intake：信息不足先补齐，别急着执行
+- 通知、播报类事件只记录不执行
+
+# 优先级
+- 线上告警、生产故障：P0，立即执行
+- 明确的 bug：P1
+- 需求、咨询：P2
+- 其它：P3
+- 明显与项目无关的噪声：P4`
 
 export function defaultConfig(): AppConfig {
   return {
@@ -453,6 +540,29 @@ export function defaultConfig(): AppConfig {
     worker: { tools: { ...DEFAULT_WORKER_TOOLS }, evidence: { ui: 'warn' }, skill: { mode: 'path' } },
     reply: { ask: { mode: 'auto', allow: 'anyone', timeoutMs: 30 * 60_000 } },
     runtime: { default: 'orca' },
+    events: {
+      enabled: false,
+      sources: {
+        github: { enabled: false, kind: 'github', repo: '', intervalMs: 300_000, labels: [], defaultPriority: 'P2', dailyLimit: 50 },
+        http: { enabled: false, kind: 'http', path: '/api/events/inject', secret: '', rateLimitPerMin: 30, defaultPriority: 'P2' },
+        schedule: { enabled: false, kind: 'schedule', intervalMs: 3_600_000, title: '定时任务', body: '', defaultPriority: 'P3' },
+        feishu: { enabled: false, kind: 'feishu' },
+      },
+      decision: {
+        provider: 'rule',
+        prompt: DEFAULT_EVENT_DECISION_PROMPT,
+        confidenceThreshold: 0.6,
+        fallback: 'review',
+      },
+      policy: {
+        peak: { start: '09:00', end: '20:00', priorities: ['P0', 'P1'] },
+        offPeak: { start: '20:00', end: '09:00', priorities: ['P2', 'P3'] },
+        dailyEventLimit: 200,
+        perSourceDailyLimit: 50,
+        reviewNotify: true,
+        reviewChatId: '',
+      },
+    },
     server: { port: 3083 },
   }
 }
@@ -741,6 +851,7 @@ runtime: {
       ...(Object.keys(runtimePlugins).length > 0 ? { plugins: runtimePlugins } : {}),
     },
     ...(Object.keys(channelPlugins).length > 0 ? { channels: channelPlugins } : {}),
+    events: parseEvents(doc.events, base.events),
     server: { port: Number.isFinite(port) && port >= 0 && port < 65536 ? port : base.server.port },
     ...(isRecord(doc.llm) ? { llm: parseLlm(doc.llm) } : {}),
     decision: parseDecision(doc.decision, env),
@@ -748,6 +859,71 @@ runtime: {
   // 群绑定分支始终跟随项目清单，避免 YAML 里残留的自定义分支与面板显示不一致。
   alignChatBranches(config)
   return config
+}
+
+/** 解析事件总线配置；逐项兜底，缺省值来自 defaultConfig。 */
+function parseEvents(value: unknown, base: EventsSettings): EventsSettings {
+  if (!isRecord(value)) return base
+  const sources: Record<string, EventSourceConfig> = { ...base.sources }
+  const rawSources = isRecord(value.sources) ? value.sources : {}
+  for (const [id, raw] of Object.entries(rawSources)) {
+    if (!isRecord(raw)) continue
+    const fallback = base.sources[id] ?? { enabled: false }
+    sources[id] = {
+      enabled: booleanOr(raw.enabled, fallback.enabled),
+      ...(raw.kind ? { kind: raw.kind as EventSourceConfig['kind'] } : fallback.kind ? { kind: fallback.kind } : {}),
+      ...(typeof raw.plugin === 'string' ? { plugin: raw.plugin } : {}),
+      ...(isRecord(raw.options) ? { options: raw.options } : {}),
+      ...(typeof raw.repo === 'string' ? { repo: raw.repo } : {}),
+      ...(typeof raw.intervalMs === 'number' ? { intervalMs: raw.intervalMs } : {}),
+      ...(Array.isArray(raw.labels) ? { labels: stringArray(raw.labels, []) } : {}),
+      ...(typeof raw.project === 'string' ? { project: raw.project } : {}),
+      ...(typeof raw.branch === 'string' ? { branch: raw.branch } : {}),
+      ...(typeof raw.path === 'string' ? { path: raw.path } : {}),
+      ...(typeof raw.secret === 'string' ? { secret: raw.secret } : {}),
+      ...(typeof raw.rateLimitPerMin === 'number' ? { rateLimitPerMin: raw.rateLimitPerMin } : {}),
+      ...(typeof raw.title === 'string' ? { title: raw.title } : {}),
+      ...(typeof raw.body === 'string' ? { body: raw.body } : {}),
+      ...(raw.defaultPriority ? { defaultPriority: normalizeEventPriority(raw.defaultPriority) } : {}),
+      ...(typeof raw.defaultType === 'string' ? { defaultType: raw.defaultType } : {}),
+      ...(typeof raw.dailyLimit === 'number' ? { dailyLimit: raw.dailyLimit } : {}),
+    }
+  }
+  const decisionDoc = isRecord(value.decision) ? value.decision : {}
+  const policyDoc = isRecord(value.policy) ? value.policy : {}
+  return {
+    enabled: booleanOr(value.enabled, base.enabled),
+    sources,
+    decision: {
+      provider: decisionDoc.provider === 'jev' || decisionDoc.provider === 'llm' || decisionDoc.provider === 'rule'
+        ? decisionDoc.provider
+        : base.decision.provider,
+      prompt: typeof decisionDoc.prompt === 'string' && decisionDoc.prompt.trim() ? decisionDoc.prompt : base.decision.prompt,
+      confidenceThreshold: positiveNumberOr(decisionDoc.confidenceThreshold, base.decision.confidenceThreshold, 0, 1),
+      fallback: decisionDoc.fallback === 'pending' ? 'pending' : base.decision.fallback,
+    },
+    policy: {
+      peak: parseWindow(policyDoc.peak, base.policy.peak),
+      offPeak: parseWindow(policyDoc.offPeak, base.policy.offPeak),
+      dailyEventLimit: positiveIntOr(policyDoc.dailyEventLimit, base.policy.dailyEventLimit, 0, 1_000_000),
+      perSourceDailyLimit: positiveIntOr(policyDoc.perSourceDailyLimit, base.policy.perSourceDailyLimit, 0, 1_000_000),
+      reviewNotify: booleanOr(policyDoc.reviewNotify, base.policy.reviewNotify),
+      reviewChatId: typeof policyDoc.reviewChatId === 'string' ? policyDoc.reviewChatId : base.policy.reviewChatId,
+    },
+  }
+}
+
+/** 解析时间窗：HH:mm 起止 + 允许自动执行的优先级。 */
+function parseWindow(value: unknown, base: { start: string; end: string; priorities: EventPriority[] }): { start: string; end: string; priorities: EventPriority[] } {
+  if (!isRecord(value)) return base
+  const priorities = Array.isArray(value.priorities)
+    ? value.priorities.map(item => normalizeEventPriority(item)).filter(item => EVENT_PRIORITIES.includes(item))
+    : base.priorities
+  return {
+    start: typeof value.start === 'string' ? value.start : base.start,
+    end: typeof value.end === 'string' ? value.end : base.end,
+    priorities: priorities.length > 0 ? priorities : base.priorities,
+  }
 }
 
 /**
@@ -1271,6 +1447,12 @@ export function writeConfig(home: string, config: AppConfig): void {
         : {}),
     },
     ...(config.channels && Object.keys(config.channels).length > 0 ? { channels: config.channels } : {}),
+    events: {
+      enabled: config.events.enabled,
+      sources: config.events.sources,
+      decision: config.events.decision,
+      policy: config.events.policy,
+    },
     projects: config.projects,
     server: { port: config.server.port },
   }
@@ -1307,7 +1489,7 @@ export interface ConfigPatchResult {
  * 群级 `allowed` 仍挂在 `feishu.chats` 下（同一条目里还有 mode / repo 等必须重启的字段），
  * 所以仍然按需要重启处理。
  */
-export const HOT_CONFIG_PREFIXES = ['policy.', 'feishu.allowed'] as const
+export const HOT_CONFIG_PREFIXES = ['policy.', 'feishu.allowed', 'events.'] as const
 
 function clone<T>(value: T): T {
   return structuredClone(value)
@@ -1368,7 +1550,7 @@ export function publicConfig(config: AppConfig): Record<string, unknown> {
 /** 面板插件页需要的元数据；不包含任何密钥或实现细节。 */
 export interface PluginConfigView {
   id: string
-  kind: 'runtime' | 'channel'
+  kind: 'runtime' | 'channel' | 'event'
   name?: string
   label?: string
   hint?: string
@@ -1413,7 +1595,7 @@ interface LoadedChannelMeta {
 export function publicPlugins(config: AppConfig, loaded?: {
   runtimes?: LoadedPluginMeta[]
   channels?: LoadedChannelMeta[]
-  failures?: Array<{ kind: 'runtime' | 'channel'; id: string; specifier: string; message: string }>
+  failures?: Array<{ kind: 'runtime' | 'channel' | 'event'; id: string; specifier: string; message: string }>
 }): PluginConfigView[] {
   const failures = loaded?.failures ?? []
   // createAll() 的实例 id（如 ACP 的 acp-claude）不是独立插件：面板只列插件本身，
@@ -1597,6 +1779,72 @@ function validatePluginEntry(value: unknown): PluginEntry | null {
 
 type PluginKind = 'runtime' | 'channel'
 
+/** 小数校验（0~1 置信度这类）。 */
+function numberValue(min: number, max: number): Validator {
+  return {
+    check: value => {
+      const number = Number(value)
+      if (!Number.isFinite(number)) return '需要数字'
+      if (number < min || number > max) return `需要在 ${min} ~ ${max} 之间`
+      return null
+    },
+  }
+}
+
+/** 事件来源可编辑的字段与取值校验。 */
+const EVENT_SOURCE_FIELDS: Record<string, 'text' | 'number' | 'boolean' | 'list' | 'priority'> = {
+  enabled: 'boolean',
+  kind: 'text',
+  plugin: 'text',
+  repo: 'text',
+  intervalMs: 'number',
+  labels: 'list',
+  project: 'text',
+  branch: 'text',
+  path: 'text',
+  secret: 'text',
+  rateLimitPerMin: 'number',
+  title: 'text',
+  body: 'text',
+  defaultPriority: 'priority',
+  defaultType: 'text',
+  dailyLimit: 'number',
+}
+
+/** 校验单个事件来源字段；字段名不认识就拒绝，避免面板写错键名。 */
+function validateEventSourceField(key: string, value: unknown): string | null {
+  const kind = EVENT_SOURCE_FIELDS[key]
+  if (!kind) return `不是可编辑的事件来源字段：${key}`
+  switch (kind) {
+    case 'boolean':
+      return typeof value === 'boolean' ? null : '需要布尔值'
+    case 'number': {
+      const number = Number(value)
+      if (!Number.isFinite(number) || number < 0) return '需要非负数字'
+      return null
+    }
+    case 'list':
+      return Array.isArray(value) ? null : '需要字符串数组'
+    case 'priority':
+      return EVENT_PRIORITIES.includes(String(value).toUpperCase() as EventPriority) ? null : `优先级只能是 ${EVENT_PRIORITIES.join(' / ')}`
+    default:
+      return typeof value === 'string' ? null : '需要字符串'
+  }
+}
+
+/** 优先级列表校验：只接受 P0 ~ P4。 */
+function priorityListValue(): Validator {
+  return {
+    check: value => {
+      if (!Array.isArray(value)) return '需要优先级数组'
+      for (const item of value) {
+        if (!EVENT_PRIORITIES.includes(String(item).toUpperCase() as EventPriority)) return `优先级只能是 ${EVENT_PRIORITIES.join(' / ')}`
+      }
+      return null
+    },
+  }
+}
+
 function boolValue(): Validator {
   return { check: value => (typeof value === 'boolean' ? null : '需要 true / false') }
 }
@@ -1684,6 +1932,22 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
   'llm.api': enumValue(LLM_APIS),
   'llm.authHeader': boolValue(),
   'llm.contextWindow': intValue(1_000, 10_000_000),
+
+  'events.enabled': boolValue(),
+  'events.decision.provider': enumValue(['jev', 'llm', 'rule']),
+  'events.decision.prompt': stringValue,
+  'events.decision.confidenceThreshold': numberValue(0, 1),
+  'events.decision.fallback': enumValue(['review', 'pending']),
+  'events.policy.peak.start': stringValue,
+  'events.policy.peak.end': stringValue,
+  'events.policy.peak.priorities': priorityListValue(),
+  'events.policy.offPeak.start': stringValue,
+  'events.policy.offPeak.end': stringValue,
+  'events.policy.offPeak.priorities': priorityListValue(),
+  'events.policy.dailyEventLimit': intValue(0, 1_000_000),
+  'events.policy.perSourceDailyLimit': intValue(0, 1_000_000),
+  'events.policy.reviewNotify': boolValue(),
+  'events.policy.reviewChatId': stringValue,
 }
 
 /** 整段替换的复杂字段（项目、群、白名单这类不适合逐项点路径编辑的配置）。 */
@@ -1829,6 +2093,21 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
           else accepted.push({ path, value })
         }
       }
+      continue
+    }
+    // 事件来源的逐项配置：events.sources.<id>.<key>
+    const eventSourcePath = /^events\.sources\.([^.]+)\.(.+)$/.exec(path)
+    if (eventSourcePath) {
+      const sourceId = eventSourcePath[1]!
+      const key = eventSourcePath[2]!
+      const source = config.events.sources[sourceId]
+      if (!source) {
+        errors.push({ path, message: `未知事件来源：${sourceId}` })
+        continue
+      }
+      const message = validateEventSourceField(key, value)
+      if (message) errors.push({ path, message })
+      else accepted.push({ path, value })
       continue
     }
     if ((LIST_PATHS as readonly string[]).includes(path)) {

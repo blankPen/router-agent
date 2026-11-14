@@ -295,6 +295,91 @@ ra logs --follow | grep '"message":"decision:'
 
 面板改造前后的截图见 [assets/decision-config/README.md](assets/decision-config/README.md)。
 
+## 事件总线（多来源事件）
+
+事件总线把「飞书消息之外」的事也接进来：GitHub Issue、HTTP 注入、定时任务，以及自定义来源插件。事件先进队列，由决策模型一次判定出「要不要做 / 优先级 / 类型 / 归属项目 / 执行方式 / 要不要人审」，再分级派发：**能直接做的开单，需要人看的推管理员审核**。
+
+事件本身**不绑定项目** —— 归属项目由决策模型按下面的决策 prompt 判定。**默认关闭**。
+
+在 Web 面板「事件」页配（也可以写 `config.yaml`）：
+
+```yaml
+events:
+  enabled: true
+  sources:
+    github:
+      enabled: true
+      kind: github
+      repo: blankPen/router-agent   # owner/repo
+      intervalMs: 300000             # 轮询间隔
+      labels: [bug]                  # 标签白名单，留空表示全部
+      project: router-agent          # 已知线索：作为决策上下文，不绕过模型
+      branch: main
+      defaultPriority: P2
+      dailyLimit: 50
+    http:
+      enabled: true
+      kind: http
+      path: /api/events/inject       # 外部系统注入事件的接口
+      secret: ""                     # 验签密钥，防重放
+      rateLimitPerMin: 30
+      defaultPriority: P2
+    schedule:
+      enabled: true
+      kind: schedule
+      intervalMs: 3600000
+      title: 每日依赖巡检
+      body: 检查依赖是否有安全更新
+      defaultPriority: P3
+      project: router-agent
+    feishu:
+      enabled: false                 # 飞书群消息由消息链路处理，这里只留开关
+      kind: feishu
+  decision:
+    provider: llm                    # jev | llm | rule
+    prompt: |                        # 自然语言判定规则（面板里可编辑）
+      # 项目归属
+      - 来自 GitHub 仓库 xxx 的事件，归项目 router-agent
+      # 处理方式
+      - bug 类用 bug-triage
+      # 优先级
+      - 线上告警 P0
+      # 拿不准时
+      - 判断不了项目或优先级就标需人审
+    confidenceThreshold: 0.6         # 低于阈值转人工
+    fallback: review                 # review 转人工 | pending 留队重试
+  policy:
+    peak: { start: "09:00", end: "20:00", priorities: [P0, P1] }
+    offPeak: { start: "20:00", end: "09:00", priorities: [P2, P3] }
+    perSourceDailyLimit: 50          # 单来源每日配额，超了顺延（不丢）
+    dailyEventLimit: 200             # 全局每日自动执行条数
+    reviewNotify: true
+    reviewChatId: ""                 # 审核通知发到哪个会话；留空只落面板
+```
+
+**外部系统注入事件**：
+
+```bash
+curl -X POST http://127.0.0.1:3083/api/events/inject \
+  -H 'Content-Type: application/json' \
+  -H 'x-ra-event-secret: <配置里的 secret>' \
+  -d '{"sourceId":"http","externalId":"alert-42","title":"磁盘告警","body":"data 分区使用率 92%"}'
+```
+
+返回的事件会进队列，等下一次决策 tick 判定。判定结论与派发结果都在面板「事件」页能看到。
+
+**候选处理方式（skill）是内置闭集**：`bug-triage`、`clarify-intake`、`ci-fix`、`daily-digest`、`question-answer`。执行环境默认在 Worker 里，skill 只决定「这类事件按什么套路做」，不在面板单独配置。
+
+**判定 provider 怎么选**：
+
+| provider | 行为 |
+|-|-|
+| `llm` | 用研判模型要一个 JSON 结论（推荐） |
+| `jev` | 用 Jev 打分：要不要做 / 多急 / 归哪个项目 / 用哪个 skill |
+| `rule` | 只用规则（来源默认优先级、风险标签必审），判定不出项目就转人工 |
+
+模型没配好时自动退回规则判定，事件不会丢，只是更多走人工审核。
+
 ## 飞书机器人（专属 profile）
 
 router-agent 固定使用 `~/.router-agent-lark` 作为 lark-cli profile，**不复用**你终端里其它 lark-cli 的登录态，也不能通过配置修改这个目录。凭据与授权有两个入口：

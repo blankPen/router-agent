@@ -2548,3 +2548,16 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 
 /* 工具栏右侧留给工具类操作，筛选条件都聚在左边。 */
 .log-toolbar-end { margin-left: auto; }
+
+/* 事件页：来源订阅卡片按两列排布，宽度与卡片区一致。 */
+.event-source-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 10px;
+  padding-bottom: 4px;
+}
+.event-source-grid .channel-card {
+  max-width: none;
+  grid-template-columns: minmax(0, 1fr) auto;
+  cursor: default;
+}

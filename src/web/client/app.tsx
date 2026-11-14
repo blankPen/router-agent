@@ -68,6 +68,7 @@ import type { IdentityStatusView } from './identity-status.js'
 import { RuntimeCards, type RuntimeNotice } from './runtime-cards.js'
 import { FeishuBotPanel } from './feishu-panel.js'
 import { LogAssistantFab } from './log-assistant.js'
+import { EventsView } from './events-panel.js'
 import { SpecsEditor } from './specs-editor.js'
 import {
   mergeRuntimeChoices,
@@ -466,6 +467,10 @@ function App(): JSX.Element {
             <span>工单</span>
             {status && status.tickets.open > 0 && <span className="nav-count">{status.tickets.open}</span>}
           </button>
+          <button className={`nav-tab ${tab === 'events' ? 'active' : ''}`} onClick={() => switchTab('events')}>
+            <Icon name="radio" />
+            <span>事件</span>
+          </button>
           <button className={`nav-tab ${tab === 'config' ? 'active' : ''}`} onClick={() => switchTab('config')}>
             <Icon name="sliders" />
             <span>配置</span>
@@ -523,6 +528,7 @@ function App(): JSX.Element {
           />
         )}
         {tab === 'tickets' && <TicketsView />}
+        {tab === 'events' && <EventsView />}
         {tab === 'logs' && <LogsView />}
         {tab === 'config' && (
           <ConfigView

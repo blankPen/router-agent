@@ -89,6 +89,20 @@ export interface LogAssistantPort {
   diagnose(question: LogAssistantQuestion): Promise<LogDiagnosis>
 }
 
+/** 事件总线的面板能力；缺省时事件相关端点返回 404。 */
+export interface EventApiPort {
+  listEvents(filter: { status?: string; priority?: string; sourceId?: string; limit?: number }): unknown[]
+  listSources(): unknown[]
+  /** 面板操作：批准 / 驳回 / 延后 / 忽略 / 重试 / 改优先级。 */
+  apply(eventId: string, action: string, options: { priority?: string; project?: string }): Promise<unknown | null>
+  /** 外部系统注入事件（HTTP 来源）。 */
+  inject(sourceId: string, envelope: { externalId: string; title: string; body: string; url?: string }): unknown
+  /** 当前决策策略与 prompt 版本。 */
+  decision(): { provider: string; prompt: string; confidenceThreshold: number; fallback: string; version: number }
+  /** 各来源的注入密钥（面板展示用：只提示是否已配置）。 */
+  sourceSecrets(): Record<string, boolean>
+}
+
 export interface ApiServerOptions {
   engine: Engine
   store: Store
@@ -116,6 +130,8 @@ export interface ApiServerOptions {
   feishuBot?: ChannelAdmin
   /** 已注册的消息通道；面板据此渲染「渠道配置」的渠道列表。缺省时返回空列表。 */
   channels?: ChannelRegistry
+  /** 事件总线；缺省时事件相关端点返回 404。 */
+  events?: EventApiPort
   /** 面板「日志」页读取的日志文件；缺省时用 `<home>/logs/router-agent.log`。 */
   logPath?: string
   /** 项目登记：目录选择、Git 探测、clone 与 Orca 仓库登记；缺省时端点返回 404。 */
@@ -140,7 +156,7 @@ export interface ApiServerOptions {
   plugins?: {
     runtimes?: Array<{ id: string; name: string; label: string; hint: string; installHint?: string; installUrl?: string; packageName?: string; deprecated?: boolean; loadedIds?: string[] }>
     channels?: Array<{ id: string; name: string; hint: string; default?: boolean; packageName?: string; loadedIds?: string[] }>
-    failures?: Array<{ kind: 'runtime' | 'channel'; id: string; specifier: string; message: string }>
+    failures?: Array<{ kind: 'runtime' | 'channel' | 'event'; id: string; specifier: string; message: string }>
   }
 }
 
@@ -283,6 +299,69 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
     }
 
     // 工作区批量清理：按运行时分组列出 / 回收已关闭工单的遗留 worktree。
+    // ---------- 事件总线 ----------
+
+    if (path === '/api/events' && req.method === 'GET') {
+      if (!opts.events) return respond(res, 404, { error: 'events-not-supported' })
+      const status = url.searchParams.get('status') ?? undefined
+      const priority = url.searchParams.get('priority') ?? undefined
+      const sourceId = url.searchParams.get('sourceId') ?? undefined
+      const limit = Number(url.searchParams.get('limit'))
+      return respond(res, 200, {
+        events: opts.events.listEvents({
+          ...(status ? { status } : {}),
+          ...(priority ? { priority } : {}),
+          ...(sourceId ? { sourceId } : {}),
+          ...(Number.isFinite(limit) && limit > 0 ? { limit } : {}),
+        }),
+        sources: opts.events.listSources(),
+        decision: opts.events.decision(),
+        sourceSecrets: opts.events.sourceSecrets(),
+      })
+    }
+
+    const eventAction = path.match(/^\/api\/events\/([^/]+)\/action$/)
+    if (eventAction && req.method === 'POST') {
+      if (!opts.events) return respond(res, 404, { error: 'events-not-supported' })
+      const eventId = eventAction[1]!
+      const body = await readJson(req)
+      const action = String(body.action ?? '')
+      if (!['approve', 'reject', 'defer', 'ignore', 'retry', 'priority'].includes(action)) {
+        return respond(res, 400, { error: 'action-invalid', message: `不支持的操作：${action}` })
+      }
+      const result = await opts.events.apply(eventId, action, {
+        ...(typeof body.priority === 'string' ? { priority: body.priority } : {}),
+        ...(typeof body.project === 'string' ? { project: body.project } : {}),
+      })
+      if (!result) return respond(res, 404, { error: 'event-not-found' })
+      onEvent({ event: 'api:event-action', eventId, action })
+      return respond(res, 200, { event: result })
+    }
+
+    // 外部系统注入事件：走 HTTP 事件来源，密钥校验在来源配置里。
+    if (path === '/api/events/inject' && req.method === 'POST') {
+      if (!opts.events) return respond(res, 404, { error: 'events-not-supported' })
+      const body = await readJson(req)
+      const sourceId = String(body.sourceId ?? 'http')
+      const secret = String(req.headers['x-ra-event-secret'] ?? body.secret ?? '')
+      const expected = String((config.events.sources[sourceId]?.secret ?? ''))
+      if (expected && secret !== expected) {
+        logger.warn('event:inject-rejected', { sourceId, reason: 'secret-mismatch' })
+        return respond(res, 401, { error: 'secret-invalid' })
+      }
+      try {
+        const event = opts.events.inject(sourceId, {
+          externalId: String(body.externalId ?? ''),
+          title: String(body.title ?? ''),
+          body: String(body.body ?? ''),
+          ...(typeof body.url === 'string' ? { url: body.url } : {}),
+        })
+        return respond(res, 201, { event })
+      } catch (error) {
+        return respond(res, 400, { error: 'inject-failed', message: errorMessage(error) })
+      }
+    }
+
     if (path === '/api/workspaces' && req.method === 'GET') {
       if (!opts.workspaceAdmin) return respond(res, 501, { error: 'workspace-admin-not-supported' })
       return respond(res, 200, await opts.workspaceAdmin.list())
