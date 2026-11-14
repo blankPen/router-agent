@@ -113,8 +113,55 @@
   <div class="note"><span class="k">重要取舍</span><span>「每类事件一套固定 worker」和「所有事件统一澄清再执行」不是二选一：<b>统一澄清再执行是骨架</b>（保证任何事件都是「有方案才动手」），<b>固定流程是特例</b>（已注册的类型跳过澄清走固定套路）。而且不为每类事件新造 Worker 类型 —— 差别只在判定问题、提示词、工具范围、目标运行时这四处，写成配置即可。</span></div>
 </section>
 
+
+<section data-figure="fig-v3-relation">
+  <div class="sec-head"><span class="sec-num">05</span><h2>事件、工单、项目：三者什么关系</h2></div>
+  <p class="sec-sub">项目是「在哪干活」，工单是「要干的活」，事件是「为什么开始干」。事件本身不预绑项目 —— 项目是派工前解析出来的。</p>
+  <div class="relflow">
+    <div class="relnode ev">
+      <div class="kind">事件</div>
+      <div class="t">刚进来的时候，它只有来源、类型、优先级、正文</div>
+      <div class="d">还没有项目 —— 项目要等派工前才解析</div>
+    </div>
+    <div class="relarrow">↓ <b>派工前解析项目</b>（拿不到就转人工，不阻塞）</div>
+    <div class="relnode">
+      <div class="kind">项目解析链</div>
+      <div class="t">按可信度依次找，找到就用</div>
+      <div class="relchain">
+        <span class="ch hard">① 订阅器写明的仓库</span><span class="ar">›</span>
+        <span class="ch hard">② 剧本声明的默认项目</span><span class="ar">›</span>
+        <span class="ch">③ 事件内容里提到的项目名</span><span class="ar">›</span>
+        <span class="ch">④ 全局只有一个项目</span><span class="ar">›</span>
+        <span class="ch last">⑤ 都没有 → 转人工</span>
+      </div>
+      <div class="d" style="margin-top:9px;font-size:12.8px;color:var(--ink-2)">解析结果会回填到事件上：事件始终带着「它落到哪个项目」，面板和工单页都能看到。</div>
+    </div>
+    <div class="relarrow">↓</div>
+    <div class="relout">
+      <div class="relnode tk">
+        <div class="kind">出路 A · 新开一张工单</div>
+        <div class="t">项目 → 工单 → Worker</div>
+        <ul class="list">
+          <li>工单绑定项目：仓库 + 分支 + 运行时</li>
+          <li>Worker 就在这个项目的 worktree 里干活</li>
+          <li>和飞书消息开的工单完全一样</li>
+        </ul>
+      </div>
+      <div class="relnode tk">
+        <div class="kind">出路 B · 投给已有的工单</div>
+        <div class="t">不新开单，作为「输入」投递</div>
+        <ul class="list">
+          <li>事件和某张在办工单相关时（同一个 Issue 的后续评论）</li>
+          <li>把事件内容投进那张单，不重复建单</li>
+          <li>工单上能看到「又来了一条事件」</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
 <section data-figure="fig-v3-priority">
-  <div class="sec-head"><span class="sec-num">05</span><h2>优先级：什么先做</h2></div>
+  <div class="sec-head"><span class="sec-num">06</span><h2>优先级：什么先做</h2></div>
   <p class="sec-sub">按「重要 / 紧急」两问定级；P4 单独留给明确无效的事件。</p>
   <div class="matrix">
     <div class="mx head">级别</div><div class="mx head c1">紧急</div><div class="mx head">不紧急</div>
@@ -129,7 +176,7 @@
 </section>
 
 <section data-figure="fig-v3-queue">
-  <div class="sec-head"><span class="sec-num">06</span><h2>事件队列：四种状态</h2></div>
+  <div class="sec-head"><span class="sec-num">07</span><h2>事件队列：四种状态</h2></div>
   <p class="sec-sub">事件进来后只有四种归宿。</p>
   <div class="fsm">
     <span class="st pending">待处理</span><span class="sep">→</span>
@@ -149,7 +196,7 @@
 </section>
 
 <section data-figure="fig-v3-config-sub">
-  <div class="sec-head"><span class="sec-num">07</span><h2>配置界面（一）：事件订阅</h2></div>
+  <div class="sec-head"><span class="sec-num">08</span><h2>配置界面（一）：事件订阅</h2></div>
   <p class="sec-sub">事件订阅页用卡片展示，每个订阅器一张卡；点「设置」弹窗配该订阅器自己的字段；还能装第三方 npm 插件。</p>
   <div class="cfg">
     <div class="box">
@@ -191,7 +238,7 @@
 </section>
 
 <section data-figure="fig-v3-config-playbook">
-  <div class="sec-head"><span class="sec-num">08</span><h2>配置界面（二）：处理方式与队列</h2></div>
+  <div class="sec-head"><span class="sec-num">09</span><h2>配置界面（二）：处理方式与队列</h2></div>
   <p class="sec-sub">除了订阅，还要能配「这类事件怎么处理」和「什么时候做、花多少」。</p>
   <div class="cfg">
     <div class="box">
@@ -244,7 +291,7 @@
 </section>
 
 <section data-figure="fig-v3-cost">
-  <div class="sec-head"><span class="sec-num">09</span><h2>成本与时段</h2></div>
+  <div class="sec-head"><span class="sec-num">10</span><h2>成本与时段</h2></div>
   <p class="sec-sub">事件量不可控，所以预算与时段是硬约束：高峰期只做重要的事，超预算就顺延，不丢弃。</p>
   <div class="matrix" style="grid-template-columns:150px 1fr 1fr 1fr">
     <div class="mx head">约束</div><div class="mx head c1">单条事件</div><div class="mx head">单个来源</div><div class="mx head">全局</div>

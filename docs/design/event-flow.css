@@ -193,3 +193,25 @@ footer{margin-top:66px;padding-top:20px;border-top:1px solid var(--line);color:v
 .modal .foot span{font-family:var(--mono);font-size:11px;border:1px solid var(--line-strong);border-radius:6px;padding:4px 12px;color:var(--ink-2);background:#fff}
 .modal .foot span.primary{border-color:#bcdce4;color:var(--model);background:#eff8fa}
 @media (max-width:980px){.cfg{grid-template-columns:1fr}.flow{flex-direction:column}.fstep{border-right:none;border-bottom:1px solid var(--line)}.fstep::after{content:"⌄";right:auto;left:50%;top:auto;bottom:-8px;transform:translateX(-50%)}}
+
+/* ---------- v3：事件 / 工单 / 项目 关系 ---------- */
+.relflow{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px 22px}
+.relnode{border:1px solid var(--line-strong);border-radius:11px;padding:13px 15px;background:#fbfaf7}
+.relnode .kind{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.relnode .t{font-weight:670;font-size:15px;margin:2px 0 5px}
+.relnode .d{font-size:12.9px;color:var(--ink-2)}
+.relnode.ev{border-color:#bcdce4;background:#f4fafb}
+.relnode.tk{border-color:#cfe0d7;background:#f1f7f4}
+.relnode.pj{border-color:#e8d2b4;background:#fdf6ec}
+.relnode .list{margin:8px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:5px}
+.relnode .list li{font-size:12.6px;color:var(--ink-2);padding-left:12px;position:relative}
+.relnode .list li::before{content:"";position:absolute;left:0;top:8px;width:4px;height:4px;border-radius:50%;background:var(--line-strong)}
+.relarrow{font-family:var(--mono);font-size:12px;color:var(--ink-3);text-align:center;margin:9px 0}
+.relarrow b{color:var(--ink-2);font-weight:600}
+.relchain{display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin-top:9px}
+.relchain .ch{font-family:var(--mono);font-size:11px;border:1px solid var(--line);background:#fff;border-radius:7px;padding:4px 10px;color:var(--ink-2)}
+.relchain .ch.hard{border-color:#bcdce4;color:var(--model);background:#f4fafb}
+.relchain .ch.last{border-color:#f0cfcf;color:var(--rv);background:#fdf3f3}
+.relchain .ar{color:var(--line-strong);font-family:var(--mono);font-size:11px}
+.relout{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:4px}
+@media (max-width:980px){.relout{grid-template-columns:1fr}}
