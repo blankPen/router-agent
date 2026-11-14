@@ -545,6 +545,8 @@ CREATE TABLE IF NOT EXISTS event_cursors (
 - 可视化 HTML（单文件，双击即开，无外部依赖）：`docs/design/event-flow.html`
 - 样式：`docs/design/event-flow.css`
 - 本设计稿 Markdown：`docs/design/event-flow-v2.md`
-- 配图（本文插图由上面的 HTML 渲染导出）：`docs/design/figures/*.png`
-- 分支：`ra/tk-87-设计多来源事件总线方案并输出飞书文档-2`（仓库 `blankPen/router-agent`）
+- 配图（本文插图即由上面的 HTML 渲染导出）：`docs/design/figures/*.png`
+- 在线（HTML）：https://github.com/blankPen/router-agent/blob/ra%2Ftk-87-%E8%AE%BE%E8%AE%A1%E5%A4%9A%E6%9D%A5%E6%BA%90%E4%BA%8B%E4%BB%B6%E6%80%BB%E7%BA%BF%E6%96%B9%E6%A1%88%E5%B9%B6%E8%BE%93%E5%87%BA%E9%A3%9E%E4%B9%A6%E6%96%87%E6%A1%A3-2/docs/design/event-flow.html
+- 在线（设计稿 Markdown）：https://github.com/blankPen/router-agent/blob/ra%2Ftk-87-%E8%AE%BE%E8%AE%A1%E5%A4%9A%E6%9D%A5%E6%BA%90%E4%BA%8B%E4%BB%B6%E6%80%BB%E7%BA%BF%E6%96%B9%E6%A1%88%E5%B9%B6%E8%BE%93%E5%87%BA%E9%A3%9E%E4%B9%A6%E6%96%87%E6%A1%A3-2/docs/design/event-flow-v2.md
+- 分支：`ra/tk-87-设计多来源事件总线方案并输出飞书文档-2`（仓库 `blankPen/router-agent`，已推送）
 - 上一版（v1，含更细的队列/面板/成本论证）：https://poizon.feishu.cn/docx/DYkJdcKGQoyK2JxJJxecutqIn3f
