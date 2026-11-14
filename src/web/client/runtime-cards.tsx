@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateActio
 import { ACP_RUNTIME_ID, normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
 import { getJson, sendJson } from './api.js'
 import { Icon } from './icons.js'
+import { npmPackageOf } from './npm-package.js'
 import {
   isAcpAgentRuntime,
   isBuiltinRuntime,
@@ -444,16 +445,6 @@ export function RuntimeCards({
       )}
     </div>
   )
-}
-
-/** 与 packages/infra/plugin-install.ts 的 npmPackageNameOf 保持一致；面板据此决定是否显示安装按钮。 */
-const NPM_PACKAGE_PATTERN = /^(@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/i
-
-function npmPackageOf(value: string): string | undefined {
-  const text = value.trim()
-  if (!text || text.startsWith('.') || text.startsWith('/') || text.startsWith('file:')) return undefined
-  if (text.includes('\\') || /\s/.test(text)) return undefined
-  return NPM_PACKAGE_PATTERN.test(text) ? text : undefined
 }
 
 interface PluginInstallJobView {

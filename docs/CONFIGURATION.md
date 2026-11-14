@@ -382,7 +382,7 @@ curl -X POST http://127.0.0.1:3083/api/events/inject \
 
 ### 自定义事件来源（npm 插件）
 
-内置来源（github / http / schedule / feishu）不够用时，可以装一个事件来源插件 —— 和「添加运行时」是同一套机制：面板「配置 → 事件总线 → 添加自定义事件」填 npm 包名，走 `npm install` 装到 `<RA_HOME>/node_modules`；也可以填本地路径直接联调。
+内置来源（github / http / schedule / feishu）不够用时，可以装一个事件来源插件 —— 和「添加运行时」是同一套机制：面板「配置 → 事件总线 → 添加自定义事件」填 npm 包名，走 `npm install` 装到 `<RA_HOME>/node_modules`。
 
 插件包默认导出一个对象：
 
@@ -407,7 +407,7 @@ const plugin: EventPlugin = {
 export default plugin
 ```
 
-装好之后面板按插件声明的 `meta.id` 把它登记成一个来源，来源 id 就是 `meta.id`（本地路径没有 `meta.id` 时自己填一个来源 id）。落盘形状：
+装好之后面板按插件声明的 `meta.id` 把它登记成一个来源，来源 id 就是 `meta.id`。落盘形状：
 
 ```yaml
 events:
@@ -415,7 +415,7 @@ events:
     my-source:
       enabled: true
       kind: plugin
-      plugin: my-event-source              # npm 包名或本地路径
+      plugin: my-event-source              # npm 包名
       options:
         target: payments-api
         verbose: false

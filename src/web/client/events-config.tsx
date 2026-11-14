@@ -7,6 +7,7 @@
  */
 import { useMemo, useState } from 'react'
 import { getJson, sendJson, type ConfigDoc } from './api.js'
+import { npmPackageOf } from './npm-package.js'
 import { SourceLogo } from './event-source-logos.js'
 import { sourceFieldDefs, type SourceMeta } from './event-sources.js'
 import { getByPath, type FieldDef } from './fields.js'
@@ -42,15 +43,6 @@ interface PluginInstallJobView {
   error?: string
   startedAt: string
   finishedAt?: string
-}
-
-/** 与 packages/infra/plugin-install.ts 的 npmPackageNameOf 保持一致。 */
-const NPM_PACKAGE_PATTERN = /^(@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/i
-
-function npmPackageOf(value: string): string | undefined {
-  const text = value.trim()
-  if (!text || text.startsWith('.') || text.startsWith('/') || text.includes('\\') || /\s/.test(text)) return undefined
-  return NPM_PACKAGE_PATTERN.test(text) ? text : undefined
 }
 
 /** 事件来源编辑区。 */
@@ -258,18 +250,18 @@ function ModalField({ field, value, defaultValue, error, onChange }: {
   )
 }
 
-/** 添加自定义事件来源：装一个 npm 包，或指向一个本地插件目录。 */
+/** 添加自定义事件来源：装一个 npm 包。 */
 function AddEventSourceDialog({ onAdd, onNotice, onClose }: {
   onAdd: (id: string, entry: string) => void
   onNotice?: (notice: { kind: 'ok' | 'warn' | 'error'; text: string }) => void
   onClose: () => void
 }): JSX.Element {
   const [entry, setEntry] = useState('')
-  const [sourceId, setSourceId] = useState('')
   const [install, setInstall] = useState<{ busy: boolean; job?: PluginInstallJobView } | null>(null)
 
   const packageName = npmPackageOf(entry)
-  const isLocalPath = entry.trim().length > 0 && !packageName
+  /** 填了东西但不是合法 npm 包名：直接指出来，不让装到一半才失败。 */
+  const entryInvalid = entry.trim().length > 0 && !packageName
 
   const pollInstall = async (jobId: string): Promise<void> => {
     for (let attempt = 0; attempt < 300; attempt += 1) {
@@ -334,14 +326,6 @@ function AddEventSourceDialog({ onAdd, onNotice, onClose }: {
     }
   }
 
-  const addLocal = (): void => {
-    const id = sourceId.trim()
-    if (!id) return
-    onAdd(id, entry.trim())
-    onNotice?.({ kind: 'ok', text: `已添加自定义事件来源 ${id}（本地路径）；保存配置后立即生效` })
-    onClose()
-  }
-
   return (
     <div className="modal-layer">
       <button className="modal-backdrop" aria-label="关闭" onClick={onClose} />
@@ -349,28 +333,24 @@ function AddEventSourceDialog({ onAdd, onNotice, onClose }: {
         <header className="modal-head">
           <div>
             <h3>添加自定义事件</h3>
-            <p>通过 npm 包或本地路径加载自定义事件来源；包默认导出 kind=event 并声明 meta.id。</p>
+            <p>装一个 npm 包作为自定义事件来源；包默认导出 kind=event 并声明 meta.id。</p>
           </div>
           <button className="icon-btn" title="关闭" onClick={onClose}><Icon name="close" size={14} /></button>
         </header>
         <div className="modal-body">
           <label className="modal-field">
-            <span>npm 包名或本地路径</span>
-            <input className="input" value={entry} placeholder="例如 @scope/event-source 或 ./path/to/event-x" onChange={event => setEntry(event.target.value)} />
+            <span>npm 包名</span>
+            <input className="input" value={entry} placeholder="例如 @scope/event-source" onChange={event => setEntry(event.target.value)} />
           </label>
-          {isLocalPath && (
-            <label className="modal-field">
-              <span>来源 id</span>
-              <input className="input" value={sourceId} placeholder="本地路径没有 meta.id，请自己起一个" onChange={event => setSourceId(event.target.value)} />
-            </label>
-          )}
           {packageName && (
             <p className="modal-hint">
               <Icon name="download" size={13} />
               安装后按插件包声明的 meta.id 登记来源。
             </p>
           )}
-          {isLocalPath && <p className="modal-hint">本地路径不需要下载；保存配置后立即加载。</p>}
+          {entryInvalid && (
+            <p className="modal-hint">这里只认 npm 包名（例如 @scope/event-source）；本地路径请直接写进 config.yaml 的 events.sources。</p>
+          )}
           {install?.job && (
             <pre className="runtime-log">
               {(install.job.lines ?? []).slice(-8).join('\n') || (install.job.status === 'running' ? '正在启动 npm install…' : '')}
@@ -379,15 +359,9 @@ function AddEventSourceDialog({ onAdd, onNotice, onClose }: {
           )}
         </div>
         <footer className="modal-foot">
-          {packageName ? (
-            <button className="btn primary" onClick={() => void installPackage()} disabled={install?.busy}>
-              <Icon name="download" size={12} />{install?.busy ? '安装中…' : '安装并添加'}
-            </button>
-          ) : (
-            <button className="btn primary" onClick={addLocal} disabled={!isLocalPath || !sourceId.trim()}>
-              <Icon name="plus" size={12} />添加
-            </button>
-          )}
+          <button className="btn primary" onClick={() => void installPackage()} disabled={install?.busy || !packageName}>
+            <Icon name="download" size={12} />{install?.busy ? '安装中…' : '安装并添加'}
+          </button>
         </footer>
       </div>
     </div>
