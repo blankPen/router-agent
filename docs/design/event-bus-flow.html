@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>router-agent · 多来源事件总线</title>
+<style>
+  :root{
+    --bg:#f7f6f3;
+    --panel:#ffffff;
+    --ink:#17181c;
+    --ink-2:#4a4c55;
+    --ink-3:#7c7f8a;
+    --line:#e3e1da;
+    --line-strong:#cfccc3;
+    --source:#2f6bff;
+    --queue:#b45309;
+    --rule:#7c3aed;
+    --model:#0e7490;
+    --exec:#15803d;
+    --review:#b91c1c;
+    --p0:#b91c1c;
+    --p1:#b45309;
+    --p2:#0e7490;
+    --p3:#475569;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-font-smoothing:antialiased}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.65}
+  .wrap{max-width:1120px;margin:0 auto;padding:0 28px 96px}
+
+  header{padding:64px 0 40px;border-bottom:1px solid var(--line);margin-bottom:56px}
+  .eyebrow{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3)}
+  .eyebrow::before{content:"";width:22px;height:1px;background:var(--ink-3)}
+  h1{font-size:clamp(32px,4.6vw,48px);line-height:1.15;letter-spacing:-.02em;margin:18px 0 14px;font-weight:750}
+  h1 em{font-style:normal;color:var(--model)}
+  .lede{max-width:720px;color:var(--ink-2);font-size:17px;margin:0}
+  .lede code{font-family:var(--mono);font-size:.9em;background:#ecebe6;padding:1px 5px;border-radius:4px}
+  .metrics{display:flex;flex-wrap:wrap;gap:8px;margin-top:26px}
+  .metric{font-family:var(--mono);font-size:12px;color:var(--ink-2);border:1px solid var(--line-strong);background:rgba(255,255,255,.6);border-radius:999px;padding:5px 12px}
+  .metric b{color:var(--ink);font-weight:600}
+
+  section{margin-bottom:64px}
+  .sec-head{display:flex;align-items:baseline;gap:14px;margin-bottom:8px}
+  .sec-num{font-family:var(--mono);font-size:12px;color:var(--ink-3);letter-spacing:.1em}
+  h2{font-size:23px;letter-spacing:-.01em;margin:0;font-weight:700}
+  .sec-sub{color:var(--ink-2);margin:0 0 26px;max-width:780px}
+
+  .stack{display:flex;flex-direction:column;gap:12px}
+  .layer{display:grid;grid-template-columns:196px 1fr;gap:0;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .layer .lead{padding:16px 18px;border-right:1px solid var(--line);border-left:3px solid var(--line-strong)}
+  .layer .lead .n{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+  .layer .lead .t{font-weight:680;font-size:15px;margin-top:2px}
+  .layer .body{padding:15px 18px;display:flex;flex-wrap:wrap;gap:8px;align-content:flex-start}
+  .chip{font-family:var(--mono);font-size:11.5px;padding:4px 10px;border-radius:7px;border:1px solid var(--line);background:#fbfaf7;color:var(--ink-2)}
+  .chip.s{border-color:#c9dafb;background:#f2f6ff;color:var(--source)}
+  .chip.q{border-color:#e8d2b4;background:#fdf6ec;color:var(--queue)}
+  .chip.r{border-color:#d9c9f8;background:#f6f1ff;color:var(--rule)}
+  .chip.m{border-color:#bcdce4;background:#eff8fa;color:var(--model)}
+  .chip.e{border-color:#cfe0d7;background:#f1f7f4;color:var(--exec)}
+  .chip.v{border-color:#f0cfcf;background:#fdf3f3;color:var(--review)}
+  .layer.l1 .lead{border-left-color:var(--source)}
+  .layer.l3 .lead{border-left-color:var(--queue)}
+  .layer.l4 .lead{border-left-color:var(--rule)}
+  .layer.l4b .lead{border-left-color:var(--model)}
+  .layer.l5 .lead{border-left-color:var(--ink-3)}
+  .layer.l6 .lead{border-left-color:var(--exec)}
+  .layer.l7 .lead{border-left-color:var(--ink)}
+
+  table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;font-size:13.4px}
+  th,td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:500;background:#fbfaf7}
+  tr:last-child td{border-bottom:none}
+  code{font-family:var(--mono);font-size:.88em;background:#efeee9;padding:1px 4px;border-radius:4px;color:#2a2b31}
+  .pill{display:inline-block;font-family:var(--mono);font-size:11px;padding:1px 7px;border-radius:999px;border:1px solid currentColor;white-space:nowrap}
+  .pill.now{color:var(--ink-3)} .pill.next{color:var(--model)}
+
+  .pri{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+  .pcard{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 16px 14px;border-top:3px solid var(--line-strong)}
+  .pcard .lv{font-family:var(--mono);font-size:13px;font-weight:700}
+  .pcard .who{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin:2px 0 9px}
+  .pcard p{margin:0;color:var(--ink-2);font-size:13.2px}
+  .pcard .when{margin-top:10px;font-family:var(--mono);font-size:11px;color:var(--ink-3);border-top:1px dashed var(--line);padding-top:8px}
+  .pcard.p0{border-top-color:var(--p0)} .pcard.p0 .lv{color:var(--p0)}
+  .pcard.p1{border-top-color:var(--p1)} .pcard.p1 .lv{color:var(--p1)}
+  .pcard.p2{border-top-color:var(--p2)} .pcard.p2 .lv{color:var(--p2)}
+  .pcard.p3{border-top-color:var(--p3)} .pcard.p3 .lv{color:var(--p3)}
+
+  .split{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .box{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px}
+  .box h3{margin:0 0 4px;font-size:15px;font-weight:700}
+  .box .sub{font-family:var(--mono);font-size:11px;color:var(--ink-3);margin-bottom:14px}
+  .box ul{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:10px}
+  .box li{font-size:13.2px;color:var(--ink-2);padding-left:15px;position:relative}
+  .box li::before{content:"";position:absolute;left:0;top:9px;width:5px;height:5px;border-radius:50%;background:var(--line-strong)}
+  .box li b{color:var(--ink);font-weight:620}
+  .box li .m{font-family:var(--mono);font-size:11px;color:var(--ink-3);display:block;margin-top:2px}
+  .box.free{border-top:3px solid var(--rule)}
+  .box.model{border-top:3px solid var(--model)}
+
+  .fsm{display:flex;flex-wrap:wrap;align-items:center;gap:8px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px}
+  .st{font-family:var(--mono);font-size:12px;padding:6px 12px;border-radius:7px;background:#f4f3ef;border:1px solid var(--line);color:var(--ink-2)}
+  .st.start{background:#f1f5f3;border-color:#cfe0d7;color:var(--exec)}
+  .st.end{background:#f4f3ef;color:var(--ink-3)}
+  .st.warn{background:#fff6f6;border-color:#f0cfcf;color:var(--review)}
+  .st.wait{background:#fdf6ec;border-color:#e8d2b4;color:var(--queue)}
+  .sep{color:var(--line-strong);font-family:var(--mono);font-size:13px}
+
+  .clock{display:grid;grid-template-columns:repeat(24,1fr);gap:3px;margin-bottom:14px}
+  .hr{height:46px;border-radius:5px;background:#efeee9;position:relative;display:flex;align-items:flex-end;justify-content:center;padding-bottom:4px;font-family:var(--mono);font-size:9.5px;color:var(--ink-3)}
+  .hr.peak{background:#fdf1e3;color:var(--queue)}
+  .hr.night{background:#eef1f6;color:var(--ink-3)}
+  .axis{display:flex;justify-content:space-between;font-family:var(--mono);font-size:11px;color:var(--ink-3);margin-top:6px}
+  .window-legend{display:flex;gap:18px;font-size:13px;color:var(--ink-2);flex-wrap:wrap}
+  .window-legend span{display:inline-flex;align-items:center;gap:7px}
+  .dot{width:10px;height:10px;border-radius:3px;display:inline-block}
+
+  .screen{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .screen .bar{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line);background:#fbfaf7;font-family:var(--mono);font-size:11.5px;color:var(--ink-3)}
+  .screen .body{display:grid;grid-template-columns:1fr 268px;gap:0}
+  .screen .main{padding:16px}
+  .screen .side{border-left:1px solid var(--line);padding:16px;background:#fcfbf9}
+  .frow{display:grid;grid-template-columns:44px 1fr 88px;gap:10px;align-items:center;padding:10px 0;border-bottom:1px dashed var(--line)}
+  .frow:last-child{border-bottom:none}
+  .badge{font-family:var(--mono);font-size:10.5px;padding:2px 7px;border-radius:5px;border:1px solid currentColor;text-align:center}
+  .b-p0{color:var(--p0)} .b-p1{color:var(--p1)} .b-p2{color:var(--p2)} .b-p3{color:var(--p3)}
+  .frow .t{font-size:13.4px}
+  .frow .m{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);display:block;margin-top:2px}
+  .frow .s{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);text-align:right}
+  .filters{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:10px}
+  .filters .chip.on{background:#f0eeff;border-color:#d9c9f8;color:var(--rule)}
+  .review{border:1px solid var(--line);border-radius:10px;padding:12px 13px;margin-bottom:10px;background:#fff}
+  .review h5{margin:0 0 4px;font-size:13.4px;font-weight:660}
+  .review p{margin:0;font-size:12.4px;color:var(--ink-2)}
+  .review .acts{display:flex;gap:7px;margin-top:10px}
+  .review .acts span{font-family:var(--mono);font-size:10.5px;border:1px solid var(--line-strong);border-radius:6px;padding:3px 9px;color:var(--ink-2);background:#fbfaf7}
+
+  .note{display:flex;gap:12px;background:#fffdf6;border:1px solid #e8dfc2;border-radius:10px;padding:13px 16px;margin-top:14px;color:#5c4a1c;font-size:13.6px}
+  .note .k{font-family:var(--mono);font-size:11px;letter-spacing:.06em;white-space:nowrap;padding-top:2px}
+
+  footer{margin-top:72px;padding-top:22px;border-top:1px solid var(--line);color:var(--ink-3);font-size:12.5px;font-family:var(--mono)}
+
+  @media (max-width:900px){
+    .layer{grid-template-columns:1fr}
+    .layer .lead{border-right:none;border-bottom:1px solid var(--line)}
+    .pri{grid-template-columns:1fr 1fr}
+    .split{grid-template-columns:1fr}
+    .screen .body{grid-template-columns:1fr}
+    .screen .side{border-left:none;border-top:1px solid var(--line)}
+    .clock{grid-template-columns:repeat(12,1fr)}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <span class="eyebrow">router-agent · event bus design</span>
+  <h1>多来源事件总线：<em>一条事件的一生</em></h1>
+  <p class="lede">把用户消息、运营群消息、GitHub Issue、Webhook、定时任务收成同一个信封，进同一个队列池；规则先判、Jev 兜底，按优先级出队，按时间窗口与 token 预算执行。</p>
+  <div class="metrics">
+    <span class="metric">工单 <b>tk-87</b></span>
+    <span class="metric">基线 <b>ra/tk-86-llm</b></span>
+    <span class="metric">来源 <b>5 类</b></span>
+    <span class="metric">接入模式 <b>3 种</b></span>
+    <span class="metric">优先级 <b>P0–P3</b></span>
+    <span class="metric">本轮 <b>只出设计</b></span>
+  </div>
+</header>
+
+<section>
+  <div class="sec-head"><span class="sec-num">01</span><h2>分层总览</h2></div>
+  <p class="sec-sub">七层单向依赖：采集 → 归一 → 排队 → 判定 → 调度 → 执行 → 观测。每层只做一件事，跨层只传信封，不传来源细节。</p>
+  <div class="stack">
+    <div class="layer l1">
+      <div class="lead"><div class="n">① 采集层</div><div class="t">EventSource 插件</div></div>
+      <div class="body">
+        <span class="chip s">飞书用户消息 · push 长连接</span>
+        <span class="chip s">运营群消息 · push 长连接</span>
+        <span class="chip s">GitHub Issue · pull 轮询</span>
+        <span class="chip s">Webhook · push HTTP</span>
+        <span class="chip s">定时任务 · schedule</span>
+      </div>
+    </div>
+    <div class="layer l2">
+      <div class="lead"><div class="n">② 归一层</div><div class="t">统一信封</div></div>
+      <div class="body">
+        <span class="chip">EventEnvelope</span>
+        <span class="chip">去重幂等 dedupeKey</span>
+        <span class="chip">正文截断 preview</span>
+      </div>
+    </div>
+    <div class="layer l3">
+      <div class="lead"><div class="n">③ 队列层</div><div class="t">事件队列池</div></div>
+      <div class="body">
+        <span class="chip q">P0 插队</span>
+        <span class="chip q">P1 / P2 常规</span>
+        <span class="chip q">P3 低峰批量</span>
+        <span class="chip q">deferred 延后</span>
+        <span class="chip">SQLite 持久化</span>
+      </div>
+    </div>
+    <div class="layer l4">
+      <div class="lead"><div class="n">④ 判定层</div><div class="t">规则先行</div></div>
+      <div class="body">
+        <span class="chip r">来源基线定级</span>
+        <span class="chip r">身份 / 寒暄 / 噪声</span>
+        <span class="chip r">标签与配额</span>
+        <span class="chip r">命中即定案 · 不调模型</span>
+      </div>
+    </div>
+    <div class="layer l4b">
+      <div class="lead"><div class="n">④ 判定层</div><div class="t">Jev 兜底</div></div>
+      <div class="body">
+        <span class="chip m">灰区才调用</span>
+        <span class="chip m">分级预算</span>
+        <span class="chip m">失败降级不丢事件</span>
+      </div>
+    </div>
+    <div class="layer l5">
+      <div class="lead"><div class="n">⑤ 调度层</div><div class="t">Scheduler</div></div>
+      <div class="body">
+        <span class="chip">高峰 / 低峰窗口</span>
+        <span class="chip">Token 日预算</span>
+        <span class="chip">并发上限</span>
+        <span class="chip">退避重试</span>
+      </div>
+    </div>
+    <div class="layer l6">
+      <div class="lead"><div class="n">⑥ 执行层</div><div class="t">派发与审核</div></div>
+      <div class="body">
+        <span class="chip e">直派工单（复用现有派工）</span>
+        <span class="chip v">审核列表 + 通知 admin</span>
+        <span class="chip">忽略并归档</span>
+      </div>
+    </div>
+    <div class="layer l7">
+      <div class="lead"><div class="n">⑦ 观测层</div><div class="t">面板与日志</div></div>
+      <div class="body">
+        <span class="chip">事件面板（优先级筛选）</span>
+        <span class="chip">待审核 + 通知</span>
+        <span class="chip">成本统计</span>
+        <span class="chip">日志事件表</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">02</span><h2>今天 vs 方案后</h2></div>
+  <p class="sec-sub">现状只有一条入站管道，且是同步串行处理的：消息进来就在下一个 tick 被处理，没有排队，也没有「先做哪个」。</p>
+  <table>
+    <thead><tr><th style="width:22%">维度</th><th style="width:39%">今天（ra/tk-86-llm）</th><th>方案后</th></tr></thead>
+    <tbody>
+      <tr><td>入站来源</td><td><span class="pill now">只有飞书</span> 长连接 <code>lark-cli event consume</code></td><td><span class="pill next">5 类来源</span> 飞书直发 / 运营群 / Issue / Webhook / 定时</td></tr>
+      <tr><td>接入方式</td><td><span class="pill now">仅 push</span> 飞书推给我们</td><td><span class="pill next">push + pull + schedule</span> 三种模式统一抽象</td></tr>
+      <tr><td>GitHub Issue</td><td><span class="pill now">没有监听</span> 只有 PR 状态跟踪与「上报 issue」</td><td><span class="pill next">正式事件源</span> pull 轮询 + 游标 + 去重</td></tr>
+      <tr><td>Webhook</td><td><span class="pill now">不存在</span> 全仓无接入面</td><td><span class="pill next">HTTP 端点</span> 验签 + 防重放 + 限流</td></tr>
+      <tr><td>排队</td><td><span class="pill now">没有</span> 同步串行</td><td><span class="pill next">事件队列池</span> 优先级出队，P0 插队</td></tr>
+      <tr><td>判定</td><td><span class="pill now">规则 + 模型</span> 规则只看准入</td><td><span class="pill next">规则定级 + Jev 兜底</span> 明确的不调模型</td></tr>
+      <tr><td>成本控制</td><td><span class="pill now">无</span> 全量即用</td><td><span class="pill next">窗口 + 预算</span> 高峰只跑 P0/P1，超限延后</td></tr>
+      <tr><td>人工介入</td><td><span class="pill now">需求会话终审</span></td><td><span class="pill next">审核列表</span> 队列级审核 + 卡片通知</td></tr>
+    </tbody>
+  </table>
+  <div class="note"><span class="k">关键约束</span><span>用户消息的准入、开单、派工、回复语义全部保持不变，只在前面加一层队列；P0 走插队快路径，不能因为排队变慢。</span></div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">03</span><h2>优先级阶梯</h2></div>
+  <p class="sec-sub">来源决定基线，规则可以做小幅调整，模型只能在允许区间内动；P0 永远插队。</p>
+  <div class="pri">
+    <div class="pcard p0">
+      <div class="lv">P0</div>
+      <div class="who">用户直发 · 管理员</div>
+      <p>飞书里 @机器人 或私聊下需求。最高优先级，插队处理，不排在其它事件后面。</p>
+      <div class="when">执行窗口：全天 · 审核：否</div>
+    </div>
+    <div class="pcard p1">
+      <div class="lv">P1</div>
+      <div class="who">运营群消息</div>
+      <p>群里一句话可能是在聊天而不是在下需求，默认进审核；命中明确规则时可升 P0。</p>
+      <div class="when">执行窗口：全天 · 审核：是</div>
+    </div>
+    <div class="pcard p2">
+      <div class="lv">P2</div>
+      <div class="who">Issue / Webhook</div>
+      <p>主动收集来的事件。高峰只判定不执行，低峰批量执行；security 标签强制审核并立即通知。</p>
+      <div class="when">执行窗口：低峰 · 审核：视规则</div>
+    </div>
+    <div class="pcard p3">
+      <div class="lv">P3</div>
+      <div class="who">定时任务 / 补跑</div>
+      <p>巡检、汇总、过期检查。纯规则决定，不调模型，只在低峰批量跑。</p>
+      <div class="when">执行窗口：低峰 · 审核：否</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">04</span><h2>规则先判，模型兜底</h2></div>
+  <p class="sec-sub">规则命中即定案，不进模型 —— 这是省钱和省时延的大头；只有灰区事件才交给 Jev。</p>
+  <div class="split">
+    <div class="box free">
+      <h3>Rule Engine · 确定性规则</h3>
+      <div class="sub">免费 · 可解释 · 不调模型</div>
+      <ul>
+        <li><b>来源基线</b><span class="m">source-priority · 直接定级</span></li>
+        <li><b>身份分流</b><span class="m">admin-actor 提权一级 · bot-actor 直接丢</span></li>
+        <li><b>噪声门槛</b><span class="m">small-talk · noise-pattern 沿用现有规则集</span></li>
+        <li><b>标签与风险</b><span class="m">security-label 强制审核 + 立即通知</span></li>
+        <li><b>合并与限流</b><span class="m">duplicate-burst 合并 · rate-limit 超配额延后</span></li>
+        <li><b>归属判定</b><span class="m">repo-bound 已有在办工单 → 转工单输入，不新开单</span></li>
+      </ul>
+    </div>
+    <div class="box model">
+      <h3>Jev 决策模型</h3>
+      <div class="sub">按事件类型分级调用 · 失败降级不丢事件</div>
+      <ul>
+        <li><b>P0 用户消息</b><span class="m">沿用现状：是否跟进 / 类型 / 紧迫度 / 项目相关性</span></li>
+        <li><b>P1 运营群</b><span class="m">小模型 + 短 prompt：是否是明确需求</span></li>
+        <li><b>P2 Issue / Webhook</b><span class="m">小模型 + 只读工具：是否需要人排查</span></li>
+        <li><b>P3 定时任务</b><span class="m">不调模型，规则完全决定 · 0 token</span></li>
+        <li><b>硬边界</b><span class="m">模型只答「是否处理 / 类型 / 优先级区间 / 是否需人审」</span></li>
+        <li><b>降级阶梯</b><span class="m">完整模型 → 小模型 → 纯规则 → 留在队列并标红</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">05</span><h2>事件状态机</h2></div>
+  <p class="sec-sub">每个事件在队列里的位置都能查得到；延后不是丢弃，窗口开启自动继续。</p>
+  <div class="fsm">
+    <span class="st start">pending 入队</span><span class="sep">→</span>
+    <span class="st">evaluating 判定</span><span class="sep">→</span>
+    <span class="st warn">review 审核</span><span class="sep">→</span>
+    <span class="st">dispatched 已派发</span><span class="sep">/</span>
+    <span class="st wait">deferred 延后</span><span class="sep">/</span>
+    <span class="st warn">failed 异常重试</span><span class="sep">/</span>
+    <span class="st end">ignored 忽略归档</span>
+  </div>
+  <div class="note"><span class="k">去重</span><span>同一 <code>dedupeKey</code> 的重复投递不新增行，只更新计数与最后到达时间；Issue 被评论 5 次 → 一个工单，后续评论作为工单输入投递。</span></div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">06</span><h2>时间窗口与成本</h2></div>
+  <p class="sec-sub">高峰只做重要的事，低峰批量做低优任务；token 到上限是延后，不是失败。</p>
+  <div class="clock">
+    <div class="hr night">0</div><div class="hr night">1</div><div class="hr night">2</div><div class="hr night">3</div>
+    <div class="hr night">4</div><div class="hr night">5</div><div class="hr night">6</div><div class="hr night">7</div>
+    <div class="hr peak">8</div><div class="hr peak">9</div><div class="hr peak">10</div><div class="hr peak">11</div>
+    <div class="hr peak">12</div><div class="hr peak">13</div><div class="hr peak">14</div><div class="hr peak">15</div>
+    <div class="hr peak">16</div><div class="hr peak">17</div><div class="hr peak">18</div><div class="hr peak">19</div>
+    <div class="hr night">20</div><div class="hr night">21</div><div class="hr night">22</div><div class="hr night">23</div>
+  </div>
+  <div class="axis"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
+  <div class="window-legend" style="margin-top:14px">
+    <span><i class="dot" style="background:#fdf1e3;border:1px solid #e8d2b4"></i> 高峰 09:00–20:00：只执行 P0 / P1，P2 只判定不执行</span>
+    <span><i class="dot" style="background:#eef1f6;border:1px solid #cfd6e2"></i> 低峰 20:00–09:00：P2 / P3 批量执行，同类事件合并成一次判定</span>
+  </div>
+  <table style="margin-top:18px">
+    <thead><tr><th style="width:26%">预算档</th><th style="width:38%">作用</th><th>超限行为</th></tr></thead>
+    <tbody>
+      <tr><td>单事件上限</td><td>防止一条超长 Issue 正文烧掉整天额度</td><td>截断输入 / 降级为摘要后判定</td></tr>
+      <tr><td>来源日配额</td><td>防止 webhook 风暴、Issue 洪水</td><td>延后到次日低峰，或丢弃并告警</td></tr>
+      <tr><td>全局日配额</td><td>总 token 兜底</td><td>低优事件自动 deferred；P0 不受影响</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">07</span><h2>直派还是审核</h2></div>
+  <p class="sec-sub">审核只决定「要不要派」，派工仍走现有链路（<code>Engine.decide()</code> → Ticket → Mandate → 派工）。</p>
+  <table>
+    <thead><tr><th style="width:44%">条件</th><th style="width:16%">动作</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>P0 用户直发 + 管理员发起</td><td><span class="pill next">直派</span></td><td>保持现状体验</td></tr>
+      <tr><td>P0 用户直发 + 普通成员</td><td><span class="pill next">走 intake</span></td><td>澄清后由管理员终审</td></tr>
+      <tr><td>P1 运营群消息</td><td><span class="pill now">审核</span></td><td>群里一句话未必是需求</td></tr>
+      <tr><td>P2 Issue / Webhook + 规则明确</td><td><span class="pill next">直派</span></td><td>限自动派发白名单项目</td></tr>
+      <tr><td>P2 + 模型判定有价值但不确定</td><td><span class="pill now">审核</span></td><td>卡片推 admin</td></tr>
+      <tr><td>P2 + security / 数据风险 / 对外发布</td><td><span class="pill now">强制审核</span></td><td>立即通知，不合并</td></tr>
+      <tr><td>P3 定时任务（只读巡检）</td><td><span class="pill next">直派</span></td><td>只读工具范围</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">08</span><h2>事件面板</h2></div>
+  <p class="sec-sub">新增「事件」页签：左侧队列按优先级分栏，右侧待审核；通知与面板互为兜底。</p>
+  <div class="screen">
+    <div class="bar"><span>router-agent</span><span>·</span><span>事件</span><span style="margin-left:auto">待审核 3</span></div>
+    <div class="body">
+      <div class="main">
+        <div class="filters">
+          <span class="chip on">优先级 P0</span><span class="chip on">P1</span><span class="chip">P2</span><span class="chip">P3</span>
+          <span class="chip">状态 全部</span><span class="chip">来源 全部</span><span class="chip">近 7 日</span><span class="chip">关键字</span>
+        </div>
+        <div class="frow">
+          <span class="badge b-p0">P0</span>
+          <span><span class="t">飞书 · 王工：帮忙看下这个报错的堆栈</span><span class="m">feishu-direct · 命中规则 admin-actor · 0.8s</span></span>
+          <span class="s">已派发 tk-91</span>
+        </div>
+        <div class="frow">
+          <span class="badge b-p1">P1</span>
+          <span><span class="t">运营群 A：客户反馈导出功能偶发失败</span><span class="m">feishu-group · 待审核 · 等待 12 分钟</span></span>
+          <span class="s">审核中</span>
+        </div>
+        <div class="frow">
+          <span class="badge b-p2">P2</span>
+          <span><span class="t">Issue #318 登录态偶发丢失</span><span class="m">github-issue · bug 标签 · 规则判定命中</span></span>
+          <span class="s">低峰执行</span>
+        </div>
+        <div class="frow">
+          <span class="badge b-p3">P3</span>
+          <span><span class="t">每日汇总 · 昨日工单与 PR 状态</span><span class="m">schedule · 0 token · 规则决定</span></span>
+          <span class="s">排队中</span>
+        </div>
+      </div>
+      <div class="side">
+        <div class="review">
+          <h5>运营群 A：客户反馈导出失败</h5>
+          <p>建议：升级为 P1 并直派，命中项目 <code>router-agent</code>。</p>
+          <div class="acts"><span>批准</span><span>驳回</span><span>降级</span><span>稍后</span></div>
+        </div>
+        <div class="review">
+          <h5>Issue #318 登录态偶发丢失</h5>
+          <p>建议：进 P2 队列，低峰执行；如涉及安全请驳回并人工处理。</p>
+          <div class="acts"><span>批准</span><span>驳回</span><span>降级</span></div>
+        </div>
+        <div class="review">
+          <h5>Webhook · ci.failed</h5>
+          <p>建议：直接转工单输入，投给在办工单 tk-88。</p>
+          <div class="acts"><span>批准</span><span>驳回</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="note"><span class="k">通知</span><span>P0 / P1 立即推卡片；P2 同批合并成一张卡片；P3 不推。面板处理后不再重复推，通知失败不影响队列。</span></div>
+</section>
+
+<footer>
+  router-agent · 工单 tk-87 · 多来源事件总线设计（仅设计稿，不含实现代码） · 基线分支 ra/tk-86-llm
+</footer>
+
+</div>
+</body>
+</html>
