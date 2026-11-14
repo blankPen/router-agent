@@ -769,7 +769,7 @@ CREATE TABLE IF NOT EXISTS event_cursors (
 本文的完整交互版流程图（分层、优先级、窗口、审核）在仓库里有一份自包含 HTML：
 
 - 文件：`docs/design/event-bus-flow.html`（单文件，双击即可在浏览器打开，无外部依赖）
-- 在线：https://github.com/blankPen/router-agent/blob/HEAD/docs/design/event-bus-flow.html
+- 在线：https://github.com/blankPen/router-agent/blob/ra%2Ftk-87-%E8%AE%BE%E8%AE%A1%E5%A4%9A%E6%9D%A5%E6%BA%90%E4%BA%8B%E4%BB%B6%E6%80%BB%E7%BA%BF%E6%96%B9%E6%A1%88%E5%B9%B6%E8%BE%93%E5%87%BA%E9%A3%9E%E4%B9%A6%E6%96%87%E6%A1%A3-2/docs/design/event-bus-flow.html
 - 设计稿 Markdown 同目录：`docs/design/event-bus-design.md`（本文的仓库版本）
 - 分支：`ra/tk-87-设计多来源事件总线方案并输出飞书文档-2`（仓库 `blankPen/router-agent`，已推送）
 
