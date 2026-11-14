@@ -189,6 +189,68 @@ export interface ProjectConfig {
   repo: string
   /** 工单未指定分支时的默认起始分支；空字符串表示必须问用户。 */
   defaultBranch: string
+  /** 目标设备 id；非空表示该项目在远端设备上执行。 */
+  node?: string
+  /** 节点侧项目标识；节点用它查本机绝对路径。 */
+  nodeProject?: string
+}
+
+/** 节点（远端设备）负责的一个项目。 */
+export interface NodeProjectSettings {
+  /** 中心侧显示名；用户/模型按它指项目。 */
+  name: string
+  /** 节点侧项目标识：节点用它在自己的项目表里查本地绝对路径。 */
+  key: string
+  /** 该项目在节点侧的默认起始分支。 */
+  defaultBranch: string
+}
+
+/** 中心 Router 登记的一台设备。 */
+export interface NodeDeviceSettings {
+  id: string
+  name: string
+  /** 节点密钥；不下发给面板明文。 */
+  token: string
+  /** 这台设备负责的项目。 */
+  projects: NodeProjectSettings[]
+}
+
+/** 连通方式：直连（同内网 / Tailscale）或自建公网中继。 */
+export type NodeConnectMode = 'direct' | 'relay'
+
+export interface NodeSettings {
+  /** 多设备总开关；关闭时 Router 完全不装配节点能力。 */
+  enabled: boolean
+  mode: NodeConnectMode
+  /** 中继模式下标识这个中心 Router；多台中心各自一个。 */
+  routerId: string
+  /** 节点侧：本机的设备 id（中心侧用 devices 里的 id 对上）。 */
+  nodeId: string
+  /** 节点侧：显示名。 */
+  name: string
+  /** 节点侧：中心 Router 地址（直连模式）。 */
+  server: string
+  /** 中继服务地址；直连模式留空。 */
+  relay: string
+  /** 中继服务的接入密钥；中继模式必填。 */
+  relayToken: string
+  /** 节点侧：节点密钥。 */
+  token: string
+  /** 中心侧：已登记的设备。 */
+  devices: NodeDeviceSettings[]
+}
+
+export const DEFAULT_NODE_SETTINGS: NodeSettings = {
+  enabled: false,
+  mode: 'direct',
+  routerId: 'home',
+  nodeId: '',
+  name: '',
+  server: '',
+  relay: '',
+  relayToken: '',
+  token: '',
+  devices: [],
 }
 
 /**
@@ -301,6 +363,8 @@ export interface AppConfig {
   /** 通道插件入口；id 可覆盖内置飞书包，也可以新增自定义 channel。 */
   channels?: Record<string, PluginEntry>
   server: { port: number }
+  /** 多设备节点：中心侧登记设备，节点侧声明本机身份与连通方式。 */
+  nodes: NodeSettings
   llm?: LlmSettings
 }
 
@@ -309,6 +373,32 @@ export function projectsForRuntime(config: AppConfig, runtimeId: string = config
   const id = normalizeRuntimeId(runtimeId)
   if (id === ORCA_RUNTIME_ID) return config.projects
   return config.runtime.projects?.[id] ?? []
+}
+
+/**
+ * 节点项目折算成派工项目。
+ *
+ * 派工只看「项目名 + 目标设备」：repo 存节点侧标识，节点再用它查本机绝对路径。
+ */
+export function nodeProjectConfigs(config: AppConfig): ProjectConfig[] {
+  const projects: ProjectConfig[] = []
+  for (const device of config.nodes.devices) {
+    for (const project of device.projects) {
+      projects.push({
+        name: project.name,
+        repo: project.key,
+        defaultBranch: project.defaultBranch,
+        node: device.id,
+        nodeProject: project.key,
+      })
+    }
+  }
+  return projects
+}
+
+/** 派工用的项目清单：当前 runtime 的本地项目 + 全部节点项目。 */
+export function dispatchProjectsOf(config: AppConfig): ProjectConfig[] {
+  return [...projectsForRuntime(config), ...nodeProjectConfigs(config)]
 }
 
 /** 写入某个 runtime 的项目清单；orca 同步顶层字段，保持旧配置与旧工具可读。 */
@@ -450,6 +540,7 @@ export function defaultConfig(): AppConfig {
     reply: { ask: { mode: 'auto', allow: 'anyone', timeoutMs: 30 * 60_000 } },
     runtime: { default: 'orca' },
     server: { port: 3083 },
+    nodes: { ...DEFAULT_NODE_SETTINGS, devices: [] },
   }
 }
 
@@ -565,6 +656,21 @@ projects: []
 
 server:
   port: 3083
+
+# 多设备节点：一个中心 Router 调度多台电脑上的 runtime 执行任务。
+# 中心侧登记设备与设备负责的项目；节点侧（ra node）用 nodeId / server / token 声明本机身份。
+# nodes:
+#   enabled: true
+#   mode: direct          # direct = 直连（同内网 / Tailscale）；relay = 自建公网中继
+#   routerId: home        # 中继模式下标识这个中心 Router
+#   devices:
+#     - id: macbook-air
+#       name: MacBook Air
+#       token: "node-secret"      # 节点密钥；与节点侧配置一致
+#       projects:
+#         - name: router-agent    # 中心侧显示名
+#           key: router-agent     # 节点侧项目标识；节点用它查本机绝对路径
+#           defaultBranch: main
 
 # 模型配置必填：baseUrl / model / apiKey 三项缺一不可，未配置时服务启动会直接报错；
 # 也可以在 Web 面板「初始化 · LLM Provider」里填写，或从 Claude Code / CCSwitch / Pi / OpenCode / Magpie 的本地配置导入
@@ -735,6 +841,7 @@ runtime: {
     },
     ...(Object.keys(channelPlugins).length > 0 ? { channels: channelPlugins } : {}),
     server: { port: Number.isFinite(port) && port >= 0 && port < 65536 ? port : base.server.port },
+    nodes: parseNodes(doc.nodes),
     ...(isRecord(doc.llm) ? { llm: parseLlm(doc.llm) } : {}),
   }
   // 群绑定分支始终跟随项目清单，避免 YAML 里残留的自定义分支与面板显示不一致。
@@ -910,6 +1017,48 @@ function parseProjects(value: unknown): ProjectConfig[] {
     })
   }
   return projects
+}
+
+/** 解析多设备节点配置；非法项跳过，不让整份配置启动失败。 */
+function parseNodes(value: unknown): NodeSettings {
+  const base = DEFAULT_NODE_SETTINGS
+  if (!isRecord(value)) return { ...base, devices: [] }
+  const devices: NodeDeviceSettings[] = []
+  for (const item of Array.isArray(value.devices) ? value.devices : []) {
+    if (!isRecord(item)) continue
+    const id = typeof item.id === 'string' ? item.id.trim() : ''
+    if (!id) continue
+    const projects: NodeProjectSettings[] = []
+    for (const project of Array.isArray(item.projects) ? item.projects : []) {
+      if (!isRecord(project)) continue
+      const name = typeof project.name === 'string' ? project.name.trim() : ''
+      if (!name) continue
+      const key = typeof project.key === 'string' && project.key.trim() ? project.key.trim() : name
+      projects.push({
+        name,
+        key,
+        defaultBranch: typeof project.defaultBranch === 'string' ? project.defaultBranch.trim() : '',
+      })
+    }
+    devices.push({
+      id,
+      name: typeof item.name === 'string' && item.name.trim() ? item.name.trim() : id,
+      token: typeof item.token === 'string' ? item.token.trim() : '',
+      projects,
+    })
+  }
+  return {
+    enabled: value.enabled === true,
+    mode: value.mode === 'relay' ? 'relay' : 'direct',
+    routerId: typeof value.routerId === 'string' && value.routerId.trim() ? value.routerId.trim() : base.routerId,
+    nodeId: typeof value.nodeId === 'string' ? value.nodeId.trim() : '',
+    name: typeof value.name === 'string' ? value.name.trim() : '',
+    server: typeof value.server === 'string' ? value.server.trim() : '',
+    relay: typeof value.relay === 'string' ? value.relay.trim() : '',
+    relayToken: typeof value.relayToken === 'string' ? value.relayToken.trim() : '',
+    token: typeof value.token === 'string' ? value.token.trim() : '',
+    devices,
+  }
 }
 
 /**
@@ -1194,6 +1343,7 @@ export function writeConfig(home: string, config: AppConfig): void {
     ...(config.channels && Object.keys(config.channels).length > 0 ? { channels: config.channels } : {}),
     projects: config.projects,
     server: { port: config.server.port },
+    nodes: config.nodes,
   }
   if (config.llm) doc.llm = config.llm
   const header = [
@@ -1273,6 +1423,21 @@ export function publicConfig(config: AppConfig): Record<string, unknown> {
       next[id] = entry
     }
     runtime.options = next
+  }
+  // 节点密钥不下发：面板只看到「配没配」。
+  const nodes = doc.nodes as Record<string, unknown> | undefined
+  if (nodes) {
+    nodes.tokenSet = Boolean(nodes.token)
+    delete nodes.token
+    const devices = nodes.devices
+    if (Array.isArray(devices)) {
+      nodes.devices = devices.map(device => {
+        const entry = { ...(device as Record<string, unknown>) }
+        entry.tokenSet = Boolean(entry.token)
+        delete entry.token
+        return entry
+      })
+    }
   }
   return doc
 }
@@ -1533,6 +1698,16 @@ const ADMISSION_UNLISTED_ADDRESSED = ['explicit', 'inferred', 'ignore']
  * 这样做的好处是 API 永远不会因为面板拼错字段名而把 config.yaml 写成垃圾。
  */
 const CONFIG_VALIDATORS: Record<string, Validator> = {
+  'nodes.enabled': boolValue(),
+  'nodes.mode': enumValue(['direct', 'relay']),
+  'nodes.routerId': stringValue,
+  'nodes.nodeId': stringValue,
+  'nodes.name': stringValue,
+  'nodes.server': stringValue,
+  'nodes.relay': stringValue,
+  'nodes.relayToken': stringValue,
+  'nodes.token': stringValue,
+
   'feishu.appId': stringValue,
   'feishu.reaction': stringValue,
   'feishu.directMessages': boolValue(),
@@ -1921,6 +2096,47 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
     if (path.startsWith('runtime.plugins.')) setRuntimePlugin(config, id, value)
     else setChannelPlugin(config, id, value)
     return true
+  }
+
+  // 多设备节点：`ra config set nodes.<key> <值>`
+  if (path.startsWith('nodes.')) {
+    const key = path.slice('nodes.'.length).trim()
+    switch (key) {
+      case 'enabled': {
+        const v = bool()
+        if (v === null) return false
+        config.nodes.enabled = v
+        return true
+      }
+      case 'mode':
+        if (value !== 'direct' && value !== 'relay') return false
+        config.nodes.mode = value
+        return true
+      case 'routerId':
+        if (!value) return false
+        config.nodes.routerId = value
+        return true
+      case 'nodeId':
+        config.nodes.nodeId = value
+        return true
+      case 'name':
+        config.nodes.name = value
+        return true
+      case 'server':
+        config.nodes.server = value
+        return true
+      case 'relay':
+        config.nodes.relay = value
+        return true
+      case 'relayToken':
+        config.nodes.relayToken = value
+        return true
+      case 'token':
+        config.nodes.token = value
+        return true
+      default:
+        return false
+    }
   }
 
   switch (path) {

@@ -19,10 +19,11 @@ import { noopLogger, errorMessage, type Logger } from '#infra/logger.js'
 import type { IdentityStatusView } from '@router-agent/channel-feishu'
 import type { WorkerStateFile } from '#runtime/report-poller.js'
 import type { ResumeHint } from '#runtime/port.js'
-import { isReplyPayload, type ReplyPayload } from '#core/reply.js'
 import type { WorkspaceAdminPort } from '#runtime/workspaces/overview.js'
 import { PluginInstallStartError, type PluginPackageAdmin } from './plugin-admin.js'
 import { readLogs } from './log-tail.js'
+import { buildReportState } from './report-payload.js'
+import type { NodeApi } from '../node/api.js'
 import type { LogAssistantQuestion, LogAssistantOverview, LogDiagnosis } from './log-assistant.js'
 import { buildIssueBody, type IssueReporter } from './issue-report.js'
 import { getSpec, listSpecs, resetSpec, saveSpec, SpecError } from '../specs/index.js'
@@ -134,6 +135,8 @@ export interface ApiServerOptions {
   logAssistant?: LogAssistantPort
   /** 排查结果一键上报 GitHub issue；缺省时端点返回 404。 */
   issueReporter?: IssueReporter
+  /** 多设备节点端点；缺省时 /api/nodes 返回 404。 */
+  nodeApi?: NodeApi
   /** 请求级异常与配置写入失败的日志出口。 */
   logger?: Logger
   /** 当前进程加载的插件元数据；启动时由 CLI 注入，面板据此展示自定义运行时/通道。 */
@@ -174,6 +177,9 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://localhost')
     const path = url.pathname
+
+    // 节点端点先判：/api/nodes 与 worker 上报同属节点通道。
+    if (opts.nodeApi && await opts.nodeApi.handle(req, res)) return
 
     if (path === '/api/status' && req.method === 'GET') {
       const tickets = opts.store.listTickets({ limit: 500 })
@@ -330,47 +336,9 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
     if (path === '/api/reports' && req.method === 'POST') {
       if (!opts.onReport) return respond(res, 501, { error: 'report-not-supported' })
       const body = (await readJson(req)) as Record<string, any>
-      const ticketId = String(body.ticketId ?? body.ticket_id ?? '')
-      const ticket = opts.store.getTicket(ticketId)
-      if (!ticket) return respond(res, 404, { error: 'ticket-not-found' })
-
-      const assignment = (body.assignmentId ? opts.store.getAssignment(String(body.assignmentId)) : null) ?? opts.store.latestAssignment(ticketId)
-      if (!assignment) return respond(res, 409, { error: 'no-assignment' })
-
-      const state = String(body.state ?? '')
-      if (!['progress', 'ready', 'blocked', 'failed', 'dropped', 'waiting'].includes(state)) {
-        return respond(res, 400, { error: 'invalid-state' })
-      }
-      const summary = String(body.summary ?? '').trim()
-      if (!summary) return respond(res, 400, { error: 'summary-required' })
-
-      // worker 不传 turn 时按已有序号自增，避免同一 turn 的多次回答被幂等键吞掉。
-      const latest = opts.store.latestReport(ticketId)
-      const requestedTurn = Number(body.turn)
-      const turn = Number.isFinite(requestedTurn) && requestedTurn >= 0 ? requestedTurn : (latest?.turn ?? 0) + 1
-      const rawPayload = body.replyPayload
-      if (rawPayload !== undefined && !isReplyPayload(rawPayload)) {
-        return respond(res, 400, { error: 'invalid-reply-payload', message: 'replyPayload 结构不合法' })
-      }
-      const replyPayload = isReplyPayload(rawPayload) ? rawPayload as ReplyPayload : undefined
-      const reply = String(body.reply ?? legacyReply(body.deliverable) ?? replyPayload?.fallbackText ?? '').trim()
-      const uiChange = optionalBoolean(body.uiChange)
-
-      const payload: WorkerStateFile = {
-        ticketId,
-        assignmentId: assignment.id,
-        turn,
-        state: state as WorkerStateFile['state'],
-        summary,
-        ...(body.humanAction ? { humanAction: String(body.humanAction) } : {}),
-        prNumber: Number(body.prNumber ?? 0) || 0,
-        prUrl: String(body.prUrl ?? ''),
-        ...(uiChange !== undefined ? { uiChange } : {}),
-        ...(reply ? { reply } : {}),
-        ...(replyPayload ? { replyPayload } : {}),
-        ackedInputs: Array.isArray(body.ackedInputs) ? body.ackedInputs.map(String) : [],
-        updatedAt: String(body.updatedAt ?? clock.now()),
-      }
+      const outcome = buildReportState(body, opts.store, clock.now())
+      if (!outcome.ok) return respond(res, outcome.status, outcome.body)
+      const payload = outcome.state
 
       try {
         await opts.onReport(payload)
@@ -381,8 +349,9 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         }
         throw error
       }
-      onEvent({ event: 'api:report', ticketId, state, turn, replyChars: reply.length })
-      return respond(res, 201, { ok: true, ticketId, assignmentId: assignment.id, turn, state, reply: Boolean(reply) })
+      const { ticketId, turn, state } = payload
+      onEvent({ event: 'api:report', ticketId, state, turn, replyChars: payload.reply?.length ?? 0 })
+      return respond(res, 201, { ok: true, ticketId, assignmentId: payload.assignmentId, turn, state, reply: Boolean(payload.reply) })
     }
 
     // 已注册的消息通道：面板的「渠道配置」据此列出渠道实例。
@@ -988,14 +957,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
-/** 上报里的三态布尔：true / false / 未声明。字符串兼容旧客户端。 */
-function optionalBoolean(value: unknown): boolean | undefined {
-  if (typeof value === 'boolean') return value
-  if (value === 'true') return true
-  if (value === 'false') return false
-  return undefined
-}
-
 /** 配置面板的读/写都用同一份口径：安全快照 + 默认值 + 配置文件路径。 */
 function configPayload(
   config: AppConfig,
@@ -1129,9 +1090,3 @@ function groupByStage(stages: string[]): Record<string, number> {
   return out
 }
 
-/** 兼容旧版 deliverable：内容 + 链接拼成纯回复。 */
-function legacyReply(raw: unknown): string {
-  if (!raw || typeof raw !== 'object') return ''
-  const value = raw as Record<string, unknown>
-  return [String(value.content ?? '').trim(), String(value.url ?? '').trim()].filter(Boolean).join('\n\n')
-}

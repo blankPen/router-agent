@@ -172,6 +172,10 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 | `feishu.appId` / `reaction` / `directMessages` / `allowed` / `bots` / `botOpenIds` / `botNames` | 字符串、布尔或逗号分隔列表 |
 | `feishu.chats` | 逗号分隔 chat_id；已有条目的 mode / 绑定 / sync 保留，新条目默认 `all` |
 | `llm.baseUrl` / `llm.model` / `llm.apiKey` | 模型连接信息 |
+| `nodes.enabled` / `mode` | `true` / `false`；`direct` / `relay`，见「多设备节点」 |
+| `nodes.routerId` / `nodeId` / `name` | 中心 Router 标识（多中心区分）/ 设备 id（须与中心 `devices[].id` 一致）/ 设备显示名 |
+| `nodes.server` / `relay` / `relayToken` | 中心地址（direct）/ 中继地址（relay）/ 中继接入密钥 |
+| `nodes.token` | 节点密钥；须与中心 `devices[].token` 一致 |
 
 群与项目这类复合结构用专用写法，一次完成「登记 + 绑定」：
 
@@ -312,6 +316,88 @@ orca repo list --json | jq -r '.result.repos[] | "\(.displayName)\t\(.path)\t\(.
 **历史写法**：Orca 的 `name:` / `id:` 选择器（如 `name:teamwork-repos`）不再接受——旧配置仍能读，但保存时会被校验拒绝，请改成上面表格里的绝对路径。
 
 另外，旧版的全局 `repo` 配置已移除（`ra` 不再读取它）。已有配置文件请改成 `projects`，`ra doctor` 会在没有任何项目时直接报错并给出命令。
+
+## 多设备节点
+
+一个中心 Router 调度多台电脑上的 runtime 执行任务：工单池、事件流与消息通道都在中心，
+**项目与 worker 分别在各自的设备上跑**。被调度的设备上不用开任何入站端口——设备主动连回中心。
+
+### 连通方式
+
+| 模式 | 设备怎么连中心 | 适用 |
+|-|-|-|
+| `direct` | 设备直接连中心的 `server.port`（同一内网或 Tailscale IP） | 中心有可达地址，或双方都在 Tailscale / 同一内网 |
+| `relay` | 设备与中心都连自建公网中继，由中继按 `routerId` / `nodeId` 分流转发 | 中心与设备互相都不可达 |
+
+`relay` 模式下的中继服务用 `ra relay` 跑在公网服务器上；它是纯转发，不看工单内容，
+只校验一个接入密钥。
+
+### 中心侧配置
+
+```yaml
+nodes:
+  enabled: true
+  mode: direct          # direct | relay
+  routerId: home        # 中继模式下标识这个中心 Router；多台中心各自一个
+  relay: ""             # 中继模式：中继服务地址，例如 http://relay.example.com:9090
+  relayToken: ""        # 中继接入密钥；与 ra relay --token 一致
+  devices:
+    - id: macbook-air   # 设备 id；设备侧用 nodes.nodeId 对上
+      name: MacBook Air
+      token: "node-secret"   # 节点密钥；设备侧用同一个值
+      projects:
+        - name: router-agent  # 中心侧显示名；用户/模型按它指项目
+          key: router-agent   # 节点侧项目标识；设备用它查本机绝对路径
+          defaultBranch: main
+```
+
+设备登记的项目会并入派工用的项目清单：用户说「在 router-agent 上做 X」时，
+工单会派给绑定了 `router-agent` 的那台设备。
+
+### 设备侧配置
+
+```yaml
+nodes:
+  enabled: true
+  mode: direct
+  nodeId: macbook-air       # 必须是中心 devices 里的 id
+  name: MacBook Air
+  server: "http://100.64.0.2:3083"   # 中心地址（direct 模式）
+  relay: ""                           # 中继地址（relay 模式）
+  relayToken: ""
+  token: "node-secret"                # 节点密钥；与中心一致
+```
+
+设备上还要有自己的项目清单（指向本机绝对路径），派单时设备用 `key` 在这份清单里查路径：
+
+```yaml
+projects:
+  - name: router-agent
+    repo: /Users/pz/dev/router-agent
+    defaultBranch: main
+```
+
+### 命令
+
+```bash
+ra node        # 在这台电脑上跑节点守护进程
+ra nodes       # 看中心登记的设备、在线状态与项目绑定
+ra relay       # 在公网服务器上跑中继服务
+```
+
+也可以用 `ra config set` 改单个字段：
+
+```bash
+ra config set nodes.enabled true
+ra config set nodes.mode relay
+ra config set nodes.server http://100.64.0.2:3083
+```
+
+### 已知边界
+
+- 设备离线时派工会直接失败并转人工，不会静默排队；设备恢复后重新发起即可。
+- 中心不知道设备上的工作目录，PR 状态跟踪依赖 worker 上报里的 PR 链接。
+- 中继模式下 worker 的上报是「先收下、后处理」，证据门禁的拒绝不会同步回传给 worker。
 
 ## 准入规则
 

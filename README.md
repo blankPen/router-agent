@@ -193,6 +193,10 @@ Worker 不在 Router 进程里跑。Router 按 `runtime.default` 选择适配器
 
 ![群与绑定：一个群绑定一个项目，未绑定的群开工前追问](docs/assets/readme/group-binding.png)
 
+### 多设备节点
+
+一个中心 Router 管多台电脑：工单池、事件流、消息通道都在中心，**项目和 worker 各自在所属设备上跑**。被调度的设备不用开任何入站端口，节点主动长连回中心（注册 + 心跳）。连通方式可插拔：同一内网 / Tailscale IP 直接连中心，或中心与设备都连自建公网中继由中继转发。节点用设备密钥鉴权，`ra nodes` 能看到设备在线状态与项目绑定。详见 [docs/CONFIGURATION.md](docs/CONFIGURATION.md#多设备节点)。
+
 ### 从消息到 PR 的闭环
 
 消息 → 研判 → 工单 → 派工 → 上报 → PR 跟踪 → 闭环通知，全链路留痕。对外通知统一走 Outbox（幂等 key + 2s 起步、上限 60s 的指数退避），失败会重试，不会重复轰炸群里。
@@ -300,6 +304,9 @@ ra config edit                                   # 用 $EDITOR 编辑全文
 | `ra reply` | Worker 侧交付：状态、摘要、文本 / 图片 / PR / 文档 / 选择题；服务不可达时落盘 `state.json` |
 | `ra report` | `ra reply` 的旧别名，参数相同，仍可用 |
 | `ra doc` | Worker 侧创建飞书文档并输出链接，长结论写进 `--reply` |
+| `ra node` | 在这台电脑上跑节点守护进程：注册到中心、领任务、用本机 runtime 执行 |
+| `ra nodes` | 看中心登记的设备、在线状态与项目绑定 |
+| `ra relay` | 在公网服务器上跑中继服务，供中心与设备互相不可达时转发 |
 
 全局选项 `--home <dir>` 可切换状态目录（测试与多实例用）。上报协议与字段细节见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#上报协议)。
 

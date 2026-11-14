@@ -1,5 +1,5 @@
 import type { AppConfig, ChatBinding, ProjectConfig } from '../config.js'
-import { projectsForRuntime } from '../config.js'
+import { dispatchProjectsOf } from '../config.js'
 import type { DispatchDraft } from '#core/model.js'
 
 /** 草稿的默认有效期：半小时内没补齐就当作新会话。 */
@@ -58,7 +58,7 @@ export interface DispatchResolution {
 /** 配置折算成派工设置：项目清单按当前默认后端隔离；群绑定直接来自 feishu.chats 里带 repo 的条目。 */
 export function dispatchSettingsOf(config: AppConfig): DispatchSettings {
   return {
-    projects: projectsForRuntime(config),
+    projects: dispatchProjectsOf(config),
     bindings: config.feishu.chats
       .filter(chat => chat.repo)
       .map(chat => ({ chat: chat.chat, repo: chat.repo, branch: chat.branch })),

@@ -13,6 +13,7 @@ import { WorkerRuntimeError, type WorkerRuntime, type WorkerContext, type Sessio
 import { AgentLoop } from './router/agent-loop.js'
 import type { DecisionAudit, DecisionEngine } from './router/decision-engine.js'
 import { dispatchSettingsOf } from './router/dispatch.js'
+import type { NodeCenter } from './node/center.js'
 import type { IntakeEngine } from './router/intake-engine.js'
 import type { IntakeChatSettings } from './router/intake-flow.js'
 import { createRepoPathResolver } from './router/repo-paths.js'
@@ -20,7 +21,8 @@ import { ReportPoller, appendEvent, readWorkerMeta, type WorkerMeta, type Worker
 import { classifyAgentStatus } from '#runtime/status.js'
 import { RuntimeRegistry } from '#runtime/registry.js'
 import { normalizeRuntimeId, ORCA_RUNTIME_ID } from '#runtime/runtimes/catalog.js'
-import { buildNeutralContract, buildWorkerBrief, buildWorkerPrompt, ensureWorkerSkillDir, workerSkillDir, workerSkillSnapshot, type WorkerSkillSnapshot } from '#runtime/spec/index.js'
+import { nodeRuntimeId } from '#core/node.js'
+import { buildWorkerContractText, ensureWorkerSkillDir, workerSkillDir, workerSkillSnapshot, type WorkerSkillSnapshot } from '#runtime/spec/index.js'
 import { migrateLegacySoul } from './specs/index.js'
 import { workBranch } from '#runtime/naming.js'
 import { buildResumeHint } from '#runtime/resume.js'
@@ -108,6 +110,8 @@ export interface RouterServiceOptions {
   onTrigger?: (trigger: Trigger) => void
   /** Claude Code 会话记录目录；默认 ~/.claude/projects，测试可注入。 */
   claudeProjectsDir?: string
+  /** 多设备节点中心；传了才把节点项目派到远端设备执行。 */
+  nodeCenter?: NodeCenter
 }
 
 /** 进展游标的起点标记：表示「从派工这一刻开始」，之前没有需要同步的报告。 */
@@ -538,6 +542,8 @@ export class RouterService {
   private staleAfterMs: number
   /** Claude Code 会话记录目录；用于给 Orca 工单补 sessionId。 */
   private claudeProjectsDir?: string
+  /** 多设备节点中心；只在装配了节点能力时存在。 */
+  private nodeCenter?: NodeCenter
   private idle = new Map<string, { turn: number; nudgedAt: number | null; stale: boolean; blocked?: boolean; transferred?: boolean }>()
   private ticking = false
   /** 每条输入已经投递过几次；用于区分并发去重与串行重投。 */
@@ -588,6 +594,7 @@ export class RouterService {
     this.idleAfterMs = opts.idleAfterMs ?? 120_000
     this.staleAfterMs = opts.staleAfterMs ?? 300_000
     this.claudeProjectsDir = opts.claudeProjectsDir
+    this.nodeCenter = opts.nodeCenter
     this.progressSyncMs = opts.config.progress?.syncMs ?? 60_000
     this.progressProbeMs = opts.config.progress?.probeMs ?? 120_000
     this.progressSilenceMs = opts.config.progress?.silenceMs ?? 600_000
@@ -1173,9 +1180,13 @@ export class RouterService {
   private async launch(ticket: Ticket): Promise<Assignment> {
     // 旧工单沿用创建时的运行时；新工单用默认运行时。
     const latest = this.store.latestAssignment(ticket.id)
+    // 节点项目的工单派到远端设备，用该设备的远端运行时。
+    const target = this.nodeCenter?.targetOf(ticket.repo) ?? null
     const runtimeId = latest?.runtimeId && this.runtimes.has(latest.runtimeId)
       ? normalizeRuntimeId(latest.runtimeId)
-      : this.runtimes.default().id
+      : target
+        ? nodeRuntimeId(target.nodeId)
+        : this.runtimes.default().id
     const runtime = this.runtimes.get(runtimeId)
     const assignment = this.engine.startAssignment(ticket.id, {
       runtimeId,
@@ -1200,49 +1211,28 @@ export class RouterService {
     const skillDir = skillMode === 'path' ? ensureWorkerSkillDir(this.config.home) : undefined
     const skill = skillDir ? workerSkillSnapshot(this.config.home) : undefined
     // inline 是回滚开关：旧会话仍能拿到完整手册，行为与拆分前一致。
-    const contract = skillMode === 'path'
-      ? buildWorkerBrief({
-          ticketId: ticket.id,
-          title: ticket.title,
-          scope,
-          ...(ticket.request ? { request: ticket.request } : {}),
-          ...(ticket.requestActorName ? { requestActorName: ticket.requestActorName } : {}),
-          ...(ticket.requestAt ? { requestAt: ticket.requestAt } : {}),
-          repo: ticket.repo,
-          branch: ticket.branch,
-          workBranch: branchName,
-          workdir: '',
-          workerDir,
-          skillDir: skillDir ?? workerSkillDir(this.config.home),
-          ...(skill ? { skill: { name: skill.name, version: skill.version, sha256: skill.sha256 } } : {}),
-          ...(ticket.request ? { requestPath: join(workerDir, 'request.md') } : {}),
-          attachments: ticket.attachments ?? [],
-        })
-      : runtime.id === ORCA_RUNTIME_ID
-        ? buildWorkerPrompt({
-            ticket,
-            mandateScope: scope,
-            statePath,
-            eventsPath,
-            repo: ticket.repo,
-            branch: ticket.branch,
-            workBranch: branchName,
-            workdir: '',
-            home: this.config.home,
-          })
-        : buildNeutralContract({
-            ticketId: ticket.id,
-            title: ticket.title,
-            scope,
-            repo: ticket.repo,
-            branch: ticket.branch,
-            workBranch: branchName,
-            workdir: '',
-            statePath,
-            eventsPath,
-            attachments: ticket.attachments ?? [],
-            home: this.config.home,
-          })
+    const contract = buildWorkerContractText({
+      skillMode,
+      runtimeId: runtime.id,
+      ticketId: ticket.id,
+      title: ticket.title,
+      scope,
+      ...(ticket.request ? { request: ticket.request } : {}),
+      ...(ticket.requestActorName ? { requestActorName: ticket.requestActorName } : {}),
+      ...(ticket.requestAt ? { requestAt: ticket.requestAt } : {}),
+      repo: ticket.repo,
+      branch: ticket.branch,
+      workBranch: branchName,
+      workdir: '',
+      statePath,
+      eventsPath,
+      workerDir,
+      ...(skillDir ? { skillDir } : {}),
+      ...(skill ? { skill: { name: skill.name, version: skill.version, sha256: skill.sha256 } } : {}),
+      ...(ticket.request ? { requestPath: join(workerDir, 'request.md') } : {}),
+      attachments: ticket.attachments ?? [],
+      home: this.config.home,
+    })
     // 原话可能很长，落盘一份供 worker 读全文。
     if (ticket.request) {
       try {

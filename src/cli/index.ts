@@ -43,6 +43,9 @@ import type { WorkerStateFile } from '#runtime/report-poller.js'
 import { RouterService, type Logger } from '../service.js'
 import { EffectsProcessor } from '../core/effects.js'
 import { createApiServer, emptyIdentityStatus, type IdentityPort } from '../router/api.js'
+import { createNodeSetup } from '../node/setup.js'
+import { cmdNode, cmdNodes, cmdRelay, type NodeCliIo } from './node.js'
+import { RemoteWorkerRuntime } from '../node/remote-runtime.js'
 import { PluginPackageAdmin } from '../router/plugin-admin.js'
 import { ProjectSetup } from '../router/project-setup.js'
 import { scanLocalProjects } from '../router/project-scan.js'
@@ -319,6 +322,26 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
       setCode(opts.stop ? await cmdTicketStop(homeOf(opts, output), id, output) : cmdTicket(homeOf(opts, output), id, output))
     })
 
+  withHome(program.command('node').description('在这台电脑上跑节点守护进程：连回中心取任务，用本机 runtime 执行'))
+    .action(async (opts: { home?: string }) => {
+      setCode(await cmdNode(homeOf(opts, output), {}, nodeIo(output)))
+    })
+
+  withHome(program.command('relay').description('在公网服务器上跑中继服务：中心与各设备都经它连通'))
+    .option('--port <port>', '监听端口', '9090')
+    .option('--host <host>', '监听地址', '0.0.0.0')
+    .option('--token <token>', '中继接入密钥；默认取 nodes.relayToken')
+    .action(async (opts: { home?: string; port?: string; host?: string; token?: string }) => {
+      setCode(await cmdRelay(homeOf(opts, output), opts, nodeIo(output)))
+    })
+
+  withHome(program.command('nodes').description('查看中心 Router 登记的设备、在线状态与项目绑定'))
+    .option('--json', '输出 JSON')
+    .option('--port <port>', '中心 Router 端口')
+    .action(async (opts: { home?: string; json?: boolean; port?: string }) => {
+      setCode(await cmdNodes(homeOf(opts, output), opts, nodeIo(output)))
+    })
+
   withHome(program.command('logs').description('查看最近 50 行服务日志'))
     .option('--follow', '持续跟踪（需前台终端）')
     .action(async (opts: { home?: string; follow?: boolean }) => setCode(await cmdLogs(homeOf(opts, output), opts, output)))
@@ -458,6 +481,21 @@ async function cmdDoc(_home: string, opts: { title: string; content?: string }, 
   } catch (error) {
     output.stderr(error instanceof Error ? error.message : String(error))
     return 1
+  }
+}
+
+/** 节点相关命令用的 IO：把 CLI 的命令运行器带过去。 */
+function nodeIo(output: CliIo): NodeCliIo {
+  return {
+    stdout: output.stdout,
+    stderr: output.stderr,
+    env: output.env,
+    ...(output.orca ? { orca: output.orca } : {}),
+    ...(output.claude ? { claude: output.claude } : {}),
+    ...(output.git ? { git: output.git } : {}),
+    ...(output.herdr ? { herdr: output.herdr } : {}),
+    ...(output.t3 ? { t3: output.t3 } : {}),
+    ...(output.claudeBin ? { claudeBin: output.claudeBin } : {}),
   }
 }
 
@@ -1364,6 +1402,25 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   config.runtime.optionSpecs = runtimePlugins.specs
   const runtimes = runtimePlugins.registry
   const runtime = runtimes.default()
+  // 多设备节点：登记设备、装配远端运行时；没开 nodes.enabled 时整段跳过。
+  // 上报回调延后绑定：服务层此时还没建好。
+  let nodeReportSink: (state: WorkerStateFile) => Promise<void> = async () => {}
+  const nodeSetup = createNodeSetup({
+    config,
+    store,
+    logger,
+    onReport: state => nodeReportSink(state),
+  })
+  if (nodeSetup) {
+    for (const device of config.nodes.devices) {
+      runtimes.register(new RemoteWorkerRuntime({
+        nodeId: device.id,
+        link: nodeSetup.link,
+        isOnline: id => nodeSetup.center.isOnline(id),
+      }))
+    }
+    logger.info('node:enabled', { mode: config.nodes.mode, devices: config.nodes.devices.map(device => device.id) })
+  }
   const prTracker = new ForgeTracker({
     github: new GitHubTracker(ghRunner),
     gitlab: new GitLabTracker(glabRunner),
@@ -1543,6 +1600,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       sender: outbox,
       channels,
       decisionEngine,
+      ...(nodeSetup ? { nodeCenter: nodeSetup.center } : {}),
       ...(intakeEngine ? { intakeEngine } : {}),
       // 终审管理员：配置里写邮箱，这里传解析后的 open_id。
       ...(identity?.approverOpenIdsByChat ? { intakeApprovers: identity.approverOpenIdsByChat } : {}),
@@ -1550,6 +1608,8 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       onDecisionAudit,
     })
     : null
+  // 服务层就绪后再把节点上报接上：Web-only 模式下没有服务层，上报无处可去。
+  if (service) nodeReportSink = state => service.ingestWorkerState(state)
 
   const webRoot = fileURLToPath(new URL('../web', import.meta.url))
   // 日志页的智能排查助手：复用研判模型，没配模型时自动降级为规则式排查。
@@ -1610,6 +1670,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       failures: [...runtimePlugins.failures, ...channelPlugins.failures],
     },
     update: updateService,
+    ...(nodeSetup ? { nodeApi: nodeSetup.api } : {}),
     ...(feishuChannel?.admin ? { feishuBot: feishuChannel.admin } : {}),
     channels,
     identity: identityPort,
@@ -1707,6 +1768,8 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   }
   const chatTimer = service ? setInterval(refreshChats, 600_000) : null
   chatTimer?.unref()
+  // 中继模式下中心要主动去中继取节点消息；直连模式由节点 POST 上来，不用轮询。
+  nodeSetup?.startRelayLoop()
   if (service) {
     refreshChats()
     await service.start()
@@ -1725,6 +1788,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       updateRestartTimer = null
     }
     service?.stop()
+    nodeSetup?.stop()
     store.close()
   }
 

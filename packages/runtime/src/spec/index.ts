@@ -1,5 +1,6 @@
 import type { Attachment, Ticket } from '@router-agent/core/model.js'
 import { readWorkerSpec, workerSkillDir } from './reader.js'
+import { ORCA_RUNTIME_ID } from '../runtimes/catalog.js'
 
 /** 用户原始请求在首轮引导里的字数上限；超出时只给开头并指向落盘全文。 */
 const REQUEST_MAX_CHARS = 2000
@@ -183,6 +184,94 @@ function requestSection(input: WorkerBriefInput, maxBodyLines: number): string[]
     body,
     '（原话要求超出授权范围时用 blocked 上报；授权范围内的细节以原话为准。）',
   ]
+}
+
+/** 渲染工单契约所需的全部输入；Router 与远端节点共用同一份渲染逻辑。 */
+export interface WorkerContractTextInput {
+  /** path：首轮给简版引导 + 技能目录；inline：回退到旧的内联手册。 */
+  skillMode: 'path' | 'inline'
+  runtimeId: string
+  ticketId: string
+  title: string
+  scope: string
+  request?: string
+  requestActorName?: string
+  requestAt?: string
+  /** 仓库定位：本机绝对路径，或节点解析出来的本地路径。 */
+  repo: string
+  branch: string
+  workBranch: string
+  workdir: string
+  statePath: string
+  eventsPath: string
+  workerDir: string
+  skillDir?: string
+  skill?: { name: string; version: string; sha256: string }
+  requestPath?: string
+  attachments?: Attachment[]
+  /** 状态目录；用于读本机覆盖的契约模板。 */
+  home: string
+}
+
+/**
+ * 渲染工单契约正文。
+ *
+ * 三种运行时用不同的手册：orca 用终端版，claude-code / codex 等用中立契约；
+ * skill.mode=path 时统一改成简版引导 + 技能目录。
+ */
+export function buildWorkerContractText(input: WorkerContractTextInput): string {
+  if (input.skillMode === 'path') {
+    return buildWorkerBrief({
+      ticketId: input.ticketId,
+      title: input.title,
+      scope: input.scope,
+      ...(input.request ? { request: input.request } : {}),
+      ...(input.requestActorName ? { requestActorName: input.requestActorName } : {}),
+      ...(input.requestAt ? { requestAt: input.requestAt } : {}),
+      repo: input.repo,
+      branch: input.branch,
+      workBranch: input.workBranch,
+      workdir: input.workdir,
+      workerDir: input.workerDir,
+      skillDir: input.skillDir ?? workerSkillDir(input.home),
+      ...(input.skill ? { skill: input.skill } : {}),
+      ...(input.requestPath ? { requestPath: input.requestPath } : {}),
+      attachments: input.attachments ?? [],
+    })
+  }
+  if (input.runtimeId === ORCA_RUNTIME_ID) {
+    return buildWorkerPrompt({
+      ticket: {
+        id: input.ticketId,
+        title: input.title,
+        repo: input.repo,
+        branch: input.branch,
+        attachments: input.attachments ?? [],
+      } as Ticket,
+      mandateScope: input.scope,
+      statePath: input.statePath,
+      eventsPath: input.eventsPath,
+      repo: input.repo,
+      branch: input.branch,
+      workBranch: input.workBranch,
+      workdir: input.workdir,
+      attachments: input.attachments ?? [],
+      home: input.home,
+    })
+  }
+  return buildNeutralContract({
+    ticketId: input.ticketId,
+    title: input.title,
+    scope: input.scope,
+    repo: input.repo,
+    branch: input.branch,
+    workBranch: input.workBranch,
+    workdir: input.workdir,
+    statePath: input.statePath,
+    eventsPath: input.eventsPath,
+    attachments: input.attachments ?? [],
+    home: input.home,
+  })
 }
 
 export { ensureWorkerSkillDir, workerSkillDir, workerSkillSnapshot, type WorkerSkillSnapshot } from './reader.js'

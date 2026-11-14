@@ -26,5 +26,8 @@ Router 在 `server.port`（默认 3083）上提供本地 HTTP API，供 Web 面�
 | POST | `/api/projects/inspect` | 识别目录是否为 Git 仓库、当前分支与 origin |
 | POST | `/api/projects/register` | 本地项目登记（Orca 运行时执行 `orca repo add`） |
 | POST | `/api/projects/clone` | Git 项目：clone 到 `<RA_HOME>/repos` 并按需登记 Orca |
+| GET | `/api/nodes` | 多设备节点列表：设备 id、显示名、在线状态、可用运行时、登记的项目与在执行工单 |
+| POST | `/api/nodes/message` | 节点 → 中心：注册或回传 worker 上报（`{ nodeId, token, message }`） |
+| POST | `/api/nodes/poll` | 节点长轮询：取中心派来的任务与后续输入（`{ nodeId, token }`） |
 
 `/api/reports` 的请求体与状态语义见 [ARCHITECTURE.md · 上报协议](ARCHITECTURE.md#上报协议)；配置补丁的字段白名单见 [CONFIGURATION.md](CONFIGURATION.md)。请求体可带 `uiChange: true|false` 显式声明是否改了 UI；门禁档位为 `enforce` 且证据不足时返回 422（`error: evidence-missing` + `message` + `missing`）。

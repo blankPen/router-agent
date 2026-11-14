@@ -21,6 +21,11 @@ export class RuntimeRegistry {
     return runtime
   }
 
+  /** 启动后再挂一个运行时；多设备的远端运行时是启动后才装配的。 */
+  register(runtime: WorkerRuntime): void {
+    this.runtimes.set(normalizeRuntimeId(runtime.id), runtime)
+  }
+
   has(id: string): boolean {
     return this.runtimes.has(normalizeRuntimeId(id))
   }

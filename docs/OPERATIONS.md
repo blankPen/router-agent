@@ -112,6 +112,24 @@ Router 不做对话，只在必要时说话：
 | `launch:skill-meta-failed` | Service | `workdir` `detail` | 技能指纹合并进运行时 `meta.json` 失败；不影响已启动的 worker |
 | `launch:request-write-failed` | Service | `ticketId` `message` | 用户原话落盘 `request.md` 失败；首轮仍带截断后的原文 |
 | `launch:failed` | Service | `ticketId` `title` `repo` `branch` `attempt` `reason` `hint` | 派工失败，已转人工并通知发起人；`hint` 是给用户的处置建议（运行时没给就退回通用的仓库/分支兜底） |
+| `node:enabled` | CLI | `mode` `devices` | 装配了多设备节点；`mode` 是 `direct`（直连）或 `relay`（中继） |
+| `node:registered` | NodeCenter / NodeAgent | `node` `name` `runtimes` `projects` | 设备注册成功；中心侧记设备身份与它登记的项目，设备侧记自己声明的运行时与项目 |
+| `node:auth-failed` | NodeApi | `node` `path` | 节点密钥不对，请求被拒（401） |
+| `node:project-unmatched` | NodeCenter | `node` `project` `detail` | 中心排给该设备的项目，设备没有登记同名项目；派单时会因无法映射本地路径而失败 |
+| `node:task-started` | NodeAgent | `node` `ticketId` `runtime` `project` | 设备用本机 runtime 启动了远端工单 |
+| `node:task-failed` | NodeAgent | `node` `ticketId` `message` | 设备启动本机 worker 失败，已把失败原因回报中心 |
+| `node:project-missing` | NodeAgent | `node` `ticketId` `project` | 设备上没有这个项目，无法执行；已回报中心转人工 |
+| `node:delivered` | NodeAgent | `node` `ticketId` `inputs` | 后续输入已投给设备上的 worker |
+| `node:delivery-dropped` | NodeAgent | `node` `ticketId` `reason` | 本机没有对应 worker，后续输入被丢弃 |
+| `node:report-received` | NodeCenter | `node` `ticketId` `turn` `state` | 收到设备回传的 worker 上报 |
+| `node:report-rejected` | NodeCenter | `node` `message` | 设备回传的上报被 UI 证据门禁拒绝；中继模式下 worker 收不到同步应答，靠这条日志与飞书通知兜住 |
+| `node:report-forward-failed` | NodeAgent | `message` | 本机 worker 的上报没能转给中心；worker 会退回写 `state.json` |
+| `node:report-listening` | NodeAgent | `node` `port` | 节点本机开始接收 worker 的 `ra reply` |
+| `node:report-listen-failed` | NodeAgent | `port` `message` | 本机上报端口被占用；worker 的 `ra reply` 会退回写 `state.json`，节点照样能捡起来 |
+| `node:state-poll-failed` / `node:state-forward-failed` | NodeAgent | `ticketId` `message` | 本机 `state.json` 读取或转发失败 |
+| `node:poll-failed` | NodeAgent | `message` | 向中心取任务失败，节点会退避后重试 |
+| `node:relay-poll-failed` | NodeCenter | `message` | 从中继取节点消息失败，中心会退避后重试 |
+| `node:relayed-message-failed` | NodeCenter | `node` `message` | 中继转来的消息处理失败 |
 | `input:queued` | Engine | `ticketId` `seq` `text` | Router 准备发给 worker 的内容 |
 | `input:deduped` | Engine | `ticketId` `inputId` `seq` `kind` `sourceKey` | 同一条来源消息重复到达（飞书重投 / 面板再点一次），复用已有输入，没有重复投给 worker |
 | `input:delivered` | Service | `ticketId` `count` `inputIds` `text` | 实际投递进 worker 终端的输入；`inputIds` 是这轮真正送出的输入 id |
