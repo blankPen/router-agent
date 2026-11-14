@@ -7,7 +7,7 @@ import { Engine } from '../src/core/engine.js'
 import { RouterService, extractTerminalSnippet, extractSessionSnippet, formatProbeMessage } from '../src/service.js'
 import { claudeProjectSlug } from '#runtime/agents/claude.js'
 import { defaultConfig, policyOf, type AppConfig, chatEntry } from '../src/config.js'
-import { DEFAULT_ADMISSION } from '#core/policy.js'
+import { } from '#core/policy.js'
 import type {
   WorkerRuntime,
   WorkerContext,
@@ -199,7 +199,7 @@ describe('运行时机制', () => {
     store = new Store(':memory:')
     config = { ...defaultConfig(), home }
     config.projects = [{ name: 'acme/web', repo: 'acme/web', defaultBranch: 'main' }]
-    config.policy = { acceptMode: 'auto', maxWorkers: 4, admission: { ...DEFAULT_ADMISSION }, interruptedRecovery: 'auto', maxAutoRecover: 1 }
+    config.policy = { acceptMode: 'auto', maxWorkers: 4, interruptedRecovery: 'auto', maxAutoRecover: 1 }
     config.feishu = { ...config.feishu, chats: [chatEntry('oc_dev')], allowed: ['ou_alice'] }
     let n = 0
     engine = new Engine({ store, policy: policyOf(config), clock: { now: () => new Date(now).toISOString() }, ids: { next: p => `${p}_${++n}` } })

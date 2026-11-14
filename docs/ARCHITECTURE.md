@@ -24,29 +24,48 @@ WorkerRuntime 端口 ── OrcaRuntime（默认）/ ClaudeCodeRuntime / AcpRunt
 
 运行时的差异与选型见 [RUNTIME.md](RUNTIME.md)。
 
-某个群开启「需求分析助手」（`feishu.chats[].intake.enabled`）后，Router 与 Worker 之间多一条**并行**的能力链：
+消息进来先分角色：**管理员**直进 Router，**普通成员**先进决策层。管理员 =
+默认管理员（`feishu.allowed`）+ 群内扩充（`feishu.chats[].allowed`）。群级
+`feishu.chats[].scope` 决定这个群接谁的话：仅接受管理员消息 / 接受普通用户 @ 消息 /
+接受所有消息。
 
 ```text
-群消息（普通成员，可不 @）
-        │
-        ▼
-IntakeCoordinator ── 初筛（轻量 LM）── chat / question / issue
-        │                                   │
-        │ question / issue                  │ chat → 静默忽略
-        ▼
-PiIntakeEngine（只读项目代码：code_ls / code_read / code_grep）
-        │ 多轮追问，补齐场景 / 环境 / 复现步骤 / 影响 / 预期
-        ▼
-结构化需求单 ──@管理员终审── 确认派单 → 原有 Engine.decide() → WorkerRuntime
-                              └─ 驳回 / 补要求 → 结束 / 重新分析
+群消息
+  │
+  ├─ 管理员（默认管理员 + 群内扩充）
+  │      │
+  │      ▼
+  │   Router（Pi 研判 + 需求分级）
+  │      ├─ 闲聊 / 咨询 ──────────────→ 直接回复
+  │      ├─ 工单相关 ────────────────→ 工单工具（查进度 / 关单 / 回收 workspace）
+  │      ├─ 一句话或明确的需求 ──────→ 直接开单
+  │      └─ 模糊或复杂的需求 ────────→ 澄清会话（见下），聊清楚后直接开单
+  │
+  └─ 普通成员（其余所有人）
+         │
+         ▼
+      决策层（确定性准入 + Jev / LLM 分类）
+         ├─ 不跟进 / 闲聊 ──────────→ 忽略
+         ├─ 咨询 ───────────────────→ 咨询会话，直接给结论
+         └─ 需求 ───────────────────→ 需求会话 → @管理员终审 → Engine.decide() → WorkerRuntime
 ```
 
-这条链**不改原有架构**：Router 仍只调度与收尾，读代码与业务判断全部落在子 Agent；派单仍只经 `Engine.decide()`；权限、项目隔离、五阶段工单、Outbox 与 PR 闭环一行不改。详见 [CONFIGURATION.md](CONFIGURATION.md#需求分析助手群级-intake)。
+两条链共用同一个需求会话机制（`IntakeCoordinator` + `PiIntakeEngine`，只读项目代码：
+`code_ls` / `code_read` / `code_grep`），差别只在收尾：
+
+- **管理员发起的澄清会话**：讨论清楚后直接开单，发起人就是管理员，不需要再等终审；
+- **普通成员的需求会话**：整理成结构化需求单 @终审管理员，管理员回「确认派单」才走原有 `Engine.decide()`，回「驳回」结束。
+
+工具权限按角色分层，在工具层强制：管理员拿全套（`router_ticket*` / `router_ticket_close` /
+`router_workspace_remove` / `router_decide` …），普通成员只有只读上下文工具 `router_context`，
+拿不到任何工单能力。
+
+这条链**不改原有架构**：Router 仍只调度与收尾，读代码与业务判断全部落在子 Agent；派工仍只经 `Engine.decide()`；项目隔离、五阶段工单、Outbox 与 PR 闭环一行不改。详见 [CONFIGURATION.md](CONFIGURATION.md#处理普通成员消息群级-members)。
 
 ## 一条消息的四个步骤
 
 1. **听**：常驻消费飞书群 / 私聊消息，按名单与 `@` 规则做确定性准入。
-2. **判**：未被直接指派的候选交给 Pi 研判（可批量），输出 `accept / stop / ignore / unavailable` 四类决定。
+2. **判**：按角色分流——普通成员交给决策层（Jev / LLM 分类）决定要不要跟进；管理员的消息交给 Pi 研判（可批量），输出 `accept / stop / ignore / unavailable` 四类决定，需要先讨论的需求用 `clarify` 标记。
 3. **派**：接单后创建工单与授权（Mandate），先确认「项目 + 起始分支」，再按 `runtime.default` 选择运行时：Orca 用 `orca worktree create --repo ... --base-branch ...` 开 worktree + Agent 终端（默认 Claude Code，可用 `runtime.options.orca.agent` 指定）；Claude Code 用 `git worktree` + `claude --bg` 后台会话；ACP 用 `AcpRuntime` 拉起对应的 ACP Agent。缺项目或分支时不开单，先在会话里追问（群配置里可固定项目和分支，免问答）。
 4. **跟**：Worker 用 `ra report` 上报（失败自动落盘 `state.json`），Router 刷新工单阶段；PR 合并 / 关闭后通知发起人，工单保持开放、可继续追问。
 
@@ -140,14 +159,17 @@ feishu:
 
 绑定后该群开工不再追问项目；项目配了默认分支时也不再追问分支。没写 `repo` 的群仍会按规则追问。
 
-**群级白名单**：`allowed` 非空时，这个群**只有名单内的人能触发**——名单外的人 @ 机器人也会被静默忽略（不进研判、不回复、不开单），并且覆盖全局 `feishu.allowed`。
+**群消息范围**：`feishu.chats[].scope` 决定这个群接谁的话——`admins`（仅接受管理员消息）/
+`mention`（接受普通用户 @ 消息）/ `all`（接受所有消息）。范围之外的消息在通道层就被丢掉，
+不进研判、不回复、不开单。
 
 ```bash
-ra config set chatAllow.oc_xxx "ou_alice,ou_bob"
-ra config set chatAllow.oc_xxx ""          # 清空，回到全局 allowed
+ra config set chatScope.oc_xxx mention     # admins / mention / all
+ra config set chatAllow.oc_xxx "ou_alice,ou_bob"   # 本群管理员扩充
+ra config set chatAllow.oc_xxx ""          # 清空，只留默认管理员
 ```
 
-> 注意：全局 `feishu.allowed` 只区分「显式 / 推断」，名单外的人 @ 机器人默认仍可能被研判接单；要严格限制某群人，请用群级 `allowed`。
+> 注意：群级 `allowed` 只在默认管理员（`feishu.allowed`）之上扩充，不覆盖它；默认管理员在任何一个群里都还是管理员。
 
 项目清单与仓库选择见 [CONFIGURATION.md](CONFIGURATION.md#项目与仓库选择)。
 

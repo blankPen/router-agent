@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { Value } from 'typebox/value'
-import { DECISION_TOOL_NAMES, ROUTER_TOOL_SPECS, toolSpec } from '../../src/router/tool-spec.js'
+import { DECISION_TOOL_NAMES, ROUTER_TOOL_AUTHZ, ROUTER_TOOL_SPECS, toolSpec } from '../../src/router/tool-spec.js'
+import { allowedTools } from '#core/tool-scope.js'
 
 describe('Pi 工具契约（TypeBox）', () => {
   it('暴露读、查、清理与决定四类工具', () => {
     const expected = [
+      'router_context',
       'router_decide',
       'router_read',
       'router_ticket',
@@ -26,6 +28,31 @@ describe('Pi 工具契约（TypeBox）', () => {
     for (const spec of ROUTER_TOOL_SPECS) {
       expect((spec.parameters as { type?: string }).type).toBe('object')
       expect(spec.description.length).toBeGreaterThan(0)
+    }
+  })
+
+  it('普通成员只有只读上下文工具，管理员拿全套', () => {
+    expect(allowedTools('member-analysis-read', ROUTER_TOOL_AUTHZ)).toEqual(['router_context'])
+    expect(allowedTools('admin-full', ROUTER_TOOL_AUTHZ)).toEqual(ROUTER_TOOL_SPECS.map(spec => spec.name))
+  })
+
+  it('工单查看、历史开单、回收 workspace 都只给管理员', () => {
+    const adminOnly = ROUTER_TOOL_SPECS
+      .filter(spec => spec.requires === 'admin')
+      .map(spec => spec.name)
+      .sort()
+    expect(adminOnly).toEqual([
+      'router_decide',
+      'router_read',
+      'router_ticket',
+      'router_ticket_close',
+      'router_ticket_list',
+      'router_ticket_progress',
+      'router_update',
+      'router_workspace_remove',
+    ])
+    for (const name of adminOnly) {
+      expect(allowedTools('member-analysis-read', ROUTER_TOOL_AUTHZ)).not.toContain(name)
     }
   })
 

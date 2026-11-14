@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { Store } from '../../src/store/db.js'
 import { Engine, type Clock, type IdGen } from '../../src/core/engine.js'
 import type { Trigger } from '#core/model.js'
-import { DEFAULT_ADMISSION, type Policy } from '#core/policy.js'
+import { type Policy } from '#core/policy.js'
 
 class FixedClock implements Clock {
   constructor(private value: string) {}
@@ -28,8 +28,6 @@ const policy: Policy = {
   maxWorkers: 4,
   allowed: ['ou_alice'],
   bots: [],
-  admission: DEFAULT_ADMISSION,
-  receiveAll: true,
 }
 
 function makeTrigger(over: Partial<Trigger> = {}): Trigger {

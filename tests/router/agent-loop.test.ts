@@ -12,7 +12,7 @@ import type {
 import { proposalFromJson } from '../../src/router/decision-engine.js'
 import { extractJsonObject } from '../../src/router/model-config.js'
 import type { Trigger } from '#core/model.js'
-import { DEFAULT_ADMISSION, effectiveAllowed, effectiveAllowedByChat, type Policy } from '#core/policy.js'
+import { admitsByScope, effectiveAdmins, scopeOf, type Policy } from '#core/policy.js'
 import { chatEntry } from '../../src/config.js'
 import { normalizeFeishuEventDetailed, type FeishuConfig, type UnaddressedContext } from '@router-agent/channel-feishu'
 import type { DispatchSettings } from '../../src/router/dispatch.js'
@@ -86,8 +86,7 @@ const policy: Policy = {
   maxWorkers: 4,
   allowed: ['ou_alice'],
   bots: [],
-  admission: DEFAULT_ADMISSION,
-  receiveAll: true,
+  
 }
 
 const ACCEPT = (title = '延长登录超时到 30 秒'): FakeResponse => ({ content: JSON.stringify({ decision: 'accept', reason: '明确的可执行请求', title, scope: '只调整登录超时配置' }), toolCalls: [] })
@@ -567,8 +566,8 @@ describe('多项目 / 多分支派工', () => {
   })
 })
 
-describe('群级白名单', () => {
-  it('群白名单外的人 @bot：直接忽略，不调模型也不回复', async () => {
+describe('群级管理员与消息范围', () => {
+  it('群名单只扩充不覆盖：默认管理员在群里仍是管理员', async () => {
     const dispatch: DispatchSettings = { projects: [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }], bindings: [] }
     const { engine, loop, llm, store } = setup([], dispatch)
     engine.updatePolicy({ ...policy, allowedByChat: { oc_dev: ['ou_other'] } })
@@ -576,29 +575,38 @@ describe('群级白名单', () => {
 
     const result = await loop.tick()
 
+    // 没有被准入拦下：消息进了决策层。
+    expect(llm.requests.map(item => item.kind)).toContain('assess')
     expect(result.ignored).toBe(1)
-    expect(llm.requests).toHaveLength(0)
-    expect(store.claimOutbox('2026-11-06T10:00:20.000Z', 10)).toHaveLength(0)
-    const decision = store.getDecision(store.listTriggers()[0]!.decisionId!)
-    expect(decision?.reason).toBe('admission:not-in-chat-allowlist')
   })
 
-  it('群白名单配了但解析为空：该群所有人都被拒，不退回全局名单', async () => {
-    const { engine, loop, llm, store } = setup([])
+  it('群名单里额外的人算管理员：默认名单之外也能被识别', async () => {
+    const { engine, loop, llm } = setup([])
     engine.updatePolicy({
       ...policy,
       allowed: ['ou_alice'],
-      allowedByChat: { oc_dev: ['a@b.com'] },
-      allowedByChatOpenIds: { oc_dev: [] },
+      allowedByChat: { oc_dev: ['ou_extra'] },
     })
-    engine.ingest(trigger({ actorId: 'ou_alice' }))
+    engine.ingest(trigger({ actorId: 'ou_extra' }))
+
+    const result = await loop.tick()
+
+    // 群名单里额外的人按管理员处理，消息进了决策层。
+    expect(llm.requests.map(item => item.kind)).toContain('assess')
+    expect(result.ignored).toBe(1)
+  })
+
+  it('仅接受管理员消息的群里：普通成员 @ 机器人也被忽略', async () => {
+    const { engine, loop, llm, store } = setup([])
+    engine.updatePolicy({ ...policy, scopeByChat: { oc_dev: 'admins' } })
+    engine.ingest(trigger({ actorId: 'ou_bob' }))
 
     const result = await loop.tick()
 
     expect(result.ignored).toBe(1)
     expect(llm.requests).toHaveLength(0)
     const decision = store.getDecision(store.listTriggers()[0]!.decisionId!)
-    expect(decision?.reason).toBe('admission:chat-allowlist-empty')
+    expect(decision?.reason).toBe('admission:not-admin')
   })
 })
 
@@ -1005,11 +1013,66 @@ describe('关键链路日志', () => {
     expect(entry?.extra?.message).toBe('reset down')
     expect(store.claimOutbox('2026-11-06T10:00:20.000Z', 10)[0]?.text).toContain('重置没成功')
   })
+
+  it('接单开票时记 router:action=open_ticket，带上工单 ID', async () => {
+    const { logs, logger } = recorder()
+    const { engine, loop } = setup([ACCEPT()], undefined, undefined, false, undefined, logger)
+    engine.ingest(trigger())
+
+    const result = await loop.tick()
+    expect(result.accepted).toHaveLength(1)
+
+    const entry = logs.find(log => log.message === 'router:action')
+    expect(entry?.level).toBe('info')
+    expect(entry?.extra?.action).toBe('open_ticket')
+    expect(entry?.extra?.ticketId).toBe(result.accepted[0]?.id)
+    expect(entry?.extra?.triggerId).toBe('t1')
+  })
+
+  it('查询 / 清理工具答复时记 router:action=ticket_tool，不再重复记 ignore', async () => {
+    const { logs, logger } = recorder()
+    const { engine, loop } = setup([{
+      content: JSON.stringify({ decision: 'ignore', reason: 'ops:closed-tk-1' }),
+      toolCalls: [],
+      reply: '已关闭工单 tk-1，workspace 正在回收。',
+    }], undefined, undefined, false, undefined, logger)
+    engine.ingest(trigger({ text: '把 tk-1 关掉' }))
+
+    await loop.tick()
+
+    const actionEntries = logs.filter(log => log.message === 'router:action')
+    expect(actionEntries).toHaveLength(1)
+    expect(actionEntries[0]?.extra?.action).toBe('ticket_tool')
+  })
+
+  it('明显寒暄时记 router:action=reply，不重复记 ignore', async () => {
+    const { logs, logger } = recorder()
+    const { engine, loop } = setup([SAY('你好呀，需要我帮你改点什么？')], undefined, undefined, false, undefined, logger)
+    engine.ingest(trigger({ text: '你好，在吗' }))
+
+    await loop.tick()
+
+    const actionEntries = logs.filter(log => log.message === 'router:action')
+    expect(actionEntries).toHaveLength(1)
+    expect(actionEntries[0]?.extra?.action).toBe('reply')
+  })
+
+  it('名单内未 @ 的消息判 ignore 时记 router:action=ignore', async () => {
+    const { logs, logger } = recorder()
+    const { engine, loop } = setup([IGNORE('闲聊')], undefined, undefined, false, undefined, logger)
+    engine.ingest(trigger({ addressed: 'none' }))
+
+    const result = await loop.tick()
+    expect(result.ignored).toBe(1)
+
+    const entry = logs.find(log => log.message === 'router:action')
+    expect(entry?.extra?.action).toBe('ignore')
+  })
 })
 
 describe('已绑定工单的话题：名单内成员不 @ 也触发回复', () => {
   const mentionCfg: FeishuConfig = {
-    chats: [chatEntry('oc_dev', { mode: 'mention' })],
+    chats: [chatEntry('oc_dev', { scope: 'mention' })],
     directMessages: true,
     botOpenIds: ['ou_bot'],
     botNames: ['router-agent'],
@@ -1031,6 +1094,12 @@ describe('已绑定工单的话题：名单内成员不 @ 也触发回复', () =
     }
   }
 
+  /** 与 CLI 装配同款的范围判定：管理员不受限制，普通成员按范围决定要不要 @。 */
+  function admitByScope(current: Policy) {
+    return ({ chatId, actorId, addressed }: { chatId: string; actorId: string; addressed: boolean }): boolean =>
+      admitsByScope(scopeOf(current, chatId), effectiveAdmins(current, chatId).includes(actorId), addressed)
+  }
+
   it('话题里没 @ 的名单内消息投给绑定的工单，不再发「已转给工单」回执；名单外的人照旧丢弃', async () => {
     const { engine, loop, store } = setup([ACCEPT()])
     // 第一条 @ 机器人：正常研判开单
@@ -1039,15 +1108,12 @@ describe('已绑定工单的话题：名单内成员不 @ 也触发回复', () =
     const ticket = store.listTickets()[0]!
     engine.startAssignment(ticket.id, { runtimeId: 'orca', handle: 'h', workdir: '/tmp/wt' })
 
-    // 与 CLI 装配同款的放行判定：名单内 + 话题绑着在办工单
-    const admit = ({ chatId, actorId, threadKeys }: UnaddressedContext) => {
-      const scoped = effectiveAllowedByChat(engine.policy(), chatId)
-      if (scoped && scoped.length === 0) return false
-      const allowed = scoped ?? effectiveAllowed(engine.policy())
-      return allowed.includes(actorId) && store.hasLiveTicketForThreadKeys('feishu', threadKeys)
+    // 与 CLI 装配同款的放行判定：管理员 + 话题绑着在办工单
+    const admit = ({ actorId, threadKeys }: UnaddressedContext) => {
+      return effectiveAdmins(engine.policy(), 'oc_dev').includes(actorId) && store.hasLiveTicketForThreadKeys('feishu', threadKeys)
     }
 
-    const normalized = normalizeFeishuEventDetailed(feishuEvent(), mentionCfg, '研发群', admit)
+    const normalized = normalizeFeishuEventDetailed(feishuEvent(), mentionCfg, '研发群', admit, admitByScope(engine.policy()))
     expect(normalized.dropped).toBeUndefined()
     expect(normalized.trigger?.addressed).toBe('none')
 
@@ -1066,8 +1132,9 @@ describe('已绑定工单的话题：名单内成员不 @ 也触发回复', () =
       mentionCfg,
       '研发群',
       admit,
+      admitByScope(engine.policy()),
     )
-    expect(outsider.dropped).toBe('mention:required')
+    expect(outsider.dropped).toBe('scope:excluded')
   })
 
   it('同一话题里未 @ 的追问只投给 worker，始终不发「已转给工单」回执', async () => {
@@ -1077,15 +1144,12 @@ describe('已绑定工单的话题：名单内成员不 @ 也触发回复', () =
     const ticket = store.listTickets()[0]!
     engine.startAssignment(ticket.id, { runtimeId: 'orca', handle: 'h', workdir: '/tmp/wt' })
 
-    const admit = ({ chatId, actorId, threadKeys }: UnaddressedContext) => {
-      const scoped = effectiveAllowedByChat(engine.policy(), chatId)
-      if (scoped && scoped.length === 0) return false
-      const allowed = scoped ?? effectiveAllowed(engine.policy())
-      return allowed.includes(actorId) && store.hasLiveTicketForThreadKeys('feishu', threadKeys)
+    const admit = ({ actorId, threadKeys }: UnaddressedContext) => {
+      return effectiveAdmins(engine.policy(), 'oc_dev').includes(actorId) && store.hasLiveTicketForThreadKeys('feishu', threadKeys)
     }
 
     // 未 @ 的追问：只投给 worker，不发回执。
-    const first = normalizeFeishuEventDetailed(feishuEvent(), mentionCfg, '研发群', admit)
+    const first = normalizeFeishuEventDetailed(feishuEvent(), mentionCfg, '研发群', admit, admitByScope(engine.policy()))
     engine.ingest(first.trigger!)
     await loop.tick()
     const outbox = store.claimOutbox('2026-11-06T10:00:20.000Z', 10)
@@ -1097,6 +1161,7 @@ describe('已绑定工单的话题：名单内成员不 @ 也触发回复', () =
       mentionCfg,
       '研发群',
       admit,
+      admitByScope(engine.policy()),
     )
     engine.ingest(second.trigger!)
     const result = await loop.tick()
@@ -1110,10 +1175,17 @@ describe('已绑定工单的话题：名单内成员不 @ 也触发回复', () =
   it('话题没有绑定在办工单时，名单内成员不 @ 也不会被放行', async () => {
     const { engine, store } = setup([])
     const admit = ({ actorId, threadKeys }: UnaddressedContext) => {
-      return effectiveAllowed(engine.policy()).includes(actorId) && store.hasLiveTicketForThreadKeys('feishu', threadKeys)
+      return effectiveAdmins(engine.policy(), 'oc_dev').includes(actorId) && store.hasLiveTicketForThreadKeys('feishu', threadKeys)
     }
-    const normalized = normalizeFeishuEventDetailed(feishuEvent(), mentionCfg, '研发群', admit)
-    expect(normalized.dropped).toBe('mention:required')
+    // 普通成员在「接受普通用户@消息」的群里没 @ 就不进领域。
+    const normalized = normalizeFeishuEventDetailed(
+      feishuEvent({ sender_id: 'ou_mallory' }),
+      mentionCfg,
+      '研发群',
+      admit,
+      admitByScope(engine.policy()),
+    )
+    expect(normalized.dropped).toBe('scope:excluded')
   })
 
   it('@ 机器人的消息照旧只扇出，不多发一条「已转给工单」回执', async () => {
@@ -1140,14 +1212,11 @@ describe('已绑定工单的话题：名单内成员不 @ 也触发回复', () =
     const ticket = store.listTickets()[0]!
     engine.startAssignment(ticket.id, { runtimeId: 'orca', handle: 'h', workdir: '/tmp/wt' })
 
-    const admit = ({ chatId, actorId, threadKeys }: UnaddressedContext) => {
-      const scoped = effectiveAllowedByChat(engine.policy(), chatId)
-      if (scoped && scoped.length === 0) return false
-      const allowed = scoped ?? effectiveAllowed(engine.policy())
-      return allowed.includes(actorId) && store.hasLiveTicketForThreadKeys('feishu', threadKeys)
+    const admit = ({ actorId, threadKeys }: UnaddressedContext) => {
+      return effectiveAdmins(engine.policy(), 'oc_dev').includes(actorId) && store.hasLiveTicketForThreadKeys('feishu', threadKeys)
     }
 
-    const normalized = normalizeFeishuEventDetailed(feishuEvent(), mentionCfg, '研发群', admit)
+    const normalized = normalizeFeishuEventDetailed(feishuEvent(), mentionCfg, '研发群', admit, admitByScope(engine.policy()))
     expect(normalized.dropped).toBeUndefined()
 
     engine.ingest(normalized.trigger!)

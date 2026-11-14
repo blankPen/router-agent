@@ -1,18 +1,18 @@
 /**
- * 群列表编辑器：监控哪些群、收全部消息还是只收 @、绑定到哪个项目。
+ * 群列表编辑器：监控哪些群、消息处理范围、绑定到哪个项目。
  *
- * 渠道专属表单复用它（飞书渠道的「接收范围」），所以独立成模块。
+ * 渠道专属表单复用它（飞书渠道的「群与绑定」），所以独立成模块。
  */
 import { useState } from 'react'
 import { Icon } from './icons.js'
-import type { ChatDraft, ProjectDraft } from './config-shared.js'
+import { CHAT_SCOPE_LABELS, type ChatDraft, type ProjectDraft } from './config-shared.js'
 import {
-  DEFAULT_CHAT_INTAKE,
-  MAX_INTAKE_QUESTIONS,
-  chatIntakeIssue,
-  normalizeChatIntake,
-  type ChatIntakeDraft,
-} from './chat-intake.js'
+  DEFAULT_CHAT_MEMBERS,
+  MAX_MEMBER_QUESTIONS,
+  chatMembersIssue,
+  normalizeChatMembers,
+  type ChatMembersDraft,
+} from './chat-members.js'
 
 export function ChatsEditor({ chats, projects, error, onChange }: {
   chats: ChatDraft[]
@@ -20,22 +20,22 @@ export function ChatsEditor({ chats, projects, error, onChange }: {
   error?: string
   onChange: (value: ChatDraft[]) => void
 }): JSX.Element {
-  const [intakeIndex, setIntakeIndex] = useState<number | null>(null)
+  const [membersIndex, setMembersIndex] = useState<number | null>(null)
   const projectOf = (name: string): ProjectDraft | undefined => projects.find(project => project.name === name)
   const update = (index: number, patch: Partial<ChatDraft>): void => {
     onChange(chats.map((chat, i) => (i === index ? { ...chat, ...patch } : chat)))
   }
-  const intakeChat = intakeIndex === null ? undefined : chats[intakeIndex]
+  const membersChat = membersIndex === null ? undefined : chats[membersIndex]
   return (
     <div className="editor">
       {chats.length === 0 && <p className="editor-empty">还没有监控群。至少添加一个群，机器人才能收到消息。</p>}
       {chats.length > 0 && (
         <div className="editor-head chat-head">
           <span>chat_id</span>
-          <span>接收</span>
+          <span>消息范围</span>
           <span>绑定项目</span>
-          <span>本群名单（推荐邮箱）</span>
-          <span>需求分析助手</span>
+          <span>本群管理员（推荐邮箱）</span>
+          <span>普通成员设置</span>
           <span />
         </div>
       )}
@@ -43,9 +43,10 @@ export function ChatsEditor({ chats, projects, error, onChange }: {
         <div key={index} className="editor-row chat-row">
           <input value={chat.chat} placeholder="oc_xxx" onChange={event => update(index, { chat: event.target.value })} />
           <span className="select-wrap compact">
-            <select value={chat.mode} onChange={event => update(index, { mode: event.target.value })}>
-              <option value="all">全部消息</option>
-              <option value="mention">仅 @</option>
+            <select value={chat.scope} onChange={event => update(index, { scope: event.target.value as ChatDraft['scope'] })}>
+              <option value="admins">仅接受管理员消息</option>
+              <option value="mention">接受普通用户@消息</option>
+              <option value="all">接受所有消息</option>
             </select>
             <Icon name="chevron" size={12} className="select-chevron" />
           </span>
@@ -65,15 +66,15 @@ export function ChatsEditor({ chats, projects, error, onChange }: {
           </span>
           <input
             value={chat.allowed.join(', ')}
-            placeholder="可空，沿用全局；推荐填邮箱"
+            placeholder="可空，沿用默认管理员；推荐填邮箱"
             onChange={event => update(index, { allowed: event.target.value.split(',').map(item => item.trim()).filter(Boolean) })}
           />
           <button
-            className={`btn tiny ${chat.intake?.enabled ? 'primary' : 'ghost'}`}
-            title="配置需求分析助手"
-            onClick={() => setIntakeIndex(index)}
+            className="btn tiny ghost"
+            title="普通成员消息的追问轮数、终审管理员与只读代码设置"
+            onClick={() => setMembersIndex(index)}
           >
-            {chat.intake?.enabled ? '已开启' : '需求分析助手'}
+            普通成员设置
           </button>
           <button className="icon-btn danger" title="删除群" onClick={() => onChange(chats.filter((_, i) => i !== index))}>
             <Icon name="trash" size={14} />
@@ -81,16 +82,16 @@ export function ChatsEditor({ chats, projects, error, onChange }: {
         </div>
       ))}
       {error && <p className="field-error">{error}</p>}
-      <button className="btn add" onClick={() => onChange([...chats, { chat: '', mode: 'all', repo: '', branch: '', allowed: [] }])}>
+      <button className="btn add" onClick={() => onChange([...chats, { chat: '', scope: 'mention', repo: '', branch: '', allowed: [] }])}>
         <Icon name="plus" size={13} />添加群
       </button>
-      {intakeChat && (
-        <IntakeSettingsModal
-          chat={intakeChat}
-          onClose={() => setIntakeIndex(null)}
+      {membersChat && (
+        <MemberSettingsModal
+          chat={membersChat}
+          onClose={() => setMembersIndex(null)}
           onSave={value => {
-            update(intakeIndex as number, { intake: value })
-            setIntakeIndex(null)
+            update(membersIndex as number, { members: value })
+            setMembersIndex(null)
           }}
         />
       )}
@@ -99,32 +100,33 @@ export function ChatsEditor({ chats, projects, error, onChange }: {
 }
 
 /**
- * 需求分析助手的群级配置弹窗。
+ * 群级普通成员消息处理配置弹窗。
  *
- * 开关、轮数、终审管理员、是否读代码都跟着群走：多群互不影响，
+ * 轮数、终审管理员、是否读代码都跟着群走：多群互不影响，
  * 改完随群配置一起保存（保存后重启服务生效）。
+ * 要不要处理普通成员的消息由上面的「消息范围」决定。
  */
-function IntakeSettingsModal({ chat, onClose, onSave }: {
+function MemberSettingsModal({ chat, onClose, onSave }: {
   chat: ChatDraft
   onClose: () => void
-  onSave: (value: ChatIntakeDraft) => void
+  onSave: (value: ChatMembersDraft) => void
 }): JSX.Element {
-  const current = chat.intake ?? DEFAULT_CHAT_INTAKE
-  const [enabled, setEnabled] = useState(current.enabled)
+  const current = chat.members ?? DEFAULT_CHAT_MEMBERS
   const [maxQuestions, setMaxQuestions] = useState(String(current.maxQuestions))
   const [approvers, setApprovers] = useState(current.approvers.join(', '))
   const [codeAccess, setCodeAccess] = useState(current.codeAccess)
   const rounds = Number(maxQuestions)
-  const issue = chatIntakeIssue({ ...current, maxQuestions: rounds })
+  const issue = chatMembersIssue({ ...current, maxQuestions: rounds })
   return (
     <div className="modal-layer">
       <button className="modal-backdrop" aria-label="关闭" onClick={onClose} />
-      <div className="modal" role="dialog" aria-modal="true" aria-label="需求分析助手">
+      <div className="modal" role="dialog" aria-modal="true" aria-label="普通成员消息设置">
         <header className="modal-head">
           <div>
-            <h3>需求分析助手</h3>
+            <h3>普通成员消息设置</h3>
             <p>
-              群 {chat.chat || '（未填写 chat_id）'}：普通成员不 @ 机器人也能直接反馈问题，助手先初筛再追问，最后整理成结构化需求单，必须经管理员终审才派单。
+              群 {chat.chat || '（未填写 chat_id）'}：非管理员的消息先由决策层判断要不要跟进；要跟进的会进入多轮澄清，整理成结构化需求单后必须经管理员终审才派单。
+              本群当前的消息范围是「{CHAT_SCOPE_LABELS[chat.scope]}」{chat.scope === 'admins' ? '，普通成员的消息不会被处理，这里的设置暂不生效。' : '。'}
             </p>
           </div>
           <button className="icon-btn" title="关闭" onClick={onClose}>
@@ -132,23 +134,19 @@ function IntakeSettingsModal({ chat, onClose, onSave }: {
           </button>
         </header>
         <div className="modal-body">
-          <button type="button" role="switch" aria-checked={enabled} className={`toggle ${enabled ? 'on' : ''}`} onClick={() => setEnabled(!enabled)}>
-            <span className="toggle-track"><span className="toggle-knob" /></span>
-            <span className="toggle-label">{enabled ? '已开启' : '已关闭'}</span>
-          </button>
           <label className="modal-field">
             <span>最大对话轮次</span>
             <span className="input-box">
               <input
                 type="number"
                 min={0}
-                max={MAX_INTAKE_QUESTIONS}
+                max={MAX_MEMBER_QUESTIONS}
                 value={maxQuestions}
                 onChange={event => setMaxQuestions(event.target.value)}
               />
               <span className="input-unit">轮</span>
             </span>
-            <small>助手最多追问几轮；默认 {DEFAULT_CHAT_INTAKE.maxQuestions} 轮，到顶后按现有信息整理成需求单。</small>
+            <small>最多追问几轮；默认 {DEFAULT_CHAT_MEMBERS.maxQuestions} 轮，到顶后按现有信息整理成需求单。</small>
           </label>
           <label className="modal-field">
             <span>终审管理员（推荐填邮箱，逗号分隔）</span>
@@ -157,7 +155,7 @@ function IntakeSettingsModal({ chat, onClose, onSave }: {
               placeholder="admin@example.com, ou_xxx"
               onChange={event => setApprovers(event.target.value)}
             />
-            <small>只有这些管理员能确认派单或驳回；留空则沿用全局允许名单。邮箱会在启动时解析成对应的人。</small>
+            <small>只有这些管理员能确认派单或驳回；留空则沿用默认管理员名单。邮箱会在启动时解析成对应的人。</small>
           </label>
           <button type="button" role="switch" aria-checked={codeAccess} className={`toggle ${codeAccess ? 'on' : ''}`} onClick={() => setCodeAccess(!codeAccess)}>
             <span className="toggle-track"><span className="toggle-knob" /></span>
@@ -165,7 +163,7 @@ function IntakeSettingsModal({ chat, onClose, onSave }: {
           </button>
           <p className="modal-hint">
             <Icon name="alert" size={13} />
-            关闭「允许只读项目代码」后，助手只依据对话与通用业务知识判断，不会读取本群绑定项目的任何文件。
+            关闭「允许只读项目代码」后，普通成员的分析只依据对话与通用业务知识，不会读取本群绑定项目的任何文件。
           </p>
           {issue && <p className="modal-error">{issue}</p>}
         </div>
@@ -174,8 +172,7 @@ function IntakeSettingsModal({ chat, onClose, onSave }: {
           <button
             className="btn primary"
             disabled={Boolean(issue)}
-            onClick={() => onSave(normalizeChatIntake({
-              enabled,
+            onClick={() => onSave(normalizeChatMembers({
               maxQuestions: rounds,
               approvers: approvers.split(','),
               codeAccess,

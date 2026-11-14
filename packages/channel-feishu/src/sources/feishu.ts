@@ -48,7 +48,7 @@ export type FeishuDrop =
   | 'chat:not-monitored'
   | 'dm:disabled'
   | 'sender:self'
-  | 'mention:required'
+  | 'scope:excluded'
   | 'system-message'
   | 'card-message'
   | 'empty-content'
@@ -83,8 +83,30 @@ export interface UnaddressedContext {
  */
 export type UnaddressedAdmission = (ctx: UnaddressedContext) => boolean
 
+/** 一条消息要不要进领域：按群的消息范围 + 发送人身份判断。 */
+export interface AdmissionContext {
+  chatId: string
+  actorId: string
+  /** 有没有 @ 机器人。 */
+  addressed: boolean
+}
+
+/**
+ * 消息范围判定；返回 true 表示这条消息值得进领域。
+ *
+ * 群的范围（仅接受管理员消息 / 接受普通用户@消息 / 接受所有消息）与发送人是不是管理员
+ * 都在宿主侧才知道（要读策略与解析后的名单），所以由装配层注入这个只读判定。
+ */
+export type MessageAdmission = (ctx: AdmissionContext) => boolean
+
 /** 归一化并返回丢弃原因；正常路径用 normalizeFeishuEvent。 */
-export function normalizeFeishuEventDetailed(raw: Record<string, unknown>, cfg: FeishuConfig, chatName = '', allowUnaddressed?: UnaddressedAdmission): NormalizedEvent {
+export function normalizeFeishuEventDetailed(
+  raw: Record<string, unknown>,
+  cfg: FeishuConfig,
+  chatName = '',
+  allowUnaddressed?: UnaddressedAdmission,
+  admitMessage?: MessageAdmission,
+): NormalizedEvent {
   const event = raw as FeishuEvent
   const messageId = event.message_id ?? event.id
   const chatId = event.chat_id
@@ -119,16 +141,23 @@ export function normalizeFeishuEventDetailed(raw: Record<string, unknown>, cfg: 
   // 线程标识全集：话题 ID / 根消息 ID / 消息自身 ID，任一到场都能落回同一条线程。
   const threadKeys = uniqueKeys(topicId, rootId, messageId)
 
-  // 只接收 @ 的群里，未 @ 的消息不进入领域。
   const mentionIds = (event.mentions ?? []).map(m => m.id ?? '').filter(Boolean)
   const mentionNames = (event.mentions ?? []).map(m => m.name ?? '').filter(Boolean)
   const mentionedBot = mentionIds.some(id => cfg.botOpenIds.includes(id)) || mentionNames.some(name => cfg.botNames.includes(name))
-  // 未 @ 机器人的消息是否放行：已绑定工单的话题内，名单内成员不 @ 也要触发回复（tk-59）。
+  // 群的消息范围决定这条消息要不要进领域：
+  // - admins：只听管理员的；- mention：普通成员必须 @ 机器人；- all：都听。
+  // 判定在宿主侧做（要读策略里的管理员名单），这里只负责拦掉不值得处理的消息。
+  // 未 @ 机器人的消息还有一条例外：已绑定工单的话题内，管理员不 @ 也要触发回复（tk-59）。
   // 放行结果记在 Trigger 上，后续的表情（shouldAcknowledge）与回执（agent-loop）都靠它判断。
   let unaddressedAdmitted = false
-  if (!isP2p && chat?.mode === 'mention' && !mentionedBot) {
-    unaddressedAdmitted = allowUnaddressed?.({ chatId, actorId: senderId, threadKeys }) ?? false
-    if (!unaddressedAdmitted) return { dropped: 'mention:required', chatId, actorId: senderId }
+  if (!isP2p) {
+    const admitted = admitMessage?.({ chatId, actorId: senderId, addressed: mentionedBot }) ?? true
+    if (!admitted) {
+      if (!mentionedBot) {
+        unaddressedAdmitted = allowUnaddressed?.({ chatId, actorId: senderId, threadKeys }) ?? false
+      }
+      if (!unaddressedAdmitted) return { dropped: 'scope:excluded', chatId, actorId: senderId }
+    }
   }
 
   const text = (event.content ?? '').trim()

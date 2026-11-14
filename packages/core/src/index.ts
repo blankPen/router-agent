@@ -1,4 +1,7 @@
 export * from './model.js'
+export * from './admission.js'
+export * from './decision.js'
+export * from './tool-scope.js'
 export * from './policy.js'
 export * from './stage.js'
 export * from './events.js'

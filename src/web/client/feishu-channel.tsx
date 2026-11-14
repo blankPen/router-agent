@@ -2,7 +2,7 @@
  * 飞书渠道的描述与表单。
  *
  * 这是「渠道注册表」的第一个条目：页面只认 ChannelDescriptor，
- * 这里描述飞书自己的配置块（凭据、授权、接收范围、群绑定、消息处理）。
+ * 这里描述飞书自己的配置块（凭据、授权、接入与管理员、群绑定、消息处理）。
  * 以后接第二个渠道，只需要再加一个同类描述文件。
  */
 import { FeishuBotPanel } from './feishu-panel.js'
@@ -31,10 +31,10 @@ const DIRECT_MESSAGES_FIELD: FieldDef = {
 
 const ALLOWED_FIELD: FieldDef = {
   path: 'feishu.allowed',
-  label: '全局允许名单',
+  label: '默认管理员',
   kind: 'list',
   placeholder: 'alice@company.com, bob@company.com',
-  hint: '推荐填邮箱；换应用后 open_id 会变，邮箱不会。名单外的消息一律不接',
+  hint: '所有群的基线名单，推荐填邮箱；每个群还能在「群与绑定」里单独扩充管理员',
 }
 
 const REACTION_FIELD: FieldDef = {
@@ -79,15 +79,15 @@ export const feishuChannel: ChannelDescriptor = {
     },
     {
       id: 'receive',
-      title: '接收范围',
-      description: '私聊与全局允许名单：名单外的人发来的消息一律不接。',
+      title: '接入与管理员',
+      description: '是否接收私聊，以及默认管理员是谁（每个群的消息范围在「群与绑定」里单独设置）。',
       render: 'custom',
       fields: [DIRECT_MESSAGES_FIELD, ALLOWED_FIELD],
     },
     {
       id: 'chats',
       title: '群与绑定',
-      description: '配置监控哪些群、收全部消息还是只收 @；绑定项目只能从当前后端的项目清单里选。',
+      description: '配置监控哪些群、每个群接什么消息、谁是本群管理员；绑定项目只能从当前后端的项目清单里选。',
       render: 'custom',
       fields: [],
       paths: ['feishu.chats'],
@@ -145,7 +145,7 @@ function FeishuBotChannelBlock(props: ChannelPanelProps & { block: ConfigBlock }
   )
 }
 
-/** 接收范围：私聊开关 + 全局允许名单 + 名单解析状态。 */
+/** 接入与管理员：私聊开关 + 默认管理员 + 名单解析状态。 */
 function FeishuReceiveBlock(props: ChannelPanelProps & { block: ConfigBlock }): JSX.Element {
   const { draft, defaults, setField, errors, identity, staleIdentity } = props
   return (
@@ -167,7 +167,7 @@ function FeishuReceiveBlock(props: ChannelPanelProps & { block: ConfigBlock }): 
   )
 }
 
-/** 群与绑定：监控群列表 + 每个群的接收方式、绑定项目与群级名单。 */
+/** 群与绑定：监控群列表 + 每个群的消息范围、绑定项目与群管理员扩充。 */
 function FeishuChatsBlock(props: ChannelPanelProps & { block: ConfigBlock }): JSX.Element {
   const { draft, setField, errors, projects } = props
   const chats = (draft.feishu?.chats ?? []) as ChatDraft[]
@@ -182,7 +182,7 @@ function FeishuChatsBlock(props: ChannelPanelProps & { block: ConfigBlock }): JS
         </div>
       )}
       <p className="editor-hint">
-        群级名单推荐填邮箱（兼容 ou_xxx）：配了却解析不到人时，该群会拒绝所有人，不会退回全局名单。
+        消息范围决定这个群接谁的话：仅接受管理员消息 / 接受普通用户 @ 消息 / 接受所有消息。本群管理员推荐填邮箱（兼容 ou_xxx），是在默认管理员之外再加人，不会覆盖默认名单。
       </p>
       <ChatsEditor
         chats={chats}

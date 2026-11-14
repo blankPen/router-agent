@@ -51,7 +51,7 @@ export function IdentityNotices({ identity, stale, scope = 'all' }: {
       )}
       {showAllowlist && summary.kind === 'error' && (
         <p className="editor-hint identity-hint">
-          名单条目没解析到就等于没有这个人：他们的消息收不到；如果某个群的名单配了却解析不到，该群会直接拒绝所有人（不会退回全局名单）。
+          名单条目没解析到就等于没有这个人：默认管理员名单里解析不到的人不按管理员算；某个群的管理员条目解析不到时，本群不会因此多出管理员。
         </p>
       )}
     </>

@@ -73,7 +73,7 @@ export async function runInitWizard(deps: InitDeps): Promise<AppConfig> {
   } else {
     out('')
     const selected = await prompts.checkbox<string>({
-      message: '选择要监控的群（默认接收全部消息）',
+      message: '选择要监控的群（默认只接 @ 机器人的消息，可在配置页按群调整）',
       choices: chats.map(chat => ({
         name: `${chat.name || chat.chatId}  ${chat.chatId}`,
         value: chat.chatId,
@@ -388,7 +388,7 @@ function unique(values: string[]): string[] {
 
 function summarize(config: AppConfig): string {
   const projects = projectsForRuntime(config).map(project => `${project.name}${project.defaultBranch ? ` @ ${project.defaultBranch}` : ''}`)
-  const chats = config.feishu.chats.map(chat => `${chat.chat}:${chat.mode}${chat.repo ? `→${chat.repo}@${chat.branch || '?'}` : ''}`)
+  const chats = config.feishu.chats.map(chat => `${chat.chat}:${chat.scope}${chat.repo ? `→${chat.repo}@${chat.branch || '?'}` : ''}`)
   return [
     '当前配置：',
     `  运行时: ${config.runtime.default}`,

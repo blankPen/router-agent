@@ -812,15 +812,12 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         }
         if (acceptMode !== undefined) config.policy.acceptMode = acceptMode as AcceptMode
         if (maxWorkers !== undefined) config.policy.maxWorkers = maxWorkers
-        if (body.admission && typeof body.admission === 'object') {
-          config.policy.admission = { ...config.policy.admission, ...(body.admission as object) }
-        }
         const policy = opts.engine.updatePolicy(policyOf(config, identityResolution(opts.identity)))
         // 面板保存要落盘，否则重启后策略又回到旧值；home 为空（单测）时跳过写文件。
         if (config.home) writeConfig(config.home, config)
         onEvent({ event: 'api:policy', acceptMode: policy.acceptMode, maxWorkers: policy.maxWorkers, version: policy.version })
         await opts.onPolicyChange?.(config)
-        await opts.onConfigChange?.(config, ['policy.acceptMode', 'policy.maxWorkers', 'policy.admission'])
+        await opts.onConfigChange?.(config, ['policy.acceptMode', 'policy.maxWorkers'])
         return respond(res, 200, { policy, config: config.policy })
       }
       return respond(res, 405, { error: 'method-not-allowed' })

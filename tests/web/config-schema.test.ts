@@ -27,9 +27,10 @@ import {
 const HOT = ['policy.', 'feishu.allowed']
 
 describe('配置分组与块', () => {
-  it('一级分组按「LLM Provider → 运行时 → 渠道 → 项目 → 消息准入 → 其他设置」排列', () => {
+  it('一级分组按「LLM Provider → 决策层 → 运行时 → 渠道 → 项目 → 消息准入 → 其他设置」排列', () => {
     expect(CONFIG_GROUPS.map(group => group.id)).toEqual([
       'llm',
+      'decision',
       'runtime',
       'channels',
       'projects',
@@ -38,6 +39,7 @@ describe('配置分组与块', () => {
     ])
     expect(CONFIG_GROUPS.map(group => group.title)).toEqual([
       'LLM Provider',
+      '决策层',
       '运行时配置',
       '渠道配置',
       '项目配置',

@@ -67,7 +67,7 @@ function autoBotConfig(appId = 'cli_bot'): AppConfig {
   config.feishu.appId = appId
   config.feishu.botOpenIds = []
   config.feishu.botNames = []
-  config.feishu.chats = [chatEntry('oc_dsh', { mode: 'mention' })]
+  config.feishu.chats = [chatEntry('oc_dsh', { scope: 'mention' })]
   return config
 }
 
@@ -165,7 +165,7 @@ describe('ra doctor', () => {
 
   it('手填机器人身份时不再自动识别，只由「机器人在群内」扫一次成员', async () => {
     const config = healthyConfig()
-    config.feishu.chats = [chatEntry('oc_dsh', { mode: 'mention' })]
+    config.feishu.chats = [chatEntry('oc_dsh', { scope: 'mention' })]
     let memberCalls = 0
     const base = lark()
     const runner: CommandRunner = {
@@ -214,5 +214,32 @@ describe('面板用的配置自检', () => {
 
     expect(checks.every(item => item.status === 'ok')).toBe(true)
     expect(checks.some(item => item.section)).toBe(false)
+  })
+
+  it('决策层未启用时给出提示，启用但 Jev 不全时判失败', () => {
+    const off = runConfigDoctor({ config: healthyConfig(), llm: () => ({ ok: true, detail: 'model' }) })
+    const disabled = off.find(item => item.name === '决策层')!
+    expect(disabled.status).toBe('ok')
+    expect(disabled.detail).toContain('未启用')
+
+    const partial = healthyConfig()
+    partial.decision.enabled = true
+    partial.decision.jev.apiKey = 'sk-jev'
+    const checks = runConfigDoctor({ config: partial, llm: () => ({ ok: true, detail: 'model' }) })
+    const layer = checks.find(item => item.name === '决策层')!
+    expect(layer.status).toBe('fail')
+    expect(layer.detail).toContain('模型名')
+    expect(layer.section).toBe('decision')
+  })
+
+  it('决策层启用且 Jev 连接信息齐全时判通过', () => {
+    const config = healthyConfig()
+    config.decision.enabled = true
+    config.decision.jev.apiKey = 'sk-jev'
+    config.decision.jev.model = 'jev-latest'
+    const checks = runConfigDoctor({ config, llm: () => ({ ok: true, detail: 'model' }) })
+    const layer = checks.find(item => item.name === '决策层')!
+    expect(layer.status).toBe('ok')
+    expect(layer.detail).toContain('jev-latest')
   })
 })

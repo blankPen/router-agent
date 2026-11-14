@@ -300,7 +300,7 @@ describe('HTTP 管理 API', () => {
   it('PUT /api/config 整段更新群列表并做重复校验', async () => {
     config.home = mkdtempSync(join(tmpdir(), 'ra-api-config-'))
     const chats = [
-      chatEntry('oc_a', { mode: 'mention', repo: 'router-agent', branch: 'main' }),
+      chatEntry('oc_a', { scope: 'mention', repo: 'router-agent', branch: 'main' }),
       chatEntry('oc_b', { allowed: ['ou_bob'] }),
     ]
     const ok = await call(server, 'PUT', '/api/config', { patch: { 'feishu.chats': chats } })

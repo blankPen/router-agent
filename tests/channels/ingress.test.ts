@@ -3,7 +3,7 @@ import { ChannelIngress } from '#channel/ingress.js'
 import type { ChannelAdapter } from '#channel/port.js'
 import type { Engine } from '../../src/core/engine.js'
 import type { Trigger } from '#core/model.js'
-import { DEFAULT_ADMISSION, shouldAcknowledge, type Policy } from '#core/policy.js'
+import { shouldAcknowledge, type Policy } from '#core/policy.js'
 import { Store } from '../../src/store/db.js'
 import type { Logger } from '#infra/logger.js'
 
@@ -13,8 +13,6 @@ const policy: Policy = {
   maxWorkers: 4,
   allowed: ['ou_alice'],
   bots: [],
-  admission: DEFAULT_ADMISSION,
-  receiveAll: false,
 }
 
 function trigger(): Trigger {
@@ -137,7 +135,7 @@ describe('入站管线', () => {
       adapter: adapter({ normalize: () => ({ trigger: { ...trigger(), addressed: 'none', unaddressedAdmitted: true } }) }),
       engine: { ingest: () => true } as unknown as Engine,
       store,
-      shouldReply: t => shouldAcknowledge(t, policy, new Set()),
+      shouldReply: t => shouldAcknowledge(t, policy),
       onAck: (messageId, handle) => acked.push(`${messageId}:${handle}`),
     })
     ingress.handleRaw({})
@@ -150,10 +148,10 @@ describe('入站管线', () => {
     const store = new Store(':memory:')
     const acked: string[] = []
     const ingress = new ChannelIngress({
-      adapter: adapter({ normalize: () => ({ trigger: { ...trigger(), addressed: 'none' } }) }),
+      adapter: adapter({ normalize: () => ({ trigger: { ...trigger(), addressed: 'none', actorId: 'ou_bob' } }) }),
       engine: { ingest: () => true } as unknown as Engine,
       store,
-      shouldReply: t => shouldAcknowledge(t, policy, new Set()),
+      shouldReply: t => shouldAcknowledge(t, policy),
       onAck: (messageId, handle) => acked.push(`${messageId}:${handle}`),
     })
     ingress.handleRaw({})

@@ -55,4 +55,21 @@ describe('运行时下拉选项', () => {
     const field = groups.flatMap(group => group.blocks).find(block => block.id === 'runtime')?.fields.find(item => item.path === 'runtime.default')
     expect(field?.options?.some(option => option.value === 'example')).toBe(true)
   })
+
+  it('配置页有决策层分组，Jev 的开关 / Provider / 模型 / 密钥都能配', () => {
+    const groups = groupsFor()
+    const group = groups.find(item => item.id === 'decision')
+    expect(group?.title).toBe('决策层')
+    const paths = (group?.blocks ?? []).flatMap(block => block.fields.map(field => field.path))
+    expect(paths).toEqual(expect.arrayContaining([
+      'decision.enabled',
+      'decision.provider',
+      'decision.jev.model',
+      'decision.jev.apiKey',
+      'decision.jev.baseUrl',
+    ]))
+    const block = group?.blocks.find(item => item.id === 'decision')
+    expect(block?.fields.find(field => field.path === 'decision.enabled')?.kind).toBe('switch')
+    expect(block?.fields.find(field => field.path === 'decision.jev.apiKey')?.kind).toBe('password')
+  })
 })

@@ -6,7 +6,7 @@ import type { Trigger } from '#core/model.js'
 import { buildQuestionCard, buildReplyCard, normalizeCardAction } from '../../packages/channel-feishu/src/sources/feishu-reply.js'
 
 const cfg: FeishuConfig = {
-  chats: [chatEntry('oc_dev'), chatEntry('oc_other', { mode: 'mention' })],
+  chats: [chatEntry('oc_dev'), chatEntry('oc_other', { scope: 'mention' })],
   directMessages: true,
   botOpenIds: ['ou_bot'],
   botNames: ['router-agent'],
@@ -268,18 +268,24 @@ describe('飞书富回复', () => {
   })
 })
 describe('飞书通道的未寻址放行', () => {
-  it('注入放行判定后，只 @ 模式群里没 @ 的消息也能归一化', () => {
-    const ch = new FeishuChannel({ config: cfg, runner, sender: new FakeSender(), allowUnaddressed: () => true })
+  it('范围判定拒绝后，放行判定能救回没 @ 的消息', () => {
+    const ch = new FeishuChannel({ config: cfg, runner, sender: new FakeSender(), allowUnaddressed: () => true, admitMessage: () => false })
     const result = ch.normalize(evt({ chat_id: 'oc_other' }))
     expect(result.trigger).toBeDefined()
     expect(result.trigger?.addressed).toBe('none')
   })
 
-  it('不注入放行判定时行为不变：没 @ 的消息被丢弃', () => {
-    const ch = new FeishuChannel({ config: cfg, runner, sender: new FakeSender() })
+  it('范围判定拒绝且没有放行判定时，消息被丢弃', () => {
+    const ch = new FeishuChannel({ config: cfg, runner, sender: new FakeSender(), admitMessage: () => false })
     const result = ch.normalize(evt({ chat_id: 'oc_other' }))
     expect(result.trigger).toBeUndefined()
-    expect(result.dropped).toBe('mention:required')
+    expect(result.dropped).toBe('scope:excluded')
+  })
+
+  it('不注入范围判定时通道不做准入：消息照常进领域', () => {
+    const ch = new FeishuChannel({ config: cfg, runner, sender: new FakeSender() })
+    const result = ch.normalize(evt({ chat_id: 'oc_other' }))
+    expect(result.trigger).toBeDefined()
   })
 
   it('放行判定拿得到群、发送者与线程标识', () => {
@@ -292,6 +298,7 @@ describe('飞书通道的未寻址放行', () => {
         seen.push(ctx)
         return true
       },
+      admitMessage: () => false,
     })
     ch.normalize(evt({ chat_id: 'oc_other', thread_id: 'omt_topic_1' }))
     expect(seen[0]).toMatchObject({ chatId: 'oc_other', actorId: 'ou_alice' })

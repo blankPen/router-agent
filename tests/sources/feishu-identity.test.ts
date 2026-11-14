@@ -723,7 +723,7 @@ describe('运行时身份装配', () => {
     })
     const config = appConfig({
       appId: 'cli_a',
-      chats: [chatEntry('oc_1', { mode: 'mention', allowed: ['pengzhen02@dewu.com'] })],
+      chats: [chatEntry('oc_1', { scope: 'mention', allowed: ['pengzhen02@dewu.com'] })],
     })
 
     const identity = await resolveRuntimeIdentity({ config, lark: runner })
@@ -732,7 +732,7 @@ describe('运行时身份装配', () => {
     expect(identity.names.get(OPEN_ID)).toBe('阿振(Pz)')
   })
 
-  it('需求分析助手的终审管理员支持邮箱，按群解析成 open_id', async () => {
+  it('普通成员需求的终审管理员支持邮箱，按群解析成 open_id', async () => {
     const runner = makeRunner(argv => {
       if (isBatch(argv)) return OK_BATCH('pengzhen02@dewu.com', OPEN_ID)
       if (requestedUserId(argv) === OPEN_ID) return OK_USER(OPEN_ID, '阿振(Pz)')
@@ -741,8 +741,8 @@ describe('运行时身份装配', () => {
     const config = appConfig({
       appId: 'cli_a',
       chats: [
-        chatEntry('oc_1', { mode: 'all', intake: { enabled: true, maxQuestions: 10, codeAccess: true, approvers: ['pengzhen02@dewu.com'] } }),
-        chatEntry('oc_2', { mode: 'all' }),
+        chatEntry('oc_1', { scope: 'all', members: { maxQuestions: 10, codeAccess: true, approvers: ['pengzhen02@dewu.com'] } }),
+        chatEntry('oc_2', { scope: 'all' }),
       ],
     })
 
@@ -757,13 +757,13 @@ describe('运行时身份装配', () => {
     const { events, logger } = captureLogger()
     const config = appConfig({
       appId: 'cli_a',
-      chats: [chatEntry('oc_1', { mode: 'all', intake: { enabled: true, maxQuestions: 10, codeAccess: true, approvers: ['pengzhen02@dewu.com'] } })],
+      chats: [chatEntry('oc_1', { scope: 'all', members: { maxQuestions: 10, codeAccess: true, approvers: ['pengzhen02@dewu.com'] } })],
     })
 
     const identity = await resolveRuntimeIdentity({ config, lark: runner, logger })
 
     expect(identity.approverOpenIdsByChat).toEqual({ oc_1: [] })
-    const empty = events.find(event => event.message === 'feishu:intake-approver-empty')
+    const empty = events.find(event => event.message === 'feishu:member-approver-empty')
     expect(empty?.level).toBe('error')
     expect(empty?.extra?.chat).toBe('oc_1')
   })
@@ -773,7 +773,7 @@ describe('运行时身份装配', () => {
     const { events, logger } = captureLogger()
     const config = appConfig({
       appId: 'cli_a',
-      chats: [chatEntry('oc_1', { mode: 'mention', allowed: ['pengzhen02@dewu.com'] })],
+      chats: [chatEntry('oc_1', { scope: 'mention', allowed: ['pengzhen02@dewu.com'] })],
     })
 
     const identity = await resolveRuntimeIdentity({ config, lark: runner, logger })
@@ -804,7 +804,7 @@ describe('运行时身份装配', () => {
       appId: 'cli_a',
       botOpenIds: ['ou_manual_bot'],
       botNames: ['手动机器人'],
-      chats: [chatEntry('oc_1', { mode: 'mention' })],
+      chats: [chatEntry('oc_1', { scope: 'mention' })],
     })
 
     const identity = await resolveRuntimeIdentity({ config, lark: runner })
@@ -815,11 +815,11 @@ describe('运行时身份装配', () => {
     expect(identity.bot.resolved).toBe(true)
   })
 
-  it('没有 mode=mention 群时机器人身份标记为可用（无需识别，不是失败）', async () => {
+  it('没有配置任何群时机器人身份标记为可用（无需识别，不是失败）', async () => {
     const runner = makeRunner(() => { throw new Error('不该被调用') })
     const config = appConfig({
       appId: 'cli_a',
-      chats: [chatEntry('oc_all', { mode: 'all' })],
+      chats: [],
     })
 
     const identity = await resolveRuntimeIdentity({ config, lark: runner })
@@ -829,17 +829,17 @@ describe('运行时身份装配', () => {
     expect(identity.bot.detail).toContain('无需识别')
   })
 
-  it('只扫描 mode=mention 的群来识别机器人身份', async () => {
+  it('扫描所有监控群来识别机器人身份', async () => {
     const runner = makeRunner(() => MEMBERS([{ member_id: 'ou_bot', name: '小助手', app_id: 'cli_a' }]))
     const config = appConfig({
       appId: 'cli_a',
-      chats: [chatEntry('oc_all', { mode: 'all' }), chatEntry('oc_mention', { mode: 'mention' })],
+      chats: [chatEntry('oc_all', { scope: 'all' }), chatEntry('oc_mention', { scope: 'mention' })],
     })
 
     const identity = await resolveRuntimeIdentity({ config, lark: runner })
 
     const scanned = runner.calls.map(call => call[call.indexOf('--chat-id') + 1])
-    expect(scanned).toEqual(['oc_mention'])
+    expect(scanned).toEqual(['oc_all', 'oc_mention'])
     expect(identity.bot.botOpenIds).toEqual(['ou_bot'])
     expect(identity.bot.resolved).toBe(true)
   })

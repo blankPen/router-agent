@@ -1,7 +1,7 @@
 import { join } from 'node:path'
 import { Engine } from '../core/engine.js'
 import type { AddressMode, DecisionRecord, SourceKind, Ticket, Trigger } from '#core/model.js'
-import { policyOf, replyAlwaysChatsOf, type AppConfig, type PolicyResolution } from '../config.js'
+import { policyOf, type AppConfig, type PolicyResolution } from '../config.js'
 import { Store } from '../store/db.js'
 import { AgentLoop } from '../router/agent-loop.js'
 import { dispatchSettingsOf } from '../router/dispatch.js'
@@ -58,7 +58,6 @@ export async function simulate(
       home: deps.home,
       batchWindowMs: 0,
       dispatch: dispatchSettingsOf(deps.config),
-      replyAlwaysChats: replyAlwaysChatsOf(deps.config),
       onAudit: audit => audits.push(audit),
     })
     const now = new Date()

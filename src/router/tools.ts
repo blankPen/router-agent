@@ -93,6 +93,24 @@ export class RouterToolbox {
     return { error: 'router_read:missing-args' }
   }
 
+  /**
+   * 普通成员可用的只读上下文。
+   *
+   * 与 router_read 的区别是不返回工单：普通成员没有查看与管理工单的权限，
+   * 需求要等管理员终审后才成单，成员侧只看得到会话本身。
+   */
+  context(args: Record<string, unknown>): unknown {
+    if (args.trigger_id) {
+      const trigger = this.store.getTrigger(String(args.trigger_id))
+      if (!trigger) return { error: 'trigger:not-found' }
+      return { trigger, thread: this.store.listTriggersByThread(trigger.threadId, 20) }
+    }
+    if (args.thread_id) {
+      return { triggers: this.store.listTriggersByThread(String(args.thread_id), 20) }
+    }
+    return { error: 'router_context:missing-args' }
+  }
+
   ticket(args: Record<string, unknown>): unknown {
     if (args.ticket_id) return this.store.getTicket(String(args.ticket_id)) ?? { error: 'ticket:not-found' }
     const stage = typeof args.stage === 'string' && args.stage ? (args.stage as Stage) : undefined
@@ -305,6 +323,8 @@ export class RouterToolbox {
         ...(args.scope === undefined ? {} : { scope: String(args.scope) }),
         ...(args.repo === undefined ? {} : { repo: String(args.repo).trim() }),
         ...(args.branch === undefined ? {} : { branch: String(args.branch).trim() }),
+        // clarify：需求要先讨论几轮再开单；模型给了 clarify 就不再按 accept 直接开单。
+        ...(args.clarify === true ? { clarify: true } : {}),
       },
     }
   }

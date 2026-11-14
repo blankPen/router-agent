@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { Store } from '../../src/store/db.js'
 import { Engine } from '../../src/core/engine.js'
 import type { Trigger } from '#core/model.js'
-import { DEFAULT_ADMISSION, type Policy } from '#core/policy.js'
+import { type Policy } from '#core/policy.js'
 import { RouterToolbox } from '../../src/router/tools.js'
 
 const policy: Policy = {
@@ -11,8 +11,6 @@ const policy: Policy = {
   maxWorkers: 4,
   allowed: ['ou_alice'],
   bots: [],
-  admission: DEFAULT_ADMISSION,
-  receiveAll: true,
 }
 
 const NOW = '2026-11-06T10:00:10.000Z'
