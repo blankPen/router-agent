@@ -119,10 +119,78 @@ export interface EnqueueOutbox {
   threadId: string
   text: string
   now: string
+  /** 最早可投递时间；缺省等于 `now`。静默时段的通知用它推迟到时段结束。 */
+  nextAt?: string
   /** 用户消息 ID（不是话题根），用于回复后撤销回执表情。 */
   originMessageId?: string
   /** 结构化回复块；为空时只发 `text`。 */
   blocks?: ReplyBlock[]
+}
+
+/**
+ * 事件总线的事件本体（一行一条，只追加）。
+ *
+ * 幂等键是 (source, external_id)：同一个来源的同一条外部事件只会进来一次。
+ */
+export interface EventRecord {
+  id: string
+  source: string
+  type: string
+  externalId: string
+  lane: string
+  subject: string
+  summary: string
+  detail?: string
+  detailRef?: string
+  link?: string
+  actorId: string
+  actorName: string
+  actorType: string
+  chatId?: string
+  project?: string
+  priorityHint: number
+  costClass: string
+  hops: number
+  parentEventId?: string
+  receivedAt: string
+  deadlineAt?: string
+}
+
+/** 事件在队列里的状态投影：判定、延后、派发、审核都改这里。 */
+export interface EventQueueRecord {
+  eventId: string
+  lane: string
+  priority: number
+  tier: string
+  state: string
+  reason?: string
+  decidedBy?: string
+  /** 延后到的时间点；空表示随时可取。 */
+  notBefore?: string
+  attempts: number
+  leaseUntil?: string
+  ticketId?: string
+  createdAt: string
+  updatedAt: string
+}
+
+/** 队列筛选条件。 */
+export interface EventQueueFilter {
+  state?: string
+  tier?: string
+  source?: string
+  project?: string
+  /** 关键字：在摘要与对象标识里做包含匹配。 */
+  q?: string
+  limit?: number
+  offset?: number
+}
+
+/** 队列统计。 */
+export interface EventQueueStats {
+  total: number
+  byState: Record<string, number>
+  byTier: Record<string, number>
 }
 
 export interface EnqueueEffect {
@@ -438,6 +506,52 @@ CREATE TABLE IF NOT EXISTS effects (
 );
 CREATE INDEX IF NOT EXISTS idx_effects_due ON effects (status, next_at);
 
+-- 事件总线：事件本体（只追加）与队列状态（可重放的投影）。
+CREATE TABLE IF NOT EXISTS events (
+  id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  type TEXT NOT NULL,
+  external_id TEXT NOT NULL,
+  lane TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  detail TEXT,
+  detail_ref TEXT,
+  link TEXT,
+  actor_id TEXT NOT NULL DEFAULT '',
+  actor_name TEXT NOT NULL DEFAULT '',
+  actor_type TEXT NOT NULL DEFAULT 'external',
+  chat_id TEXT,
+  project TEXT,
+  priority_hint INTEGER NOT NULL DEFAULT 0,
+  cost_class TEXT NOT NULL DEFAULT 'cheap',
+  hops INTEGER NOT NULL DEFAULT 0,
+  parent_event_id TEXT,
+  received_at TEXT NOT NULL,
+  deadline_at TEXT,
+  raw TEXT,
+  UNIQUE (source, external_id)
+);
+CREATE INDEX IF NOT EXISTS idx_events_received ON events (received_at);
+
+CREATE TABLE IF NOT EXISTS event_queue (
+  event_id TEXT PRIMARY KEY,
+  lane TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 0,
+  tier TEXT NOT NULL DEFAULT 't3',
+  state TEXT NOT NULL DEFAULT 'queued',
+  reason TEXT,
+  decided_by TEXT,
+  not_before TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  lease_until TEXT,
+  ticket_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_event_queue_pick ON event_queue (state, priority DESC, not_before);
+CREATE INDEX IF NOT EXISTS idx_event_queue_lane ON event_queue (lane, state);
+
 -- 身份别名缓存：邮箱 / open_id 解析成 open_id 的结果。
 -- 键里必须带 app_id：open_id 是「应用 × 用户」维度的，换个应用同一个人的 open_id 就变了，
 -- 旧应用的缓存不能被新应用复用。
@@ -539,6 +653,9 @@ export class Store {
       this.db.exec('ALTER TABLE inputs ADD COLUMN source_key TEXT')
     }
     this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_inputs_source_key ON inputs (ticket_id, source_key)')
+    // 事件队列不再有「延后」状态：等待中的事件一律留在 queued，靠 not_before 表达「最早可处理时间」。
+    // 旧库里的 deferred 行回到 queued，避免永远取不到。
+    this.db.exec("UPDATE event_queue SET state = 'queued' WHERE state = 'deferred'")
     // 派工草稿从「一个群一条」改成「一个群 + 一个人一条」：旧库需要重建主键。
     const draftColumns = this.db.prepare('PRAGMA table_info(dispatch_drafts)').all() as Row[]
     const actorPk = Number(draftColumns.find(column => column.name === 'actor_id')?.pk ?? 0)
@@ -594,6 +711,119 @@ export class Store {
     }
   }
 
+  // ---------- 事件总线 ----------
+
+  /** 落一条事件；幂等命中返回 false（不覆盖已有事件）。 */
+  insertEvent(event: EventRecord): boolean {
+    const result = this.db.prepare(`INSERT OR IGNORE INTO events
+      (id, source, type, external_id, lane, subject, summary, detail, detail_ref, link, actor_id, actor_name, actor_type, chat_id, project, priority_hint, cost_class, hops, parent_event_id, received_at, deadline_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(event.id, event.source, event.type, event.externalId, event.lane, event.subject, event.summary,
+        event.detail ?? null, event.detailRef ?? null, event.link ?? null, event.actorId, event.actorName, event.actorType,
+        event.chatId ?? null, event.project ?? null, event.priorityHint, event.costClass, event.hops,
+        event.parentEventId ?? null, event.receivedAt, event.deadlineAt ?? null)
+    return Number(result.changes) > 0
+  }
+
+  getEvent(id: string): EventRecord | null {
+    const row = this.db.prepare('SELECT * FROM events WHERE id = ?').get(id) as Row | undefined
+    return row ? eventFromRow(row) : null
+  }
+
+  /** 按幂等三元组查事件：(source, externalId)。 */
+  getEventByKey(source: string, externalId: string): EventRecord | null {
+    const row = this.db.prepare('SELECT * FROM events WHERE source = ? AND external_id = ?').get(source, externalId) as Row | undefined
+    return row ? eventFromRow(row) : null
+  }
+
+  /** 写入队列状态；同事件已存在时按 event_id 覆盖。 */
+  insertEventQueue(entry: EventQueueRecord): void {
+    this.db.prepare(`INSERT INTO event_queue
+      (event_id, lane, priority, tier, state, reason, decided_by, not_before, attempts, lease_until, ticket_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(event_id) DO UPDATE SET
+        lane = excluded.lane, priority = excluded.priority, tier = excluded.tier, state = excluded.state,
+        reason = excluded.reason, decided_by = excluded.decided_by, not_before = excluded.not_before,
+        attempts = excluded.attempts, lease_until = excluded.lease_until, ticket_id = excluded.ticket_id,
+        updated_at = excluded.updated_at`)
+      .run(entry.eventId, entry.lane, entry.priority, entry.tier, entry.state, entry.reason ?? null,
+        entry.decidedBy ?? null, entry.notBefore ?? null, entry.attempts, entry.leaseUntil ?? null,
+        entry.ticketId ?? null, entry.createdAt, entry.updatedAt)
+  }
+
+  /** 更新队列状态；只覆盖传入的字段。 */
+  updateEventQueue(eventId: string, patch: Partial<EventQueueRecord>): void {
+    const current = this.getEventQueue(eventId)
+    if (!current) return
+    const next: EventQueueRecord = {
+      ...current,
+      ...patch,
+      eventId,
+      createdAt: current.createdAt,
+      updatedAt: patch.updatedAt ?? current.updatedAt,
+    }
+    this.insertEventQueue(next)
+  }
+
+  getEventQueue(eventId: string): EventQueueRecord | null {
+    const row = this.db.prepare('SELECT * FROM event_queue WHERE event_id = ?').get(eventId) as Row | undefined
+    return row ? eventQueueFromRow(row) : null
+  }
+
+  /** 按条件列队列；支持按来源与项目过滤（需要 join events）。 */
+  listEventQueue(filter: EventQueueFilter = {}): EventQueueRecord[] {
+    const where: string[] = []
+    const params: string[] = []
+    if (filter.state) { where.push('q.state = ?'); params.push(filter.state) }
+    if (filter.tier) { where.push('q.tier = ?'); params.push(filter.tier) }
+    if (filter.source) { where.push('e.source = ?'); params.push(filter.source) }
+    if (filter.project) { where.push('e.project = ?'); params.push(filter.project) }
+    if (filter.q) {
+      where.push('(e.summary LIKE ? OR e.subject LIKE ?)')
+      params.push(`%${filter.q}%`, `%${filter.q}%`)
+    }
+    const clause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''
+    const limit = filter.limit && filter.limit > 0 ? filter.limit : 200
+    const offset = filter.offset && filter.offset > 0 ? filter.offset : 0
+    const rows = this.db.prepare(`SELECT q.* FROM event_queue q
+      JOIN events e ON e.id = q.event_id
+      ${clause}
+      ORDER BY q.priority DESC, q.created_at ASC
+      LIMIT ? OFFSET ?`).all(...params, limit, offset) as Row[]
+    return rows.map(eventQueueFromRow)
+  }
+
+  /** 取到期可处理的队列项：优先级高的先来。 */
+  pickEventQueue(now: string, limit = 10): EventQueueRecord[] {
+    const rows = this.db.prepare(`SELECT * FROM event_queue
+      WHERE state IN ('queued', 'ready')
+        AND (not_before IS NULL OR not_before <= ?)
+        AND (lease_until IS NULL OR lease_until <= ?)
+      ORDER BY priority DESC, not_before ASC, created_at ASC
+      LIMIT ?`).all(now, now, limit) as Row[]
+    return rows.map(eventQueueFromRow)
+  }
+
+  /** 队列统计：总数 + 按状态 + 按档位。 */
+  eventQueueStats(): EventQueueStats {
+    const total = Number((this.db.prepare('SELECT COUNT(*) AS n FROM event_queue').get() as Row).n ?? 0)
+    const byState: Record<string, number> = {}
+    for (const row of this.db.prepare('SELECT state, COUNT(*) AS n FROM event_queue GROUP BY state').all() as Row[]) {
+      byState[String(row.state)] = Number(row.n)
+    }
+    const byTier: Record<string, number> = {}
+    for (const row of this.db.prepare('SELECT tier, COUNT(*) AS n FROM event_queue GROUP BY tier').all() as Row[]) {
+      byTier[String(row.tier)] = Number(row.n)
+    }
+    return { total, byState, byTier }
+  }
+
+  /** 统计某个时刻之后进来的事件数；预算按天算时用它。 */
+  countEventsSince(since: string): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS n FROM events WHERE received_at >= ?').get(since) as Row | undefined
+    return Number(row?.n ?? 0)
+  }
+
   close(): void {
     this.db.close()
   }
@@ -623,6 +853,12 @@ export class Store {
 
   getTrigger(id: string): Trigger | null {
     const row = this.db.prepare('SELECT * FROM triggers WHERE id = ?').get(id) as Row | undefined
+    return row ? triggerFromRow(row) : null
+  }
+
+  /** 按 (source, external_id) 找触发消息；事件派工幂等靠它复用已有触发。 */
+  getTriggerByExternal(source: string, externalId: string): Trigger | null {
+    const row = this.db.prepare('SELECT * FROM triggers WHERE source = ? AND external_id = ?').get(source, externalId) as Row | undefined
     return row ? triggerFromRow(row) : null
   }
 
@@ -906,6 +1142,17 @@ export class Store {
   getIntake(id: string): Intake | null {
     const row = this.db.prepare('SELECT * FROM intakes WHERE id = ?').get(id) as Row | undefined
     return row ? intakeFromRow(row) : null
+  }
+
+  /** 列 intake；按状态筛选（统一待审核列表要用）。 */
+  listIntakes(filter: { status?: string; limit?: number } = {}): Intake[] {
+    const where: string[] = []
+    const params: string[] = []
+    if (filter.status) { where.push('status = ?'); params.push(filter.status) }
+    const clause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''
+    const limit = filter.limit && filter.limit > 0 ? filter.limit : 200
+    const rows = this.db.prepare(`SELECT * FROM intakes ${clause} ORDER BY updated_at DESC LIMIT ?`).all(...params, String(limit)) as Row[]
+    return rows.map(intakeFromRow)
   }
 
   /** 找一条仍在进行（clarifying / ready）的 intake：同群 + 同人 + 同话题只允许一条。 */
@@ -1444,7 +1691,7 @@ export class Store {
   enqueueOutbox(item: EnqueueOutbox): boolean {
     const result = this.db.prepare(`INSERT OR IGNORE INTO outbox (id, key, channel_kind, channel_id, thread_id, text, blocks, status, attempts, next_at, created_at, origin_message_id)
       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)`)
-      .run(item.id, item.key, item.channelKind, item.channelId, item.threadId, item.text, item.blocks ? JSON.stringify(item.blocks) : null, item.now, item.now, item.originMessageId ?? null)
+      .run(item.id, item.key, item.channelKind, item.channelId, item.threadId, item.text, item.blocks ? JSON.stringify(item.blocks) : null, item.nextAt ?? item.now, item.now, item.originMessageId ?? null)
     return Number(result.changes) > 0
   }
 
@@ -1868,6 +2115,50 @@ function effectFromRow(row: Row, bump: number): EffectItem {
     nextAt: String(row.next_at),
     createdAt: String(row.created_at),
     ...(row.last_error ? { lastError: String(row.last_error) } : {}),
+  }
+}
+
+function eventFromRow(row: Row): EventRecord {
+  return {
+    id: String(row.id),
+    source: String(row.source),
+    type: String(row.type),
+    externalId: String(row.external_id),
+    lane: String(row.lane),
+    subject: String(row.subject),
+    summary: String(row.summary),
+    ...(row.detail ? { detail: String(row.detail) } : {}),
+    ...(row.detail_ref ? { detailRef: String(row.detail_ref) } : {}),
+    ...(row.link ? { link: String(row.link) } : {}),
+    actorId: String(row.actor_id ?? ''),
+    actorName: String(row.actor_name ?? ''),
+    actorType: String(row.actor_type ?? 'external'),
+    ...(row.chat_id ? { chatId: String(row.chat_id) } : {}),
+    ...(row.project ? { project: String(row.project) } : {}),
+    priorityHint: Number(row.priority_hint ?? 0),
+    costClass: String(row.cost_class ?? 'cheap'),
+    hops: Number(row.hops ?? 0),
+    ...(row.parent_event_id ? { parentEventId: String(row.parent_event_id) } : {}),
+    receivedAt: String(row.received_at),
+    ...(row.deadline_at ? { deadlineAt: String(row.deadline_at) } : {}),
+  }
+}
+
+function eventQueueFromRow(row: Row): EventQueueRecord {
+  return {
+    eventId: String(row.event_id),
+    lane: String(row.lane),
+    priority: Number(row.priority ?? 0),
+    tier: String(row.tier ?? 't3'),
+    state: String(row.state ?? 'queued'),
+    ...(row.reason ? { reason: String(row.reason) } : {}),
+    ...(row.decided_by ? { decidedBy: String(row.decided_by) } : {}),
+    ...(row.not_before ? { notBefore: String(row.not_before) } : {}),
+    attempts: Number(row.attempts ?? 0),
+    ...(row.lease_until ? { leaseUntil: String(row.lease_until) } : {}),
+    ...(row.ticket_id ? { ticketId: String(row.ticket_id) } : {}),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
   }
 }
 

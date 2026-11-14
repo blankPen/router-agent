@@ -27,6 +27,8 @@ import type { LogAssistantQuestion, LogAssistantOverview, LogDiagnosis } from '.
 import { buildIssueBody, type IssueReporter } from './issue-report.js'
 import { getSpec, listSpecs, resetSpec, saveSpec, SpecError } from '../specs/index.js'
 import { PACKAGE_VERSION, type UpdateSnapshot } from '../update/index.js'
+import type { EventBus } from './event-bus.js'
+import type { EventWebhookGateway } from './event-sources.js'
 import {
   discoverLocalProviders,
   toLocalProviderView,
@@ -134,6 +136,10 @@ export interface ApiServerOptions {
   logAssistant?: LogAssistantPort
   /** 排查结果一键上报 GitHub issue；缺省时端点返回 404。 */
   issueReporter?: IssueReporter
+  /** 事件总线；缺省时事件相关写接口返回 501。 */
+  eventBus?: EventBus
+  /** 事件 webhook 入口；缺省时 /api/events/in/* 返回 404。 */
+  eventWebhook?: EventWebhookGateway
   /** 请求级异常与配置写入失败的日志出口。 */
   logger?: Logger
   /** 当前进程加载的插件元数据；启动时由 CLI 注入，面板据此展示自定义运行时/通道。 */
@@ -325,6 +331,125 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
           message: error instanceof Error ? error.message : String(error),
         })
       }
+    }
+
+    // ---------- 事件总线 ----------
+
+    if (path === '/api/events' && req.method === 'GET') {
+      const rows = opts.store.listEventQueue({
+        ...(url.searchParams.get('state') ? { state: url.searchParams.get('state')! } : {}),
+        ...(url.searchParams.get('tier') ? { tier: url.searchParams.get('tier')! } : {}),
+        ...(url.searchParams.get('source') ? { source: url.searchParams.get('source')! } : {}),
+        ...(url.searchParams.get('project') ? { project: url.searchParams.get('project')! } : {}),
+        ...(url.searchParams.get('q') ? { q: url.searchParams.get('q')! } : {}),
+        limit: Number(url.searchParams.get('limit') ?? 200),
+        offset: Number(url.searchParams.get('offset') ?? 0),
+      })
+      const events = rows.map(row => ({ queue: row, event: opts.store.getEvent(row.eventId) }))
+      return respond(res, 200, { events })
+    }
+
+    if (path === '/api/events/stats' && req.method === 'GET') {
+      return respond(res, 200, {
+        stats: opts.store.eventQueueStats(),
+        sources: config.event.sources.map(source => ({ id: source.id, type: source.type, mode: source.mode })),
+      })
+    }
+
+    if (path === '/api/events/config') {
+      if (req.method === 'GET') return respond(res, 200, { event: config.event })
+      if (req.method === 'PUT' || req.method === 'POST') {
+        const body = (await readJson(req)) as Record<string, unknown>
+        const result = applyConfigPatch(config, body)
+        if (result.errors.length > 0) return respond(res, 400, { errors: result.errors })
+        // 时间窗与预算要落盘：面板改完立即生效，重启后也不能丢。
+        if (config.home) writeConfig(config.home, config)
+        onEvent({ event: 'api:event-config', changed: result.changed.join(',') })
+        await opts.onConfigChange?.(config, result.changed)
+        return respond(res, 200, { event: config.event, changed: result.changed })
+      }
+      return respond(res, 405, { error: 'method-not-allowed' })
+    }
+
+    // webhook 入口：外部系统把事件推进来。
+    const inbound = path.match(/^\/api\/events\/in\/([^/]+)$/)
+    if (inbound && req.method === 'POST') {
+      if (!opts.eventWebhook) return respond(res, 404, { error: 'event-webhook-not-available' })
+      const sourceId = inbound[1]!
+      const body = await readRaw(req)
+      const headers = headerMap(req)
+      const result = opts.eventWebhook.accept(sourceId, body, headers)
+      if (!result.accepted || !result.envelope) {
+        onEvent({ event: 'api:event-inbound-rejected', source: sourceId, reason: result.reason ?? 'unknown' })
+        return respond(res, 400, { error: result.reason ?? 'event-rejected' })
+      }
+      const ingested = opts.eventBus
+        ? await opts.eventBus.ingest(result.envelope)
+        : { accepted: false, eventId: '', duplicate: false, reason: 'event:bus-disabled' }
+      onEvent({ event: 'api:event-inbound', source: sourceId, eventId: ingested.eventId, accepted: ingested.accepted })
+      return respond(res, ingested.accepted ? 201 : 200, ingested)
+    }
+
+    const eventDetail = path.match(/^\/api\/events\/([^/]+)$/)
+    if (eventDetail && req.method === 'GET') {
+      const eventId = eventDetail[1]!
+      const event = opts.store.getEvent(eventId)
+      if (!event) return respond(res, 404, { error: 'event-not-found' })
+      return respond(res, 200, { event, queue: opts.store.getEventQueue(eventId) })
+    }
+
+    const eventAction = path.match(/^\/api\/events\/([^/]+)\/(dispatch|reject|defer)$/)
+    if (eventAction && req.method === 'POST') {
+      if (!opts.eventBus) return respond(res, 501, { error: 'event-bus-not-enabled' })
+      const eventId = eventAction[1]!
+      const what = eventAction[2]!
+      const denied = denyIfNotApprover(req, config)
+      if (denied) return respond(res, 403, { error: 'event:forbidden', message: denied })
+      const action = what === 'dispatch' ? 'approve' : what === 'reject' ? 'reject' : 'defer'
+      const operator = req.headers['x-ra-actor'] ?? 'panel'
+      const result = await opts.eventBus.review(eventId, action, String(operator))
+      if (result.state === 'not-found') return respond(res, 404, { error: 'event-not-found' })
+      onEvent({ event: 'api:event-review', eventId, action, state: result.state })
+      return respond(res, 200, result)
+    }
+
+    // 统一待审核列表：需求终审与事件审核同页展示。
+    if (path === '/api/review' && req.method === 'GET') {
+      const type = url.searchParams.get('type') ?? 'all'
+      const items: Array<Record<string, unknown>> = []
+      if (type === 'all' || type === 'intake') {
+        for (const intake of opts.store.listIntakes({ status: 'ready', limit: 100 })) {
+          items.push({
+            kind: 'intake',
+            id: intake.id,
+            title: intake.rawText.slice(0, 80),
+            summary: intake.rawText.slice(0, 200),
+            actorName: intake.actorName,
+            project: intake.project,
+            status: intake.status,
+            updatedAt: intake.updatedAt,
+          })
+        }
+      }
+      if (type === 'all' || type === 'event') {
+        for (const row of opts.store.listEventQueue({ state: 'pending_review', limit: 100 })) {
+          const event = opts.store.getEvent(row.eventId)
+          items.push({
+            kind: 'event',
+            id: row.eventId,
+            title: event?.summary ?? row.eventId,
+            summary: event?.summary ?? '',
+            source: event?.source ?? '',
+            actorName: event?.actorName ?? '',
+            project: event?.project ?? '',
+            priority: row.priority,
+            reason: row.reason ?? '',
+            status: row.state,
+            updatedAt: row.updatedAt,
+          })
+        }
+      }
+      return respond(res, 200, { items })
     }
 
     if (path === '/api/reports' && req.method === 'POST') {
@@ -1036,6 +1161,37 @@ const IDENTITY_PATHS = ['feishu.allowed', 'feishu.chats', 'feishu.appId', 'feish
 /** 本次保存是否涉及允许名单：涉及才需要重新解析并重建策略。 */
 function touchesIdentity(changed: string[]): boolean {
   return changed.some(path => IDENTITY_PATHS.includes(path))
+}
+
+/** 读原始请求体（webhook 验签需要原文，不能先解析成 JSON）。 */
+async function readRaw(req: IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = []
+  for await (const chunk of req) chunks.push(Buffer.from(chunk))
+  return Buffer.concat(chunks).toString('utf8')
+}
+
+/** 取请求头（小写键）。 */
+function headerMap(req: IncomingMessage): Record<string, string | undefined> {
+  const headers: Record<string, string | undefined> = {}
+  for (const [key, value] of Object.entries(req.headers)) {
+    headers[key.toLowerCase()] = Array.isArray(value) ? value[0] : value
+  }
+  return headers
+}
+
+/**
+ * 审核写操作的身份校验。
+ *
+ * 面板是本机页面，默认放行；请求带了操作者标识时，必须在审核人名单里。
+ * 返回空串表示放行。
+ */
+function denyIfNotApprover(req: IncomingMessage, config: AppConfig): string {
+  const actor = req.headers['x-ra-actor']
+  const name = Array.isArray(actor) ? actor[0] : actor
+  if (!name) return ''
+  const approvers = config.event?.approvers ?? []
+  if (approvers.length === 0) return ''
+  return approvers.includes(name) ? '' : '只有审核人名单里的人可以操作待审核事件'
 }
 
 function respond(res: ServerResponse, status: number, body: unknown, after?: () => void): void {

@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="use-iframe" content="true">
+<meta name="html-box-height-mode" content="auto">
+<meta name="description" content="Router Agent 多来源事件总线的整体流转可视化：来源层、事件队列池、规则+Jev 双层判定、分级派发、成本闸门与时间窗、Web 事件面板。">
+<title>Router Agent 多来源事件总线 · 整体流转</title>
+<style>
+  :root{
+    --ink:#16181d; --ink-2:#4a4d57; --ink-3:#83868f;
+    --line:#e5e3dd; --line-2:#d6d3ca; --bg:#fbfaf8; --panel:#ffffff;
+    --violet:#6d28d9; --violet-soft:#f3eeff;
+    --blue:#2563eb; --blue-soft:#eaf1ff;
+    --green:#15803d; --green-soft:#e8f5ec;
+    --amber:#b45309; --amber-soft:#fdf1e3;
+    --red:#b91c1c; --red-soft:#fdecec;
+    --slate:#475569; --slate-soft:#eef0f3;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-font-smoothing:antialiased}
+  body{
+    margin:0;background:var(--bg);color:var(--ink);
+    font-family:var(--sans);font-size:14px;line-height:1.6;
+  }
+  .wrap{width:100%;max-width:100%;padding:18px 16px 26px}
+  h1{font-size:21px;line-height:1.35;margin:0 0 6px;font-weight:700;letter-spacing:-.01em}
+  h2{font-size:15px;margin:0 0 12px;font-weight:650;display:flex;align-items:center;gap:8px}
+  h2 .n{
+    font-family:var(--mono);font-size:11px;color:var(--violet);
+    background:var(--violet-soft);border-radius:5px;padding:2px 6px;font-weight:600;
+  }
+  p{margin:0 0 10px}
+  .lede{color:var(--ink-2);font-size:13.5px;max-width:720px}
+  .badges{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 18px}
+  .badge{
+    font-family:var(--mono);font-size:11px;color:var(--ink-2);
+    border:1px solid var(--line-2);background:var(--panel);
+    border-radius:999px;padding:3px 9px;
+  }
+  .badge b{color:var(--ink);font-weight:600}
+  section{
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:16px 16px 18px;margin-bottom:14px;
+  }
+  .row{display:grid;gap:10px}
+  .flow{grid-template-columns:repeat(5,1fr);align-items:stretch}
+  .flow-4{grid-template-columns:repeat(4,1fr)}
+  .stage{
+    position:relative;border:1px solid var(--line);border-radius:10px;
+    padding:11px 11px 12px;background:#fff;
+  }
+  .stage + .stage::before{
+    content:"›";position:absolute;left:-9px;top:50%;transform:translateY(-50%);
+    color:#b9b4a7;font-size:18px;line-height:1;z-index:2;
+  }
+  .stage h3{font-size:12.5px;margin:0 0 3px;font-weight:650;letter-spacing:.01em}
+  .stage .sub{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-bottom:8px;display:block}
+  .stage ul{margin:0;padding-left:15px}
+  .stage li{font-size:12px;color:var(--ink-2);margin-bottom:3px}
+  .stage li b{color:var(--ink);font-weight:600}
+  .tint-violet{background:var(--violet-soft);border-color:#e0d4ff}
+  .tint-blue{background:var(--blue-soft);border-color:#d6e4ff}
+  .tint-amber{background:var(--amber-soft);border-color:#f5e2c8}
+  .tint-green{background:var(--green-soft);border-color:#d3eadb}
+  .tint-red{background:var(--red-soft);border-color:#f7d8d8}
+  .chip{
+    display:inline-block;font-family:var(--mono);font-size:10.5px;
+    border:1px solid var(--line-2);border-radius:5px;padding:1px 6px;
+    color:var(--ink-2);background:#fff;margin:0 4px 4px 0;
+  }
+  .chip.v{color:var(--violet);border-color:#ddcfff;background:var(--violet-soft)}
+  .chip.b{color:var(--blue);border-color:#cfe0ff;background:var(--blue-soft)}
+  .chip.g{color:var(--green);border-color:#cfe8d8;background:var(--green-soft)}
+  .chip.a{color:var(--amber);border-color:#f0dcbe;background:var(--amber-soft)}
+  .chip.r{color:var(--red);border-color:#f5d2d2;background:var(--red-soft)}
+  .bypass{
+    margin-top:12px;border:1px dashed #c9c3f2;background:var(--violet-soft);
+    border-radius:9px;padding:9px 12px;font-size:12.5px;color:#4c1d95;
+  }
+  .bypass b{font-weight:650}
+  .rail{
+    margin-top:12px;display:grid;grid-template-columns:repeat(3,1fr);gap:10px;
+  }
+  .rail div{
+    border:1px solid var(--line);border-left:3px solid var(--line-2);
+    border-radius:8px;padding:8px 11px;background:#fcfcfb;font-size:12px;color:var(--ink-2);
+  }
+  .rail div b{display:block;color:var(--ink);font-size:12px;font-weight:650;margin-bottom:2px}
+  .tier{border-radius:10px;padding:11px 12px;border:1px solid var(--line);background:#fff}
+  .tier .tag{font-family:var(--mono);font-size:11px;font-weight:600;margin-bottom:5px;display:block}
+  .tier h3{font-size:13px;margin:0 0 4px;font-weight:650}
+  .tier p{font-size:12px;color:var(--ink-2);margin:0 0 6px}
+  .tier .cond{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);font-weight:600;text-transform:uppercase;letter-spacing:.04em;background:#faf9f7}
+  tr:last-child td{border-bottom:none}
+  td b{font-weight:600}
+  .mono{font-family:var(--mono);font-size:11.5px;color:var(--ink-2)}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .panelbox{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fff}
+  .panelbox .ptitle{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:8px 11px;background:#f7f6f3;border-bottom:1px solid var(--line);
+    font-size:12px;font-weight:650;
+  }
+  .panelbox .ptitle span{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);font-weight:500}
+  .filters{display:flex;flex-wrap:wrap;gap:5px;padding:9px 11px;border-bottom:1px solid var(--line)}
+  .f{
+    font-family:var(--mono);font-size:10.5px;border:1px solid var(--line-2);border-radius:999px;
+    padding:2px 8px;color:var(--ink-2);background:#fff;
+  }
+  .f.on{background:var(--violet);border-color:var(--violet);color:#fff}
+  .f.t0{background:var(--red-soft);border-color:#f0c9c9;color:var(--red)}
+  .f.t1{background:var(--amber-soft);border-color:#efd9b6;color:var(--amber)}
+  .f.t2{background:var(--slate-soft);border-color:#d9dde3;color:var(--slate)}
+  .ev{display:flex;gap:9px;padding:9px 11px;border-bottom:1px solid var(--line);align-items:flex-start}
+  .ev:last-child{border-bottom:none}
+  .prio{font-family:var(--mono);font-size:10px;font-weight:700;border-radius:4px;padding:1px 5px;flex:0 0 auto;margin-top:1px}
+  .p0{background:var(--red-soft);color:var(--red)}
+  .p1{background:var(--amber-soft);color:var(--amber)}
+  .p2{background:var(--slate-soft);color:var(--slate)}
+  .ev .body{flex:1 1 auto;min-width:0}
+  .ev .t{font-size:12.5px;color:var(--ink);font-weight:550;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ev .m{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);display:block;margin-top:1px}
+  .ev .act{font-family:var(--mono);font-size:10.5px;color:var(--blue);flex:0 0 auto}
+  .timeline{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px}
+  .win{border-radius:9px;padding:9px 11px;border:1px solid var(--line);background:#fff}
+  .win .rid{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);display:block;margin-bottom:3px}
+  .win h4{margin:0 0 4px;font-size:12.5px;font-weight:650}
+  .win p{margin:0;font-size:11.5px;color:var(--ink-2)}
+  .gates{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+  .gate{border:1px solid var(--line);border-radius:9px;padding:9px 11px;background:#fcfcfb}
+  .gate b{display:block;font-size:12.5px;margin-bottom:2px}
+  .gate span{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+  .note{font-size:11.5px;color:var(--ink-3);margin-top:12px;padding-top:10px;border-top:1px dashed var(--line)}
+  @media (max-width:900px){
+    .flow{grid-template-columns:1fr;row-gap:24px}
+    .flow-4{grid-template-columns:repeat(2,1fr)}
+    .two,.rail,.gates,.timeline{grid-template-columns:1fr}
+    .stage + .stage::before{content:none}
+    .stage:not(:last-child)::after{
+      content:"↓";position:absolute;left:50%;bottom:-20px;transform:translateX(-50%);
+      color:#b9b4a7;font-size:15px;line-height:1;
+    }
+    .flow-4 .tier:not(:last-child)::after{content:none}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>多来源事件总线 · 整体流转</h1>
+  <p class="lede">所有来源先归一化成统一事件进<b>事件队列池</b>，由<b>规则层 + Jev 决策模型</b>判定「要不要处理、什么类型、多急、要不要人介入」，再<b>分级派发</b>；全程受成本闸门与可配置时间窗约束，事件状态对用户在面板可见。<b>来源只给基线，不定处理方式</b>。</p>
+  <div class="badges">
+    <span class="badge">来源 <b>用户消息 / 运营群 / Issue / Webhook / 定时任务</b></span>
+    <span class="badge">幂等键 <b>(source, externalId)</b></span>
+    <span class="badge">判定 <b>所有来源同一套</b></span>
+    <span class="badge">直派与否 <b>看判定与置信度</b></span>
+    <span class="badge">时间窗 / 预算 <b>可配置 · 预算默认不限</b></span>
+    <span class="badge">派发 <b>T0 直派 / T1 审核 / T2 归档 / T3 丢弃</b></span>
+    <span class="badge">参考 <b>agent-autoloop 的语义</b></span>
+  </div>
+
+  <section>
+    <h2><span class="n">01</span>端到端流转</h2>
+    <div class="row flow">
+      <div class="stage">
+        <h3>来源层</h3>
+        <span class="sub">EventSource 插件 · 只给基线</span>
+        <ul>
+          <li><b>用户消息</b>（飞书）</li>
+          <li>运营群消息</li>
+          <li>GitHub Issue</li>
+          <li>Webhook</li>
+          <li>定时任务</li>
+        </ul>
+        <div style="margin-top:8px">
+          <span class="chip v">feishu-message</span><span class="chip v">ops-chat</span>
+          <span class="chip v">github-issue</span><span class="chip v">webhook</span><span class="chip v">cron</span>
+        </div>
+      </div>
+      <div class="stage tint-blue">
+        <h3>归一化 · 事件契约</h3>
+        <span class="sub">EventEnvelope</span>
+        <ul>
+          <li>稳定去重键 + 类型</li>
+          <li>subject 白名单（进提示词）</li>
+          <li>正文只落 detailRef</li>
+          <li>actor / project / lane</li>
+          <li><b>基线优先级</b>（只影响排序与插队）</li>
+        </ul>
+      </div>
+      <div class="stage tint-violet">
+        <h3>事件队列池</h3>
+        <span class="sub">lane · priority · notBefore</span>
+        <ul>
+          <li>状态机 8 态</li>
+          <li>同 lane 串行</li>
+          <li>背压 / TTL 过期</li>
+          <li>高基线事件插队</li>
+        </ul>
+      </div>
+      <div class="stage tint-amber">
+        <h3>判定层</h3>
+        <span class="sub">规则 → Jev · 所有来源同一套</span>
+        <ul>
+          <li><b>规则层</b>：形态 / 身份 / 预算（不看来源）</li>
+          <li><b>Jev</b>：处理·类型·优先级·是否需人</li>
+          <li>护栏只朝更大副作用移动</li>
+          <li>失败降级不丢事件</li>
+        </ul>
+      </div>
+      <div class="stage tint-green">
+        <h3>分级派发</h3>
+        <span class="sub">Dispatch · 所有来源同一套</span>
+        <ul>
+          <li><b>T0</b> 直派工单</li>
+          <li><b>T1</b> 审核 + 通知 admin</li>
+          <li><b>T2</b> 归档留痕</li>
+          <li><b>T3</b> 丢弃</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="bypass">
+      <b>时效插队（不是特权）：</b>优先级基线高的事件（如用户消息 100）不等队列，取到即处理；<b>但它「怎么处理」仍由判定决定</b>——是否直派工单与它来自哪种来源无关。
+    </div>
+
+    <div class="rail">
+      <div><b>成本闸门 · 时间窗</b>时间窗与预算都可配置，预算默认不限；窗口先留空 = 一直放行，配了才分高低峰</div>
+      <div><b>Web 事件面板</b>TODO 面板 + 优先级筛选 + 统一待审核（事件与需求终审同页）；飞书卡片与面板同一套接口</div>
+      <div><b>日志 · 可观测</b>event:ingested → triaged → pending-review → dispatched，全程带 eventId</div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">02</span>优先级判定：规则层 + Jev 双层</h2>
+    <div class="two">
+      <div>
+        <table>
+          <thead><tr><th>规则</th><th>结论</th></tr></thead>
+          <tbody>
+            <tr><td><span class="mono">scope:admins / mention / all</span></td><td>群范围<b>第一道闸</b>：不在群里算数就不进队列</td></tr>
+            <tr><td><span class="mono">identity:admin</span></td><td>提高基线优先级，允许直派（默认管理员 + 群级扩充）</td></tr>
+            <tr><td><span class="mono">keyword:sev0 / sev1</span></td><td>提高基线优先级（线上告警 / 疑似 Bug）</td></tr>
+            <tr><td><span class="mono">project:unbound</span></td><td>前置不满足 → <b>T1 审核</b></td></tr>
+            <tr><td><span class="mono">scope:undecidable</span></td><td>判定不出授权范围 → <b>T1 审核</b></td></tr>
+            <tr><td><span class="mono">budget:exhausted</span></td><td><b>延后</b>到下一个窗口（预算默认不限）</td></tr>
+            <tr><td><span class="mono">window:closed</span></td><td><b>延后</b>到窗口开始</td></tr>
+            <tr><td><span class="mono">dedupe / noise / bot</span></td><td><b>T3 丢弃</b>（留一行记录）</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div>
+        <table>
+          <thead><tr><th>Jev · event.triage.v1</th><th>档位</th></tr></thead>
+          <tbody>
+            <tr><td><b>needsHandling</b> 是否需要处理</td><td>noul · 阈值 0.6</td></tr>
+            <tr><td><b>eventType</b> 类型</td><td>告警 / 缺陷 / 需求 / 信息 / 噪音</td></tr>
+            <tr><td><b>priority</b> 优先级</td><td>立即 / 高 / 中 / 低</td></tr>
+            <tr><td><b>needsHuman</b> 是否需人介入</td><td>noul · 阈值 0.5</td></tr>
+            <tr><td><b>projectRelated</b> 与项目相关</td><td>noul · 无关则归档</td></tr>
+          </tbody>
+        </table>
+        <p style="margin-top:10px;font-size:12px;color:var(--ink-2)">
+          <b>融合：</b>规则置信度 × 模型置信度取低值；置信度 &lt; 0.5 一律 <b>T1 进审核</b>；规则已判终局的不被模型改写；
+          模型失败 → 用规则结论继续并标 <span class="mono">degraded</span>，<b>绝不静默丢弃</b>。<br>
+          <b>来源只给基线</b>（用户消息 100 / Issue 70 / webhook 50 / 定时 40），<b>不出现在 tier 判定里</b>。
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">03</span>分级派发</h2>
+    <div class="row flow flow-4">
+      <div class="tier tint-red">
+        <span class="tag" style="color:var(--red)">T0 · 直派</span>
+        <h3>直接开单派工</h3>
+        <p>判定「需要处理」且置信度达标、不需人介入、前置条件满足。任何来源都可能是 T0。</p>
+        <span class="cond">cond: 判定结论 + 置信度 + 四条前置条件</span>
+      </div>
+      <div class="tier tint-amber">
+        <span class="tag" style="color:var(--amber)">T1 · 审核</span>
+        <h3>进审核队列</h3>
+        <p>判定要人介入、置信度不足、项目未绑定或授权范围不可落地。飞书卡片 + 面板待审列表。</p>
+        <span class="cond">cond: 需人拍板</span>
+      </div>
+      <div class="tier">
+        <span class="tag" style="color:var(--slate)">T2 · 归档</span>
+        <h3>只留痕可检索</h3>
+        <p>与项目无关、纯通知类、可在面板搜索追溯；可配日报汇总，不打扰。</p>
+        <span class="cond">cond: 不处理但值得留痕</span>
+      </div>
+      <div class="tier">
+        <span class="tag" style="color:var(--ink-3)">T3 · 丢弃</span>
+        <h3>丢弃但记一笔</h3>
+        <p>机器人自发、寒暄、幂等重复。写日志便于事后追溯为什么没处理。</p>
+        <span class="cond">cond: 无处理价值</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">04</span>成本控制与可配置时间窗</h2>
+    <p style="font-size:12px;color:var(--ink-2);margin:-4px 0 12px">时间窗<b>先留空</b>（默认一直放行）；下面的窗口划分只是<b>示例，不预置</b>，需要时在配置里启用。</p>
+    <div class="timeline">
+      <div class="win">
+        <span class="rid">示例 · window: night 00:00–06:00</span>
+        <h4>低峰 · 全量 + 批量</h4>
+        <p>放行 T0~T3；同 <span class="mono">source + type + project</span> 的事件合并成一次 Jev 调用，调用次数 N → 1；合并失败自动退回逐条判定。<b>窗口可在面板改。</b></p>
+      </div>
+      <div class="win">
+        <span class="rid">示例 · window: peak 09:00–20:00</span>
+        <h4>高峰 · 只放要紧事</h4>
+        <p>只放行 T0 / T1；低优事件排队或延后，模型调用优先保响应。</p>
+      </div>
+      <div class="win">
+        <span class="rid">示例 · window: offpeak 20:00–09:00</span>
+        <h4>平峰 · 常规节奏</h4>
+        <p>放行 T0 / T1 / T2；T3 归档不派发。</p>
+      </div>
+      <div class="win">
+        <span class="rid">配置项 · budget daily</span>
+        <h4>预算闸门（默认不限）</h4>
+        <p>可配置日 token / 日事件数；默认 <b>0 = 不限制</b>，配了才拦截；触顶后先不调模型、低优事件延后到次日，已判定完的 T0 仍执行，并记 <span class="mono">event:budget-exceeded</span>。</p>
+      </div>
+    </div>
+    <div class="gates">
+      <div class="gate"><b>时间窗闸门</b><span>event.windows[].allow</span></div>
+      <div class="gate"><b>预算闸门</b><span>dailyTokens / dailyEvents</span></div>
+      <div class="gate"><b>并发与背压闸门</b><span>maxWorkers / maxQueueDepth</span></div>
+    </div>
+    <p class="note">降级链：规则命中 → 直接定案（0 模型调用）；规则无法定论 → Jev；Jev 超时 / 非法 / 超预算 → 规则结论 + <span class="mono">degraded</span> 标记并优先转 T1 审核。</p>
+  </section>
+
+  <section>
+    <h2><span class="n">05</span>Web 事件面板形态</h2>
+    <div class="two">
+      <div class="panelbox">
+        <div class="ptitle">事件 · TODO 面板<span>GET /api/events</span></div>
+        <div class="filters">
+          <span class="f on">全部</span>
+          <span class="f t0">T0 立即</span>
+          <span class="f t1">T1 高</span>
+          <span class="f t2">T2 中</span>
+          <span class="f">T3 低</span>
+          <span class="f">来源 ▾</span>
+          <span class="f">状态 ▾</span>
+          <span class="f">项目 ▾</span>
+        </div>
+        <div class="ev">
+          <span class="prio p0">T0</span>
+          <div class="body">
+            <span class="t">线上支付回调 5xx 突增（生产告警）</span>
+            <span class="m">github-issue · 汇金支付 · keyword:sev0 · 等待 2m</span>
+          </div>
+          <span class="act">详情</span>
+        </div>
+        <div class="ev">
+          <span class="prio p1">T1</span>
+          <div class="body">
+            <span class="t">Issue #412 导出功能偶发失败</span>
+            <span class="m">github-issue · 无线 · jev:defect/高 · 需人介入</span>
+          </div>
+          <span class="act">审核</span>
+        </div>
+        <div class="ev">
+          <span class="prio p2">T2</span>
+          <div class="body">
+            <span class="t">运营群：本周巡检排班已更新</span>
+            <span class="m">ops-chat · 客服 · jev:info · 已归档</span>
+          </div>
+          <span class="act">详情</span>
+        </div>
+        <div class="ev">
+          <span class="prio p2">T2</span>
+          <div class="body">
+            <span class="t">夜间批量任务：依赖版本巡检</span>
+            <span class="m">cron · 汇金 · 窗口 night · 排队中</span>
+          </div>
+          <span class="act">详情</span>
+        </div>
+      </div>
+
+      <div class="panelbox">
+        <div class="ptitle">统一待审核 · admin<span>批准 / 驳回 / 补充要求 / 延后</span></div>
+        <div class="filters">
+          <span class="f on">待我处理</span>
+          <span class="f">我已处理</span>
+          <span class="f">全部</span>
+          <span class="f on">事件</span>
+          <span class="f">需求终审</span>
+          <span class="f">免打扰 22:00–08:00</span>
+        </div>
+        <div class="ev">
+          <span class="prio p1">T1</span>
+          <div class="body">
+            <span class="t">建议：派给「汇金支付」项目 · 运行时 Orca</span>
+            <span class="m">模型建议 defect / 高 / 需人 · 通知已发飞书 · 3 分钟前</span>
+          </div>
+          <span class="act">批准</span>
+        </div>
+        <div class="ev">
+          <span class="prio p1">T1</span>
+          <div class="body">
+            <span class="t">建议：先问清楚复现步骤再开工</span>
+            <span class="m">模型置信度 0.48 &lt; 0.5 · 等待补充信息</span>
+          </div>
+          <span class="act">驳回</span>
+        </div>
+        <div class="ev">
+          <span class="prio p2">T2</span>
+          <div class="body">
+            <span class="t">建议：延后到 09:00 高峰窗口处理</span>
+            <span class="m">运营群 · 非紧急 · 人工指定时间</span>
+          </div>
+          <span class="act">延后</span>
+        </div>
+        <p style="padding:9px 11px;margin:0;font-size:11.5px;color:var(--ink-3);border-top:1px solid var(--line)">
+          每次拍板写审计（谁 · 何时 · 结论）；飞书卡片与面板共用同一套接口，两边结果一致。<b>需求终审与事件审核合并在同一页签</b>，行内标注类型。
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">06</span>落地顺序</h2>
+    <table>
+      <thead><tr><th>阶段</th><th>内容</th><th>验收</th></tr></thead>
+      <tbody>
+        <tr><td><b>P0 事件底座</b></td><td>事件契约 + 队列表 + 规则层判定 + 面板只读列表 + GitHub Issue <b>轮询</b></td><td>Issue 作为第一个非飞书来源进队列；用户消息插队零退化</td></tr>
+        <tr><td><b>P1 判定与派发</b></td><td>Jev <span class="mono">event.triage.v1</span> + 护栏 + T1 审核队列 + <b>统一待审核</b>（合并需求终审）+ 飞书通知</td><td>判定与来源解耦：同一套规则出 T0/T1</td></tr>
+        <tr><td><b>P2 成本与主动性</b></td><td>可配置时间窗 + 可配置预算（默认不限）+ 批量合并 + <span class="mono">later</span> 定时复查 + Issue <b>webhook 验签</b></td><td>夜间自动批量跑低优；轮询可平滑切 webhook</td></tr>
+        <tr><td><b>P3 自产事件</b></td><td><span class="mono">hops</span> 熔断 → 规则白名单 → worker <span class="mono">--emit</span></td><td>A→B→A 自激被熔断；越权 emit 被拒</td></tr>
+      </tbody>
+    </table>
+    <p class="note">顺序不可错：<b>熔断必须先于自产事件</b>（否则自激无法归因）；<b>时间窗必须先于批量</b>（否则批量会在高峰期偷偷跑）。</p>
+  </section>
+
+</div>
+</body>
+</html>

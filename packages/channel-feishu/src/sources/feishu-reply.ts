@@ -78,7 +78,8 @@ export function buildReplyCard(input: ReplyCardInput): Record<string, unknown> {
               tag: 'button',
               text: { tag: 'plain_text', content: action.label },
               type: 'default',
-              url: action.url,
+              // 回调按钮回传 value；跳转按钮带 url。
+              ...(action.value ? { value: action.value } : { url: action.url ?? '' }),
             })),
           })
         }

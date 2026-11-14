@@ -25,6 +25,13 @@ export interface JevQuestion {
 /** 每个问题的答案（已归一化到 0~1）。 */
 export type JevAnswers = Record<string, number>
 
+/** 一次模型调用的 token 用量。 */
+export interface JevUsage {
+  input: number
+  output: number
+  total: number
+}
+
 const JEV_ENDPOINT = 'https://api.typesafe.ai/v1/systemone'
 const DEFAULT_TIMEOUT_MS = 5_000
 
@@ -60,8 +67,17 @@ export class JevClient {
   }
 
   async ask(state: unknown, questions: Record<string, JevQuestion>): Promise<JevAnswers> {
+    return (await this.askWithUsage(state, questions)).answers
+  }
+
+  /** 同 ask，但一并返回 token 用量；预算闸门按它计费。 */
+  async askWithUsage(
+    state: unknown,
+    questions: Record<string, JevQuestion>,
+  ): Promise<{ answers: JevAnswers; usage: JevUsage }> {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), this.timeoutMs)
+    const body = JSON.stringify({ model: this.model, state, questions })
     try {
       const res = await this.fetchImpl(this.baseUrl, {
         method: 'POST',
@@ -69,15 +85,21 @@ export class JevClient {
           Authorization: `Bearer ${this.apiKey}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ model: this.model, state, questions }),
+        body,
         signal: controller.signal,
       })
       if (!res.ok) {
         const detail = await res.text().catch(() => '')
         throw new JevError('http', `jev:http-${res.status} ${detail.slice(0, 200)}`)
       }
-      const data = (await res.json()) as { answers?: Record<string, { noul?: number; score?: number }> }
-      return this.extractAnswers(data.answers ?? {}, questions)
+      const data = (await res.json()) as {
+        answers?: Record<string, { noul?: number; score?: number }>
+        usage?: Record<string, unknown>
+      }
+      return {
+        answers: this.extractAnswers(data.answers ?? {}, questions),
+        usage: usageOf(data.usage, body.length, JSON.stringify(data.answers ?? {}).length),
+      }
     } catch (error) {
       if (error instanceof JevError) throw error
       if (controller.signal.aborted) throw new JevError('timeout', 'jev:timeout')
@@ -114,4 +136,29 @@ export class JevClient {
     }
     return out
   }
+}
+
+/**
+ * 解析模型返回的 token 用量。
+ *
+ * Provider 给了就用它（几种常见字段名都认）；没给就按 4 字符 ≈ 1 token 估算，
+ * 宁可高估也不要低估——预算宁可早点触发。
+ */
+function usageOf(raw: Record<string, unknown> | undefined, requestChars: number, responseChars: number): JevUsage {
+  const input = numberOf(raw?.prompt_tokens ?? raw?.input_tokens ?? raw?.input)
+  const output = numberOf(raw?.completion_tokens ?? raw?.output_tokens ?? raw?.output)
+  const total = numberOf(raw?.total_tokens ?? raw?.total)
+  if (input === null && output === null && total === null) {
+    const estimatedInput = Math.ceil(requestChars / 4)
+    const estimatedOutput = Math.ceil(responseChars / 4)
+    return { input: estimatedInput, output: estimatedOutput, total: estimatedInput + estimatedOutput }
+  }
+  const resolvedInput = input ?? 0
+  const resolvedOutput = output ?? 0
+  return { input: resolvedInput, output: resolvedOutput, total: total ?? resolvedInput + resolvedOutput }
+}
+
+function numberOf(value: unknown): number | null {
+  const num = Number(value)
+  return typeof value === 'number' && Number.isFinite(num) && num >= 0 ? num : null
 }

@@ -22,7 +22,10 @@ export interface ReplyField {
 
 export interface ReplyAction {
   label: string
-  url: string
+  /** 跳转链接；与 `value` 二选一。 */
+  url?: string
+  /** 回调按钮携带的值；与 `url` 二选一，由通道回传给 Router。 */
+  value?: Record<string, unknown>
 }
 
 export interface ReplyOption {
@@ -138,5 +141,8 @@ function isReplyField(value: unknown): value is ReplyField {
 function isReplyAction(value: unknown): value is ReplyAction {
   if (!value || typeof value !== 'object') return false
   const action = value as ReplyAction
-  return typeof action.label === 'string' && typeof action.url === 'string'
+  if (typeof action.label !== 'string') return false
+  if (typeof action.url === 'string') return true
+  // 回调按钮：值必须是对象，通道原样回传。
+  return typeof action.value === 'object' && action.value !== null && !Array.isArray(action.value)
 }

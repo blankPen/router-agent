@@ -38,6 +38,9 @@ import { realRunner, type CommandRunner } from '#infra/process.js'
 import { errorMessage, withFieldContext } from '#infra/logger.js'
 import { resolveImageModelConfig, resolvePiModelConfig, type PiModelConfig } from '../router/model-config.js'
 import { createDecisionAgent, createDecisionEngine, createIntakeEngine } from '../router/engine-factory.js'
+import { JevEventTriage } from '../router/event-triage.js'
+import { EventWebhookGateway } from '../router/event-sources.js'
+import { EventRuntime, dispatchPlanOf, notifyEventReview } from '../router/event-runtime.js'
 import type { DecisionAudit } from '../router/decision-engine.js'
 import type { WorkerStateFile } from '#runtime/report-poller.js'
 import { RouterService, type Logger } from '../service.js'
@@ -1394,6 +1397,15 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     }
   }
   // 没有模型配置时不装配研判引擎，RouterService 整体跳过，只保留 Web / 配置 API。
+  // 事件判定层：与消息判定分开一份 spec（event.triage.v1）。
+  // 没配 Jev 密钥时事件只走规则层，判定一律要人确认，不会自动开单。
+  const eventTriage = config.decision.enabled && config.decision.jev.apiKey
+    ? new JevEventTriage({
+      apiKey: config.decision.jev.apiKey,
+      model: config.decision.jev.model,
+      ...(config.decision.jev.baseUrl ? { baseUrl: config.decision.jev.baseUrl } : {}),
+    })
+    : undefined
   const decisionEngine = model
     ? createDecisionEngine({
         config,
@@ -1546,6 +1558,21 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     handlers: {},
     onEvent: sink,
   })
+  // 事件总线独立于 RouterService：Web-only 模式（还没配 LLM）下也能收事件、跑判定，
+  // 只是判定降级到规则层并全部转人工审核。
+  const eventRuntime = config.event.enabled
+    ? new EventRuntime({
+      config: () => config.event,
+      store,
+      engine,
+      runner: ghRunner,
+      env: process.env,
+      logger,
+      ...(eventTriage ? { triage: eventTriage } : {}),
+      resolveDispatch: event => dispatchPlanOf(config, event),
+      notifyReview: (event, queue) => notifyEventReview(store, config, { now: () => new Date().toISOString() }, logger, event, queue),
+    })
+    : null
   const service = decisionEngine
     ? new RouterService({
       config,
@@ -1628,6 +1655,14 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       failures: [...runtimePlugins.failures, ...channelPlugins.failures],
     },
     update: updateService,
+    ...(eventRuntime ? { eventBus: eventRuntime.bus } : {}),
+    eventWebhook: new EventWebhookGateway({
+      config: () => config.event,
+      store,
+      runner: ghRunner,
+      env: process.env,
+      logger,
+    }),
     ...(feishuChannel?.admin ? { feishuBot: feishuChannel.admin } : {}),
     channels,
     identity: identityPort,
@@ -1697,6 +1732,28 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       if (!adapter.startCardActions) continue
       const startCardActions = adapter.startCardActions
       void Promise.resolve().then(() => startCardActions.call(adapter, action => {
+        // 事件审核按钮走事件总线，不进选择题那条路。
+        const eventAction = String(action.value.eventAction ?? '')
+        if (eventAction && eventRuntime) {
+          void eventRuntime.bus
+            .review(String(action.value.eventId ?? ''), eventAction === 'approve' ? 'approve' : 'reject', action.operatorId)
+            .then(result => {
+              logger.info('event:review-from-card', {
+                eventId: String(action.value.eventId ?? ''),
+                action: eventAction,
+                operator: action.operatorId,
+                state: result.state,
+              })
+            })
+            .catch(error => {
+              logger.warn('event:review-from-card-failed', {
+                eventId: String(action.value.eventId ?? ''),
+                channel: adapter.id,
+                detail: errorMessage(error),
+              })
+            })
+          return
+        }
         void service.handleCardAction(action).catch(error => {
           logger.warn('question:handle-failed', {
             channel: adapter.id,
@@ -1725,6 +1782,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   }
   const chatTimer = service ? setInterval(refreshChats, 600_000) : null
   chatTimer?.unref()
+  eventRuntime?.start()
   if (service) {
     refreshChats()
     await service.start()
@@ -1735,6 +1793,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
 
   const stopRuntime = (): void => {
     channels.stopAll()
+    eventRuntime?.stop()
     if (chatTimer) clearInterval(chatTimer)
     clearInterval(updateTimer)
     if (updateRestartTimer) {

@@ -75,6 +75,7 @@ import {
   runtimeStatusLabel,
 } from './runtime-model.js'
 import { hashForTab, tabFromHash, type Tab } from './tabs.js'
+import { EventsView } from './events.js'
 import { THEME_MODE_LABEL, nextThemeMode, useThemeMode, type ThemeMode } from './theme.js'
 import {
   readSkippedVersion,
@@ -470,6 +471,10 @@ function App(): JSX.Element {
             <Icon name="sliders" />
             <span>配置</span>
           </button>
+          <button className={`nav-tab ${tab === 'events' ? 'active' : ''}`} onClick={() => switchTab('events')}>
+            <Icon name="zap" />
+            <span>事件</span>
+          </button>
           <button className={`nav-tab ${tab === 'sources' ? 'active' : ''}`} onClick={() => switchTab('sources')}>
             <Icon name="radio" />
             <span>来源</span>
@@ -533,6 +538,7 @@ function App(): JSX.Element {
             onFocusHandled={() => setConfigTarget(null)}
           />
         )}
+        {tab === 'events' && <EventsView />}
         {tab === 'sources' && <SourcesView />}
       </div>
 

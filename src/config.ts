@@ -13,6 +13,7 @@ import { optionFieldOf, parseRuntimeOptionPath, validateRuntimeOption, type Runt
 import { DEFAULT_RUNTIME_PLUGINS } from '#runtime/plugins/loader.js'
 import { DEFAULT_CHANNEL_PLUGINS } from '#channel/plugins/loader.js'
 import { noopLogger, errorMessage, type Logger } from '#infra/logger.js'
+import { EVENT_TIERS, type EventCostClass, type EventTier } from '#core/event.js'
 import type { PluginEntry } from '#infra/plugin-loader.js'
 
 const runtimePackage: Record<string, string> = { ...DEFAULT_RUNTIME_PLUGINS }
@@ -277,6 +278,103 @@ export interface DecisionSettings {
   jev: { apiKey: string; model: string; baseUrl?: string }
 }
 
+/**
+ * 事件总线的时间窗。
+ *
+ * 窗口为空 = 一直放行；窗口划分不预置，需要时在配置里写。
+ */
+export interface EventWindowSettings {
+  id: string
+  /** 'HH:MM' 本地时间。 */
+  from: string
+  /** 'HH:MM' 本地时间；可以跨零点（22:00 → 06:00）。 */
+  to: string
+  /** 该窗口放行的处理档位。 */
+  allow: EventTier[]
+  /** 该窗口是否开启批量合并。 */
+  batch?: boolean
+}
+
+/**
+ * 一个事件来源的配置。
+ *
+ * 来源只决定「接什么、给什么基线」，不决定处理方式：
+ * 是否处理、什么优先级、要不要人介入全部由判定层回答。
+ */
+export interface EventSourceSettings {
+  id: string
+  /** 来源类型。 */
+  type: 'github' | 'webhook' | 'cron'
+  /** 接入方式。 */
+  mode: 'poll' | 'webhook' | 'schedule'
+  /** 仓库白名单（github）。 */
+  repos: string[]
+  /** 标签筛选（github）。 */
+  labels: string[]
+  /** issue 状态筛选（github）。 */
+  state: string
+  /** 轮询间隔（毫秒）。 */
+  intervalMs: number
+  /** 定时表达式（cron / schedule）。 */
+  cron: string
+  /** Webhook 路径（webhook 模式）。 */
+  path: string
+  /** 签名密钥的环境变量名；密钥本身不写进配置文件。 */
+  secretRef: string
+  /** 派工后的进展通知群。 */
+  notifyChat: string
+  /** 归属项目；派工时用它解析 repo / branch。 */
+  project: string
+  /** 基线优先级 0~100。 */
+  priorityHint: number
+  /** 成本档位。 */
+  costClass: EventCostClass
+  /** 归属泳道。 */
+  lane: string
+}
+
+/** 事件总线的配置。 */
+/** 通知静默时段；留空 = 不静默。 */
+export interface EventQuietHours {
+  /** 'HH:MM' 本地时间。 */
+  from: string
+  /** 'HH:MM' 本地时间；可以跨零点（22:00 → 06:00）。 */
+  to: string
+}
+
+export interface EventSettings {
+  /** 总开关；关掉时所有来源都不接。 */
+  enabled: boolean
+  /** 已配置的事件来源。 */
+  sources: EventSourceSettings[]
+  /** 时间窗；空 = 一直放行。 */
+  windows: EventWindowSettings[]
+  budget: {
+    /** 每日 token 上限；0 = 不限制。 */
+    dailyTokens: number
+    /** 每日事件数上限；0 = 不限制。 */
+    dailyEvents: number
+  }
+  /** 审核通知的接收人（open_id / 邮箱）。 */
+  approvers: string[]
+  /** 审核通知群。 */
+  notifyChat: string
+  /** 通知静默时段；期间只入面板不推送。 */
+  notifyQuietHours?: EventQuietHours
+}
+
+/** 事件总线的默认配置：关闭、不限预算、一直放行。 */
+export function defaultEventSettings(): EventSettings {
+  return {
+    enabled: false,
+    sources: [],
+    windows: [],
+    budget: { dailyTokens: 0, dailyEvents: 0 },
+    approvers: [],
+    notifyChat: '',
+  }
+}
+
 export interface AppConfig {
   home: string
   projects: ProjectConfig[]
@@ -312,6 +410,8 @@ export interface AppConfig {
   server: { port: number }
   llm?: LlmSettings
   decision: DecisionSettings
+  /** 事件总线：来源、队列、时间窗与预算。 */
+  event: EventSettings
 }
 
 /** 某个 runtime 当前可用的项目清单；orca 兼容顶层 projects。 */
@@ -381,6 +481,7 @@ export function defaultConfig(): AppConfig {
   return {
     home: '',
     projects: [],
+    event: defaultEventSettings(),
     feishu: {
       appId: '',
       reaction: 'Typing',
@@ -609,6 +710,103 @@ export interface ConfigLoadOptions {
   logger?: Logger
 }
 
+/** 事件来源的类型白名单。 */
+const EVENT_SOURCE_TYPES = ['github', 'webhook', 'cron'] as const
+
+/** 解析一条事件来源配置；字段缺失时用默认值。 */
+function parseEventSource(entry: Record<string, any>, fallback: EventSourceSettings): EventSourceSettings {
+  const type = EVENT_SOURCE_TYPES.includes(entry.type) ? entry.type : fallback.type
+  const familyDefaults = type === 'github'
+    ? { priorityHint: 70, costClass: 'cheap' as EventCostClass, mode: 'poll' as const, intervalMs: 15 * 60_000, state: 'open' }
+    : type === 'cron'
+      ? { priorityHint: 40, costClass: 'free' as EventCostClass, mode: 'schedule' as const, intervalMs: 60 * 60_000, state: '' }
+      : { priorityHint: 50, costClass: 'cheap' as EventCostClass, mode: 'webhook' as const, intervalMs: 60 * 60_000, state: '' }
+  return {
+    id: stringOr(entry.id, fallback.id),
+    type,
+    mode: entry.mode === 'poll' || entry.mode === 'webhook' || entry.mode === 'schedule' ? entry.mode : familyDefaults.mode,
+    repos: stringArray(entry.repos, fallback.repos),
+    labels: stringArray(entry.labels, fallback.labels),
+    state: stringOr(entry.state, familyDefaults.state),
+    intervalMs: positiveIntOr(entry.intervalMs, familyDefaults.intervalMs, 1_000, 24 * 3_600_000),
+    cron: stringOr(entry.cron, fallback.cron),
+    path: stringOr(entry.path, fallback.path),
+    secretRef: stringOr(entry.secretRef, fallback.secretRef),
+    notifyChat: stringOr(entry.notifyChat, fallback.notifyChat),
+    project: stringOr(entry.project, fallback.project),
+    priorityHint: positiveIntOr(entry.priorityHint, familyDefaults.priorityHint, 0, 100),
+    costClass: entry.costClass === 'free' || entry.costClass === 'cheap' || entry.costClass === 'llm' || entry.costClass === 'heavy'
+      ? entry.costClass
+      : familyDefaults.costClass,
+    lane: stringOr(entry.lane, fallback.lane),
+  }
+}
+
+/** 解析事件来源清单。 */
+export function parseEventSources(value: unknown): EventSourceSettings[] {
+  if (!Array.isArray(value)) return []
+  const seen = new Set<string>()
+  const sources: EventSourceSettings[] = []
+  for (const entry of value) {
+    if (!isRecord(entry)) continue
+    const parsed = parseEventSource(entry, {
+      id: '', type: 'webhook', mode: 'webhook', repos: [], labels: [], state: '', intervalMs: 3_600_000,
+      cron: '', path: '', secretRef: '', notifyChat: '', project: '', priorityHint: 50, costClass: 'cheap', lane: '',
+    })
+    if (!parsed.id || seen.has(parsed.id)) continue
+    seen.add(parsed.id)
+    sources.push(parsed)
+  }
+  return sources
+}
+
+/** 解析时间窗；时间格式不对的整条丢掉，不让脏配置进运行时。 */
+export function parseEventWindows(value: unknown): EventWindowSettings[] {
+  if (!Array.isArray(value)) return []
+  const windows: EventWindowSettings[] = []
+  for (const entry of value) {
+    if (!isRecord(entry)) continue
+    const id = stringOr(entry.id, '')
+    const from = stringOr(entry.from, '')
+    const to = stringOr(entry.to, '')
+    if (!id || !/^([01]\d|2[0-3]):[0-5]\d$/.test(from) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(to)) continue
+    const allow = Array.isArray(entry.allow)
+      ? entry.allow.filter((item): item is EventTier => EVENT_TIERS.includes(item as EventTier))
+      : []
+    if (allow.length === 0) continue
+    windows.push({ id, from, to, allow, ...(entry.batch === true ? { batch: true } : {}) })
+  }
+  return windows
+}
+
+/** 解析事件总线配置段。 */
+export function parseEventSettings(doc: unknown, fallback: EventSettings = defaultEventSettings()): EventSettings {
+  if (!isRecord(doc)) return fallback
+  const budgetDoc = isRecord(doc.budget) ? doc.budget : {}
+  const quietHours = parseEventQuietHours(doc.notifyQuietHours)
+  return {
+    enabled: booleanOr(doc.enabled, fallback.enabled),
+    sources: parseEventSources(doc.sources),
+    windows: parseEventWindows(doc.windows),
+    budget: {
+      dailyTokens: positiveIntOr(budgetDoc.dailyTokens, fallback.budget.dailyTokens, 0, 100_000_000),
+      dailyEvents: positiveIntOr(budgetDoc.dailyEvents, fallback.budget.dailyEvents, 0, 1_000_000),
+    },
+    approvers: stringArray(doc.approvers, fallback.approvers),
+    notifyChat: stringOr(doc.notifyChat, fallback.notifyChat),
+    ...(quietHours ? { notifyQuietHours: quietHours } : {}),
+  }
+}
+
+/** 解析通知静默时段；格式不对就当没配，不静默。 */
+export function parseEventQuietHours(value: unknown): EventQuietHours | undefined {
+  if (!isRecord(value)) return undefined
+  const from = stringOr(value.from, '')
+  const to = stringOr(value.to, '')
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(from) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(to)) return undefined
+  return { from, to }
+}
+
 export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv = process.env, options: ConfigLoadOptions = {}): AppConfig {
   const logger = options.logger ?? noopLogger
   const configPath = join(home, 'config.yaml')
@@ -668,6 +866,7 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
   const config: AppConfig = {
     home,
     projects: projectLists.orca ?? parseProjects(doc.projects),
+    event: parseEventSettings(doc.event, base.event),
     feishu: {
       appId: stringOr(doc.feishu?.appId, base.feishu.appId),
       reaction: stringOr(doc.feishu?.reaction, base.feishu.reaction),
@@ -1270,6 +1469,43 @@ export function writeConfig(home: string, config: AppConfig): void {
         ? { plugins: config.runtime.plugins }
         : {}),
     },
+    // 事件总线：来源清单、时间窗与预算都要写回，否则面板保存其它配置会把这一段冲掉。
+    event: {
+      enabled: config.event.enabled,
+      sources: config.event.sources.map(source => ({
+        id: source.id,
+        type: source.type,
+        mode: source.mode,
+        repos: source.repos,
+        labels: source.labels,
+        state: source.state,
+        intervalMs: source.intervalMs,
+        cron: source.cron,
+        path: source.path,
+        secretRef: source.secretRef,
+        notifyChat: source.notifyChat,
+        project: source.project,
+        priorityHint: source.priorityHint,
+        costClass: source.costClass,
+        lane: source.lane,
+      })),
+      windows: config.event.windows.map(window => ({
+        id: window.id,
+        from: window.from,
+        to: window.to,
+        allow: window.allow,
+        ...(window.batch === true ? { batch: true } : {}),
+      })),
+      budget: {
+        dailyTokens: config.event.budget.dailyTokens,
+        dailyEvents: config.event.budget.dailyEvents,
+      },
+      approvers: config.event.approvers,
+      notifyChat: config.event.notifyChat,
+      ...(config.event.notifyQuietHours
+        ? { notifyQuietHours: { from: config.event.notifyQuietHours.from, to: config.event.notifyQuietHours.to } }
+        : {}),
+    },
     ...(config.channels && Object.keys(config.channels).length > 0 ? { channels: config.channels } : {}),
     projects: config.projects,
     server: { port: config.server.port },
@@ -1307,7 +1543,7 @@ export interface ConfigPatchResult {
  * 群级 `allowed` 仍挂在 `feishu.chats` 下（同一条目里还有 mode / repo 等必须重启的字段），
  * 所以仍然按需要重启处理。
  */
-export const HOT_CONFIG_PREFIXES = ['policy.', 'feishu.allowed'] as const
+export const HOT_CONFIG_PREFIXES = ['policy.', 'feishu.allowed', 'event.'] as const
 
 function clone<T>(value: T): T {
   return structuredClone(value)
@@ -1503,6 +1739,7 @@ export function publicDefaults(): Record<string, unknown> {
     worker: base.worker,
     runtime: base.runtime,
     server: base.server,
+    event: base.event,
   }
 }
 
@@ -1526,6 +1763,8 @@ function setPath(doc: Record<string, unknown>, path: string, value: unknown): vo
 
 interface Validator {
   check(value: unknown): string | null
+  /** 可选：把原始值归一成写回配置的形状（列表类字段用）。 */
+  normalize?(value: unknown): unknown
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -1611,8 +1850,77 @@ function stringListValue(): Validator {
   }
 }
 
+/** 整段列表校验：校验通过后用归一化后的值写回。 */
+function listValue<T>(validate: (value: unknown) => { error: string | null; value: T }): Validator {
+  return {
+    check: value => validate(value).error,
+    normalize: value => validate(value).value,
+  }
+}
+
 const ACCEPT_MODES = ['off', 'observe', 'auto']
 const INTERRUPTED_RECOVERY_MODES = ['auto', 'notify', 'off']
+
+/** 时间窗的 'HH:MM' 格式；配置写错时整条丢弃而不是静默生效。 */
+const CLOCK_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/
+
+/** 校验一份来源清单；返回解析后的清单或错误说明。 */
+function validateEventSources(value: unknown): { error: string | null; value: EventSourceSettings[] } {
+  if (!Array.isArray(value)) return { error: '需要来源数组', value: [] }
+  const seen = new Set<string>()
+  const sources: EventSourceSettings[] = []
+  for (const [index, item] of value.entries()) {
+    if (!isRecord(item)) return { error: `第 ${index + 1} 个来源不是对象`, value: [] }
+    const id = typeof item.id === 'string' ? item.id.trim() : ''
+    if (!id) return { error: `第 ${index + 1} 个来源缺少 id`, value: [] }
+    if (seen.has(id)) return { error: `来源 id 重复：${id}`, value: [] }
+    seen.add(id)
+    if (!EVENT_SOURCE_TYPES.includes(item.type as never)) {
+      return { error: `来源 ${id} 的 type 只能是 ${EVENT_SOURCE_TYPES.join(' / ')}`, value: [] }
+    }
+    sources.push(parseEventSource(item, {
+      id: '', type: 'webhook', mode: 'webhook', repos: [], labels: [], state: '', intervalMs: 3_600_000,
+      cron: '', path: '', secretRef: '', notifyChat: '', project: '', priorityHint: 50, costClass: 'cheap', lane: '',
+    }))
+  }
+  return { error: null, value: sources }
+}
+
+/** 校验通知静默时段；空对象表示不静默。 */
+function validateEventQuietHours(value: unknown): { error: string | null; value: EventQuietHours | undefined } {
+  if (value === null || value === undefined) return { error: null, value: undefined }
+  if (!isRecord(value)) return { error: '静默时段要写成 { from, to }', value: undefined }
+  const from = typeof value.from === 'string' ? value.from.trim() : ''
+  const to = typeof value.to === 'string' ? value.to.trim() : ''
+  // 两端都留空 = 取消静默；只填一端是写错了，直接拒绝。
+  if (!from && !to) return { error: null, value: undefined }
+  if (!CLOCK_PATTERN.test(from) || !CLOCK_PATTERN.test(to)) {
+    return { error: '静默时段的时间要用 HH:MM 格式', value: undefined }
+  }
+  return { error: null, value: { from, to } }
+}
+
+/** 校验一份时间窗清单。 */
+function validateEventWindows(value: unknown): { error: string | null; value: EventWindowSettings[] } {
+  if (!Array.isArray(value)) return { error: '需要时间窗数组', value: [] }
+  const windows: EventWindowSettings[] = []
+  for (const [index, item] of value.entries()) {
+    if (!isRecord(item)) return { error: `第 ${index + 1} 个时间窗不是对象`, value: [] }
+    const id = typeof item.id === 'string' ? item.id.trim() : ''
+    if (!id) return { error: `第 ${index + 1} 个时间窗缺少 id`, value: [] }
+    const from = typeof item.from === 'string' ? item.from.trim() : ''
+    const to = typeof item.to === 'string' ? item.to.trim() : ''
+    if (!CLOCK_PATTERN.test(from) || !CLOCK_PATTERN.test(to)) {
+      return { error: `时间窗 ${id} 的时间要用 HH:MM 格式`, value: [] }
+    }
+    const allow = Array.isArray(item.allow)
+      ? item.allow.filter((entry): entry is EventTier => EVENT_TIERS.includes(entry as EventTier))
+      : []
+    if (allow.length === 0) return { error: `时间窗 ${id} 至少要放行一个档位`, value: [] }
+    windows.push({ id, from, to, allow, ...(item.batch === true ? { batch: true } : {}) })
+  }
+  return { error: null, value: windows }
+}
 
 /**
  * 一份显式的路径白名单：校验规则跟着路径走，不再让请求体直接 merge 进配置。
@@ -1684,6 +1992,15 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
   'llm.api': enumValue(LLM_APIS),
   'llm.authHeader': boolValue(),
   'llm.contextWindow': intValue(1_000, 10_000_000),
+
+  'event.enabled': boolValue(),
+  'event.sources': listValue(validateEventSources),
+  'event.windows': listValue(validateEventWindows),
+  'event.budget.dailyTokens': intValue(0, 100_000_000),
+  'event.budget.dailyEvents': intValue(0, 1_000_000),
+  'event.approvers': stringListValue(),
+  'event.notifyChat': stringValue,
+  'event.notifyQuietHours': listValue(validateEventQuietHours),
 }
 
 /** 整段替换的复杂字段（项目、群、白名单这类不适合逐项点路径编辑的配置）。 */
@@ -1859,7 +2176,7 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
           : value
     const message = validator.check(next)
     if (message) errors.push({ path, message })
-    else accepted.push({ path, value: next })
+    else accepted.push({ path, value: validator.normalize ? validator.normalize(next) : next })
   }
 
   if (errors.length > 0) return { errors, changed: [] }
@@ -1870,6 +2187,11 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
     if (JSON.stringify(before) === JSON.stringify(value)) continue
     if (path === 'projects') config.projects = value as ProjectConfig[]
     else if (path === 'feishu.chats') config.feishu.chats = value as ChatSettings[]
+    else if (path === 'event.notifyQuietHours') {
+      // 两端留空表示取消静默：这一项要真删掉，不能留一个空壳。
+      if (value) config.event.notifyQuietHours = value as EventQuietHours
+      else delete config.event.notifyQuietHours
+    }
     else if (path.startsWith('runtime.projects.')) {
       setProjectsForRuntime(config, path.slice('runtime.projects.'.length), value as ProjectConfig[])
     } else if (path.startsWith('runtime.options.')) {
@@ -1927,6 +2249,15 @@ function ensureChat(config: AppConfig, chat: string): ChatSettings {
 }
 
 /** 按点路径设置一个已知配置项；未知路径或非法值返回 false。 */
+/** 解析命令行传入的 JSON 值；非法 JSON 返回 null。 */
+function parseJsonValue(value: string): unknown {
+  try {
+    return JSON.parse(value)
+  } catch {
+    return null
+  }
+}
+
 export function setConfigValue(config: AppConfig, path: string, raw: string): boolean {
   const value = raw.trim()
   const list = (): string[] => value.split(',').map(v => v.trim()).filter(Boolean)
@@ -2079,6 +2410,60 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
     case 'decision.jev.baseUrl':
       config.decision.jev.baseUrl = value
       return true
+    case 'event.enabled': {
+      const v = bool()
+      if (v === null) return false
+      config.event.enabled = v
+      return true
+    }
+    case 'event.budget.dailyTokens': {
+      const v = int(0, 100_000_000)
+      if (v === null) return false
+      config.event.budget.dailyTokens = v
+      return true
+    }
+    case 'event.budget.dailyEvents': {
+      const v = int(0, 1_000_000)
+      if (v === null) return false
+      config.event.budget.dailyEvents = v
+      return true
+    }
+    case 'event.approvers':
+      config.event.approvers = list()
+      return true
+    case 'event.notifyChat':
+      config.event.notifyChat = value
+      return true
+    case 'event.notifyQuietHours': {
+      // 静默时段整体替换；空值表示取消静默。
+      if (value === '') {
+        delete config.event.notifyQuietHours
+        return true
+      }
+      const parsed = parseJsonValue(value)
+      if (!parsed) return false
+      const quiet = parseEventQuietHours(parsed)
+      if (!quiet) return false
+      config.event.notifyQuietHours = quiet
+      return true
+    }
+    case 'event.windows': {
+      // 时间窗结构复杂，用 JSON 整体替换；条目不合法时整体拒绝，不写半份。
+      const parsed = parseJsonValue(value)
+      if (!Array.isArray(parsed)) return false
+      const windows = parseEventWindows(parsed)
+      if (parsed.length > 0 && windows.length === 0) return false
+      config.event.windows = windows
+      return true
+    }
+    case 'event.sources': {
+      const parsed = parseJsonValue(value)
+      if (!Array.isArray(parsed)) return false
+      const sources = parseEventSources(parsed)
+      if (parsed.length > 0 && sources.length === 0) return false
+      config.event.sources = sources
+      return true
+    }
     case 'progress.syncMs': {
       // 0 表示关闭工单进展定时同步
       const n = Number(value)

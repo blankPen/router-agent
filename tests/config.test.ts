@@ -1058,3 +1058,48 @@ describe('关单后的工作区回收配置', () => {
     expect(JSON.stringify(published)).not.toContain('jev-secret')
   })
 })
+
+describe('事件总线的 config set 白名单', () => {
+  it('setConfigValue 可改事件开关、预算、队列深度与审核人', () => {
+    const cfg = loadConfig(home())
+    expect(setConfigValue(cfg, 'event.enabled', 'true')).toBe(true)
+    expect(cfg.event.enabled).toBe(true)
+    expect(setConfigValue(cfg, 'event.enabled', 'yes')).toBe(false)
+    expect(setConfigValue(cfg, 'event.budget.dailyTokens', '50000')).toBe(true)
+    expect(cfg.event.budget.dailyTokens).toBe(50_000)
+    expect(setConfigValue(cfg, 'event.budget.dailyTokens', '-1')).toBe(false)
+    expect(setConfigValue(cfg, 'event.budget.dailyEvents', '0')).toBe(true)
+    expect(cfg.event.budget.dailyEvents).toBe(0)
+    expect(setConfigValue(cfg, 'event.approvers', 'ou_a, ou_b')).toBe(true)
+    expect(cfg.event.approvers).toEqual(['ou_a', 'ou_b'])
+    expect(setConfigValue(cfg, 'event.notifyChat', 'oc_ops')).toBe(true)
+    expect(cfg.event.notifyChat).toBe('oc_ops')
+  })
+
+  it('setConfigValue 用 JSON 改时间窗与来源，非法 JSON 与非法条目被拒绝', () => {
+    const cfg = loadConfig(home())
+    const windows = JSON.stringify([{ id: 'night', from: '22:00', to: '06:00', allow: ['t0', 't1'] }])
+    expect(setConfigValue(cfg, 'event.windows', windows)).toBe(true)
+    expect(cfg.event.windows).toEqual([{ id: 'night', from: '22:00', to: '06:00', allow: ['t0', 't1'] }])
+    expect(setConfigValue(cfg, 'event.windows', 'not-json')).toBe(false)
+    expect(setConfigValue(cfg, 'event.windows', JSON.stringify([{ id: 'bad', from: '25:00', to: '06:00', allow: ['t0'] }]))).toBe(false)
+    const sources = JSON.stringify([{ id: 'gh', type: 'github', mode: 'poll', repos: ['a/b'], labels: [], state: 'open', intervalMs: 600000, cron: '', path: '', secretRef: '', notifyChat: '', project: '', priorityHint: 50, costClass: 'cheap', lane: '' }])
+    expect(setConfigValue(cfg, 'event.sources', sources)).toBe(true)
+    expect(cfg.event.sources[0]?.id).toBe('gh')
+    expect(setConfigValue(cfg, 'event.sources', '[]')).toBe(true)
+    expect(cfg.event.sources).toEqual([])
+  })
+
+  it('applyConfigPatch 可设置与取消通知静默时段', () => {
+    const cfg = loadConfig(home())
+    const set = applyConfigPatch(cfg, { 'event.notifyQuietHours': { from: '22:00', to: '08:00' } })
+    expect(set.errors).toHaveLength(0)
+    expect(cfg.event.notifyQuietHours).toEqual({ from: '22:00', to: '08:00' })
+
+    const cleared = applyConfigPatch(cfg, { 'event.notifyQuietHours': { from: '', to: '' } })
+    expect(cleared.errors).toHaveLength(0)
+    expect(cfg.event.notifyQuietHours).toBeUndefined()
+
+    expect(applyConfigPatch(cfg, { 'event.notifyQuietHours': { from: '22:00', to: '' } }).errors).toHaveLength(1)
+  })
+})

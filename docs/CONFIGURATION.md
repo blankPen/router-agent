@@ -169,6 +169,13 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 | `decision.enabled` | `true` / `false`；开启普通成员消息的决策层 |
 | `decision.provider` | `jev` / `llm`；决策模型来源 |
 | `decision.jev.model` / `decision.jev.apiKey` / `decision.jev.baseUrl` | Jev 连接信息（密钥只写不回显） |
+| `event.enabled` | `true` / `false`；事件总线总开关 |
+| `event.budget.dailyTokens` / `event.budget.dailyEvents` | 每日 token / 事件数上限；`0` = 不限制（默认） |
+| `event.approvers` | 逗号分隔审核人（open_id / 邮箱） |
+| `event.notifyChat` | 审核与进展通知群 |
+| `event.notifyQuietHours` | 通知静默时段，JSON 如 `{"from":"22:00","to":"08:00"}`；留空串 = 取消静默 |
+| `event.windows` | JSON 数组整体替换时间窗，如 `[{"id":"night","from":"22:00","to":"06:00","allow":["t0","t1"]}]` |
+| `event.sources` | JSON 数组整体替换事件来源，如 `[{"id":"gh","type":"github","mode":"poll","repos":["a/b"],"state":"open","intervalMs":600000}]` |
 
 群与项目这类复合结构用专用写法，一次完成「登记 + 绑定」：
 
@@ -431,6 +438,64 @@ feishu:
 需求会话在 `~/.router-agent/state.db` 的 `intakes` 表里持久化；72 小时没有新消息自动放弃，不会挡住后续新问题。分析 Agent 的追问 / 收口规范在 Web 面板「配置 → 规范文件」里可查看和修改（`需求初筛规范` / `需求分析规范`）。
 
 > 注意：处理普通成员消息依赖群已绑定项目（`chatBinding` / `feishu.chats[].repo`）。没有绑定项目的群里，它不会接管消息，仍按原准入规则处理——因为拿不到项目就无法生成可派单的需求单。
+
+## 事件总线（多来源事件）
+
+所有来源（用户消息、运营群、GitHub Issue、webhook、定时任务）先归一化成**事件**，进同一个队列池，由判定层决定直派工单、进待审核、归档还是丢弃。**来源只提供幂等键、优先级基线、成本档位与泳道，不决定处理方式。**
+
+整体方案见 [EVENT-BUS-DESIGN.md](EVENT-BUS-DESIGN.md)。
+
+```yaml
+event:
+  enabled: true                  # 总开关；关掉时所有来源都不接
+  sources:                       # 来源清单，可多个
+    - id: github-issues          # 来源 id，唯一；幂等键与面板筛选都按它
+      type: github               # github | webhook | cron
+      mode: poll                 # poll（轮询）| webhook（推送）| schedule（定时）
+      repos: [blankPen/router-agent]   # 仓库白名单（github）
+      labels: [bug]              # 标签筛选（github）
+      state: open                # issue 状态筛选（github）
+      intervalMs: 900000         # 轮询间隔
+      cron: "0 3 * * *"          # 定时表达式（cron / schedule）
+      path: /api/events/in/ops   # webhook 路径
+      secretRef: RA_EVENT_OPS_TOKEN   # 密钥的环境变量名；密钥本身不写进配置
+      notifyChat: oc_xxx         # 事件派工后的进展通知群
+      project: router-agent      # 归属项目；决定派工目标
+      priorityHint: 70           # 基线优先级 0–100（只影响排序，不决定是否直派）
+      costClass: cheap           # free | cheap | llm | heavy
+      lane: repo:blankPen/router-agent   # 归属泳道；同 lane 串行处理
+    - id: nightly-audit
+      type: cron
+      mode: schedule
+      cron: "0 3 * * *"
+      task: check-dependency-drift
+      project: router-agent
+      priorityHint: 40
+  windows:                       # 时间窗；**留空 = 一直放行**
+    - id: peak
+      from: '09:00'
+      to: '20:00'
+      allow: [t0, t1]            # 该窗口放行的档位：t0 直派 / t1 待审 / t2 归档 / t3 丢弃
+      batch: false
+  budget:
+    dailyTokens: 0               # 每日 token 上限；0 = 不限制
+    dailyEvents: 0               # 每日事件数上限；0 = 不限制
+  approvers: []                  # 审核人（open_id / 邮箱）；面板写操作按它校验
+  notifyChat: ''                 # 待审核事件的推送群；留空则只在面板可见
+  # notifyQuietHours: { from: '22:00', to: '08:00' }   # 通知静默时段；期间只入面板不推送
+```
+
+要点：
+
+- **时间窗先留空**：不预置高低峰模板，需要时再配；窗口不放行的事件会留在队列里，最早可处理时间记到窗口开始。
+- **预算默认不限制**：`dailyTokens` / `dailyEvents` 都是 `0` 时不拦任何事件；显式配置才生效。预算触顶后先不调模型（低优事件留在队列等次日），已经判定完的 T0 仍会执行（保响应），两种情况都记 `event:budget-exceeded`。
+- **批量合并只发生在开了 `batch` 的窗口里**：同一窗口内同 `source + type + project` 的事件合并成一次判定调用；调用失败自动退回逐条判定，事件不丢。
+- **通知静默时段**：配了之后静默期内的待审通知不外发，推迟到静默结束那一刻；两端留空表示不静默。
+- **密钥只从环境变量读**：`secretRef` 里写的是环境变量名；GitHub webhook 用 `X-Hub-Signature-256` 验签，通用 webhook 用 `Bearer` 令牌。
+- **轮询与 webhook 可平滑切换**：同一个来源把 `mode` 从 `poll` 改成 `webhook` 即可，产出的是同一种事件。
+- 判定层复用决策层的 Jev 连接信息（`decision.jev.*`）；没配 Jev 时事件只走规则层，判定一律转人工审核，不会自动开单。
+- 面板「事件」页可以直接改时间窗与预算，保存后立即生效；来源清单在 `config.yaml` 里改，或用 `ra config set event.sources '<JSON>'` 整体替换。
+- 命令行等价写法：`ra config set event.enabled true`、`ra config set event.budget.dailyTokens 50000`、`ra config set event.windows '[{"id":"night","from":"22:00","to":"06:00","allow":["t0","t1"]}]'`；`event.windows` 与 `event.sources` 是 JSON 整体替换，条目不合法时整体拒绝，不写半份配置。
 
 ## 闲置工单治理
 
