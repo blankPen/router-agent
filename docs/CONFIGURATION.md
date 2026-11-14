@@ -380,6 +380,51 @@ curl -X POST http://127.0.0.1:3083/api/events/inject \
 
 模型没配好时自动退回规则判定，事件不会丢，只是更多走人工审核。
 
+### 自定义事件来源（npm 插件）
+
+内置来源（github / http / schedule / feishu）不够用时，可以装一个事件来源插件 —— 和「添加运行时」是同一套机制：面板「配置 → 事件总线 → 添加自定义事件」填 npm 包名，走 `npm install` 装到 `<RA_HOME>/node_modules`；也可以填本地路径直接联调。
+
+插件包默认导出一个对象：
+
+```ts
+import type { EventPlugin } from '@router-agent/event'
+
+const plugin: EventPlugin = {
+  kind: 'event',                              // 必须是 event
+  meta: { id: 'my-source', name: '我的来源', hint: '做什么的' },
+  options: {                                 // 面板设置弹窗里要显示的字段
+    fields: [
+      { key: 'target', label: '巡检目标', kind: 'text', hint: '要盯的服务名' },
+      { key: 'verbose', label: '输出详情', kind: 'boolean' },
+    ],
+  },
+  async create(ctx) {
+    const source = new MySource(ctx.config, ctx.logger)
+    return source
+  },
+}
+
+export default plugin
+```
+
+装好之后面板按插件声明的 `meta.id` 把它登记成一个来源，来源 id 就是 `meta.id`（本地路径没有 `meta.id` 时自己填一个来源 id）。落盘形状：
+
+```yaml
+events:
+  sources:
+    my-source:
+      enabled: true
+      kind: plugin
+      plugin: my-event-source              # npm 包名或本地路径
+      options:
+        target: payments-api
+        verbose: false
+```
+
+`options` 里的键就是插件 `options.fields[].key`，面板设置弹窗直接按它渲染，不用宿主再写一份表单。插件可以声明 `createAll()` 注册多个来源实例，也可以只实现 `create()` 注册一个。
+
+加载失败只记 `event:plugin-failed` 日志，不影响其它来源。
+
 ## 飞书机器人（专属 profile）
 
 router-agent 固定使用 `~/.router-agent-lark` 作为 lark-cli profile，**不复用**你终端里其它 lark-cli 的登录态，也不能通过配置修改这个目录。凭据与授权有两个入口：

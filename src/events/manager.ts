@@ -9,6 +9,7 @@ import type { Store } from '../store/db.js'
 import type { EventPriority, EventRecord } from '#core/event.js'
 import type { EventEnvelope, EventSource } from '#event/port.js'
 import { loadEventPlugins } from '#event/plugins/loader.js'
+import type { EventOptionField } from '#event/plugins/types.js'
 import { errorMessage, noopLogger, type Logger } from '#infra/logger.js'
 import type { CommandRunner } from '#infra/process.js'
 import type { EventAction, EventPipeline } from './pipeline.js'
@@ -30,6 +31,8 @@ export interface EventSourceView {
   lastPolledAt?: string
   /** 内置来源还是自定义插件。 */
   builtin: boolean
+  /** 自定义来源插件的 npm 包名或本地路径。 */
+  package?: string
 }
 
 /** 事件来源的字段说明；内置来源写在这里，插件来源用插件自己声明的。 */
@@ -86,6 +89,8 @@ export class EventManager {
   private timers = new Map<string, ReturnType<typeof setInterval>>()
   private tickTimer: ReturnType<typeof setInterval> | null = null
   private status = new Map<string, { status: EventSourceView['status']; message?: string; lastPolledAt?: string }>()
+  /** 插件来源 id → 插件声明的可配置项。 */
+  private pluginOptions: Record<string, EventOptionField[]> = {}
   private running = false
 
   constructor(deps: EventManagerDeps) {
@@ -167,6 +172,7 @@ export class EventManager {
     for (const source of plugins.sources) {
       this.sources.set(source.id, source)
     }
+    this.pluginOptions = plugins.optionsById
 
     for (const [id, source] of this.sources) {
       const interval = this.intervalOf(id, source)
@@ -202,11 +208,12 @@ export class EventManager {
         id,
         kind: source.kind ?? (source.plugin ? 'plugin' : 'event'),
         enabled: source.enabled,
-        fields: source.plugin ? pluginFieldsOf(id) : (BUILTIN_FIELDS[source.kind ?? ''] ?? []),
+        fields: source.plugin ? pluginFieldsOf(this.pluginOptions[id]) : (BUILTIN_FIELDS[source.kind ?? ''] ?? []),
         status: status?.status ?? (source.enabled ? 'idle' : 'unsupported'),
         ...(status?.message ? { message: status.message } : {}),
         ...(status?.lastPolledAt ? { lastPolledAt: status.lastPolledAt } : {}),
         builtin: !source.plugin,
+        ...(source.plugin ? { package: source.plugin } : {}),
       })
     }
     return out
@@ -325,7 +332,17 @@ function pluginEntriesOf(config: AppConfig): Record<string, string> {
   return out
 }
 
-/** 插件来源的字段：这里拿不到插件声明时给一份通用说明。 */
-function pluginFieldsOf(_id: string): EventSourceView['fields'] {
-  return [{ key: 'options', label: '插件选项', kind: 'textarea', hint: '插件自己声明的字段' }]
+/**
+ * 插件来源的字段：按插件自己声明的可配置项渲染。
+ *
+ * 插件没声明选项时不编造字段——面板弹窗会直接说「这个来源没有可配置项」。
+ */
+function pluginFieldsOf(fields: EventOptionField[] | undefined): EventSourceView['fields'] {
+  return (fields ?? []).map(field => ({
+    key: `options.${field.key}`,
+    label: field.label,
+    kind: field.kind,
+    ...(field.hint ? { hint: field.hint } : {}),
+    ...(field.options ? { options: field.options } : {}),
+  }))
 }

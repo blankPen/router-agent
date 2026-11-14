@@ -148,8 +148,11 @@ export default plugin
 ## 新增一个事件来源插件
 
 1. 插件包实现 `EventPlugin`（`kind: 'event'`），依赖 `@router-agent/event` / `@router-agent/core` / `@router-agent/infra`；
-2. 在配置里写 `events.sources.<id>.plugin: <包名或本地路径>`，面板「事件」页即可启用；
-3. 加载失败只记 `event:plugin-failed`，不影响其它来源。
+2. 面板「配置 → 事件总线 → 添加自定义事件」填 npm 包名即可安装（也可填本地路径联调），装完按插件声明的 `meta.id` 登记成来源；也可以手写 `events.sources.<id>.plugin: <包名或本地路径>`；
+3. 插件用 `options.fields` 声明自己的可配置项，面板设置弹窗按声明自动渲染，值落在 `events.sources.<id>.options.<key>`；
+4. 加载失败只记 `event:plugin-failed`，不影响其它来源。
+
+协议与配置形状见 [CONFIGURATION.md](CONFIGURATION.md#自定义事件来源npm-插件)。
 
 内置来源（github / http / schedule / feishu）由宿主直接装配，不走插件机制。
 

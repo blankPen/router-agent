@@ -21,6 +21,8 @@ export interface SourceMeta {
   status: string
   message?: string
   lastPolledAt?: string
+  /** 自定义来源插件的 npm 包名或本地路径。 */
+  package?: string
   fields: SourceFieldMeta[]
 }
 
@@ -67,4 +69,23 @@ export function eventSourcePaths(sources: SourceMeta[]): string[] {
 /** 事件来源的字段描述集合，用于配置页的本地校验。 */
 export function eventSourceFields(sources: SourceMeta[]): FieldDef[] {
   return sources.flatMap(source => sourceFieldDefs(source.id, source.fields))
+}
+
+/**
+ * 配置草稿里涉及的事件来源路径。
+ *
+ * 除了服务端已登记的来源，还要算上草稿里刚加的（插件来源装完还没保存时，
+ * 服务端还不认识它），否则改了却不会进保存补丁。
+ */
+export function eventSourcePathsIn(sources: SourceMeta[], draftSources: Record<string, unknown>): string[] {
+  const paths = new Set<string>()
+  for (const source of sources) {
+    paths.add(`events.sources.${source.id}.enabled`)
+    for (const field of sourceFieldDefs(source.id, source.fields)) paths.add(field.path)
+  }
+  for (const id of Object.keys(draftSources)) {
+    paths.add(`events.sources.${id}.enabled`)
+    paths.add(`events.sources.${id}.plugin`)
+  }
+  return [...paths]
 }

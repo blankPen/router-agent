@@ -1349,6 +1349,28 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
   outline: none;
 }
 .modal-field input:focus { border-color: var(--accent); }
+.modal-field select {
+  height: var(--control-height);
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+.modal-field select:focus { border-color: var(--accent); }
+.modal-field .text-area { min-height: 120px; }
+.modal-field-changed {
+  margin-left: 8px;
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--warning);
+}
+.modal-field-hint { font-style: normal; font-size: 11px; line-height: 1.5; color: var(--faint); }
+.modal-field-error { font-style: normal; font-size: 11px; line-height: 1.5; color: var(--negative); }
+.modal-field.has-error .text-input { border-color: var(--negative); }
 .modal-inline { display: flex; gap: 8px; }
 .modal-inline input { flex: 1; min-width: 0; }
 .modal-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -2699,39 +2721,74 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
    配置页 · 事件来源（配置 -> 事件总线）
    --------------------------------------------------------------------------- */
 
-.source-list { display: flex; flex-direction: column; padding: 0 var(--card-pad-x); }
-.source-item { border-top: 1px solid var(--rule); }
-.source-item:first-child { border-top: 0; }
-.source-item-head {
+/* 事件来源卡片区 */
+.source-cards-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 12px 0;
+  padding: 0 var(--card-pad-x);
+  margin-bottom: 12px;
 }
-.source-item-toggle {
+.source-cards-head .editor-hint { margin: 0; }
+.source-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+  padding: 0 var(--card-pad-x);
+}
+.source-cards-empty {
   display: flex;
   align-items: center;
-  gap: 8px;
-  background: none;
-  border: 0;
-  padding: 0;
-  cursor: pointer;
-  color: var(--text);
-  font: inherit;
+  gap: 12px;
+  padding: 0 var(--card-pad-x);
 }
-.source-item .fold-chevron { transform: rotate(0deg); }
-.source-item.open .fold-chevron { transform: rotate(90deg); }
-.source-item-name { font-weight: 500; }
-.source-item-kind { font-size: var(--fs-small); color: var(--muted); }
-.source-item-meta { display: flex; align-items: center; gap: 16px; }
-.source-item-status { font-size: var(--fs-small); color: var(--muted); }
-.source-item-body { padding: 2px 0 14px 20px; }
-.source-item-body .setting {
-  padding: 14px 0;
-  border-bottom: 0;
+.source-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+}
+.source-card.on { border-color: color-mix(in srgb, var(--accent) 38%, var(--border)); }
+.source-card-top { display: flex; align-items: center; gap: 10px; }
+.source-logo {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border-radius: 9px;
+  background: var(--raised);
+  color: var(--muted);
+}
+.source-card.on .source-logo { background: var(--accent-soft); color: var(--accent); }
+.source-card-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.source-card-title strong { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-card-title span { font-size: 12px; color: var(--muted); }
+.source-card-status { margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted); }
+.source-card-package {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.source-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 10px;
   border-top: 1px solid var(--rule);
 }
+.source-card-fields { font-size: 11px; color: var(--faint); }
+
 /* 多行字段（prompt、正文）占满整行，不挤在右侧 320px 里。 */
 .setting:has(.text-area) { grid-template-columns: minmax(0, 1fr); }
 .setting:has(.text-area) .setting-control { max-width: none; justify-content: stretch; }

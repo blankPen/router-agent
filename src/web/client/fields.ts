@@ -360,6 +360,7 @@ export const CONFIG_GROUPS: ConfigGroup[] = [
         description: '来源只负责「把事件收进来」：GitHub Issue 轮询、HTTP 推送、定时任务等。启用与参数保存后立即生效，不需要重启。',
         render: 'events',
         fields: [],
+        effectLabel: '保存后立即生效',
       },
       {
         id: 'events-decision',

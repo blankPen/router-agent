@@ -432,6 +432,23 @@ export function setChannelPlugin(config: AppConfig, id: string, value: PluginEnt
   config.channels = Object.keys(channels).length > 0 ? channels : undefined
 }
 
+/**
+ * 写入或删除事件来源插件入口。
+ *
+ * 入口本身就是一个来源条目：装了 npm 包就等于新增一个来源，
+ * 默认启用；传空串表示移除该条目。
+ */
+export function setEventSourcePlugin(config: AppConfig, id: string, value: string): void {
+  const sources = { ...config.events.sources }
+  if (!value) {
+    delete sources[id]
+  } else {
+    sources[id] = { ...(sources[id] ?? {}), enabled: sources[id]?.enabled ?? true, plugin: value }
+    delete sources[id]!.kind
+  }
+  config.events.sources = sources
+}
+
 /** 当前配置里可用的 runtime id：SDK 内置 + 用户声明的插件 id + 插件声明的多实例 id。 */
 export function isKnownRuntimeId(config: AppConfig, id: string): boolean {
   const value = normalizeRuntimeId(id)
@@ -2101,8 +2118,21 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
       const sourceId = eventSourcePath[1]!
       const key = eventSourcePath[2]!
       const source = config.events.sources[sourceId]
-      if (!source) {
+      // 来源还不存在时，只允许「先装插件再启用」这一条路径：新来源由 plugin 入口创建；
+      // enabled 必须与同一个补丁里的 plugin 入口成对出现，单独的 enabled 仍按未知来源拒绝。
+      const pluginDeclared = `events.sources.${sourceId}.plugin` in patch
+      if (!source
+        && key !== 'plugin'
+        && !(key === 'enabled' && pluginDeclared)
+        && !key.startsWith('options.')) {
         errors.push({ path, message: `未知事件来源：${sourceId}` })
+        continue
+      }
+      // 插件自己声明的选项：只认标量，键名由插件决定，服务端不猜类型。
+      if (key.startsWith('options.')) {
+        const ok = typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
+        if (!ok) errors.push({ path, message: '插件选项只接受字符串、数字或布尔值' })
+        else accepted.push({ path, value })
         continue
       }
       const message = validateEventSourceField(key, value)
@@ -2158,6 +2188,9 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
       setRuntimePlugin(config, path.slice('runtime.plugins.'.length), value as PluginEntry | '')
     } else if (path.startsWith('channels.')) {
       setChannelPlugin(config, path.slice('channels.'.length), value as PluginEntry | '')
+    } else if (/^events\.sources\.[^.]+\.plugin$/.test(path)) {
+      const sourceId = path.split('.')[2]!
+      setEventSourcePlugin(config, sourceId, String(value))
     } else setPath(config as unknown as Record<string, unknown>, path, value)
     changed.push(path)
   }

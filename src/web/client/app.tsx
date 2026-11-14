@@ -70,7 +70,7 @@ import { FeishuBotPanel } from './feishu-panel.js'
 import { LogAssistantFab } from './log-assistant.js'
 import { EventsView } from './events-panel.js'
 import { EventSourcesConfig } from './events-config.js'
-import { eventSourceFields, eventSourcePaths, type SourceMeta } from './event-sources.js'
+import { eventSourceFields, eventSourcePathsIn, type SourceMeta } from './event-sources.js'
 import { SpecsEditor } from './specs-editor.js'
 import {
   mergeRuntimeChoices,
@@ -1269,11 +1269,15 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
   const [eventSources, setEventSources] = useState<SourceMeta[]>([])
 
   // 事件来源的字段是来源自己声明的，配置页要按它们渲染并追踪改动。
-  useEffect(() => {
+  const loadEventSources = useCallback((): void => {
     void getJson<{ sources?: SourceMeta[] }>('/api/events')
       .then(data => setEventSources(data.sources ?? []))
       .catch(() => undefined)
   }, [])
+
+  useEffect(() => {
+    loadEventSources()
+  }, [loadEventSources])
 
   // 重启开始后不再提示「需重启」。
   useEffect(() => {
@@ -1325,8 +1329,8 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
   const allBlocks = useMemo(() => [...groupBlocks, ...channelBlocks], [groupBlocks, channelBlocks])
   const trackedPaths = useMemo(() => [
     ...allBlocks.flatMap(block => blockPaths(block)),
-    ...eventSourcePaths(eventSources),
-  ], [allBlocks, eventSources])
+    ...eventSourcePathsIn(eventSources, (draft?.events?.sources ?? {}) as Record<string, unknown>),
+  ], [allBlocks, eventSources, draft])
 
   const changed = useMemo(() => {
     if (!draft || !original) return []
@@ -1444,6 +1448,8 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
       // 保存后服务端会重解析名单，这里同步最新状态（解析失败也不影响保存结果）。
       if (result.identity) setIdentity(result.identity)
       setPendingRestart(result.restartRequired)
+      // 新加的事件来源插件要等来源重新装配后才出现在列表里，保存后刷新一次。
+      if (Object.keys(patch).some(path => path.startsWith('events.sources.'))) loadEventSources()
       const message = secretDropNotice(patch, result) ?? (result.identityEffective === false
         ? {
             // 名单重解析失败时保存仍然成功（配置已落盘），但新名单还没生效，必须说清楚。
@@ -1597,6 +1603,7 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
             defaults={defaults}
             setField={setField}
             errors={errors}
+            onNotice={notice => setNotice(notice)}
           />
         )
       }

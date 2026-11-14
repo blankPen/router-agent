@@ -66,6 +66,30 @@ describe('事件配置', () => {
     expect(unknownField.errors[0]?.message).toContain('不是可编辑的事件来源字段')
   })
 
+  it('插件入口可以新建一个事件来源，默认启用', () => {
+    const config = defaultConfig()
+    const result = applyConfigPatch(config, {
+      'events.sources.demo-source.plugin': '@scope/demo-source',
+      'events.sources.demo-source.enabled': true,
+    })
+    expect(result.errors).toEqual([])
+    expect(config.events.sources['demo-source']).toMatchObject({
+      enabled: true,
+      plugin: '@scope/demo-source',
+    })
+  })
+
+  it('插件自己声明的选项可以逐项写入', () => {
+    const config = defaultConfig()
+    applyConfigPatch(config, { 'events.sources.demo-source.plugin': '@scope/demo-source' })
+    const result = applyConfigPatch(config, {
+      'events.sources.demo-source.options.target': 'checkout',
+      'events.sources.demo-source.options.verbose': true,
+    })
+    expect(result.errors).toEqual([])
+    expect(config.events.sources['demo-source']?.options).toEqual({ target: 'checkout', verbose: true })
+  })
+
   it('事件配置改动不需要重启', () => {
     const config = defaultConfig()
     const result = applyConfigPatch(config, { 'events.enabled': true })

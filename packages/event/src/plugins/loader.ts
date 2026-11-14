@@ -10,6 +10,7 @@ import {
 import { EventSourceRegistry } from '../registry.js'
 import type { EventSource } from '../port.js'
 import type {
+  EventOptionField,
   EventPlugin,
   EventPluginEntry,
   EventPluginMeta,
@@ -45,6 +46,8 @@ export interface LoadedEventPlugins {
   sources: EventSource[]
   /** 配置 id → 实际注册的来源实例 id；一个插件包可以注册多个。 */
   loadedIds: Record<string, string[]>
+  /** 配置 id → 插件声明的可配置项；面板按它渲染设置表单。 */
+  optionsById: Record<string, EventOptionField[]>
   failures: PluginFailure[]
 }
 
@@ -65,6 +68,7 @@ export async function loadEventPlugins(
   const metas: EventPluginMeta[] = []
   const sources: EventSource[] = []
   const loadedIds: Record<string, string[]> = {}
+  const optionsById: Record<string, EventOptionField[]> = {}
   const failures: PluginFailure[] = []
 
   const loaded = await loadPluginModules<EventPlugin>({
@@ -97,6 +101,7 @@ export async function loadEventPlugins(
         logger.info('plugin:loaded', { kind: 'event', id: source.id })
       }
       loadedIds[configId] = instanceIds
+      optionsById[configId] = plugin.options?.fields ?? []
       if (plugin.meta) {
         if (plugin.meta.id !== configId) {
           logger.warn('plugin:id-mismatch', {
@@ -119,5 +124,5 @@ export async function loadEventPlugins(
       })
     }
   }
-  return { registry, metas, sources, loadedIds, failures }
+  return { registry, metas, sources, loadedIds, optionsById, failures }
 }

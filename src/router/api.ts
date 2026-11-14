@@ -1008,8 +1008,9 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       const body = await readJson(req)
       const kind = body.kind === undefined || body.kind === 'runtime'
         ? 'runtime' as const
-        : body.kind === 'channel' ? 'channel' as const : null
-      if (!kind) return respond(res, 400, { error: 'invalid-kind', message: 'kind 只能是 runtime / channel' })
+        : body.kind === 'channel' ? 'channel' as const
+          : body.kind === 'event' ? 'event' as const : null
+      if (!kind) return respond(res, 400, { error: 'invalid-kind', message: 'kind 只能是 runtime / channel / event' })
       const id = typeof body.id === 'string' ? body.id.trim() : ''
       try {
         const installOpts: { version?: string; packageName?: string; entry?: string } = {}

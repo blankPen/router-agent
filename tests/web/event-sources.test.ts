@@ -3,6 +3,7 @@ import { CONFIG_GROUPS, blockPaths } from '../../src/web/client/fields.js'
 import {
   eventSourceFields,
   eventSourcePaths,
+  eventSourcePathsIn,
   sourceFieldDefs,
 } from '../../src/web/client/event-sources.js'
 
@@ -50,6 +51,20 @@ describe('配置页的事件总线分组', () => {
   })
 })
 
+describe('插件来源的字段', () => {
+  it('插件自己声明的选项落在 options 下，路径拼到来源里', () => {
+    const defs = sourceFieldDefs('demo-source', [
+      { key: 'options.target', label: '巡检目标', kind: 'text' },
+      { key: 'options.verbose', label: '输出详情', kind: 'boolean' },
+    ])
+    expect(defs.map(def => def.path)).toEqual([
+      'events.sources.demo-source.options.target',
+      'events.sources.demo-source.options.verbose',
+    ])
+    expect(defs.map(def => def.kind)).toEqual(['text', 'switch'])
+  })
+})
+
 describe('事件来源的改动追踪', () => {
   const sources = [
     {
@@ -68,5 +83,11 @@ describe('事件来源的改动追踪', () => {
       'events.sources.github.repo',
     ])
     expect(eventSourceFields(sources).map(field => field.path)).toEqual(['events.sources.github.repo'])
+  })
+
+  it('草稿里刚加的来源也算进去，改了才能进保存补丁', () => {
+    const paths = eventSourcePathsIn(sources, { 'demo-source': { plugin: '@scope/demo' } })
+    expect(paths).toContain('events.sources.demo-source.plugin')
+    expect(paths).toContain('events.sources.demo-source.enabled')
   })
 })
