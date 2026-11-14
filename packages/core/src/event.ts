@@ -19,7 +19,6 @@ export type EventQueueState =
   | 'ready'
   | 'dispatched'
   | 'pending_review'
-  | 'deferred'
   | 'dropped'
   | 'expired'
   | 'archived'
@@ -34,7 +33,6 @@ export const EVENT_QUEUE_STATES: readonly EventQueueState[] = [
   'ready',
   'dispatched',
   'pending_review',
-  'deferred',
   'dropped',
   'expired',
   'archived',

@@ -355,8 +355,6 @@ export interface EventSettings {
     /** 每日事件数上限；0 = 不限制。 */
     dailyEvents: number
   }
-  /** 队列深度上限；超出后丢弃最低分事件。 */
-  maxQueueDepth: number
   /** 审核通知的接收人（open_id / 邮箱）。 */
   approvers: string[]
   /** 审核通知群。 */
@@ -372,7 +370,6 @@ export function defaultEventSettings(): EventSettings {
     sources: [],
     windows: [],
     budget: { dailyTokens: 0, dailyEvents: 0 },
-    maxQueueDepth: 500,
     approvers: [],
     notifyChat: '',
   }
@@ -795,7 +792,6 @@ export function parseEventSettings(doc: unknown, fallback: EventSettings = defau
       dailyTokens: positiveIntOr(budgetDoc.dailyTokens, fallback.budget.dailyTokens, 0, 100_000_000),
       dailyEvents: positiveIntOr(budgetDoc.dailyEvents, fallback.budget.dailyEvents, 0, 1_000_000),
     },
-    maxQueueDepth: positiveIntOr(doc.maxQueueDepth, fallback.maxQueueDepth, 1, 100_000),
     approvers: stringArray(doc.approvers, fallback.approvers),
     notifyChat: stringOr(doc.notifyChat, fallback.notifyChat),
     ...(quietHours ? { notifyQuietHours: quietHours } : {}),
@@ -1504,7 +1500,6 @@ export function writeConfig(home: string, config: AppConfig): void {
         dailyTokens: config.event.budget.dailyTokens,
         dailyEvents: config.event.budget.dailyEvents,
       },
-      maxQueueDepth: config.event.maxQueueDepth,
       approvers: config.event.approvers,
       notifyChat: config.event.notifyChat,
       ...(config.event.notifyQuietHours
@@ -2003,7 +1998,6 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
   'event.windows': listValue(validateEventWindows),
   'event.budget.dailyTokens': intValue(0, 100_000_000),
   'event.budget.dailyEvents': intValue(0, 1_000_000),
-  'event.maxQueueDepth': intValue(1, 100_000),
   'event.approvers': stringListValue(),
   'event.notifyChat': stringValue,
   'event.notifyQuietHours': listValue(validateEventQuietHours),
@@ -2432,12 +2426,6 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
       const v = int(0, 1_000_000)
       if (v === null) return false
       config.event.budget.dailyEvents = v
-      return true
-    }
-    case 'event.maxQueueDepth': {
-      const v = int(1, 100_000)
-      if (v === null) return false
-      config.event.maxQueueDepth = v
       return true
     }
     case 'event.approvers':

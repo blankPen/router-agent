@@ -245,16 +245,14 @@ Router 不做对话，只在必要时说话：
 | `event:enabled` | Service | `sources` `queueDepth` | 事件总线已装配，列出接入的来源与当前队列深度 |
 | `event:ingested` | EventBus | `eventId` `source` `type` `lane` `priority` | 事件入队（幂等键 source + externalId） |
 | `event:duplicate` | EventBus | `source` `externalId` | 幂等命中：同一外部事件重投，不会产生第二条 |
-| `event:dropped` | EventBus | `eventId` `source` `reason` | 事件被丢弃（机器人 / 寒暄 / 对象标识非法 / 队列背压超限等），原因必填 |
-| `event:requeued` | EventBus | `count` | 到点的延后事件自动回到可取状态（deferred → ready），进入本轮判定 |
-| `event:lane-busy` | EventBus | `eventId` `lane` `notBefore` | 同 lane 串行：该泳道已有未完成工单，事件延后重查，避免同项目被并发改代码 |
+| `event:dropped` | EventBus | `eventId` `source` `reason` | 事件被丢弃（机器人 / 寒暄 / 对象标识非法等），原因必填 |
 | `event:hops-exceeded` | EventBus | `source` `hops` | 自产事件链超过上限，熔断丢弃 |
 | `event:triaged` | EventBus | `eventId` `tier` `decidedBy` `reason` `confidence` | 判定结论：t0 直派 / t1 待审 / t2 归档 / t3 丢弃 |
 | `event:triage-failed` | EventBus | `eventId` `detail` | 判定模型失败，已降级到规则层并转人工审核（不丢事件） |
 | `event:triage-batched` | EventBus | `group` `count` `tokens` | 批量窗口内同源同类型事件合并成一次判定调用；`group` 是 source｜type｜project |
 | `event:triage-batch-failed` | EventBus | `count` `detail` | 批量判定失败，已退回逐条判定（事件不丢） |
-| `event:deferred` | EventBus | `eventId` `notBefore` `reason` | 事件延后（时间窗 / 预算 / 人工指定） |
-| `event:budget-exceeded` | EventBus | `eventId` `reason` `used` `limit` | 预算触顶；前置闸门直接延后且不再调模型，已判定完的 t0 仍会执行（保响应） |
+| `event:waiting` | EventBus | `eventId` `notBefore` `reason` | 事件这轮不处理，留在队列里等（时间窗 / 预算 / 人工指定）；到点自动恢复处理资格 |
+| `event:budget-exceeded` | EventBus | `eventId` `reason` `used` `limit` | 预算触顶；前置闸门不再调模型、事件留在队列等，已判定完的 t0 仍会执行（保响应） |
 | `event:tokens-used` | EventBus | `tokens` `day` `total` | 本次判定消耗的 token 记进当日游标，预算按它算账 |
 | `event:dispatched` | EventBus | `eventId` `ticketId` `project` `reused` | 事件已转成工单；`reused=true` 表示复用了之前已开的工单 |
 | `event:pending-review` | EventBus | `eventId` `reason` | 事件进待审核队列（不派工） |

@@ -653,6 +653,9 @@ export class Store {
       this.db.exec('ALTER TABLE inputs ADD COLUMN source_key TEXT')
     }
     this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_inputs_source_key ON inputs (ticket_id, source_key)')
+    // 事件队列不再有「延后」状态：等待中的事件一律留在 queued，靠 not_before 表达「最早可处理时间」。
+    // 旧库里的 deferred 行回到 queued，避免永远取不到。
+    this.db.exec("UPDATE event_queue SET state = 'queued' WHERE state = 'deferred'")
     // 派工草稿从「一个群一条」改成「一个群 + 一个人一条」：旧库需要重建主键。
     const draftColumns = this.db.prepare('PRAGMA table_info(dispatch_drafts)').all() as Row[]
     const actorPk = Number(draftColumns.find(column => column.name === 'actor_id')?.pk ?? 0)
@@ -799,40 +802,6 @@ export class Store {
       ORDER BY priority DESC, not_before ASC, created_at ASC
       LIMIT ?`).all(now, now, limit) as Row[]
     return rows.map(eventQueueFromRow)
-  }
-
-  /** 延后到点的事件自动回到可取状态；返回回队条数。 */
-  requeueDueDeferred(now: string): number {
-    const row = this.db.prepare(`UPDATE event_queue
-      SET state = 'ready', not_before = NULL, updated_at = ?
-      WHERE state = 'deferred' AND (not_before IS NULL OR not_before <= ?)`).run(now, now)
-    return Number(row.changes ?? 0)
-  }
-
-  /** 等待处理的事件数：queued + ready + deferred。 */
-  eventQueueDepth(): number {
-    const row = this.db.prepare("SELECT COUNT(*) AS n FROM event_queue WHERE state IN ('queued', 'ready', 'deferred')").get() as Row | undefined
-    return Number(row?.n ?? 0)
-  }
-
-  /** 排队中（非延后）最低分的若干事件 id；背压超限时按它丢弃。 */
-  lowestQueuedIds(limit: number): string[] {
-    const rows = this.db.prepare(`SELECT event_id FROM event_queue
-      WHERE state IN ('queued', 'ready')
-      ORDER BY priority ASC, created_at ASC
-      LIMIT ?`).all(limit) as Row[]
-    return rows.map(row => String(row.event_id))
-  }
-
-  /** 该 lane 是否还有未完成（在飞）的工单；用于同 lane 串行。 */
-  laneHasLiveTicket(lane: string, excludeEventId: string): boolean {
-    const rows = this.db.prepare(`SELECT ticket_id FROM event_queue
-      WHERE lane = ? AND state = 'dispatched' AND ticket_id IS NOT NULL AND event_id != ?`).all(lane, excludeEventId) as Row[]
-    for (const row of rows) {
-      const ticket = this.getTicket(String(row.ticket_id))
-      if (ticket && ticket.stage !== 'done') return true
-    }
-    return false
   }
 
   /** 队列统计：总数 + 按状态 + 按档位。 */

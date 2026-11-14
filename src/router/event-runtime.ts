@@ -98,7 +98,7 @@ export class EventRuntime {
           processed: outcome.processed,
           dispatched: outcome.dispatched,
           pending: outcome.pending,
-          deferred: outcome.deferred,
+          waiting: outcome.waiting,
           dropped: outcome.dropped,
           archived: outcome.archived,
         })

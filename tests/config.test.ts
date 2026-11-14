@@ -1070,8 +1070,6 @@ describe('事件总线的 config set 白名单', () => {
     expect(setConfigValue(cfg, 'event.budget.dailyTokens', '-1')).toBe(false)
     expect(setConfigValue(cfg, 'event.budget.dailyEvents', '0')).toBe(true)
     expect(cfg.event.budget.dailyEvents).toBe(0)
-    expect(setConfigValue(cfg, 'event.maxQueueDepth', '100')).toBe(true)
-    expect(cfg.event.maxQueueDepth).toBe(100)
     expect(setConfigValue(cfg, 'event.approvers', 'ou_a, ou_b')).toBe(true)
     expect(cfg.event.approvers).toEqual(['ou_a', 'ou_b'])
     expect(setConfigValue(cfg, 'event.notifyChat', 'oc_ops')).toBe(true)

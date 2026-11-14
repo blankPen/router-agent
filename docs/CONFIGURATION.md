@@ -171,7 +171,6 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 | `decision.jev.model` / `decision.jev.apiKey` / `decision.jev.baseUrl` | Jev 连接信息（密钥只写不回显） |
 | `event.enabled` | `true` / `false`；事件总线总开关 |
 | `event.budget.dailyTokens` / `event.budget.dailyEvents` | 每日 token / 事件数上限；`0` = 不限制（默认） |
-| `event.maxQueueDepth` | 队列深度上限；超出后丢弃最低分事件 |
 | `event.approvers` | 逗号分隔审核人（open_id / 邮箱） |
 | `event.notifyChat` | 审核与进展通知群 |
 | `event.notifyQuietHours` | 通知静默时段，JSON 如 `{"from":"22:00","to":"08:00"}`；留空串 = 取消静默 |
@@ -481,7 +480,6 @@ event:
   budget:
     dailyTokens: 0               # 每日 token 上限；0 = 不限制
     dailyEvents: 0               # 每日事件数上限；0 = 不限制
-  maxQueueDepth: 500
   approvers: []                  # 审核人（open_id / 邮箱）；面板写操作按它校验
   notifyChat: ''                 # 待审核事件的推送群；留空则只在面板可见
   # notifyQuietHours: { from: '22:00', to: '08:00' }   # 通知静默时段；期间只入面板不推送
@@ -489,8 +487,8 @@ event:
 
 要点：
 
-- **时间窗先留空**：不预置高低峰模板，需要时再配；窗口不放行的事件会延后到窗口开始。
-- **预算默认不限制**：`dailyTokens` / `dailyEvents` 都是 `0` 时不拦任何事件；显式配置才生效。预算触顶后先不调模型（低优事件延后到次日），已经判定完的 T0 仍会执行（保响应），两种情况都记 `event:budget-exceeded`。
+- **时间窗先留空**：不预置高低峰模板，需要时再配；窗口不放行的事件会留在队列里，最早可处理时间记到窗口开始。
+- **预算默认不限制**：`dailyTokens` / `dailyEvents` 都是 `0` 时不拦任何事件；显式配置才生效。预算触顶后先不调模型（低优事件留在队列等次日），已经判定完的 T0 仍会执行（保响应），两种情况都记 `event:budget-exceeded`。
 - **批量合并只发生在开了 `batch` 的窗口里**：同一窗口内同 `source + type + project` 的事件合并成一次判定调用；调用失败自动退回逐条判定，事件不丢。
 - **通知静默时段**：配了之后静默期内的待审通知不外发，推迟到静默结束那一刻；两端留空表示不静默。
 - **密钥只从环境变量读**：`secretRef` 里写的是环境变量名；GitHub webhook 用 `X-Hub-Signature-256` 验签，通用 webhook 用 `Bearer` 令牌。

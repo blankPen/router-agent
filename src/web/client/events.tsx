@@ -77,7 +77,6 @@ export interface EventConfigView {
   }[]
   windows: { id: string; from: string; to: string; allow: string[]; batch?: boolean }[]
   budget: { dailyTokens: number; dailyEvents: number }
-  maxQueueDepth: number
   approvers: string[]
   notifyChat: string
   notifyQuietHours?: { from: string; to: string }
@@ -96,7 +95,6 @@ const STATE_LABEL: Record<string, string> = {
   ready: '待派发',
   dispatched: '已派发',
   pending_review: '待审核',
-  deferred: '已延后',
   dropped: '已丢弃',
   expired: '已过期',
   archived: '已归档',
@@ -108,7 +106,6 @@ const STATE_TONE: Record<string, string> = {
   ready: 'mixed',
   dispatched: 'hot',
   pending_review: 'dirty',
-  deferred: 'mixed',
   dropped: 'cold',
   expired: 'cold',
   archived: 'cold',
@@ -184,7 +181,7 @@ export function EventsView(): JSX.Element {
   const sources = useMemo(() => Array.from(new Set(rows.map(row => row.event?.source ?? '').filter(Boolean))), [rows])
   const pending = stats?.byState?.pending_review ?? 0
   const dispatched = stats?.byState?.dispatched ?? 0
-  const deferred = stats?.byState?.deferred ?? 0
+  const queued = stats?.byState?.queued ?? 0
 
   return (
     <>
@@ -208,8 +205,8 @@ export function EventsView(): JSX.Element {
           <strong className="stat-value">{dispatched}</strong>
         </div>
         <div className="stat-card">
-          <span className="stat-label">延后中</span>
-          <strong className="stat-value muted">{deferred}</strong>
+          <span className="stat-label">排队中</span>
+          <strong className="stat-value muted">{queued}</strong>
         </div>
         <div className="stat-card">
           <span className="stat-label">队列总数</span>
@@ -287,7 +284,7 @@ export function EventsView(): JSX.Element {
                           <button className="btn tiny" onClick={() => void act(row.queue.eventId, 'dispatch')}>批准</button>
                           <button className="btn tiny danger" onClick={() => void act(row.queue.eventId, 'reject')}>驳回</button>
                         </>
-                      ) : row.queue.state === 'deferred' ? (
+                      ) : row.queue.state === 'queued' ? (
                         <button className="btn tiny" onClick={() => void act(row.queue.eventId, 'dispatch')}>立即处理</button>
                       ) : (
                         <span className="muted">—</span>
@@ -384,7 +381,6 @@ function EventGateCard({ config, onSaved, onError }: {
         'event.budget.dailyTokens': draft.budget.dailyTokens,
         'event.budget.dailyEvents': draft.budget.dailyEvents,
         'event.windows': draft.windows,
-        'event.maxQueueDepth': draft.maxQueueDepth,
         'event.notifyChat': draft.notifyChat,
         'event.notifyQuietHours': {
           from: draft.notifyQuietHours?.from ?? '',
@@ -430,16 +426,6 @@ function EventGateCard({ config, onSaved, onError }: {
             min={0}
             value={draft.budget.dailyEvents}
             onChange={event => update({ budget: { ...draft.budget, dailyEvents: Number(event.target.value) } })}
-          />
-        </div>
-        <div className="meta-item">
-          <span className="meta-label">队列深度上限</span>
-          <input
-            className="text-input"
-            type="number"
-            min={1}
-            value={draft.maxQueueDepth}
-            onChange={event => update({ maxQueueDepth: Number(event.target.value) })}
           />
         </div>
         <div className="meta-item">

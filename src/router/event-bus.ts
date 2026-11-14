@@ -71,7 +71,8 @@ export interface TickOutcome {
   processed: number
   dispatched: number
   pending: number
-  deferred: number
+  /** 这轮没处理、留在队列里等的条数。 */
+  waiting: number
   dropped: number
   archived: number
 }
@@ -93,9 +94,6 @@ export interface ReviewOutcome {
 }
 
 const defaultIds = { next: (prefix: string) => `${prefix}_${crypto.randomUUID()}` }
-
-/** 同 lane 串行的重查间隔：在飞工单未完成时每隔这么久再判一次。 */
-const LANE_RETRY_MS = 60_000
 
 /**
  * 事件总线。
@@ -195,21 +193,9 @@ export class EventBus {
 
   /** 处理一轮队列：先做不花钱的前置判断，再判定（可批量合并），最后分级派发。 */
   async tick(): Promise<TickOutcome> {
-    const outcome: TickOutcome = { processed: 0, dispatched: 0, pending: 0, deferred: 0, dropped: 0, archived: 0 }
+    const outcome: TickOutcome = { processed: 0, dispatched: 0, pending: 0, waiting: 0, dropped: 0, archived: 0 }
     const now = this.clock.now()
     const settings = this.settings()
-    const requeued = this.store.requeueDueDeferred(now)
-    if (requeued > 0) this.logger.info('event:requeued', { count: requeued })
-    // 背压：队列等待数超过上限时丢弃最低分事件，而不是无限堆积。
-    const depth = this.store.eventQueueDepth()
-    if (settings.maxQueueDepth > 0 && depth > settings.maxQueueDepth) {
-      const overflow = depth - settings.maxQueueDepth
-      for (const eventId of this.store.lowestQueuedIds(overflow)) {
-        this.logger.warn('event:dropped', { eventId, reason: 'event:queue-overflow' })
-        this.settle(eventId, { state: 'dropped', tier: 't3', reason: 'event:queue-overflow' })
-        outcome.dropped += 1
-      }
-    }
     const pending = this.store.pickEventQueue(now, 20)
     const candidates: EventCandidate[] = []
     for (const item of pending) {
@@ -236,42 +222,17 @@ export class EventBus {
         continue
       }
 
-      // 同 lane 串行：该泳道已有未完成工单时延后，避免同一项目被多事件并发改代码。
-      if (this.store.laneHasLiveTicket(item.lane, event.id)) {
-        const notBefore = new Date(Date.parse(now) + LANE_RETRY_MS).toISOString()
-        this.logger.info('event:lane-busy', { eventId: event.id, lane: item.lane, notBefore })
-        this.settle(event.id, {
-          state: 'deferred',
-          tier: tierOfPriority(item.priority),
-          priority: item.priority,
-          reason: 'event:lane-busy',
-          notBefore,
-          decidedBy: 'rule',
-        })
-        outcome.deferred += 1
-        continue
-      }
-
       // 预算触顶后先别问模型：规则层认定高优先级且无需人介入的事件才值得继续。
       // 否则每条事件都要先花一次判定调用，预算反而拦不住成本。
       const used = this.usage(settings, now)
       const budget = budgetState(settings.budget, used)
       if (budget.exceeded && (rule.needsHuman || rule.priority < URGENT_PRIORITY)) {
-        this.logger.warn('event:budget-exceeded', {
-          eventId: event.id,
-          reason: budget.reason,
+        this.wait(event.id, 'event:budget-exceeded', nextDayStart(now), {
+          budgetReason: budget.reason,
           used: budget.reason === 'tokens' ? used.tokens : used.events,
           limit: budget.reason === 'tokens' ? settings.budget.dailyTokens : settings.budget.dailyEvents,
         })
-        this.settle(event.id, {
-          state: 'deferred',
-          tier: tierOfPriority(rule.priority),
-          priority: rule.priority,
-          reason: 'event:budget-exceeded',
-          notBefore: nextDayStart(now),
-          decidedBy: 'rule',
-        })
-        outcome.deferred += 1
+        outcome.waiting += 1
         continue
       }
       candidates.push({ event, rule })
@@ -284,7 +245,7 @@ export class EventBus {
       const state = await this.finish(candidate, triage, settings, now)
       if (state === 'dispatched') outcome.dispatched += 1
       else if (state === 'pending_review') outcome.pending += 1
-      else if (state === 'deferred') outcome.deferred += 1
+      else if (state === 'waiting') outcome.waiting += 1
       else if (state === 'dropped') outcome.dropped += 1
       else if (state === 'archived') outcome.archived += 1
     }
@@ -382,16 +343,9 @@ export class EventBus {
     const priority = merged.priority
 
     const gate = this.gate(settings, tier, priority, now)
-    if (gate.deferred) {
-      this.logger.info('event:deferred', { eventId: event.id, notBefore: gate.notBefore, reason: gate.reason })
-      return this.settle(event.id, {
-        state: 'deferred',
-        tier,
-        priority,
-        reason: gate.reason,
-        notBefore: gate.notBefore,
-        decidedBy: triage.degraded ? 'rule' : 'jev',
-      })
+    if (gate.blocked) {
+      this.wait(event.id, gate.reason ?? 'event:waiting', gate.notBefore ?? now)
+      return 'waiting'
     }
 
     this.logger.info('event:triaged', {
@@ -445,25 +399,43 @@ export class EventBus {
     tier: EventTier,
     priority: number,
     now: string,
-  ): { deferred: boolean; reason?: string; notBefore?: string } {
+  ): { blocked: boolean; reason?: string; notBefore?: string } {
     // 归档与丢弃不消耗处理资源，不受时间窗与预算约束。
-    if (tier === 't2' || tier === 't3') return { deferred: false }
+    if (tier === 't2' || tier === 't3') return { blocked: false }
     const window = windowAllows(settings.windows, tier, this.timeOfDay(now))
     if (!window.allowed) {
-      return { deferred: true, reason: 'event:window-closed', notBefore: nextWindowStart(window.nextStart, now) }
+      return { blocked: true, reason: 'event:window-closed', notBefore: nextWindowStart(window.nextStart, now) }
     }
     const usage = this.usage(settings, now)
     const budget = budgetState(settings.budget, usage)
     if (budget.exceeded) {
-      this.logger.warn('event:budget-exceeded', {
-        reason: budget.reason,
-        used: budget.reason === 'tokens' ? usage.tokens : usage.events,
-        limit: budget.reason === 'tokens' ? settings.budget.dailyTokens : settings.budget.dailyEvents,
-      })
-      if (tier === 't0') return { deferred: false }
-      return { deferred: true, reason: 'event:budget-exceeded', notBefore: nextDayStart(now) }
+      if (tier === 't0') {
+        // T0 放行（保响应），但预算触顶要留痕。
+        this.logger.warn('event:budget-exceeded', {
+          reason: budget.reason,
+          used: budget.reason === 'tokens' ? usage.tokens : usage.events,
+          limit: budget.reason === 'tokens' ? settings.budget.dailyTokens : settings.budget.dailyEvents,
+        })
+        return { blocked: false }
+      }
+      return { blocked: true, reason: 'event:budget-exceeded', notBefore: nextDayStart(now) }
     }
-    return { deferred: false }
+    return { blocked: false }
+  }
+
+  /**
+   * 这条事件这轮不处理：留在队列里等，状态不变，只记「最早可处理时间」与原因。
+   *
+   * 队列本身就是等待区——事件不会丢，也不会被反复判定；到点后自动具备处理资格。
+   * 原因与时间都没变时不重复写、也不重复记日志，避免每轮刷屏。
+   */
+  private wait(eventId: string, reason: string, notBefore: string, extra: Record<string, unknown> = {}): void {
+    const queue = this.store.getEventQueue(eventId)
+    if (queue && queue.reason === reason && queue.notBefore === notBefore) return
+    const fields = { eventId, reason, notBefore, ...extra }
+    if (reason === 'event:budget-exceeded') this.logger.warn('event:budget-exceeded', fields)
+    else this.logger.info('event:waiting', fields)
+    this.store.updateEventQueue(eventId, { reason, notBefore, updatedAt: this.clock.now() })
   }
 
   /** 今日用量：事件数从库里数，token 数从游标里读。 */
@@ -644,9 +616,15 @@ export class EventBus {
     }
     if (action === 'defer') {
       const notBefore = new Date(Date.parse(this.clock.now()) + 3_600_000).toISOString()
-      this.settle(eventId, { state: 'deferred', tier: queue.tier || 't1', reason: 'event:review-deferred', notBefore })
-      this.logger.info('event:deferred', { eventId, notBefore, reason: 'event:review-deferred' })
-      return { state: 'deferred', reason: 'event:review-deferred' }
+      // 人工延后：事件回到队列排队，一小时后再判定。
+      this.store.updateEventQueue(eventId, {
+        state: 'queued',
+        reason: 'event:review-deferred',
+        notBefore,
+        updatedAt: this.clock.now(),
+      })
+      this.logger.info('event:waiting', { eventId, notBefore, reason: 'event:review-deferred' })
+      return { state: 'queued', reason: 'event:review-deferred' }
     }
     const triage = await this.triageEvent(event)
     const state = await this.dispatch(event, 't0', queue.priority, 'event:review-approved', triage)

@@ -164,7 +164,7 @@ describe('事件总线', () => {
     expect(store.listTickets({ limit: 10 })).toHaveLength(0)
   })
 
-  it('预算超限时不再问模型，低优先级事件直接延后', async () => {
+  it('预算超限时不再问模型，低优先级事件留在队列里等', async () => {
     settings.budget.dailyEvents = 1
     const port = triageOf({ needsHuman: 0.9 })
     const triage = vi.fn(port.triage)
@@ -172,8 +172,9 @@ describe('事件总线', () => {
     await b.ingest(envelope())
     await b.tick()
     const queue = store.getEventQueue('ev_1')
-    expect(queue?.state).toBe('deferred')
+    expect(queue?.state).toBe('queued')
     expect(queue?.reason).toBe('event:budget-exceeded')
+    expect(queue?.notBefore).toBeTruthy()
     // 预算的意义就是不再花钱问模型：这条事件一次判定都不该发生。
     expect(triage).not.toHaveBeenCalled()
     expect(logs.some(log => log.event === 'event:budget-exceeded' && log.level === 'warn')).toBe(true)
@@ -195,7 +196,7 @@ describe('事件总线', () => {
     const b = bus({ triage: { triage } })
     await b.ingest(envelope({ id: 'ev_1', externalId: 'ext-1' }))
     await b.tick()
-    expect(store.getEventQueue('ev_1')?.state).toBe('deferred')
+    expect(store.getEventQueue('ev_1')?.state).toBe('queued')
     expect(store.getEventQueue('ev_1')?.reason).toBe('event:budget-exceeded')
     // 计数器按本地日历日分桶：日期用 Intl 独立算，不复制生产实现。
     const localDay = new Date(NOW).toLocaleDateString('en-CA')
@@ -203,22 +204,23 @@ describe('事件总线', () => {
 
     await b.ingest(envelope({ id: 'ev_2', externalId: 'ext-2' }))
     await b.tick()
-    expect(store.getEventQueue('ev_2')?.state).toBe('deferred')
+    expect(store.getEventQueue('ev_2')?.state).toBe('queued')
     // 预算已触顶，第二条事件一次模型调用都不该再发生。
     expect(triage).toHaveBeenCalledTimes(1)
   })
 
-  it('时间窗不放行时延后到窗口开始', async () => {
+  it('时间窗不放行时事件留在队列里等窗口', async () => {
     settings.windows = [{ id: 'peak', from: '09:00', to: '20:00', allow: ['t0'] }]
     const b = bus({ triage: triageOf({ priority: 0.2, needsHuman: 0.9 }) })
     await b.ingest(envelope())
     await b.tick()
     const queue = store.getEventQueue('ev_1')
-    expect(queue?.state).toBe('deferred')
+    expect(queue?.state).toBe('queued')
     expect(queue?.reason).toBe('event:window-closed')
+    expect(queue?.notBefore).toBeTruthy()
   })
 
-  it('延后事件到点后自动回到可取状态并被派发', async () => {
+  it('窗口外的事件到点后自动恢复处理资格并派发', async () => {
     settings.windows = [{ id: 'peak', from: '09:00', to: '20:00', allow: ['t0'] }]
     let current = '2026-11-14T08:00:00.000Z'
     const clock = { now: () => current }
@@ -233,48 +235,44 @@ describe('事件总线', () => {
     await b.ingest(envelope())
     await b.tick()
     const queue = store.getEventQueue('ev_1')
-    expect(queue?.state).toBe('deferred')
+    expect(queue?.state).toBe('queued')
     expect(queue?.reason).toBe('event:window-closed')
-    // 推进到窗口放行、且已过 not_before 的时刻：延后事件必须被重新取回。
+    // 推进到窗口放行、且已过 not_before 的时刻：排队中的事件必须被重新取回。
     current = '2026-11-15T09:30:00.000Z'
     const outcome = await b.tick()
     expect(outcome.dispatched).toBe(1)
     expect(store.getEventQueue('ev_1')?.state).toBe('dispatched')
   })
 
-  it('队列超过 maxQueueDepth 时丢弃最低分事件并记日志', async () => {
-    settings.maxQueueDepth = 2
-    const b = bus({ triage: triageOf() })
-    await b.ingest(envelope({ id: 'ev_1', externalId: 'ext-1', priorityHint: 10 }))
-    await b.ingest(envelope({ id: 'ev_2', externalId: 'ext-2', priorityHint: 20 }))
-    await b.ingest(envelope({ id: 'ev_3', externalId: 'ext-3', priorityHint: 30 }))
-    await b.tick()
-    expect(store.getEventQueue('ev_1')?.state).toBe('dropped')
-    expect(store.getEventQueue('ev_1')?.reason).toBe('event:queue-overflow')
-    expect(store.getEventQueue('ev_2')?.state).not.toBe('dropped')
-    expect(logs.some(log => log.event === 'event:dropped' && log.fields.reason === 'event:queue-overflow' && log.level === 'warn')).toBe(true)
+  it('队列不做上限：事件一直排队，按优先级从高到低处理', async () => {
+    const seen: string[] = []
+    const triage = vi.fn(async (input: { subject: string }) => {
+      seen.push(input.subject)
+      return {
+        answers: { needsHandling: 0.9, eventType: 0.6, priority: 0.75, needsHuman: 0.1, projectRelated: 0.9 },
+        eventTypeLabel: 'defect',
+        priorityLabel: 'high',
+      }
+    })
+    const b2 = bus({ triage: { triage } })
+    await b2.ingest(envelope({ id: 'ev_1', externalId: 'ext-1', subject: 'repo#1', priorityHint: 10 }))
+    await b2.ingest(envelope({ id: 'ev_2', externalId: 'ext-2', subject: 'repo#2', priorityHint: 30 }))
+    await b2.ingest(envelope({ id: 'ev_3', externalId: 'ext-3', subject: 'repo#3', priorityHint: 20 }))
+    await b2.tick()
+    expect(seen).toEqual(['repo#2', 'repo#3', 'repo#1'])
+    // 三条都处理掉，没有一条被上限丢掉。
+    for (const id of ['ev_1', 'ev_2', 'ev_3']) {
+      expect(store.getEventQueue(id)?.state).toBe('dispatched')
+    }
   })
 
-  it('同一 lane 已有在飞工单时新事件延后，工单完成后自动放行', async () => {
-    let current = NOW
-    const clock = { now: () => current }
-    const b = bus({ clock, triage: triageOf({ priority: 0.95 }) })
+  it('同一 lane 的多条事件各自开单，不做串行', async () => {
+    const b = bus({ triage: triageOf({ priority: 0.95 }) })
     await b.ingest(envelope({ id: 'ev_1', externalId: 'ext-1' }))
     await b.tick()
-    const first = store.getEventQueue('ev_1')
-    expect(first?.state).toBe('dispatched')
-    expect(first?.ticketId).toBeTruthy()
-    // 同一 lane 的第二条事件：有在飞工单 → 延后，不重复开单。
     await b.ingest(envelope({ id: 'ev_2', externalId: 'ext-2' }))
     await b.tick()
-    const second = store.getEventQueue('ev_2')
-    expect(second?.state).toBe('deferred')
-    expect(second?.reason).toBe('event:lane-busy')
-    // 完成第一张工单，推进时钟到延后到点，再 tick → 放行派发。
-    engine.closeTicket(first!.ticketId!, '完成验收')
-    current = new Date(Date.parse(NOW) + 2 * 60_000).toISOString()
-    const outcome = await b.tick()
-    expect(outcome.dispatched).toBe(1)
+    expect(store.getEventQueue('ev_1')?.state).toBe('dispatched')
     expect(store.getEventQueue('ev_2')?.state).toBe('dispatched')
   })
 

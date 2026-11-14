@@ -130,7 +130,7 @@ export interface EventEnvelope {
   actor: { id: string; name: string; type: 'user' | 'bot' | 'system' | 'external' }
   /** 绑定的项目；决定 repo / branch / 默认规则集 */
   project?: string
-  /** 归属泳道：同一 lane 串行处理，避免同项目并发风暴 */
+  /** 归属泳道：标记这条事件属于哪条线（用于面板筛选与排查，不再强制串行） */
   lane: string
   /** 来源给出的基线优先级 0~100（只影响排序与插队，不决定 tier） */
   priorityHint: number
@@ -276,10 +276,10 @@ CREATE TABLE IF NOT EXISTS event_queue (
   lane TEXT NOT NULL,
   priority INTEGER NOT NULL,          -- 最终分数 0~100
   tier TEXT NOT NULL,                 -- t0 | t1 | t2 | t3
-  state TEXT NOT NULL,                -- queued | triaged | ready | dispatched | pending_review | deferred | dropped | expired
+  state TEXT NOT NULL,                -- queued | triaged | ready | dispatched | pending_review | dropped | expired | archived
   reason TEXT,                        -- 判定依据（规则名 / jev 结论摘要）
   decided_by TEXT,                    -- rule | jev | human | system
-  not_before TEXT,                    -- 延后到的时间点（时间窗 / 预算 / 人工指定）
+  not_before TEXT,                    -- 最早可处理时间（时间窗 / 预算 / 人工指定）
   attempts INTEGER NOT NULL DEFAULT 0,
   lease_until TEXT,                   -- 领取租约，避免重复派发
   ticket_id TEXT,                     -- 派发后关联工单
@@ -296,13 +296,14 @@ CREATE INDEX IF NOT EXISTS idx_event_queue_lane ON event_queue (lane, state);
 queued ──判定──► triaged ──┬─► ready ──派工──► dispatched
    │                        ├─► pending_review ──批准──► dispatched（回原事件）
    │                        │                  └─驳回──► dropped
-   │                        ├─► deferred ──到点/放行──► ready
+   │                        ├─► 留在 queued（记 not_before，等窗口 / 预算放行）
    │                        ├─► archived（只留痕，不通知）
    │                        └─► dropped / expired（留一行记录）
    └──规则直判（无需模型）──► triaged（decided_by = rule）
 ```
 
-> 实现口径：`queued` / `ready` 是「可取」的状态，`deferred` 带 `not_before` 到点自动回到可取；
+> 实现口径：`queued` / `ready` 是「可取」的状态；**队列不做深度上限，事件一直堆积**，
+> 现在不处理的事件留在 `queued`，只把「最早可处理时间」记在 `not_before` 上，到点自动恢复处理资格；
 > 判定结论直接落到终局状态（`dispatched` / `pending_review` / `archived` / `dropped` / `expired`），
 > `triaged` 只作为判定过程痕迹保留在 `reason` 与 `decided_by` 里，不再单独占用一轮。
 
@@ -310,8 +311,8 @@ queued ──判定──► triaged ──┬─► ready ──派工──►
 
 - **排序键**：`priority DESC, not_before ASC, received_at ASC`。
 - **插队**：优先级基线高的事件（如用户消息 100）**不等队列**，取到即处理；队列里的低优事件不阻塞它。它「怎么处理」仍由判定决定（§6）。
-- **同 lane 串行**：同一 lane 同时最多 1 条在飞，避免同一项目被多事件并发改代码。
-- **背压**：`maxQueueDepth` 超限 → 丢弃最低分事件并记 `event:dropped`（附原因），而不是无限堆积。
+- **不做深度上限**：队列一直往里堆，不丢事件；唯一的调度手段是优先级（并发上限仍由 `policy.maxWorkers` 兜底）。
+- **不按 lane 串行**：同一 lane 的多条事件各自开单；并发冲突由既有工单并发上限兜底。
 - **TTL / 过期**：`deadlineAt` 到点未处理 → `expired`，只留档不派发。
 
 ## 6. 优先级判定（规则层 + Jev 双层，所有来源同一套）
@@ -331,12 +332,12 @@ queued ──判定──► triaged ──┬─► ready ──派工──►
 | `keyword:sev0` | 提高基线优先级 | 命中「线上故障 / 生产告警 / 数据丢失」等关键词表 |
 | `keyword:sev1` | 提高基线优先级 | 命中「疑似 Bug / 体验问题」 |
 | `dedupe:seen` | T3 丢弃 | 幂等三元组命中 |
-| `budget:exhausted` | 延后 | 预算触顶（预算默认不限制，只有配置了才生效）→ `deferred` 到下一个窗口 |
-| `window:closed` | 延后 | 当前时间窗不允许该优先级 → `deferred` 到窗口开始 |
+| `budget:exhausted` | 等待 | 预算触顶（预算默认不限制，只有配置了才生效）→ 事件留在队列，最早可处理时间记到次日 |
+| `window:closed` | 等待 | 当前时间窗不允许该优先级 → 事件留在队列，最早可处理时间记到窗口开始 |
 | `project:unbound` | 提高「需人介入」概率 | 事件没绑定项目 → 派发前置条件不满足 |
 | `scope:undecidable` | 提高「需人介入」概率 | 判定不出可落地的授权范围 |
 
-**规则输出四态**：`命中终局结论`（直接给 tier）/ `需要模型判定`（交给 Jev）/ `延后`（给时间）/ `提高基线`（不直接定级，只调整分数与置信度）。
+**规则输出四态**：`命中终局结论`（直接给 tier）/ `需要模型判定`（交给 Jev）/ `等待`（给时间，事件留在队列）/ `提高基线`（不直接定级，只调整分数与置信度）。
 
 > 来源只出现在「基线优先级」一列（用户消息 100 / Issue 70 / webhook 50 / 定时任务 40），**不出现在终局 tier 的判定里**。同一个 Issue 判出来该直派就直派，该待审就待审，与它来自哪种来源无关。
 
@@ -381,7 +382,7 @@ export const EVENT_TRIAGE_SPEC = {
               规则置信度 × 模型置信度 ─────────┴──► 最终 tier
 ```
 
-- **融合规则**：规则给出的基线优先级与模型优先级**取较高者**（保守）；规则已判终局（丢弃 / 延后）的，不再被模型改写。
+- **融合规则**：规则给出的基线优先级与模型优先级**取较高者**（保守）；规则已判终局（丢弃 / 等待）的，不再被模型改写。
 - **置信度**：`confidence = min(规则置信度, 模型置信度)`；低于 `0.5` 一律 **T1 进审核**（宁可人看一眼）。
 - **降级**：Jev 超时 / 失败 / 返回非法 → 用规则结论继续，并标 `degraded = true`，记 `event:triage-failed`（**不丢事件**）。
 - **成本**：模型只对「规则无法定论」的事件调用；低峰窗口对同来源事件**批量合并**成一次调用（§8）。
@@ -440,14 +441,14 @@ export const EVENT_TRIAGE_SPEC = {
 
 ## 8. 成本控制与可配置时间窗
 
-### 8.1 三重闸门（全部可配置）
+### 8.1 成本闸门（全部可配置）
 
 | 闸门 | 配置项 | 默认值 | 行为 |
 |-|-|-|-|
-| **时间窗** | `event.windows[]`：`{ id, from, to, allow: ['t0','t1',...], batch: bool }` | **先留空** = 一直放行（全 tier、不批量） | 窗口不允许该 tier → 延后到窗口开始 |
-| **预算** | `event.budget.dailyTokens` / `event.budget.dailyEvents` | **不限**（`0` 或缺省 = 不限制） | **前置闸门**：预算触顶后先不调模型——规则层判为高优先级且无需人介入的事件才继续，其余直接延后到次日；**后置闸门**：已经判定完的 T0 超限仍执行（保响应）并记 `warn` |
+| **时间窗** | `event.windows[]`：`{ id, from, to, allow: ['t0','t1',...], batch: bool }` | **先留空** = 一直放行（全 tier、不批量） | 窗口不允许该 tier → 事件留在队列，最早可处理时间记到窗口开始 |
+| **预算** | `event.budget.dailyTokens` / `event.budget.dailyEvents` | **不限**（`0` 或缺省 = 不限制） | **前置闸门**：预算触顶后先不调模型——规则层判为高优先级且无需人介入的事件才继续，其余留在队列等次日；**后置闸门**：已经判定完的 T0 超限仍执行（保响应）并记 `warn` |
 | **来源范围** | `event.sources[].repos` / `labels` / `state` | 空 = 不接该来源 | 决定接哪些仓库、哪些标签 |
-| **并发** | 复用现有 `policy.maxWorkers`；队列侧 `event.maxQueueDepth` / 每 lane 1 在飞 | 沿用现有并发上限 | 背压优先于排队 |
+| **并发** | 复用现有 `policy.maxWorkers` | 沿用现有并发上限 | 队列侧不设深度上限、不按 lane 串行，只按优先级排序 |
 
 **时间窗与预算都可以在配置里改，也可以在面板「事件」页直接改**（保存到 `config.yaml`，标「立即生效」）。
 
@@ -469,7 +470,6 @@ event:
     dailyTokens: 0        # 0 = 不限制
     dailyEvents: 0        # 0 = 不限制
 
-  maxQueueDepth: 500
 ```
 
 ### 8.3 降级链（成本从低到高）
@@ -502,14 +502,14 @@ event:
 - **列**：优先级（T0~T3 色标）/ 来源 / 类型 / 摘要 / 项目 / 状态 / 等待时长 / 判定依据（规则名或 Jev 结论）/ 操作。
 - **筛选**：优先级多选、来源、状态、项目、关键字；组合取交集。
 - **排序**：默认按优先级 + 等待时长倒序；「等待最久」单独一档。
-- **行操作**：派发、审核、延后（到指定窗口/时间）、丢弃、查看判定详情（规则命中项 + 模型答案 + 置信度）。
+- **行操作**：派发、审核、延后（回到队列排队，到点再判）、丢弃、查看判定详情（规则命中项 + 模型答案 + 置信度）。
 - **只读优先**：P0 只做只读 + 派发/审核两个动作，写操作在 P2 补齐。
 
 ### 9.2 待审核列表（与需求终审合并）
 
 - **一个页签装两类待办**：需求单（intake）与事件（event），行内标注类型与来源；筛选用「全部 / 待我处理 / 我已处理」。
 - 事件条目显示：事件摘要、来源、模型建议（类型/优先级/是否需人）、建议动作（派给谁、哪个项目）。
-- 管理员动作：**批准派单 / 驳回 / 补充要求（退回重判）/ 延后 / 改优先级**；每次动作写审计（谁、什么时候、结论）。
+- 管理员动作：**批准派单 / 驳回 / 补充要求（退回重判）/ 延后（回队列排队）/ 改优先级**；每次动作写审计（谁、什么时候、结论）。
 - 面板动作与飞书卡片动作共用同一套后端接口，两边结果一致。
 
 ### 9.3 通知
@@ -533,7 +533,7 @@ event:
 | `event:triage-failed` | warn | eventId, detail | Jev 失败，降级到规则 |
 | `event:triage-batched` | info | group, count, tokens | 批量窗口内合并成一次判定调用 |
 | `event:triage-batch-failed` | warn | count, detail | 批量判定失败，退回逐条判定 |
-| `event:deferred` | info | eventId, notBefore, reason | 延后（窗口 / 预算 / 人工） |
+| `event:waiting` | info | eventId, notBefore, reason | 事件这轮不处理、留在队列里等（窗口 / 预算 / 人工） |
 | `event:budget-exceeded` | warn | eventId, reason, used, limit | 预算触顶 |
 | `event:tokens-used` | info | tokens, day, total | 判定消耗记进当日预算游标 |
 | `event:dispatched` | info | eventId, ticketId, project | 已转工单 |
@@ -560,7 +560,7 @@ event:
 | `/api/events/:id` | GET | 事件详情（判定依据、模型答案、审计） |
 | `/api/events/:id/dispatch` | POST | 批准并派工（需 admin） |
 | `/api/events/:id/reject` | POST | 驳回（需 admin） |
-| `/api/events/:id/defer` | POST | 延后到指定时间 / 窗口 |
+| `/api/events/:id/defer` | POST | 延后：事件回到队列排队，到点再判 |
 | `/api/review` | GET | **统一待审核列表**（`type=event` 与 `type=intake` 合并，可分别筛） |
 | `/api/review/:id` | POST | 统一审核动作（approve / reject / clarify / defer） |
 | `/api/events/stats` | GET | 队列统计：各 tier / 各来源堆积数、平均等待时长 |
@@ -574,12 +574,12 @@ event:
 |-|-|-|
 | **P0 事件底座** | 事件契约 + 队列表 + 规则层判定 + 面板只读列表 + **GitHub Issue 轮询接入**（仓库白名单走配置）+ 用户消息插队语义 | Issue 作为第一个非飞书来源进队列；用户消息仍插队处理，零退化 |
 | **P1 判定与派发** | Jev `event.triage.v1` + 融合护栏 + T1 审核队列 + 统一待审核列表（合并 intake）+ 飞书通知 | 判定与来源解耦：同一套规则出 T0/T1；审核一处处理两类待办 |
-| **P2 成本与主动性** | 可配置时间窗 + 可配置预算（默认不限）+ 批量合并 + `later`（定时复查）+ **GitHub Issue webhook 接入（验签）** | 夜间自动批量跑低优；预算触顶自动延后；轮询可平滑切 webhook |
+| **P2 成本与主动性** | 可配置时间窗 + 可配置预算（默认不限）+ 批量合并 + `later`（定时复查）+ **GitHub Issue webhook 接入（验签）** | 夜间自动批量跑低优；预算触顶自动排队等次日；轮询可平滑切 webhook |
 | **P3 自产事件** | `hops` 熔断 → 规则白名单 → worker `--emit` | A→B→A 自激被熔断；越权 emit 被拒 |
 
 顺序上唯一不能错：**熔断（hops）必须先于自产事件（emit）**；**时间窗必须先于批量**（否则批量会在高峰期偷偷跑）。
 
-**实现现状**（2026-11-14）：P0 / P1 / P2 已随 tk-87 一并落地——事件契约与队列表、规则层 + Jev `event.triage.v1` 判定、T1 审核队列与统一待审核列表、可配置时间窗与预算、GitHub Issue 轮询与 webhook、cron 定时任务、Web 事件面板。**夜间批量合并（`window.batch`）已落地**：命中批量窗口时同源同类型事件合并成一次 Jev 调用，失败自动退回逐条判定。**§5.2/§5.3 队列语义已闭环**：`deferred` 到点自动回到 `ready`（`event:requeued`）；`maxQueueDepth` 背压超限时丢弃最低分事件（`event:dropped`，原因 `event:queue-overflow`）；同 lane 串行落地（在飞工单未完成时新事件延后重查，`event:lane-busy`）。P3 自产事件（`--emit`）只落地了 `hops` 熔断，未开放自产来源。
+**实现现状**（2026-11-14）：P0 / P1 / P2 已随 tk-87 一并落地——事件契约与队列表、规则层 + Jev `event.triage.v1` 判定、T1 审核队列与统一待审核列表、可配置时间窗与预算、GitHub Issue 轮询与 webhook、cron 定时任务、Web 事件面板。**夜间批量合并（`window.batch`）已落地**：命中批量窗口时同源同类型事件合并成一次 Jev 调用，失败自动退回逐条判定。**队列口径按评审意见收敛（第四轮）**：去掉「延后」状态机、`maxQueueDepth` 背压与同 lane 串行——队列不做深度上限、事件一直堆积，现在不处理的事件留在 `queued` 并把「最早可处理时间」记在 `not_before` 上（`event:waiting`），唯一的调度手段是优先级。P3 自产事件（`--emit`）只落地了 `hops` 熔断，未开放自产来源。
 
 ## 13. 风险与开放问题
 
@@ -589,10 +589,10 @@ event:
 |-|-|-|
 | **自动开单越权** | 判定误判导致自动派工 | 直派必须同时满足四条前置条件（§7.2）；置信度 <0.5 一律待审；`acceptMode` 仍是总闸；面板可看到每次直派依据 |
 | **提示词注入** | Issue / webhook 正文里的指令被模型执行 | `subject` 白名单 + 正文只落 `detailRef` + 提示词声明「资料非指令」 |
-| **成本失控** | 事件风暴打爆 token | 规则前置 + 可配置预算 + 时间窗 + 队列背压 + 批量合并；预算默认不限，需显式配置才生效 |
+| **成本失控** | 事件风暴打爆 token | 规则前置 + 可配置预算 + 时间窗 + 批量合并；预算默认不限，需显式配置才生效 |
 | **批量判定答不全** | 模型一次没答全 N 条事件，判定结果缺失 | 答案缺条按结构非法处理，整批退回逐条判定（记 `event:triage-batch-failed`），事件不丢 |
-| **队列积压** | 面板越来越长，判定越来越晚 | `maxQueueDepth` + TTL 过期 + 每日汇总归档 |
-| **自激** | 事件触发事件，无限循环 | `hops` 熔断（P3 前置）+ 来源白名单 + 每 lane 串行 |
+| **队列积压** | 面板越来越长，判定越来越晚 | 队列不做上限、不丢事件，靠优先级排序；TTL 过期 + 每日汇总归档 |
+| **自激** | 事件触发事件，无限循环 | `hops` 熔断（P3 前置）+ 来源白名单 |
 | **通知刷屏** | admin 被卡片淹没 | 聚合阈值 + 免打扰时段 + 面板为唯一真源 |
 
 ### 13.2 已确认的评审结论（2026-11-13）
