@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>router-agent · 事件流程方案（简化版 v3）</title>
+<link rel="stylesheet" href="./event-flow.css">
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <span class="eyebrow">router-agent · event pipeline · 简化版</span>
+  <h1>事件流程方案：<em>两条路，同一个 Worker</em></h1>
+  <p class="lede">左边是飞书消息：用户说话，系统听完派活；右边是事件：系统自己收到事，判断要不要做、什么时候做、派给谁。两路最后都变成一张工单，交给同一批 Worker。</p>
+  <div class="metrics">
+    <span class="metric">工单 <b>tk-87</b></span>
+    <span class="metric">版本 <b>v3 · 简化版</b></span>
+    <span class="metric">飞书流程 <b>不动</b></span>
+    <span class="metric">事件优先级 <b>P0–P4</b></span>
+    <span class="metric">本轮 <b>只出设计</b></span>
+  </div>
+</header>
+
+<section data-figure="fig-v3-routes">
+  <div class="sec-head"><span class="sec-num">01</span><h2>一图看两条路</h2></div>
+  <p class="sec-sub">左边是现状（保持不动），右边是新增。中间那一列是两条路共用的部分。</p>
+  <div class="tracks">
+    <div class="track ch">
+      <div class="tag">路 A · 飞书消息</div>
+      <h3>有人说话 → 有人干活</h3>
+      <div class="mode">有对话 · 可以追问 · 用户在等</div>
+      <div class="steps">
+        <div class="step chk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">收到消息</div><div class="d">群里 @机器人 或私聊</div></div></div>
+        <div class="step chk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">判断是不是需求</div><div class="d">管理员直接进；普通成员先过一道</div></div></div>
+        <div class="step chk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">一起把需求聊清楚</div><div class="d">缺什么就追问什么</div></div></div>
+        <div class="step chk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">管理员点头 → 开单</div><div class="d">生成工单与授权范围</div></div></div>
+        <div class="step chk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">派工 → Worker 执行</div><div class="d">建 worktree、给任务简报</div></div></div>
+        <div class="step chk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">结论回到群里</div><div class="d">附 PR 链接</div></div></div>
+      </div>
+    </div>
+    <div class="track ev">
+      <div class="tag">路 B · 事件（新增）</div>
+      <h3>有事发生 → 自动去办</h3>
+      <div class="mode">没对话 · 只能自动补齐或转人工</div>
+      <div class="steps">
+        <div class="step evk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">订阅器接到事件</div><div class="d">GitHub、HTTP 注入、定时任务</div></div></div>
+        <div class="step evk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">进事件队列</div><div class="d">重复的合并成一条</div></div></div>
+        <div class="step evk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">判断要不要做、什么优先级</div><div class="d">规则先判，模型兜底</div></div></div>
+        <div class="step evk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">选处理方式（剧本）</div><div class="d">这类事件该怎么处理</div></div></div>
+        <div class="step evk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">补齐信息、出方案</div><div class="d">补不齐就转人工</div></div></div>
+        <div class="step evk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">开单 → 派工 → Worker</div><div class="d">和路 A 同一套派工</div></div></div>
+        <div class="step evk"><div class="rail"><div class="dot"></div></div><div class="body"><div class="t">结论回写到来源</div><div class="d">Issue 评论 / 回调 / 卡片</div></div></div>
+      </div>
+    </div>
+  </div>
+  <div class="note"><span class="k">共同点</span><span>两路都变成一张工单（带上授权范围、仓库、分支），都走同一套派工与 Worker。事件管线新增的只有「订阅 → 判断 → 选方式」三段，不重写执行链路。</span></div>
+</section>
+
+<section data-figure="fig-v3-channel">
+  <div class="sec-head"><span class="sec-num">02</span><h2>路 A 细看：消息怎么变成活</h2></div>
+  <p class="sec-sub">这一路是现状，方案里原样保留。</p>
+  <div class="flow">
+    <div class="fstep"><div class="n">1</div><div class="t">收到消息</div><div class="d">飞书把消息推过来，存进队列</div><span class="m">同一消息只进一次</span></div>
+    <div class="fstep"><div class="n">2</div><div class="t">准入判断</div><div class="d">机器人消息、纯寒暄直接丢掉；管理员直接进，其它人再判一道</div><span class="m">这一步不花钱</span></div>
+    <div class="fstep"><div class="n">3</div><div class="t">聊清楚需求</div><div class="d">缺项目、缺分支、缺复现信息就追问</div><span class="m">多轮对话</span></div>
+    <div class="fstep"><div class="n">4</div><div class="t">终审开单</div><div class="d">管理员确认，生成工单与授权范围</div></div>
+    <div class="fstep"><div class="n">5</div><div class="t">派工执行</div><div class="d">建 worktree，把任务简报交给 Worker</div></div>
+    <div class="fstep finish"><div class="n">6</div><div class="t">回报</div><div class="d">结论回到群里，附 PR</div></div>
+  </div>
+  <div class="flowlegend"><span><i style="background:#eef4ff;border-color:#c9dafb"></i>自动判断</span><span><i style="background:#fdf6ec;border-color:#e8d2b4"></i>需要人参与</span><span><i style="background:#f1f7f4;border-color:#cfe0d7"></i>收尾</span></div>
+</section>
+
+<section data-figure="fig-v3-event">
+  <div class="sec-head"><span class="sec-num">03</span><h2>路 B 细看：事件怎么变成活</h2></div>
+  <p class="sec-sub">这条链路是本方案新增的核心。和路 A 最大的不同：中间没有对话，所以「补信息」要靠自动或转人工。</p>
+  <div class="flow">
+    <div class="fstep"><div class="n">1</div><div class="t">订阅器接到</div><div class="d">GitHub 轮询/订阅、HTTP 注入、定时任务触发</div><span class="m">插件可扩展</span></div>
+    <div class="fstep"><div class="n">2</div><div class="t">归一 + 排队</div><div class="d">统一成事件信封，重复的合并，按优先级排队</div></div>
+    <div class="fstep"><div class="n">3</div><div class="t">判断一次</div><div class="d">要不要做？多急？什么类型？要不要人审？</div><span class="m">规则先判，模型兜底</span></div>
+    <div class="fstep"><div class="n">4</div><div class="t">选处理方式</div><div class="d">匹配剧本：这类型事件按哪套流程走</div></div>
+    <div class="fstep gate"><div class="n">4b · 分支</div><div class="t">补不齐时转人工</div><div class="d">只在缺关键信息或高风险时走：进待审核队列，等 admin 拍板</div><span class="m">排队等人，不阻塞</span></div>
+    <div class="fstep"><div class="n">5</div><div class="t">出方案</div><div class="d">补齐信息，产出可执行方案（假设要写明）</div></div>
+    <div class="fstep"><div class="n">6</div><div class="t">开单派工</div><div class="d">和路 A 一样：生成工单 → 派给 Worker</div></div>
+    <div class="fstep finish"><div class="n">7</div><div class="t">回写</div><div class="d">状态、结论、关联工单写回来源</div></div>
+  </div>
+  <div class="note"><span class="k">没有对话怎么办</span><span>事件不等人回答。三档处理：信息够 → 直接办；信息不全但能猜 → 带着假设办并写明假设；关键项缺失或命中风险清单（安全 / 生产 / 付费 / 对外发布）→ 进待审核队列，不执行。</span></div>
+</section>
+
+<section data-figure="fig-v3-dispatch">
+  <div class="sec-head"><span class="sec-num">04</span><h2>事件分给谁：三个问题</h2></div>
+  <p class="sec-sub">分派不是写一堆 if-else，而是「先选处理方式，再选执行者」。</p>
+  <div class="tree">
+    <div class="tnode"><span class="tbox q">事件出队 · 判断通过</span><span class="arrowdown">↓</span></div>
+    <div class="tnode"><span class="tbox">① 这类事件该怎么处理？</span><span class="arrowdown">↓ 先找特化方式，找不到用通用方式</span></div>
+    <div class="branches3">
+      <div class="bx b1"><div class="h">特化方式</div><div class="t">已注册的类型</div><p>这类事件有固定套路，直接按套路走，不做多余的澄清。</p><div class="when">例：GitHub bug、CI 失败、定时巡检</div></div>
+      <div class="bx b2"><div class="h">通用方式</div><div class="t">没注册的类型</div><p>先自动补信息、出方案，再执行。任何事件都有出路。</p><div class="when">例：HTTP 注入的未知事件</div></div>
+      <div class="bx b3"><div class="h">转人工</div><div class="t">缺关键信息 / 高风险</div><p>不执行，直接进待审核 + 飞书卡片通知 admin。</p><div class="when">例：定位不到项目、影响生产</div></div>
+    </div>
+    <div class="tnode"><span class="tbox mut">② 信息够不够？</span><span class="arrowdown">↓ 够 → 办；不够但能猜 → 带假设办；不够且关键 → 转人工</span></div>
+    <div class="tnode"><span class="tbox">③ 派给谁执行？</span><span class="arrowdown">↓ 按能力选现有运行时</span></div>
+    <div class="tnode"><span class="tbox ok">④ 开单 → 派工 → Worker 执行 → 回写事件</span></div>
+  </div>
+  <table style="margin-top:16px">
+    <thead><tr><th style="width:26%">能力</th><th style="width:32%">要做什么</th><th>典型执行者</th></tr></thead>
+    <tbody>
+      <tr><td>只读</td><td>看代码、看日志、读监控</td><td>轻量运行时（只读模式）</td></tr>
+      <tr><td>改代码</td><td>写代码、跑测试</td><td>Codex / Claude Code</td></tr>
+      <tr><td>仓库操作</td><td>建分支、开 PR</td><td>Orca（worktree + PR）</td></tr>
+    </tbody>
+  </table>
+  <div class="note"><span class="k">重要取舍</span><span>「每类事件一套固定 worker」和「所有事件统一澄清再执行」不是二选一：<b>统一澄清再执行是骨架</b>（保证任何事件都是「有方案才动手」），<b>固定流程是特例</b>（已注册的类型跳过澄清走固定套路）。而且不为每类事件新造 Worker 类型 —— 差别只在判定问题、提示词、工具范围、目标运行时这四处，写成配置即可。</span></div>
+</section>
+
+<section data-figure="fig-v3-priority">
+  <div class="sec-head"><span class="sec-num">05</span><h2>优先级：什么先做</h2></div>
+  <p class="sec-sub">按「重要 / 紧急」两问定级；P4 单独留给明确无效的事件。</p>
+  <div class="matrix">
+    <div class="mx head">级别</div><div class="mx head c1">紧急</div><div class="mx head">不紧急</div>
+    <div class="mx p0"><div class="lv">P0</div><div class="t">重要且紧急</div><div class="w">立刻做 · 可插队 · 全天</div></div>
+    <div class="mx p1"><div class="lv">P1</div><div class="t">重要不紧急</div><div class="w">排期做 · 低峰批量</div></div>
+    <div class="mx head">—</div>
+    <div class="mx p2"><div class="lv">P2</div><div class="t">紧急不重要</div><div class="w">低优执行者 · 合并做</div></div>
+    <div class="mx p3"><div class="lv">P3</div><div class="t">不重要不紧急</div><div class="w">只记录 · 不自动做</div></div>
+    <div class="mx head">—</div>
+    <div class="mx p4"><div class="lv">P4</div><div class="t">明确无效</div><div class="w">忽略 · 留审计记录</div></div>
+  </div>
+</section>
+
+<section data-figure="fig-v3-queue">
+  <div class="sec-head"><span class="sec-num">06</span><h2>事件队列：四种状态</h2></div>
+  <p class="sec-sub">事件进来后只有四种归宿。</p>
+  <div class="fsm">
+    <span class="st pending">待处理</span><span class="sep">→</span>
+    <span class="st review">待审核</span><span class="sep">→</span>
+    <span class="st done">已处理完成</span>
+    <span class="st invalid" style="margin-left:12px">无效事件（忽略，但留记录）</span>
+  </div>
+  <table style="margin-top:16px">
+    <thead><tr><th style="width:18%">状态</th><th style="width:34%">什么意思</th><th>接下来</th></tr></thead>
+    <tbody>
+      <tr><td><span class="pill q">待处理</span></td><td>判断过了，该做，在排队</td><td>按优先级和时段出队 → 补信息 → 派工</td></tr>
+      <tr><td><span class="pill rv">待审核</span></td><td>需要人拍板才能继续</td><td>飞书卡片 + 面板红点；批准后回到待处理</td></tr>
+      <tr><td><span class="pill pb">已处理完成</span></td><td>Worker 做完了</td><td>结论回写来源，关联工单与 PR</td></tr>
+      <tr><td><span class="pill q">无效事件</span></td><td>噪声、重复、与项目无关</td><td>归档留痕，面板可查「为什么没处理」</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section data-figure="fig-v3-config-sub">
+  <div class="sec-head"><span class="sec-num">07</span><h2>配置界面（一）：事件订阅</h2></div>
+  <p class="sec-sub">事件订阅页用卡片展示，每个订阅器一张卡；点「设置」弹窗配该订阅器自己的字段；还能装第三方 npm 插件。</p>
+  <div class="cfg">
+    <div class="box">
+      <h3>订阅页长什么样</h3>
+      <div class="sub">卡片 + 设置弹窗 + 添加自定义插件</div>
+      <div class="cards" style="grid-template-columns:1fr 1fr">
+        <div class="pcard on"><div class="n">github</div><div class="t">GitHub 订阅</div><div class="m">2 个仓库 · 每 5 分钟 · issue/PR/CI</div><div class="acts"><span>设置</span><span>暂停</span></div></div>
+        <div class="pcard on"><div class="n">http</div><div class="t">HTTP 事件</div><div class="m">外部注入 · 已开启验签</div><div class="acts"><span>设置</span></div></div>
+        <div class="pcard off"><div class="n">feishu</div><div class="t">飞书消息订阅</div><div class="m">本期占位</div><div class="acts"><span>设置</span></div></div>
+        <div class="pcard"><div class="n">custom</div><div class="t">自定义插件</div><div class="m">npm 包</div><div class="acts"><span>添加</span></div></div>
+      </div>
+    </div>
+    <div class="box">
+      <h3>「设置」弹窗示例：GitHub</h3>
+      <div class="sub">字段由插件自己声明，宿主不写死</div>
+      <div class="modal">
+        <div class="head"><span>GitHub 订阅 · 设置</span><span>✕</span></div>
+        <div class="body">
+          <div class="row"><span class="lab">监听仓库</span><span class="inp">blankPen/router-agent, other/repo</span></div>
+          <div class="row"><span class="lab">接入方式</span><span class="inp">轮询（每 5 分钟） / 订阅</span></div>
+          <div class="row"><span class="lab">监听事件</span><span class="inp">issue、PR、CI</span></div>
+          <div class="row"><span class="lab">只看这些标签</span><span class="inp">bug、needs-triage</span></div>
+          <div class="row"><span class="lab">默认优先级</span><span class="inp">P2</span></div>
+          <div class="row"><span class="lab">每天最多处理</span><span class="inp">50 条 / 100k token</span></div>
+        </div>
+        <div class="foot"><span>取消</span><span class="primary">保存</span></div>
+      </div>
+    </div>
+  </div>
+  <table style="margin-top:16px">
+    <thead><tr><th style="width:22%">订阅器</th><th style="width:38%">要配什么</th><th>备注</th></tr></thead>
+    <tbody>
+      <tr><td>GitHub</td><td>仓库、接入方式（轮询/订阅）、轮询间隔、监听哪些事件、标签白名单、默认优先级、每日配额</td><td>轮询先上，订阅留二期</td></tr>
+      <tr><td>HTTP 事件</td><td>接口路径、密钥、限流（每分钟条数）、允许的事件类型</td><td>外部系统注入事件的入口</td></tr>
+      <tr><td>飞书消息订阅</td><td>（本期占位，只留开关）</td><td>二期再做规则检测</td></tr>
+      <tr><td>自定义插件</td><td>npm 包名 + 该插件声明的字段</td><td>机制与 runtime 插件一致</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section data-figure="fig-v3-config-playbook">
+  <div class="sec-head"><span class="sec-num">08</span><h2>配置界面（二）：处理方式与队列</h2></div>
+  <p class="sec-sub">除了订阅，还要能配「这类事件怎么处理」和「什么时候做、花多少」。</p>
+  <div class="cfg">
+    <div class="box">
+      <h3>处理方式（剧本）配置</h3>
+      <div class="sub">一条规则 = 一类事件的处理办法</div>
+      <div class="fields">
+        <div class="field"><span class="k">适用事件</span><span class="v"><b>GitHub Issue</b> 且带 bug 标签</span></div>
+        <div class="field"><span class="k">处理办法</span><span class="v">按固定套路：复现 → 定位 → 出根因与修复方案</span></div>
+        <div class="field"><span class="k">要不要澄清</span><span class="v">不用（信息从 issue 里自动取）</span></div>
+        <div class="field"><span class="k">执行者</span><span class="v">能改代码的运行时（默认 Codex）</span></div>
+        <div class="field"><span class="k">权限范围</span><span class="v">可改本仓库代码，不碰生产</span></div>
+        <div class="field"><span class="k">审核</span><span class="v">带 security 标签时必须人工审</span></div>
+        <div class="field"><span class="k">预算与时段</span><span class="v">单条最多 6 万 token，低峰执行</span></div>
+        <div class="field"><span class="k">结果回写</span><span class="v">在 Issue 下留言</span></div>
+      </div>
+    </div>
+    <div class="box">
+      <h3>全局策略配置</h3>
+      <div class="sub">影响所有事件</div>
+      <div class="fields">
+        <div class="field"><span class="k">高峰时段</span><span class="v">09:00–20:00，只做 P0 / P1</span></div>
+        <div class="field"><span class="k">低峰时段</span><span class="v">20:00–09:00，批量做 P2 / P3</span></div>
+        <div class="field"><span class="k">每日 token 上限</span><span class="v">20 万（超了低优事件顺延）</span></div>
+        <div class="field"><span class="k">单个来源上限</span><span class="v">每来源每天 50 条 / 单独配额</span></div>
+        <div class="field"><span class="k">审核通知</span><span class="v">飞书卡片发给 admin；P2 合并成一张</span></div>
+        <div class="field"><span class="k">回写要求</span><span class="v">没有回写通道的事件只落库、不标记完成</span></div>
+        <div class="field"><span class="k">插件来源</span><span class="v">允许安装的 npm 包白名单</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="ui" style="margin-top:16px">
+    <div class="bar"><span>router-agent</span><span>·</span><span>事件队列</span><span style="margin-left:auto">待审核 3</span></div>
+    <div class="body">
+      <div class="queue">
+        <div class="qcol q0"><div class="h"><span>P0</span><span>2</span></div><div class="it">生产告警：登录接口 5xx<span class="m">告警 · 派发中</span></div></div>
+        <div class="qcol q1"><div class="h"><span>P1</span><span>5</span></div><div class="it">Issue #318 登录态丢失<span class="m">github · 低峰执行</span></div></div>
+        <div class="qcol q2"><div class="h"><span>P2</span><span>11</span></div><div class="it">CI 失败（已合并 3 条）<span class="m">ci · 合并执行</span></div></div>
+        <div class="qcol q3"><div class="h"><span>P3 / P4</span><span>34</span></div><div class="it">每日汇总<span class="m">定时 · 排队中</span></div></div>
+      </div>
+      <table style="margin-top:14px">
+        <thead><tr><th style="width:26%">队列页能做什么</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td>按优先级分栏查看</td><td>P0 置顶，其余按优先级与等待时长排序；每条显示来源、判断理由、当前处理方式、等待多久</td></tr>
+          <tr><td>手动调整</td><td>提升/降级优先级、立即执行、忽略、合并同类事件</td></tr>
+          <tr><td>待审核</td><td>批准 / 驳回 / 延后；处理后不再重复通知</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section data-figure="fig-v3-cost">
+  <div class="sec-head"><span class="sec-num">09</span><h2>成本与时段</h2></div>
+  <p class="sec-sub">事件量不可控，所以预算与时段是硬约束：高峰期只做重要的事，超预算就顺延，不丢弃。</p>
+  <div class="matrix" style="grid-template-columns:150px 1fr 1fr 1fr">
+    <div class="mx head">约束</div><div class="mx head c1">单条事件</div><div class="mx head">单个来源</div><div class="mx head">全局</div>
+    <div class="mx p0"><div class="lv">作用</div><div class="t">防长 issue 烧光额度</div><div class="t">防 webhook 风暴</div><div class="t">总 token 兜底</div></div>
+    <div class="mx p1"><div class="lv">超了怎么办</div><div class="t">截断正文再判断</div><div class="t">顺延到次日低峰</div><div class="t">低优顺延，P0 不受影响</div></div>
+    <div class="mx p2"><div class="lv">时段</div><div class="t">高峰只做 P0 / P1</div><div class="t">低峰批量做 P2 / P3</div><div class="t">同类事件合并成一次判断</div></div>
+  </div>
+  <div class="note"><span class="k">省 token 的大头</span><span>不是把提示词写短，而是<b>规则先判、模型兜底</b>：规则能定案的完全不调模型；模型只在灰区调一次，而且按事件类型分级（简单事件用小模型、问题模板更短）。</span></div>
+</section>
+
+<footer>
+  router-agent · 事件流程方案 v3 简化版 · 工单 tk-87 · 仅设计稿，不含实现代码
+</footer>
+
+</div>
+</body>
+</html>
