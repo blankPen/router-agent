@@ -72,5 +72,7 @@ function rewriteImports(file) {
     .replaceAll('"#runtime/', '"@router-agent/runtime/')
     .replaceAll("'#channel/", "'@router-agent/channel/")
     .replaceAll('"#channel/', '"@router-agent/channel/')
+    .replaceAll("'#event/", "'@router-agent/event/")
+    .replaceAll('"#event/', '"@router-agent/event/')
   writeFileSync(file, text, 'utf8')
 }

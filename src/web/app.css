@@ -1349,6 +1349,28 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
   outline: none;
 }
 .modal-field input:focus { border-color: var(--accent); }
+.modal-field select {
+  height: var(--control-height);
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+.modal-field select:focus { border-color: var(--accent); }
+.modal-field .text-area { min-height: 120px; }
+.modal-field-changed {
+  margin-left: 8px;
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--warning);
+}
+.modal-field-hint { font-style: normal; font-size: 11px; line-height: 1.5; color: var(--faint); }
+.modal-field-error { font-style: normal; font-size: 11px; line-height: 1.5; color: var(--negative); }
+.modal-field.has-error .text-input { border-color: var(--negative); }
 .modal-inline { display: flex; gap: 8px; }
 .modal-inline input { flex: 1; min-width: 0; }
 .modal-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -2548,3 +2570,242 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 
 /* 工具栏右侧留给工具类操作，筛选条件都聚在左边。 */
 .log-toolbar-end { margin-left: auto; }
+
+/* ---------------------------------------------------------------------------
+   事件队列（事件页）
+   一块容器 + 细线分栏的概览；表格用规则与对齐，不做斑马纹与卡片套卡片。
+   --------------------------------------------------------------------------- */
+
+.event-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  margin-bottom: 20px;
+  overflow: hidden;
+}
+.event-summary-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 16px 20px;
+  border-left: 1px solid var(--rule);
+}
+.event-summary-cell:first-child { border-left: 0; }
+.event-summary-label { font-size: var(--fs-small); color: var(--muted); }
+.event-summary-value {
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+/* 待审核是需要人处理的数量，用警示色点出来，其余保持墨色。 */
+.event-summary-value.attention { color: var(--warning); }
+.event-summary-time {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.event-summary-cell.quiet { justify-content: flex-end; }
+
+.event-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.event-filter-group { display: flex; align-items: center; gap: 6px; }
+.event-filter-label { font-size: var(--fs-small); color: var(--muted); margin-right: 2px; }
+.event-chip {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-chip);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: var(--fs-small);
+  font-family: var(--mono);
+  cursor: pointer;
+  transition: color 0.14s, border-color 0.14s, background 0.14s;
+}
+.event-chip:hover { color: var(--text); border-color: var(--control); }
+.event-chip.active { color: var(--text); border-color: var(--accent); background: var(--accent-soft); }
+
+.event-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.event-table th,
+.event-table td { text-align: left; padding: 14px 20px; border-top: 1px solid var(--rule); vertical-align: top; }
+.event-table th {
+  font-size: var(--fs-small);
+  font-weight: 500;
+  color: var(--muted);
+  padding-top: 10px;
+  padding-bottom: 10px;
+  white-space: nowrap;
+}
+.event-table tbody tr:hover td { background: var(--raised); }
+/* 待审核的行左边给一道色条，扫一眼就知道哪几行等着人决定。 */
+.event-table tbody tr.is-review td:first-child { box-shadow: inset 2px 0 0 var(--warning); }
+.event-col-priority { width: 76px; }
+.event-col-actions { width: 232px; text-align: right; }
+.event-col-actions .event-actions { justify-content: flex-end; flex-wrap: nowrap; }
+
+.event-priority {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+}
+.event-priority::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+.event-priority.p0 { color: var(--negative); }
+.event-priority.p0::before { background: var(--negative); }
+.event-priority.p1 { color: var(--warning); }
+.event-priority.p1::before { background: var(--warning); }
+.event-priority.p2 { color: var(--info); }
+.event-priority.p2::before { background: var(--info); }
+
+.event-title { font-weight: 600; font-size: 14px; letter-spacing: -0.005em; }
+.event-meta { margin-top: 4px; font-size: var(--fs-small); color: var(--muted); }
+.event-meta .dot-sep { margin: 0 6px; color: var(--control); }
+.event-excerpt {
+  margin-top: 6px;
+  font-size: var(--fs-small);
+  color: var(--faint);
+  max-width: 46ch;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.event-verdict { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.event-project { font-weight: 500; }
+.event-skill {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--raised);
+  border-radius: var(--radius-chip);
+  padding: 1px 6px;
+}
+.event-reason {
+  margin-top: 4px;
+  font-size: var(--fs-small);
+  color: var(--muted);
+  max-width: 34ch;
+}
+
+.event-status { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+.event-status i { width: 6px; height: 6px; border-radius: 50%; background: var(--control); flex: none; }
+.event-status.s-review { color: var(--warning); }
+.event-status.s-review i { background: var(--warning); }
+.event-status.s-pending { color: var(--info); }
+.event-status.s-pending i { background: var(--info); }
+.event-status.s-done { color: var(--positive); }
+.event-status.s-done i { background: var(--positive); }
+
+.event-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.event-actions .btn { white-space: nowrap; }
+
+/* ---------------------------------------------------------------------------
+   配置页 · 事件来源（配置 -> 事件总线）
+   --------------------------------------------------------------------------- */
+
+/* 事件来源卡片区 */
+.source-cards-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 var(--card-pad-x);
+  margin-bottom: 12px;
+}
+.source-cards-head .editor-hint { margin: 0; }
+.source-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+  padding: 0 var(--card-pad-x);
+}
+.source-cards-empty {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 var(--card-pad-x);
+}
+.source-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+}
+.source-card.on { border-color: color-mix(in srgb, var(--accent) 38%, var(--border)); }
+.source-card-top { display: flex; align-items: center; gap: 10px; }
+.source-logo {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border-radius: 9px;
+  background: var(--raised);
+  color: var(--muted);
+}
+.source-card.on .source-logo { background: var(--accent-soft); color: var(--accent); }
+.source-card-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.source-card-title strong { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-card-title span { font-size: 12px; color: var(--muted); }
+.source-card-status { margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted); }
+.source-card-package {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.source-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--rule);
+}
+.source-card-fields { font-size: 11px; color: var(--faint); }
+
+/* 多行字段（prompt、正文）占满整行，不挤在右侧 320px 里。 */
+.setting:has(.text-area) { grid-template-columns: minmax(0, 1fr); }
+.setting:has(.text-area) .setting-control { max-width: none; justify-content: stretch; }
+.setting:has(.text-area) .text-area { flex: 1; }
+
+/* 长文本字段（判定 prompt、任务正文）用多行输入。 */
+.text-area {
+  width: 100%;
+  min-height: 180px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.7;
+  resize: vertical;
+}
+.text-area:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }

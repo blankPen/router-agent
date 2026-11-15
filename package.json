@@ -55,6 +55,7 @@
     "@router-agent/channel-feishu": "0.3.40",
     "@router-agent/channel": "0.3.40",
     "@router-agent/core": "0.3.40",
+    "@router-agent/event": "0.3.40",
     "@router-agent/infra": "0.3.40",
     "@router-agent/runtime": "0.3.40",
     "@router-agent/runtime-acp": "0.3.40",
@@ -84,6 +85,7 @@
     "#core/*": "./dist/packages/core/src/*",
     "#infra/*": "./dist/packages/infra/src/*",
     "#runtime/*": "./dist/packages/runtime/src/*",
-    "#channel/*": "./dist/packages/channel/src/*"
+    "#channel/*": "./dist/packages/channel/src/*",
+    "#event/*": "./dist/packages/event/src/*"
   }
 }

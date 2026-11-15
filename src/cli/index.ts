@@ -12,6 +12,7 @@ import { admitsByScope, effectiveAdmins, scopeOf, shouldAcknowledge } from '#cor
 import { logDimensions } from '#core/events.js'
 import { loadRuntimePlugins, type LoadedRuntimePlugins } from '#runtime/plugins/loader.js'
 import { loadChannelPlugins, type LoadedChannelPlugins } from '#channel/plugins/loader.js'
+import { createEventWiring } from '../events/wiring.js'
 import { AcpRuntimeAdmin } from '@router-agent/runtime-acp'
 import { readDetectionSnapshot } from '@router-agent/runtime-acp'
 import { WORKER_RUNTIME_IDS, normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
@@ -22,6 +23,7 @@ import { createFeishuChannel, createFeishuDocumenter } from '@router-agent/chann
 import { ChannelIngress } from '#channel/ingress.js'
 import { ChannelRegistry } from '#channel/registry.js'
 import { ChannelRouter } from '#channel/router.js'
+import { DEFAULT_CHANNEL_ID } from '#channel/port.js'
 import { ChatDirectory } from '@router-agent/channel-feishu'
 import { resolveRuntimeIdentity, detailText, type IdentityCache, type IdentityStatusView, type RuntimeIdentity } from '@router-agent/channel-feishu'
 import { createLarkRunner, larkEnv } from '@router-agent/channel-feishu'
@@ -1569,6 +1571,43 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     })
     : null
 
+  // 事件总线：多来源事件 → 队列 → 决策 → 分级派发。
+  // 事件链路与飞书消息链路只在「派工 → Worker」处汇合：事件判定后合成工单，
+  // 之后完全沿用现有派工与 Worker 流程。
+  const eventWiring = createEventWiring({
+    config: () => config,
+    store,
+    engine,
+    logger,
+    runner: ghRunner,
+    model: () => model,
+    onReview: event => {
+      if (!config.events.policy.reviewNotify) return
+      const chatId = config.events.policy.reviewChatId.trim()
+      if (!chatId) return
+      const text = [
+        `事件待审核：${event.title}`,
+        `优先级：${event.priority}`,
+        event.reason ? `判定理由：${event.reason}` : '',
+        '到面板「事件」页批准 / 驳回 / 延后。',
+      ].filter(Boolean).join('\n')
+      store.enqueueOutbox({
+        id: `ob_event_review_${event.id}`,
+        key: `event:review:${event.id}`,
+        channelKind: DEFAULT_CHANNEL_ID,
+        channelId: chatId,
+        threadId: '',
+        text,
+        now: new Date().toISOString(),
+      })
+      logger.info('event:review-notified', { eventId: event.id, chatId })
+    },
+    onDispatched: () => {
+      // 事件开出的工单同样要尽快派出去，不用等下一个秒级 tick。
+      void service?.launchPending()
+    },
+  })
+
   const webRoot = fileURLToPath(new URL('../web', import.meta.url))
   // 日志页的智能排查助手：复用研判模型，没配模型时自动降级为规则式排查。
   // 助手还能读本机装的 router-agent 代码与当前配置，用来判断「是不是 ra 的 bug」。
@@ -1628,6 +1667,33 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       failures: [...runtimePlugins.failures, ...channelPlugins.failures],
     },
     update: updateService,
+    events: {
+      listEvents: filter => eventWiring.manager.listEvents(filter),
+      listSources: () => eventWiring.manager.listSources(),
+      apply: (eventId, action, options) => eventWiring.manager.apply(
+        eventId,
+        action as Parameters<typeof eventWiring.manager.apply>[1],
+        {
+          ...(options.priority ? { priority: options.priority as never } : {}),
+          ...(options.project ? { project: options.project } : {}),
+        },
+      ),
+      inject: (sourceId, envelope) => eventWiring.manager.inject(sourceId, envelope),
+      decision: () => {
+        const decision = config.events.decision
+        const version = Number(store.getCursor('events:decision-prompt-version') ?? '1')
+        return {
+          provider: decision.provider,
+          prompt: decision.prompt,
+          confidenceThreshold: decision.confidenceThreshold,
+          fallback: decision.fallback,
+          version: Number.isFinite(version) && version > 0 ? version : 1,
+        }
+      },
+      sourceSecrets: () => Object.fromEntries(
+        Object.entries(config.events.sources).map(([id, source]) => [id, Boolean(source.secret)]),
+      ),
+    },
     ...(feishuChannel?.admin ? { feishuBot: feishuChannel.admin } : {}),
     channels,
     identity: identityPort,
@@ -1662,6 +1728,16 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     },
     onConfigChange: (_updated, changed) => {
       logger.info('config:updated', { changed })
+      // 决策 prompt 改动后版本号 +1：历史判定记录用的版本还能回放。
+      if (changed.includes('events.decision.prompt')) {
+        const current = Number(store.getCursor('events:decision-prompt-version') ?? '1')
+        const next = Number.isFinite(current) && current > 0 ? current + 1 : 2
+        store.setCursor('events:decision-prompt-version', String(next), new Date().toISOString())
+        logger.info('event:decision-prompt-updated', { version: next })
+      }
+      if (changed.some(path => path.startsWith('events.'))) {
+        void eventWiring.manager.reloadSources()
+      }
     },
   })
   logger.info('api:listening', { port: config.server.port })
@@ -1725,6 +1801,10 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   }
   const chatTimer = service ? setInterval(refreshChats, 600_000) : null
   chatTimer?.unref()
+  if (config.events.enabled) {
+    await eventWiring.manager.start()
+    output.stdout(`事件总线已启动（${Object.keys(config.events.sources).filter(id => config.events.sources[id]?.enabled).length} 个来源已启用）。`)
+  }
   if (service) {
     refreshChats()
     await service.start()
@@ -1735,6 +1815,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
 
   const stopRuntime = (): void => {
     channels.stopAll()
+    eventWiring.manager.stop()
     if (chatTimer) clearInterval(chatTimer)
     clearInterval(updateTimer)
     if (updateRestartTimer) {

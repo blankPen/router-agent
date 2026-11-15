@@ -23,6 +23,9 @@ importers:
       '@router-agent/core':
         specifier: 0.3.40
         version: link:packages/core
+      '@router-agent/event':
+        specifier: 0.3.39
+        version: link:packages/event
       '@router-agent/infra':
         specifier: 0.3.40
         version: link:packages/infra
@@ -107,6 +110,15 @@ importers:
         version: link:../infra
 
   packages/core: {}
+
+  packages/event:
+    dependencies:
+      '@router-agent/core':
+        specifier: 0.3.39
+        version: link:../core
+      '@router-agent/infra':
+        specifier: 0.3.39
+        version: link:../infra
 
   packages/infra: {}
 
