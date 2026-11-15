@@ -31,6 +31,8 @@ export interface EventSourceView {
   lastPolledAt?: string
   /** 内置来源还是自定义插件。 */
   builtin: boolean
+  /** 占位来源：开关能开但还不产出事件（飞书群消息仍走 channel 链路）。 */
+  placeholder?: boolean
   /** 自定义来源插件的 npm 包名或本地路径。 */
   package?: string
 }
@@ -204,15 +206,23 @@ export class EventManager {
     const out: EventSourceView[] = []
     for (const [id, source] of Object.entries(config.events.sources)) {
       const status = this.status.get(id)
+      const fields = source.plugin
+        ? pluginFieldsOf(this.pluginOptions[id])
+        : (BUILTIN_FIELDS[source.kind ?? ''] ?? [])
       out.push({
         id,
         kind: source.kind ?? (source.plugin ? 'plugin' : 'event'),
         enabled: source.enabled,
-        fields: source.plugin ? pluginFieldsOf(this.pluginOptions[id]) : (BUILTIN_FIELDS[source.kind ?? ''] ?? []),
+        // 验签密钥明文不下发，字段上只标「已配置」，面板据此提示留空即保持。
+        fields: fields.map(field => field.key === 'secret'
+          ? { ...field, hint: source.secret ? '已配置；留空 = 保持当前密钥' : (field.hint ?? '') }
+          : field),
         status: status?.status ?? (source.enabled ? 'idle' : 'unsupported'),
         ...(status?.message ? { message: status.message } : {}),
         ...(status?.lastPolledAt ? { lastPolledAt: status.lastPolledAt } : {}),
         builtin: !source.plugin,
+        // 占位来源（飞书）：开关能开但不产出事件，标注出来免得以为配了就能用。
+        ...(source.kind === 'feishu' ? { placeholder: true } : {}),
         ...(source.plugin ? { package: source.plugin } : {}),
       })
     }
@@ -229,6 +239,11 @@ export class EventManager {
     })
   }
 
+  /** 面板用：按状态统计事件条数（不受列表 limit 影响）。 */
+  countEvents(): Record<string, number> {
+    return this.store.countEventsByStatus()
+  }
+
   /** 面板用：事件操作。 */
   async apply(eventId: string, action: EventAction, options: { priority?: EventPriority; project?: string } = {}) {
     return this.pipeline.apply(eventId, action, options)
@@ -236,6 +251,8 @@ export class EventManager {
 
   /** 跑一轮管线：判定新事件 + 回收已完成的工单结果。 */
   async runTick(): Promise<void> {
+    // 总开关关着就不再判定与派发：已入队的事件留在队列里，开回来继续处理。
+    if (!this.config().events.enabled) return
     try {
       await this.pipeline.tick()
       await this.settleDispatched()

@@ -1542,6 +1542,28 @@ export function publicConfig(config: AppConfig): Record<string, unknown> {
     apiKeySet: Boolean(jev.apiKey),
   }
 
+  // 事件来源的验签密钥明文不下发；secretSet 只用来告诉面板「已经配过」。
+  const eventsDoc = doc.events as Record<string, unknown> | undefined
+  if (eventsDoc && typeof eventsDoc === 'object') {
+    const sources = eventsDoc.sources
+    if (sources && typeof sources === 'object' && !Array.isArray(sources)) {
+      const next: Record<string, unknown> = {}
+      for (const [id, value] of Object.entries(sources as Record<string, unknown>)) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+          next[id] = value
+          continue
+        }
+        const entry = { ...(value as Record<string, unknown>) }
+        if (typeof entry.secret === 'string') {
+          entry.secretSet = Boolean(entry.secret)
+          delete entry.secret
+        }
+        next[id] = entry
+      }
+      eventsDoc.sources = next
+    }
+  }
+
   // ACP 适配器的 env 可能包含 API key：只下发 key 名，不下发明文。
   const options = runtime?.options
   if (runtime && options && typeof options === 'object' && !Array.isArray(options)) {
@@ -2133,6 +2155,12 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
         const ok = typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
         if (!ok) errors.push({ path, message: '插件选项只接受字符串、数字或布尔值' })
         else accepted.push({ path, value })
+        continue
+      }
+      // 验签密钥明文不下发给面板，面板回传空串表示「保持已配置的密钥」。
+      if (key === 'secret' && typeof value === 'string' && !value.trim()) {
+        if (source?.secret) continue
+        errors.push({ path, message: '验签密钥不能为空' })
         continue
       }
       const message = validateEventSourceField(key, value)

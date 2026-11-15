@@ -45,22 +45,3 @@ export interface EventSource {
    */
   publish?(target: { externalId: string; url?: string }, text: string): Promise<void>
 }
-
-/** 事件来源的能力声明；宿主按能力决定怎么驱动它。 */
-export interface EventSourceCapabilities {
-  /** 支持主动拉取。 */
-  poll: boolean
-  /** 支持订阅推送。 */
-  subscribe: boolean
-  /** 支持把结论回写到来源。 */
-  writeback: boolean
-}
-
-/** 按实现推断能力：实现哪个方法就有什么能力。 */
-export function capabilitiesOf(source: EventSource): EventSourceCapabilities {
-  return {
-    poll: typeof source.poll === 'function',
-    subscribe: typeof source.start === 'function',
-    writeback: typeof source.publish === 'function',
-  }
-}

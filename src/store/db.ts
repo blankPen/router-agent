@@ -811,16 +811,19 @@ export class Store {
 
   /**
    * 原子领取一批待判定事件：把 attempts 往上加并占住，避免重叠的 tick 重复判定。
-   * 判定失败后事件回到 pending，attempts 继续累加，超过上限由管线标成 failed。
+   *
+   * 只领「还没判定过」的（decided_at 为空）。已经判定过的事件在闸门处等窗口，
+   * 不重新跑模型 —— 否则每轮 tick 都在为同一条事件付一次判定成本。
    */
   claimPendingEvents(limit = 20): EventRecord[] {
-    const rows = (this.db.prepare("SELECT * FROM events WHERE status = 'pending' ORDER BY received_at LIMIT ?").all(limit) as Row[])
+    const rows = (this.db.prepare("SELECT * FROM events WHERE status = 'pending' AND decided_at IS NULL ORDER BY received_at LIMIT ?").all(limit) as Row[])
     const claimed: EventRecord[] = []
     for (const row of rows) {
       const event = eventFromRow(row)
       const result = this.db.prepare("UPDATE events SET attempts = attempts + 1, updated_at = ? WHERE id = ? AND status = 'pending' AND attempts = ?")
         .run(event.updatedAt, event.id, event.attempts)
-      if (Number(result.changes) > 0) claimed.push(event)
+      // 返回认领后的次数：调用方拿它写回时不能把计数覆盖回去。
+      if (Number(result.changes) > 0) claimed.push({ ...event, attempts: event.attempts + 1 })
     }
     return claimed
   }
@@ -831,6 +834,26 @@ export class Store {
       ? this.db.prepare('SELECT COUNT(*) AS n FROM events WHERE source_id = ? AND received_at >= ?').get(sourceId, since) as Row | undefined
       : this.db.prepare('SELECT COUNT(*) AS n FROM events WHERE received_at >= ?').get(since) as Row | undefined
     return Number(row?.n ?? 0)
+  }
+
+  /** 按业务状态统计事件条数（面板统计卡用；不受列表 limit 影响）。 */
+  countEventsByStatus(): Record<string, number> {
+    const rows = this.db.prepare('SELECT status, COUNT(*) AS n FROM events GROUP BY status').all() as Row[]
+    const out: Record<string, number> = { pending: 0, review: 0, done: 0, invalid: 0 }
+    for (const row of rows) out[String(row.status)] = Number(row.n ?? 0)
+    return out
+  }
+
+  /**
+   * 已判定但还没派出去的事件：等窗口或等配额放行。
+   *
+   * 只取「判定过、还没工单、没在审核中」的，顺延中的排在前面，先处理等最久的。
+   */
+  listDecidedUndispatched(limit = 20): EventRecord[] {
+    const rows = (this.db.prepare(
+      "SELECT * FROM events WHERE status = 'pending' AND decided_at IS NOT NULL AND ticket_id IS NULL ORDER BY received_at LIMIT ?",
+    ).all(limit) as Row[])
+    return rows.map(eventFromRow)
   }
 
   // ---------- Thread alias ----------

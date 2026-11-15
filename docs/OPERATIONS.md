@@ -262,11 +262,14 @@ Router 不做对话，只在必要时说话：
 | `event:manager-disabled` | Event | — | 事件总开关关着，来源不会装配 |
 | `event:sources-loaded` / `event:source-registered` | Event | `count` / `sourceId` `kind` | 来源装配完成 / 单个来源注册成功 |
 | `event:source-poll-failed` | Event | `sourceId` `detail` | 拉取事件失败；下次轮询继续重试，事件不丢 |
+| `event:github-poll-failed` | Event | `sourceId` `repo` `detail` | GitHub 来源调 `gh` 失败（未登录 / 仓库不存在 / 限流）；本次不拉取，下次轮询再试 |
 | `event:source-not-configured` | Event | `sourceId` `kind` | 来源没配关键字段（如 GitHub 没填仓库），本次不拉取 |
 | `event:source-unsupported` | Event | `sourceId` `kind` | 来源种类不认识，未装配 |
 | `event:source-placeholder` | Event | `sourceId` `kind` | 占位来源（飞书消息订阅本期只留开关） |
+| `event:source-duplicate` | Event | `sourceId` | 同名来源重复注册，先注册的继续跑（插件重载不覆盖正在跑的来源） |
+| `event:source-stop-failed` | Event | `sourceId` `detail` | 停来源抛错；不影响其它来源 |
 | `event:ingested` | Event | `eventId` `sourceId` `sourceKind` `externalId` `title` | 事件进入队列 |
-| `event:inject-rejected` | Event | `sourceId` `reason` / `path` `reason` | HTTP 注入被拒：密钥不对（`secret-mismatch`）或这条路径没有对应的 http 来源（`no-source-for-path`） |
+| `event:inject-rejected` | Event | `sourceId` `reason` / `path` `reason` | HTTP 注入被拒：密钥不对（`secret-mismatch`）、这条路径没有对应的 http 来源（`no-source-for-path`）、总开关关着（`events-disabled`）或来源开关关着（`source-disabled`） |
 | `event:rate-limited` | Event | `sourceId` `limit` | 来源每分钟条数已达上限，本次推送被拒 |
 | `event:duplicate` | Event | `eventId` `sourceId` `externalId` | 同一来源的同一事件重复到达，按幂等忽略 |
 | `event:invalid` | Event | `eventId` `sourceId` `reason` | 事件被判为无效（P4），只留记录不再处理 |
@@ -274,12 +277,17 @@ Router 不做对话，只在必要时说话：
 | `event:review-notified` | Event | `eventId` `chatId` | 待审核事件已推送给管理员 |
 | `event:deferred` | Event | `eventId` `sourceId` `reason` | 时间窗或配额不允许，顺延等待（不丢事件） |
 | `event:dispatched` | Event | `eventId` `sourceId` `ticketId` `priority` `project` `skill` | 事件已开单，交给现有 Worker 链路执行 |
+| `event:already-dispatched` | Event | `eventId` `ticketId` | 同一事件重复处理，但工单已开过；不重复开单 |
 | `event:dispatch-failed` | Event | `eventId` `detail` | 事件开单失败，已转人工处理 |
 | `event:process-failed` | Event | `eventId` `sourceId` `detail` | 判定或派发过程抛错，事件标成失败态等人处理 |
 | `event:completed` | Event | `eventId` `ticketId` | 事件对应工单已完成，结论已回写来源 |
 | `event:writeback-failed` / `event:writeback-skipped` | Event | `eventId` `sourceId` `detail` | 结论回写来源失败 / 来源没有回写能力（只落库） |
+| `event:writeback-unsupported` | Event | `sourceId` `externalId` | 来源不支持回写（没配回调地址 / 取不到 issue 号），结论只落库 |
 | `event:decision-failed` | Event | `eventId` `provider` `detail` | 判定模型调用失败，已降级为待审核（事件不丢） |
 | `event:decision-no-output` | Event | `eventId` `provider` | 模型没给出可用结论，按兜底处理 |
+| `event:decision-unparsable` | Event | `eventId` | 模型返回的内容解析不出 JSON 结论，按兜底处理 |
+| `event:decision-incomplete` | Event | `eventId` `sourceId` `reason` | 判定没完成（模型失败等）；事件留在队列等下一轮，不派工也不丢 |
+| `event:attempts-exceeded` | Event | `eventId` `sourceId` `attempts` `detail` | 判定连续失败超过上限，已转人工处理，不再重试 |
 | `event:decision-provider-unavailable` | Event | `provider` | 判定用的模型没配好，本轮退回规则判定 |
 | `event:decision-prompt-updated` | Event | `version` | 决策 prompt 被修改，版本号 +1（历史判定可回放） |
 | `event:priority-changed` / `event:ignored` / `event:retry` | Event | `eventId` `priority` / `action` | 面板上手工改优先级 / 忽略 / 重试 |

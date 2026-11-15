@@ -400,6 +400,7 @@ export const CONFIG_GROUPS: ConfigGroup[] = [
               { value: 'review', label: 'review · 转人工审核' },
               { value: 'pending', label: 'pending · 留在队列里重试' },
             ],
+            hint: '模型判不出来或置信度不够时怎么办；没判定出归属项目的一律转人工',
           },
         ],
       },

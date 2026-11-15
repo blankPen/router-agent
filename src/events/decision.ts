@@ -82,6 +82,8 @@ export class EventDecisionService {
     const rule = await this.rule.decide(input)
     let output: EventDecisionOutput = rule ?? {}
     let basis = this.rule.name
+    // 判定是否完成：模型失败时为 false，事件留在队列里等下一轮，不能派工。
+    let decided = true
 
     // 规则没把关键项定全时才调模型：省 token，也避免模型在明确事实上乱改。
     if (this.model && this.decision.provider !== 'rule' && this.needsModel(rule)) {
@@ -100,12 +102,20 @@ export class EventDecisionService {
           provider: this.model.name,
           message: errorMessage(error),
         })
-        output = { ...output, needsReview: true, reason: `判定模型失败：${errorMessage(error)}` }
+        // 判定没完成：模型失败时不存在可信结论，不能拿去派工。
+        // 兜底策略 pending 表示事件留在队列里等下一轮重判，而不是转人工。
+        output = {
+          ...output,
+          needsReview: this.decision.fallback !== 'pending',
+          reason: `判定模型失败：${errorMessage(error)}`,
+        }
+        decided = false
         basis = `${basis}+failed`
       }
     }
 
     const verdict = this.validate(input, output)
+    verdict.decided = decided
     return { verdict, promptVersion: input.promptVersion, basis }
   }
 
@@ -137,6 +147,12 @@ export class EventDecisionService {
       project = this.matchProject(input.projects, input.source.project)
       if (project) reasons.unshift(`按订阅配置归入项目「${project.name}」`)
     }
+    // 兜底策略是 pending 时，模型没判出项目就用订阅线索顶上：
+    // 事件有归属才能留在队列里等下一轮重判，而不是只能转人工。
+    if (!project && this.decision.fallback === 'pending' && input.source.project) {
+      project = this.matchProject(input.projects, input.source.project)
+      if (project) reasons.unshift(`按订阅配置归入项目「${project.name}」`)
+    }
 
     const skillId = (output.skill ?? '').trim()
     const skill = skillId ? findEventSkill(skillId) : undefined
@@ -150,8 +166,9 @@ export class EventDecisionService {
 
     let needsReview = output.needsReview === true
     if (confidence < this.decision.confidenceThreshold) {
-      needsReview = true
       reasons.push(`置信度 ${confidence.toFixed(2)} 低于阈值 ${this.decision.confidenceThreshold}`)
+      // 兜底策略：pending 表示留在队列里等下一轮重判，不占用人工。
+      needsReview = this.decision.fallback !== 'pending'
     }
     // 没有归属项目就没法开单（工单必须绑定项目），只能转人工。
     if (actionable && !project) {
@@ -173,6 +190,7 @@ export class EventDecisionService {
       repo: projectConfig?.repo ?? '',
       branch,
       needsReview,
+      decided: true,
       reason: reasons.join('；'),
       confidence,
       basis: '',
@@ -191,11 +209,17 @@ export class EventDecisionService {
   }
 }
 
-/** 模型输出覆盖规则输出，但空值不覆盖。 */
+/**
+ * 模型输出覆盖规则输出，但空值不覆盖。
+ *
+ * `needsReview` 只允许从「要人审」变成「不要人审」的相反方向：
+ * 规则判定要人审时（风险标签命中），模型说了不算 —— 安全护栏不能被模型解开。
+ */
 function mergeOutput(rule: EventDecisionOutput, model: EventDecisionOutput): EventDecisionOutput {
   const merged: EventDecisionOutput = { ...rule }
   for (const [key, value] of Object.entries(model)) {
     if (value === undefined || value === null || value === '') continue
+    if (key === 'needsReview' && rule.needsReview === true) continue
     ;(merged as Record<string, unknown>)[key] = value
   }
   return merged

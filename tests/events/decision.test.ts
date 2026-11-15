@@ -63,6 +63,36 @@ describe('事件决策', () => {
     expect(result.verdict.needsReview).toBe(true)
   })
 
+  it('风险标签的强制人审不能被模型覆盖成自动执行', async () => {
+    const model: EventDecisionPort = {
+      name: 'llm',
+      decide: async () => ({ project: 'router-agent', priority: 'P1', confidence: 0.95, needsReview: false, reason: '模型觉得可以直接做' }),
+    }
+    const service = new EventDecisionService({
+      decision: { provider: 'llm', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
+      rule: ruleDecisionPort,
+      model,
+    })
+    const result = await service.decide(inputOf({
+      source: { enabled: true, kind: 'github', labels: ['security'], project: 'router-agent', defaultPriority: 'P3' },
+    }))
+    expect(result.verdict.needsReview).toBe(true)
+  })
+
+  it('模型能把规则要求的人审改回自动执行（规则没要求人审时）', async () => {
+    const model: EventDecisionPort = {
+      name: 'llm',
+      decide: async () => ({ project: 'router-agent', priority: 'P1', confidence: 0.9, needsReview: false }),
+    }
+    const service = new EventDecisionService({
+      decision: { provider: 'llm', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
+      rule: ruleDecisionPort,
+      model,
+    })
+    const result = await service.decide(inputOf())
+    expect(result.verdict.needsReview).toBe(false)
+  })
+
   it('模型选的项目不在候选清单里就转人工，不凭空造项目', async () => {
     const model: EventDecisionPort = {
       name: 'llm',
@@ -125,6 +155,55 @@ describe('事件决策', () => {
     const result = await service.decide(inputOf())
     expect(result.verdict.needsReview).toBe(true)
     expect(result.verdict.reason).toContain('模型超时')
+    expect(result.verdict.decided).toBe(false)
+  })
+
+  it('兜底策略是 pending 时，模型失败的事件留在队列里等下一轮', async () => {
+    const model: EventDecisionPort = {
+      name: 'llm',
+      decide: async () => { throw new Error('模型超时') },
+    }
+    const service = new EventDecisionService({
+      decision: { provider: 'llm', prompt: '', confidenceThreshold: 0.6, fallback: 'pending' },
+      rule: ruleDecisionPort,
+      model,
+    })
+    const result = await service.decide(inputOf({
+      source: { enabled: true, kind: 'github', project: 'router-agent', defaultPriority: 'P2' },
+    }))
+    expect(result.verdict.needsReview).toBe(false)
+    expect(result.verdict.decided).toBe(false)
+  })
+
+  it('兜底策略是 pending 时，置信度不够的事件也留在队列里', async () => {
+    const model: EventDecisionPort = {
+      name: 'llm',
+      decide: async () => ({ project: 'router-agent', priority: 'P1', confidence: 0.2 }),
+    }
+    const service = new EventDecisionService({
+      decision: { provider: 'llm', prompt: '', confidenceThreshold: 0.6, fallback: 'pending' },
+      rule: ruleDecisionPort,
+      model,
+    })
+    const result = await service.decide(inputOf({
+      source: { enabled: true, kind: 'github', project: 'router-agent', defaultPriority: 'P2' },
+    }))
+    expect(result.verdict.needsReview).toBe(false)
+  })
+
+  it('没有归属项目时一律转人工，不受兜底策略影响', async () => {
+    const model: EventDecisionPort = {
+      name: 'llm',
+      decide: async () => ({ priority: 'P1', confidence: 0.9 }),
+    }
+    const service = new EventDecisionService({
+      decision: { provider: 'llm', prompt: '', confidenceThreshold: 0.6, fallback: 'pending' },
+      rule: ruleDecisionPort,
+      model,
+    })
+    const result = await service.decide(inputOf())
+    expect(result.verdict.needsReview).toBe(true)
+    expect(result.verdict.reason).toContain('没有判定出归属项目')
   })
 
   it('没有模型时按订阅配置里人工写明的项目归类', async () => {

@@ -347,7 +347,7 @@ events:
       # 拿不准时
       - 判断不了项目或优先级就标需人审
     confidenceThreshold: 0.6         # 低于阈值转人工
-    fallback: review                 # review 转人工 | pending 留队重试
+    fallback: review                 # review 转人工 | pending 留队重试（见下方说明）
   policy:
     peak: { start: "09:00", end: "20:00", priorities: [P0, P1] }
     offPeak: { start: "20:00", end: "09:00", priorities: [P2, P3] }
@@ -372,10 +372,21 @@ curl -X POST http://127.0.0.1:3083/api/events/inject \
 |-|-|
 | `201` | 事件已入队 |
 | `401` | 密钥不对（`x-ra-event-secret` 与配置里的 `secret` 不一致） |
-| `404` | 这条路径没有对应的 http 事件来源 |
+| `404` | 这条路径没有对应的 http 事件来源 / 总开关关着 / 这个来源开关关着 |
 | `429` | 该来源每分钟条数已达上限，稍后再推 |
 
 返回的事件会进队列，等下一次决策 tick 判定。判定结论与派发结果都在面板「事件」页能看到（事件页只做查看与审核，来源与判定策略一律回「配置 → 事件总线」改）。
+
+**验签密钥不下发给面板**：`/api/config` 只回 `secretSet: true/false`，明文留在 `config.yaml` 里。面板上留空表示「保持当前密钥」，不会把已配的密钥清掉。
+
+**`fallback` 决定「判不出来」时怎么办**：
+
+| 值 | 行为 |
+|-|-|
+| `review` | 转人工审核（默认） |
+| `pending` | 事件留在队列里等下一轮重判，不占用人工 |
+
+两种情况下「没判定出归属项目」都一律转人工 —— 工单必须绑定项目，没有项目开不出单。
 
 **候选处理方式（skill）是内置闭集**：`bug-triage`、`clarify-intake`、`ci-fix`、`daily-digest`、`question-answer`。执行环境默认在 Worker 里，skill 只决定「这类事件按什么套路做」，不在面板单独配置。
 
@@ -388,6 +399,10 @@ curl -X POST http://127.0.0.1:3083/api/events/inject \
 | `rule` | 只用规则（来源默认优先级、风险标签必审），判定不出项目就转人工 |
 
 模型没配好时自动退回规则判定，事件不会丢，只是更多走人工审核。
+
+**风险标签是硬护栏**：来源标签命中 `security` / `prod` / `production` / `incident` / `payment` / `release` 时，事件强制 P0 并**必须人工确认**，模型说了不算 —— 模型的 `needsReview: false` 覆盖不掉规则层的人审要求。
+
+**判定只跑一次**：事件判定过一次就记住结论，等窗口或配额时不再重复调模型；只有判定失败（模型报错）才会重试，连续失败 5 次后转人工处理，不再无限重试。
 
 ### 自定义事件来源（npm 插件）
 

@@ -51,6 +51,8 @@ export interface EventVerdict {
   branch: string
   /** 要不要人审。 */
   needsReview: boolean
+  /** 判定是否完成。模型失败时为 false：事件留在队列里等下一轮，不能派工。 */
+  decided: boolean
   /** 判定理由（人可读，面板直接展示）。 */
   reason: string
   /** 置信度 0~1；低于阈值一律转人工。 */
@@ -118,39 +120,4 @@ export interface EventWindow {
   end: string
   /** 这个窗口允许自动执行的优先级。 */
   priorities: EventPriority[]
-}
-
-/** 事件管线的全局策略：时间窗、预算、审核通知。 */
-export interface EventPolicySettings {
-  /** 高峰时段：只做这几档。 */
-  peak: EventWindow
-  /** 低峰时段：批量做低优任务。 */
-  offPeak: EventWindow
-  /** 每日 token 上限；0 表示不限。 */
-  dailyTokenBudget: number
-  /** 单来源每日事件条数上限；0 表示不限。 */
-  perSourceDailyLimit: number
-  /** 待审核事件是否推送给管理员。 */
-  reviewNotify: boolean
-  /** 审核通知发到哪个会话（飞书 chat id）；空表示只落面板。 */
-  reviewChatId: string
-}
-
-/** 决策策略配置：判定依据（自然语言 prompt）与护栏。 */
-export interface EventDecisionSettings {
-  /** 判定用哪个模型：jev 优先，llm 用同一份 spec 模拟，rule 只用规则。 */
-  provider: 'jev' | 'llm' | 'rule'
-  /** 自然语言判定规则：写清哪类事件归哪个项目、走哪个 skill、多急算急。 */
-  prompt: string
-  /** 置信度低于该值一律转人工审核。 */
-  confidenceThreshold: number
-  /** 判定失败或选不中时的兜底：review 转人工，pending 留队。 */
-  fallback: 'review' | 'pending'
-}
-
-/** 决策 prompt 的版本号；每次改动 +1，历史判定可回放。 */
-export interface EventDecisionPrompt {
-  version: number
-  text: string
-  updatedAt: string
 }

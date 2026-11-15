@@ -35,6 +35,8 @@ describe('事件 API', () => {
   it('列表、操作与注入都走事件端口', async () => {
     const store = new Store(':memory:')
     const config: AppConfig = defaultConfig()
+    config.events.enabled = true
+    config.events.sources.http = { enabled: true, kind: 'http', path: '/api/events/inject' }
     const engine = new Engine({ store, policy: policyOf(config), ids: { next: p => `${p}_1` } })
     const applied: Array<{ eventId: string; action: string }> = []
     const injected: Array<{ sourceId: string; externalId: string }> = []
@@ -55,6 +57,7 @@ describe('事件 API', () => {
         },
         decision: () => ({ provider: 'rule', prompt: 'x', confidenceThreshold: 0.6, fallback: 'review', version: 3 }),
         sourceSecrets: () => ({ http: true }),
+        counts: () => ({ pending: 0, review: 0, done: 0, invalid: 0 }),
       },
     })
     try {
@@ -81,6 +84,7 @@ describe('事件 API', () => {
   it('注入接口按来源配置的路径接收事件，挪走路径后默认路径不再接收', async () => {
     const store = new Store(':memory:')
     const config: AppConfig = defaultConfig()
+    config.events.enabled = true
     config.events.sources.http = { enabled: true, kind: 'http', path: '/api/events/hook' }
     const engine = new Engine({ store, policy: policyOf(config), ids: { next: p => `${p}_1` } })
     const injected: Array<{ sourceId: string; externalId: string }> = []
@@ -98,6 +102,7 @@ describe('事件 API', () => {
         },
         decision: () => ({ provider: 'rule', prompt: '', confidenceThreshold: 0.6, fallback: 'review', version: 1 }),
         sourceSecrets: () => ({ http: true }),
+        counts: () => ({ pending: 0, review: 0, done: 0, invalid: 0 }),
       },
     })
     try {
@@ -116,6 +121,8 @@ describe('事件 API', () => {
   it('注入超过来源每分钟上限时返回 429', async () => {
     const store = new Store(':memory:')
     const config: AppConfig = defaultConfig()
+    config.events.enabled = true
+    config.events.sources.http = { enabled: true, kind: 'http', path: '/api/events/inject' }
     const engine = new Engine({ store, policy: policyOf(config), ids: { next: p => `${p}_1` } })
     const api = await createApiServer({
       engine,
@@ -128,6 +135,7 @@ describe('事件 API', () => {
         inject: () => { throw new Error('event:rate-limited') },
         decision: () => ({ provider: 'rule', prompt: '', confidenceThreshold: 0.6, fallback: 'review', version: 1 }),
         sourceSecrets: () => ({ http: true }),
+        counts: () => ({ pending: 0, review: 0, done: 0, invalid: 0 }),
       },
     })
     try {
@@ -141,6 +149,7 @@ describe('事件 API', () => {
   it('注入的密钥不对时拒绝', async () => {
     const store = new Store(':memory:')
     const config: AppConfig = defaultConfig()
+    config.events.enabled = true
     config.events.sources.http = { enabled: true, kind: 'http', secret: 's3cret' }
     const engine = new Engine({ store, policy: policyOf(config), ids: { next: p => `${p}_1` } })
     const api = await createApiServer({
@@ -154,6 +163,7 @@ describe('事件 API', () => {
         inject: () => ({ id: 'evt_2' }),
         decision: () => ({ provider: 'rule', prompt: '', confidenceThreshold: 0.6, fallback: 'review', version: 1 }),
         sourceSecrets: () => ({ http: true }),
+        counts: () => ({ pending: 0, review: 0, done: 0, invalid: 0 }),
       },
     })
     try {
@@ -164,5 +174,55 @@ describe('事件 API', () => {
     } finally {
       await api.close()
     }
+  })
+})
+
+describe('事件注入的开关检查', () => {
+  it('总开关关着时注入接口拒绝', async () => {
+    const store = new Store(':memory:')
+    const config: AppConfig = defaultConfig()
+    config.events.enabled = false
+    config.events.sources.http = { enabled: true, kind: 'http', path: '/api/events/inject', secret: 's3cret' }
+    const engine = new Engine({ store, policy: policyOf(config), ids: { next: p => `${p}_1` } })
+    const injected: Array<{ externalId: string }> = []
+    const api = await createApiServer({
+      engine, store, config,
+      events: {
+        listEvents: () => [], listSources: () => [], apply: async () => null,
+        inject: (_sourceId, envelope) => { injected.push(envelope); return { id: 'evt_1' } },
+        decision: () => ({ provider: 'rule', prompt: '', confidenceThreshold: 0.6, fallback: 'review', version: 1 }),
+        sourceSecrets: () => ({ http: true }),
+        counts: () => ({ pending: 0, review: 0, done: 0, invalid: 0 }),
+      },
+    })
+    try {
+      const res = await call(api, 'POST', '/api/events/inject', { externalId: 'x#1', title: 't', body: 'b' }, { 'x-ra-event-secret': 's3cret' })
+      expect(res.status).toBe(404)
+      expect(injected).toHaveLength(0)
+    } finally { await api.close() }
+  })
+
+  it('来源开关关着时注入接口拒绝', async () => {
+    const store = new Store(':memory:')
+    const config: AppConfig = defaultConfig()
+    config.events.enabled = true
+    config.events.sources.http = { enabled: false, kind: 'http', path: '/api/events/inject', secret: 's3cret' }
+    const engine = new Engine({ store, policy: policyOf(config), ids: { next: p => `${p}_1` } })
+    const injected: Array<{ externalId: string }> = []
+    const api = await createApiServer({
+      engine, store, config,
+      events: {
+        listEvents: () => [], listSources: () => [], apply: async () => null,
+        inject: (_sourceId, envelope) => { injected.push(envelope); return { id: 'evt_1' } },
+        decision: () => ({ provider: 'rule', prompt: '', confidenceThreshold: 0.6, fallback: 'review', version: 1 }),
+        sourceSecrets: () => ({ http: true }),
+        counts: () => ({ pending: 0, review: 0, done: 0, invalid: 0 }),
+      },
+    })
+    try {
+      const res = await call(api, 'POST', '/api/events/inject', { externalId: 'x#1', title: 't', body: 'b' }, { 'x-ra-event-secret': 's3cret' })
+      expect(res.status).toBe(404)
+      expect(injected).toHaveLength(0)
+    } finally { await api.close() }
   })
 })

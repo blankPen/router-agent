@@ -18,6 +18,8 @@ export interface SourceMeta {
   kind: string
   enabled: boolean
   builtin: boolean
+  /** 占位来源：开关能开但还不产出事件。 */
+  placeholder?: boolean
   status: string
   message?: string
   lastPolledAt?: string

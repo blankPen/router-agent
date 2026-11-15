@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { getJson, sendJson } from './api.js'
 import { Icon } from './icons.js'
+import { approvePayload, needsProjectForApprove, projectOptions, type ProjectOption } from './events-model.js'
 
 interface EventRow {
   id: string
@@ -32,6 +33,10 @@ interface EventRow {
 
 interface EventsPayload {
   events: EventRow[]
+  /** 候选项目：人工批准时挑归属项目用。 */
+  projects?: ProjectOption[]
+  /** 按状态统计的条数；缺省时回退到列表里数（老服务端）。 */
+  counts?: Record<string, number>
 }
 
 const PRIORITIES = ['P0', 'P1', 'P2', 'P3', 'P4']
@@ -60,6 +65,9 @@ const STATUS_TEXT: Record<string, string> = {
 /** 事件面板。 */
 export function EventsView(): JSX.Element {
   const [events, setEvents] = useState<EventRow[]>([])
+  const [projects, setProjects] = useState<ProjectOption[]>([])
+  const [serverCounts, setServerCounts] = useState<Record<string, number> | null>(null)
+  const [picking, setPicking] = useState<EventRow | null>(null)
   const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -71,6 +79,8 @@ export function EventsView(): JSX.Element {
     try {
       const data = await getJson<EventsPayload>('/api/events')
       setEvents(data.events ?? [])
+      setProjects(data.projects ?? [])
+      setServerCounts(data.counts ?? null)
       setLoaded(true)
       setError(null)
     } catch (err) {
@@ -90,28 +100,38 @@ export function EventsView(): JSX.Element {
     && (!status || event.status === status)), [events, priority, status])
 
   const counts = useMemo(() => ({
-    pending: events.filter(item => item.status === 'pending').length,
-    review: events.filter(item => item.status === 'review').length,
-    done: events.filter(item => item.status === 'done').length,
-    invalid: events.filter(item => item.status === 'invalid').length,
-  }), [events])
+    pending: serverCounts?.pending ?? events.filter(item => item.status === 'pending').length,
+    review: serverCounts?.review ?? events.filter(item => item.status === 'review').length,
+    done: serverCounts?.done ?? events.filter(item => item.status === 'done').length,
+    invalid: serverCounts?.invalid ?? events.filter(item => item.status === 'invalid').length,
+  }), [events, serverCounts])
 
   const updatedAt = useMemo(() => {
     const latest = events.reduce<string>((acc, item) => (item.updatedAt > acc ? item.updatedAt : acc), '')
     return latest ? formatTime(latest) : '—'
   }, [events])
 
-  const act = async (eventId: string, action: string) => {
+  const act = async (eventId: string, action: string, project?: string) => {
     setBusy(true)
     try {
-      await sendJson(`/api/events/${encodeURIComponent(eventId)}/action`, 'POST', { action })
-      setNotice(action === 'approve' ? '已批准，事件已派发' : '已提交操作')
+      const body = action === 'approve' ? approvePayload(project ?? '') : { action }
+      const data = await sendJson<{ event?: EventRow }>(`/api/events/${encodeURIComponent(eventId)}/action`, 'POST', body)
+      setNotice(noticeOf(action, data.event))
       await load()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
+  }
+
+  // 批准前先补归属项目：没项目开不出单，直接批准会原地不动。
+  const approve = (event: EventRow) => {
+    if (needsProjectForApprove(event)) {
+      setPicking(event)
+      return
+    }
+    void act(event.id, 'approve', event.project)
   }
 
   if (!loaded) return <div className="empty-state tall"><p>正在读取事件队列…</p></div>
@@ -236,7 +256,7 @@ export function EventsView(): JSX.Element {
                   <div className="event-actions">
                     {event.status === 'review' && (
                       <>
-                        <button className="btn primary" disabled={busy} onClick={() => void act(event.id, 'approve')}>批准</button>
+                        <button className="btn primary" disabled={busy} onClick={() => approve(event)}>批准</button>
                         <button className="btn ghost" disabled={busy} onClick={() => void act(event.id, 'reject')}>驳回</button>
                         <button className="btn ghost" disabled={busy} onClick={() => void act(event.id, 'defer')}>延后</button>
                       </>
@@ -257,7 +277,72 @@ export function EventsView(): JSX.Element {
           </tbody>
         </table>
       )}
+      {picking && (
+        <ProjectPicker
+          event={picking}
+          projects={projectOptions(projects)}
+          busy={busy}
+          onPick={project => {
+            const target = picking
+            setPicking(null)
+            void act(target.id, 'approve', project)
+          }}
+          onClose={() => setPicking(null)}
+        />
+      )}
     </>
+  )
+}
+
+/** 操作结果提示：没开成单要说清原因，别一律报「已派发」。 */
+function noticeOf(action: string, event?: EventRow): string {
+  if (action !== 'approve') return '已提交操作'
+  if (event?.ticketId) return '已批准，事件已派发'
+  const reason = event?.reason?.trim()
+  return reason ? `已批准，但没能开单：${reason}` : '已批准，但没能开单'
+}
+
+/** 选归属项目：工单必须绑定项目，批准前先把项目定下来。 */
+function ProjectPicker({ event, projects, busy, onPick, onClose }: {
+  event: EventRow
+  projects: ProjectOption[]
+  busy: boolean
+  onPick: (project: string) => void
+  onClose: () => void
+}): JSX.Element {
+  const [project, setProject] = useState('')
+  return (
+    <div className="modal-layer">
+      <button className="modal-backdrop" aria-label="关闭" onClick={onClose} />
+      <div className="modal" role="dialog" aria-modal="true" aria-label="选择归属项目">
+        <header className="modal-head">
+          <div>
+            <h3>选择归属项目</h3>
+            <p>「{event.title}」还没判定出归属项目，批准前先定下派到哪个项目。</p>
+          </div>
+          <button className="icon-btn" title="关闭" onClick={onClose}><Icon name="close" size={14} /></button>
+        </header>
+        <div className="modal-body">
+          {projects.length === 0 ? (
+            <p className="modal-hint">还没有登记任何项目：先到「配置 → 项目配置」登记项目，再回来批准。</p>
+          ) : (
+            <label className="modal-field">
+              <span>归属项目</span>
+              <select value={project} onChange={e => setProject(e.target.value)}>
+                <option value="">（请选择）</option>
+                {projects.map(item => (
+                  <option key={item.name} value={item.name}>{item.name}（{item.repo}）</option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+        <footer className="modal-foot">
+          <button className="btn ghost" onClick={onClose}>取消</button>
+          <button className="btn primary" disabled={busy || !project} onClick={() => onPick(project)}>批准并派发</button>
+        </footer>
+      </div>
+    </div>
   )
 }
 

@@ -1693,6 +1693,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       sourceSecrets: () => Object.fromEntries(
         Object.entries(config.events.sources).map(([id, source]) => [id, Boolean(source.secret)]),
       ),
+      counts: () => eventWiring.manager.countEvents(),
     },
     ...(feishuChannel?.admin ? { feishuBot: feishuChannel.admin } : {}),
     channels,

@@ -19,6 +19,9 @@ import type { EventEnvelope, EventSource } from '#event/port.js'
 import type { EventDecisionResult, EventDecisionService } from './decision.js'
 import { EVENT_SKILLS, findEventSkill } from './skills.js'
 
+/** 事件判定最多重试几次；超过就标成失败态等人处理，不再无限重试。 */
+export const MAX_EVENT_ATTEMPTS = 5
+
 /** 一次判定的完整结果：结论 + 事件回填字段。 */
 export interface EventDecisionOutcome {
   event: EventRecord
@@ -136,7 +139,61 @@ export class EventPipeline {
         this.markFailed(event, errorMessage(error))
       }
     }
+    // 已判定但还没派出去的事件（顺延等待窗口的）：只重跑闸门，不重新判定。
+    for (const event of this.store.listDecidedUndispatched(limit)) {
+      try {
+        const outcome = await this.retryDispatch(event)
+        if (outcome) outcomes.push(outcome)
+      } catch (error) {
+        this.logger.error('event:process-failed', {
+          eventId: event.id,
+          sourceId: event.sourceId,
+          message: errorMessage(error),
+        })
+      }
+    }
     return outcomes
+  }
+
+  /**
+   * 重试派发：事件已经判定过，只是当时窗口或配额没放行。
+   * 这里复用原判定结论，不重新调模型 —— 判定一次就够，等的是窗口不是答案。
+   */
+  private async retryDispatch(event: EventRecord): Promise<EventDecisionOutcome | null> {
+    const config = this.config()
+    const verdict = this.verdictOf(event)
+    const gate = this.gateOf(config, event)
+    if (!gate.allowed) {
+      const deferred = { ...event, execution: 'deferred' as const, reason: gate.reason, updatedAt: this.clock() }
+      this.store.updateEvent(deferred)
+      return { event: deferred, verdict, basis: event.basis ?? 'event-decision', promptVersion: event.promptVersion ?? 0 }
+    }
+    const dispatched = await this.dispatch(deferred0(event), verdict)
+    if (!dispatched) {
+      const failed = { ...event, status: 'review' as const, needsReview: true, reason: '开单失败，转人工处理', updatedAt: this.clock() }
+      this.store.updateEvent(failed)
+      await this.onReview?.(failed, verdict)
+      return { event: failed, verdict, basis: event.basis ?? 'event-decision', promptVersion: event.promptVersion ?? 0 }
+    }
+    return dispatched
+  }
+
+  /** 从已判定的事件记录还原判定结论（不重新调模型）。 */
+  private verdictOf(event: EventRecord): EventVerdict {
+    return {
+      actionable: true,
+      priority: event.priority,
+      eventType: event.eventType || 'event',
+      project: event.project ?? '',
+      skill: event.skill ?? '',
+      repo: event.repo ?? '',
+      branch: event.branch ?? '',
+      needsReview: false,
+      decided: true,
+      reason: event.reason ?? '',
+      confidence: event.confidence ?? 1,
+      basis: event.basis ?? '',
+    }
   }
 
   /** 判定并派发一条事件。 */
@@ -177,6 +234,39 @@ export class EventPipeline {
       this.store.updateEvent(decided)
       this.logger.info('event:invalid', { eventId: event.id, sourceId: event.sourceId, reason: preview(verdict.reason, 120) })
       return { event: decided, verdict, basis: result.basis, promptVersion: result.promptVersion }
+    }
+
+    // 判定没完成（模型失败等）：事件留在队列里等下一轮，不能派工也不能丢。
+    if (!verdict.decided) {
+      // 一直判不出来就停手：标成失败态等人处理，不无限重试烧钱。
+      if (event.attempts >= MAX_EVENT_ATTEMPTS) {
+        const failed = {
+          ...decided,
+          status: 'review' as const,
+          execution: 'failed' as const,
+          needsReview: true,
+          reason: `判定连续失败 ${event.attempts} 次，转人工处理`,
+          lastError: verdict.reason.slice(0, 300),
+          updatedAt: this.clock(),
+        }
+        this.store.updateEvent(failed)
+        this.logger.error('event:attempts-exceeded', {
+          eventId: event.id,
+          sourceId: event.sourceId,
+          attempts: event.attempts,
+          message: preview(verdict.reason, 120),
+        })
+        await this.onReview?.(failed, verdict)
+        return { event: failed, verdict, basis: result.basis, promptVersion: result.promptVersion }
+      }
+      const waiting = { ...decided, status: 'pending' as const, execution: 'retry' as const, decidedAt: undefined, updatedAt: this.clock() }
+      this.store.updateEvent(waiting)
+      this.logger.warn('event:decision-incomplete', {
+        eventId: event.id,
+        sourceId: event.sourceId,
+        reason: preview(verdict.reason, 120),
+      })
+      return { event: waiting, verdict, basis: result.basis, promptVersion: result.promptVersion }
     }
 
     // 需要人审：不派工，进待审核队列。
@@ -314,6 +404,7 @@ export class EventPipeline {
       repo: projectConfig?.repo ?? event.repo ?? '',
       branch: projectConfig?.defaultBranch ?? event.branch ?? '',
       needsReview: false,
+      decided: true,
       reason: '人工批准',
       confidence: 1,
       basis: 'human-approve',
@@ -335,7 +426,7 @@ export class EventPipeline {
   /** 时间窗与预算的闸门。 */
   private gateOf(config: AppConfig, event: EventRecord): { allowed: boolean; reason: string } {
     const policy = config.events.policy
-    const window = windowOf(policy, event.priority)
+    const window = windowOf(policy, event.priority, new Date(this.clock()))
     if (!window) {
       return { allowed: false, reason: `优先级 ${event.priority} 不在任何时间窗内，顺延等待` }
     }
@@ -435,10 +526,16 @@ function deferred0(event: EventRecord): EventRecord {
   return next
 }
 
-/** 当前时间落在哪个窗口；没有匹配窗口返回 null。 */
-export function windowOf(policy: AppConfig['events']['policy'], priority: EventPriority): { name: string } | null {
-  const at = new Date()
-  const minutes = at.getHours() * 60 + at.getMinutes()
+/**
+ * 当前时间落在哪个窗口；没有匹配窗口返回 null。
+ *
+ * `at` 是注入的时刻，不给就用真实时间。
+ * 走注入值，测试才能确定性地断言窗口判定，不随跑测时刻与时区漂移。
+ */
+export function windowOf(policy: AppConfig['events']['policy'], priority: EventPriority, at?: Date): { name: string } | null {
+  const time = at ?? new Date()
+  if (Number.isNaN(time.getTime())) return null
+  const minutes = time.getHours() * 60 + time.getMinutes()
   const inWindow = (start: string, end: string): boolean => {
     const from = parseHhmm(start)
     const to = parseHhmm(end)

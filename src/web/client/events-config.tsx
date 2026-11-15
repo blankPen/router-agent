@@ -90,7 +90,10 @@ export function EventSourcesConfig({ sources, draft, defaults, setField, errors,
                 <span className="source-logo"><SourceLogo kind={source.kind} /></span>
                 <div className="source-card-title">
                   <strong>{source.id}</strong>
-                  <span>{KIND_LABEL[source.kind] ?? source.kind}</span>
+                  <span>
+                    {KIND_LABEL[source.kind] ?? source.kind}
+                    {source.placeholder && <em className="source-card-placeholder">暂未开放</em>}
+                  </span>
                 </div>
                 <button
                   type="button"

@@ -101,6 +101,8 @@ export interface EventApiPort {
   decision(): { provider: string; prompt: string; confidenceThreshold: number; fallback: string; version: number }
   /** 各来源的注入密钥（面板展示用：只提示是否已配置）。 */
   sourceSecrets(): Record<string, boolean>
+  /** 按状态统计事件条数（面板统计卡用；不受列表 limit 影响）。 */
+  counts(): Record<string, number>
 }
 
 export interface ApiServerOptions {
@@ -317,6 +319,9 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         sources: opts.events.listSources(),
         decision: opts.events.decision(),
         sourceSecrets: opts.events.sourceSecrets(),
+        counts: opts.events.counts(),
+        // 候选项目：人工批准时用来挑归属项目（事件本身不绑项目）。
+        projects: config.projects.map(project => ({ name: project.name, repo: project.repo })),
       })
     }
 
@@ -341,11 +346,20 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
     // 外部系统注入事件：走 HTTP 事件来源，密钥校验在来源配置里。
     if (req.method === 'POST' && isEventInjectPath(config, path)) {
       if (!opts.events) return respond(res, 404, { error: 'events-not-supported' })
+      // 总开关或来源开关关着就不收：跟「来源已关闭」保持一致。
+      if (!config.events.enabled) {
+        logger.warn('event:inject-rejected', { path, reason: 'events-disabled' })
+        return respond(res, 404, { error: 'events-disabled', message: '事件总线已关闭' })
+      }
       const body = await readJson(req)
       const sourceId = injectSourceOf(config, path, String(body.sourceId ?? ''))
       if (!sourceId) {
         logger.warn('event:inject-rejected', { path, reason: 'no-source-for-path' })
         return respond(res, 404, { error: 'inject-path-not-found', message: '这条路径没有对应的 http 事件来源' })
+      }
+      if (!config.events.sources[sourceId]?.enabled) {
+        logger.warn('event:inject-rejected', { sourceId, reason: 'source-disabled' })
+        return respond(res, 404, { error: 'source-disabled', message: '这个事件来源已关闭' })
       }
       const secret = String(req.headers['x-ra-event-secret'] ?? body.secret ?? '')
       const expected = String((config.events.sources[sourceId]?.secret ?? ''))
