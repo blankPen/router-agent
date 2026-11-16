@@ -6,14 +6,14 @@ import { EventDecisionService, ruleDecisionPort } from '../../src/events/decisio
 import { EventPipeline } from '../../src/events/pipeline.js'
 import { EventManager } from '../../src/events/manager.js'
 
-const SOURCE = { enabled: true, kind: 'github' as const, repo: 'a/b', project: 'router-agent', defaultPriority: 'P2' as const, defaultType: 'issue' }
+const SOURCE = { enabled: true, kind: 'github' as const, repo: 'blankPen/router-agent', defaultPriority: 'P2' as const, defaultType: 'issue' }
 
 function setup() {
   const store = new Store(':memory:')
   const base = defaultConfig()
   const config: AppConfig = {
     ...base,
-    projects: [{ name: 'router-agent', repo: '/r/a', defaultBranch: 'main' }],
+    projects: [{ name: 'router-agent', repo: '/r/router-agent', defaultBranch: 'main' }],
     events: { ...base.events, enabled: true, sources: { github: SOURCE } },
   }
   // 固定时刻落在低峰窗口（本地 22:00），P2 事件允许自动执行。

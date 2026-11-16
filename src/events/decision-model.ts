@@ -113,15 +113,15 @@ export function systemPromptOf(input: EventDecisionInput): string {
   ].join('\n')
 }
 
-/** LLM 的用户提示词：事件本身与已知线索。 */
+/** LLM 的用户提示词：事件本身与来源信息。 */
 export function userPromptOf(input: EventDecisionInput): string {
   const event = input.event
-  const context = input.source.project ? `订阅配置的已知线索：仓库 ${input.source.repo ?? ''} 对应项目 ${input.source.project}` : ''
+  const context = input.source.repo ? `订阅的仓库：${input.source.repo}` : ''
   return [
     `# 事件标题\n${event.title}`,
     `# 事件正文\n${event.body || '(空)'}`,
     `# 来源\n${event.sourceId}（${event.sourceKind}）`,
-    context ? `# 已知线索\n${context}` : '',
+    context ? `# 来源信息\n${context}` : '',
     '# 判定规则（人工可配置）',
     input.prompt,
   ].filter(Boolean).join('\n\n')

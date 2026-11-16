@@ -37,15 +37,8 @@ export interface EventSourceView {
 
 /** 事件来源的字段说明；内置来源写在这里，插件来源用插件自己声明的。 */
 const BUILTIN_FIELDS: Record<string, EventSourceView['fields']> = {
-  github: [
-    { key: 'repo', label: '仓库', kind: 'text', hint: 'owner/repo' },
-    { key: 'intervalMs', label: '轮询间隔（毫秒）', kind: 'number' },
-    { key: 'labels', label: '标签白名单', kind: 'list', hint: '逗号分隔；留空表示全部' },
-    { key: 'project', label: '已知项目线索', kind: 'text', hint: '作为决策上下文，不直接决定归属' },
-    { key: 'branch', label: '起始分支', kind: 'text' },
-    { key: 'defaultPriority', label: '默认优先级', kind: 'select', options: ['P0', 'P1', 'P2', 'P3', 'P4'] },
-    { key: 'dailyLimit', label: '每日配额', kind: 'number', hint: '本来源单独的上限；留空用「成本与时间窗」里的单来源配额' },
-  ],
+  // GitHub 来源的字段由面板的仓库订阅区单独渲染，不走通用设置弹窗。
+  github: [],
   feishu: [],
 }
 
@@ -288,7 +281,15 @@ export class EventManager {
   private buildSource(id: string, config: EventSourceConfig): EventSource | null {
     switch (config.kind) {
       case 'github':
-        return new GithubEventSource(id, config, { runner: this.runner, logger: this.logger })
+        return new GithubEventSource(id, config, {
+          runner: this.runner,
+          logger: this.logger,
+          // 游标存在库里：重启后接着上次的增量拉，不重复入队。
+          cursor: {
+            get: key => this.store.getCursor(key),
+            set: (key, value) => this.store.setCursor(key, value, this.clock()),
+          },
+        })
       case 'feishu':
         return new FeishuEventSource(id, config, { logger: this.logger })
       default:

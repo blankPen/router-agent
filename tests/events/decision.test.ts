@@ -53,12 +53,15 @@ describe('事件决策', () => {
     expect(result.basis).toBe('rule')
   })
 
-  it('风险标签的事件直接转人工并提到 P0', async () => {
+  it('命中风险标签的事件直接转人工并提到 P0', async () => {
     const service = new EventDecisionService({
       decision: { provider: 'rule', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
       rule: ruleDecisionPort,
     })
-    const result = await service.decide(inputOf({ source: { enabled: true, kind: 'github', labels: ['security'], defaultPriority: 'P3' } }))
+    const result = await service.decide(inputOf({
+      event: eventOf({ raw: { labels: [{ name: 'security' }] } }),
+      source: { enabled: true, kind: 'github', defaultPriority: 'P3' },
+    }))
     expect(result.verdict.priority).toBe('P0')
     expect(result.verdict.needsReview).toBe(true)
   })
@@ -74,7 +77,8 @@ describe('事件决策', () => {
       model,
     })
     const result = await service.decide(inputOf({
-      source: { enabled: true, kind: 'github', labels: ['security'], project: 'router-agent', defaultPriority: 'P3' },
+      event: eventOf({ raw: { labels: [{ name: 'security' }] } }),
+      source: { enabled: true, kind: 'github', repo: 'blankPen/router-agent', defaultPriority: 'P3' },
     }))
     expect(result.verdict.needsReview).toBe(true)
   })
@@ -169,7 +173,7 @@ describe('事件决策', () => {
       model,
     })
     const result = await service.decide(inputOf({
-      source: { enabled: true, kind: 'github', project: 'router-agent', defaultPriority: 'P2' },
+      source: { enabled: true, kind: 'github', repo: 'blankPen/router-agent', defaultPriority: 'P2' },
     }))
     expect(result.verdict.needsReview).toBe(false)
     expect(result.verdict.decided).toBe(false)
@@ -186,7 +190,7 @@ describe('事件决策', () => {
       model,
     })
     const result = await service.decide(inputOf({
-      source: { enabled: true, kind: 'github', project: 'router-agent', defaultPriority: 'P2' },
+      source: { enabled: true, kind: 'github', repo: 'blankPen/router-agent', defaultPriority: 'P2' },
     }))
     expect(result.verdict.needsReview).toBe(false)
   })
@@ -206,15 +210,27 @@ describe('事件决策', () => {
     expect(result.verdict.reason).toContain('没有判定出归属项目')
   })
 
-  it('没有模型时按订阅配置里人工写明的项目归类', async () => {
+  it('没有模型时按订阅的仓库名归入同名项目', async () => {
     const service = new EventDecisionService({
       decision: { provider: 'rule', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
       rule: ruleDecisionPort,
     })
     const result = await service.decide(inputOf({
-      source: { enabled: true, kind: 'github', project: 'router-agent', defaultPriority: 'P2' },
+      source: { enabled: true, kind: 'github', repo: 'blankPen/router-agent', defaultPriority: 'P2' },
     }))
     expect(result.verdict.project).toBe('router-agent')
     expect(result.verdict.needsReview).toBe(false)
+  })
+
+  it('订阅的仓库名对不上项目时没有归属，转人工', async () => {
+    const service = new EventDecisionService({
+      decision: { provider: 'rule', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
+      rule: ruleDecisionPort,
+    })
+    const result = await service.decide(inputOf({
+      source: { enabled: true, kind: 'github', repo: 'someone/unknown-repo', defaultPriority: 'P2' },
+    }))
+    expect(result.verdict.project).toBe('')
+    expect(result.verdict.needsReview).toBe(true)
   })
 })

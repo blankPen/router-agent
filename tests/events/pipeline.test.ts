@@ -15,7 +15,7 @@ function setup(over: Partial<AppConfig> = {}) {
       ...defaultConfig().events,
       sources: {
         ...defaultConfig().events.sources,
-        github: { enabled: true, kind: 'github', repo: 'blankPen/router-agent', project: 'router-agent', defaultPriority: 'P2', defaultType: 'issue' },
+        github: { enabled: true, kind: 'github', repo: 'blankPen/router-agent', defaultPriority: 'P2', defaultType: 'issue' },
       },
     },
     ...over,
@@ -75,10 +75,10 @@ describe('事件管线', () => {
     const { store, pipeline } = setup({
       events: {
         ...defaultConfig().events,
-        sources: { github: { ...SOURCE, project: '' } },
+        sources: { github: { ...SOURCE, repo: 'someone/other' } },
       },
     })
-    const event = pipeline.ingest('github', { ...SOURCE, project: '' }, { externalId: 'issue:a#3', title: '崩溃', body: '崩了' })
+    const event = pipeline.ingest('github', { ...SOURCE, repo: 'someone/other' }, { externalId: 'issue:a#3', title: '崩溃', body: '崩了' })
     await pipeline.process(event)
     const stored = store.getEvent(event.id)!
     expect(stored.status).toBe('review')
@@ -90,10 +90,10 @@ describe('事件管线', () => {
     const { store, pipeline } = setup({
       events: {
         ...defaultConfig().events,
-        sources: { github: { ...SOURCE, project: '' } },
+        sources: { github: { ...SOURCE, repo: 'someone/other' } },
       },
     })
-    const event = pipeline.ingest('github', { ...SOURCE, project: '' }, { externalId: 'issue:a#4', title: '崩溃', body: '崩了' })
+    const event = pipeline.ingest('github', { ...SOURCE, repo: 'someone/other' }, { externalId: 'issue:a#4', title: '崩溃', body: '崩了' })
     await pipeline.process(event)
     const result = await pipeline.apply(event.id, 'approve', { project: 'router-agent' })
     expect(result?.ticketId).toBeTruthy()

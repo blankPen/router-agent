@@ -327,7 +327,7 @@ ra logs --follow | grep '"message":"decision:'
 
 ## 事件总线（多来源事件）
 
-事件总线把「飞书消息之外」的事也接进来：GitHub Issue、HTTP 注入、定时任务，以及自定义来源插件。事件先进队列，由决策模型一次判定出「要不要做 / 优先级 / 类型 / 归属项目 / 执行方式 / 要不要人审」，再分级派发：**能直接做的开单，需要人看的推管理员审核**。
+事件总线把「飞书消息之外」的事也接进来：GitHub 仓库的 Issue / PR / Action，以及自定义来源插件。事件先进队列，由决策模型一次判定出「要不要做 / 优先级 / 类型 / 归属项目 / 执行方式 / 要不要人审」，再分级派发：**能直接做的开单，需要人看的推管理员审核**。
 
 事件本身**不绑定项目** —— 归属项目由决策模型按下面的决策 prompt 判定。**默认关闭**。
 
@@ -337,16 +337,16 @@ ra logs --follow | grep '"message":"decision:'
 events:
   enabled: true
   sources:
-    github:
+    github-1:
       enabled: true
       kind: github
-      repo: blankPen/router-agent   # owner/repo
-      intervalMs: 300000             # 轮询间隔
-      labels: [bug]                  # 标签白名单，留空表示全部
-      project: router-agent          # 已知线索：作为决策上下文，不绕过模型
-      branch: main
-      defaultPriority: P2
-      dailyLimit: 50                 # 本来源的每日配额；不填就用 policy.perSourceDailyLimit
+      repo: blankPen/router-agent    # owner/repo；一个仓库一条订阅
+      events:                        # 监听哪些事件；不填表示全部
+        - issues.opened
+        - issues.commented
+        - pull_request.opened
+        - pull_request.merged
+        - workflow_run.failure
     feishu:
       enabled: false                 # 飞书群消息由消息链路处理，这里只留开关
       kind: feishu
@@ -372,6 +372,24 @@ events:
     reviewChatId: ""                 # 审核通知发到哪个会话；留空只落面板
 ```
 
+### GitHub 仓库订阅
+
+面板「配置 → 事件总线 → 事件来源」里点「添加仓库」，填 `owner/repo` 就新增一条订阅；**可以加多个仓库，每个仓库单独选监听内容**。
+
+一条订阅只有仓库与监听内容两样东西，没有别的参数：归属项目、优先级、��额都由决策阶段判定，不在订阅里写。
+
+**可订阅的事件类型**（`类别.动作`）：
+
+| 类别 | 可选动作 |
+|-|-|
+| Issue | `opened` 新建、`reopened` 重开、`edited` 更新、`closed` 关闭、`labeled` 加标签、`commented` 评论 |
+| Pull Request | `opened` 新建、`reopened` 重开、`edited` 更新、`closed` 关闭、`synchronize` 有新提交、`reviewed` 收到评审、`merged` 已合并、`commented` 评论 |
+| Action | `requested` 触发、`success` 成功、`completed` 执行结束（成功与失败都算）、`failure` 失败、`cancelled` 取消 |
+
+数据来自 GitHub 的两条线：`repos/<repo>/events`（Issue、PR、评论、评审）与 `repos/<repo>/actions/runs`（工作流）。每个仓库用游标做增量拉取，同一个事件不会重复入队。
+
+**归属项目怎么定**：订阅里不再写「已知项目线索」，而是按**订阅的仓库名**去匹配项目清单 —— 仓库名与项目名（或项目仓库路径的末段）一致就归到那个项目。匹配不上时由决策模型按 prompt 判定，判不出来转人工。
+
 事件进队列后等下一次决策 tick 判定。判定结论与派发结果都在面板「事件」页能看到（事件页只做查看与审核，来源与判定策略一律回「配置 → 事件总线」改）。
 
 **`fallback` 决定「判不出来」时怎么办**：
@@ -395,13 +413,13 @@ events:
 
 模型没配好时自动退回规则判定，事件不会丢，只是更多走人工审核。
 
-**风险标签是硬护栏**：来源标签命中 `security` / `prod` / `production` / `incident` / `payment` / `release` 时，事件强制 P0 并**必须人工确认**，模型说了不算 —— 模型的 `needsReview: false` 覆盖不掉规则层的人审要求。
+**风险标签是硬护栏**：事件自带的风险标签命中 `security` / `prod` / `production` / `incident` / `payment` / `release` 时，事件强制 P0 并**必须人工确认**，模型说了不算 —— 模型的 `needsReview: false` 覆盖不掉规则层的人审要求。
 
 **判定只跑一次**：事件判定过一次就记住结论，等窗口或配额时不再重复调模型；只有判定失败（模型报错）才会重试，连续失败 5 次后转人工处理，不再无限重试。
 
 ### 自定义事件来源（npm 插件）
 
-内置来源（github / feishu）不够用时，可以装一个事件来源插件 —— 和「添加运行时」是同一套机制：面板「配置 → 事件总线 → 添加自定义事件」填 npm 包名，走 `npm install` 装到 `<RA_HOME>/node_modules`。
+内置来源（GitHub 仓库订阅 / 飞书）不够用时，可以装一个事件来源插件 —— 和「添加运行时」是同一套机制：面板「配置 → 事件总线 → 添加自定义事件」填 npm 包名，走 `npm install` 装到 `<RA_HOME>/node_modules`。
 
 插件包默认导出一个对象：
 

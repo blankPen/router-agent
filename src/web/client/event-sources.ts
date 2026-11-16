@@ -82,10 +82,13 @@ export function eventSourceFields(sources: SourceMeta[]): FieldDef[] {
 export function eventSourcePathsIn(sources: SourceMeta[], draftSources: Record<string, unknown>): string[] {
   const paths = new Set<string>()
   for (const source of sources) {
+    // 整条来源的路径：面板新增或删除仓库订阅时走它。
+    paths.add(`events.sources.${source.id}`)
     paths.add(`events.sources.${source.id}.enabled`)
     for (const field of sourceFieldDefs(source.id, source.fields)) paths.add(field.path)
   }
   for (const id of Object.keys(draftSources)) {
+    paths.add(`events.sources.${id}`)
     paths.add(`events.sources.${id}.enabled`)
     paths.add(`events.sources.${id}.plugin`)
   }

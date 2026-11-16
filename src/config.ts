@@ -15,6 +15,7 @@ import { DEFAULT_CHANNEL_PLUGINS } from '#channel/plugins/loader.js'
 import { noopLogger, errorMessage, type Logger } from '#infra/logger.js'
 import type { PluginEntry } from '#infra/plugin-loader.js'
 import { EVENT_PRIORITIES, normalizeEventPriority, type EventPriority } from '#core/event.js'
+import { GITHUB_EVENT_TYPES, isGithubEventType } from '#core/github-events.js'
 
 const runtimePackage: Record<string, string> = { ...DEFAULT_RUNTIME_PLUGINS }
 const channelPackage = (id: string): string | undefined => DEFAULT_CHANNEL_PLUGINS[id]
@@ -292,14 +293,10 @@ export interface EventSourceConfig {
   options?: Record<string, unknown>
   /** GitHub 来源：仓库（owner/repo）。 */
   repo?: string
+  /** GitHub 来源：订阅的事件类型（`类别.动作`）；留空表示全部。 */
+  events?: string[]
   /** 轮询间隔（毫秒）。 */
   intervalMs?: number
-  /** 只处理带这些标签的事件（GitHub）。 */
-  labels?: string[]
-  /** 订阅已知的仓库 → 候选项目；作为决策上下文线索，不绕过决策模型。 */
-  project?: string
-  /** 派工起始分支。 */
-  branch?: string
   /** 事件默认优先级。 */
   defaultPriority?: EventPriority
   /** 事件默认类型。 */
@@ -448,6 +445,17 @@ export function setEventSourcePlugin(config: AppConfig, id: string, value: strin
   config.events.sources = sources
 }
 
+/** 写入或删除一整条事件来源条目（面板新增/修改仓库订阅）。 */
+export function setEventSourceEntry(config: AppConfig, id: string, value: unknown): void {
+  const sources = { ...config.events.sources }
+  if (value === null || value === undefined || value === '') {
+    delete sources[id]
+  } else {
+    sources[id] = value as EventSourceConfig
+  }
+  config.events.sources = sources
+}
+
 /** 当前配置里可用的 runtime id：SDK 内置 + 用户声明的插件 id + 插件声明的多实例 id。 */
 export function isKnownRuntimeId(config: AppConfig, id: string): boolean {
   const value = normalizeRuntimeId(id)
@@ -559,7 +567,6 @@ export function defaultConfig(): AppConfig {
     events: {
       enabled: false,
       sources: {
-        github: { enabled: false, kind: 'github', repo: '', intervalMs: 300_000, labels: [], defaultPriority: 'P2', dailyLimit: 50 },
         feishu: { enabled: false, kind: 'feishu' },
       },
       decision: {
@@ -905,13 +912,20 @@ function parseEvents(value: unknown, base: EventsSettings): EventsSettings {
       ...(typeof raw.plugin === 'string' ? { plugin: raw.plugin } : {}),
       ...(isRecord(raw.options) ? { options: raw.options } : {}),
       ...(typeof raw.repo === 'string' ? { repo: raw.repo } : {}),
+      ...(Array.isArray(raw.events) ? { events: stringArray(raw.events, []) } : {}),
       ...(typeof raw.intervalMs === 'number' ? { intervalMs: raw.intervalMs } : {}),
-      ...(Array.isArray(raw.labels) ? { labels: stringArray(raw.labels, []) } : {}),
-      ...(typeof raw.project === 'string' ? { project: raw.project } : {}),
-      ...(typeof raw.branch === 'string' ? { branch: raw.branch } : {}),
       ...(raw.defaultPriority ? { defaultPriority: normalizeEventPriority(raw.defaultPriority) } : {}),
       ...(typeof raw.defaultType === 'string' ? { defaultType: raw.defaultType } : {}),
       ...(typeof raw.dailyLimit === 'number' ? { dailyLimit: raw.dailyLimit } : {}),
+    }
+    // GitHub 来源没写事件类型 = 订阅全部类型；写了的只认目录里的类型。
+    if (sources[id]!.kind === 'github') {
+      const picked = Array.isArray(raw.events) ? stringArray(raw.events, []) : []
+      sources[id]!.events = picked.length > 0
+        ? picked.filter(isGithubEventType)
+        : GITHUB_EVENT_TYPES.map(type => type.id)
+      // 旧配置里的空壳 GitHub 来源（没填仓库）不留着：仓库由面板「添加仓库」创建。
+      if (!sources[id]!.repo?.trim()) delete sources[id]
     }
   }
   const decisionDoc = isRecord(value.decision) ? value.decision : {}
@@ -1862,15 +1876,13 @@ function numberValue(min: number, max: number): Validator {
 }
 
 /** 事件来源可编辑的字段与取值校验。 */
-const EVENT_SOURCE_FIELDS: Record<string, 'text' | 'number' | 'boolean' | 'list' | 'priority'> = {
+const EVENT_SOURCE_FIELDS: Record<string, 'text' | 'number' | 'boolean' | 'list' | 'priority' | 'githubEvents'> = {
   enabled: 'boolean',
   kind: 'text',
   plugin: 'text',
   repo: 'text',
+  events: 'githubEvents',
   intervalMs: 'number',
-  labels: 'list',
-  project: 'text',
-  branch: 'text',
   defaultPriority: 'priority',
   defaultType: 'text',
   dailyLimit: 'number',
@@ -1890,11 +1902,37 @@ function validateEventSourceField(key: string, value: unknown): string | null {
     }
     case 'list':
       return Array.isArray(value) ? null : '需要字符串数组'
+    case 'githubEvents':
+      if (!Array.isArray(value)) return '需要字符串数组'
+      for (const item of value) {
+        if (!isGithubEventType(item)) return `不是可订阅的 GitHub 事件类型：${String(item)}`
+      }
+      return null
     case 'priority':
       return EVENT_PRIORITIES.includes(String(value).toUpperCase() as EventPriority) ? null : `优先级只能是 ${EVENT_PRIORITIES.join(' / ')}`
     default:
       return typeof value === 'string' ? null : '需要字符串'
   }
+}
+
+/**
+ * 校验整条事件来源条目（面板新增/修改仓库订阅时整体写入）。
+ *
+ * 只认 GitHub 来源需要的字段：仓库地址、启用开关与事件类型。
+ */
+function validateEventSourceEntry(value: unknown): string | null {
+  if (!isRecord(value)) return '事件来源必须是对象'
+  if (value.kind !== 'github') return '只支持 GitHub 来源的整体配置'
+  if (typeof value.enabled !== 'boolean') return '需要布尔值'
+  const repo = typeof value.repo === 'string' ? value.repo.trim() : ''
+  if (!repo) return '需要填写仓库地址（owner/repo）'
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return '仓库地址格式应为 owner/repo'
+  const events = value.events ?? []
+  if (!Array.isArray(events)) return '需要字符串数组'
+  for (const item of events) {
+    if (!isGithubEventType(item)) return `不是可订阅的 GitHub 事件类型：${String(item)}`
+  }
+  return null
 }
 
 /** 优先级列表校验：只接受 P0 ~ P4。 */
@@ -2198,6 +2236,20 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
       else accepted.push({ path, value })
       continue
     }
+    // 事件来源的整条配置：events.sources.<id>
+    const eventSourceWhole = /^events\.sources\.([^.]+)$/.exec(path)
+    if (eventSourceWhole) {
+      const sourceId = eventSourceWhole[1]!
+      // 空值表示删除这条来源。
+      if (value === null || value === '') {
+        accepted.push({ path, value: null })
+        continue
+      }
+      const message = validateEventSourceEntry(value)
+      if (message) errors.push({ path, message })
+      else accepted.push({ path, value })
+      continue
+    }
     if ((LIST_PATHS as readonly string[]).includes(path)) {
       if (path === 'projects') {
         const result = validateProjects(value)
@@ -2255,6 +2307,9 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
     } else if (/^events\.sources\.[^.]+\.plugin$/.test(path)) {
       const sourceId = path.split('.')[2]!
       setEventSourcePlugin(config, sourceId, String(value))
+    } else if (/^events\.sources\.[^.]+$/.test(path)) {
+      const sourceId = path.split('.')[2]!
+      setEventSourceEntry(config, sourceId, value)
     } else setPath(config as unknown as Record<string, unknown>, path, value)
     changed.push(path)
   }

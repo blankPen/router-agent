@@ -8,7 +8,8 @@ describe('事件配置', () => {
   it('默认配置带事件段，且内置来源都关着', () => {
     const config = defaultConfig()
     expect(config.events.enabled).toBe(false)
-    expect(config.events.sources.github?.enabled).toBe(false)
+    // GitHub 仓库由面板「添加仓库」创建，默认配置里不留空壳来源。
+    expect(config.events.sources.github).toBeUndefined()
     expect(config.events.decision.prompt.length).toBeGreaterThan(0)
   })
 
@@ -53,6 +54,7 @@ describe('事件配置', () => {
       '    github:',
       '      enabled: true',
       '      kind: github',
+      '      repo: a/b',
       '    http:',
       '      enabled: true',
       '      kind: http',
@@ -69,24 +71,125 @@ describe('事件配置', () => {
     expect(config.events.sources.schedule).toBeUndefined()
   })
 
-  it('配置补丁允许改决策 prompt 与来源字段', () => {
+  it('旧配置里没填仓库的 GitHub 空壳来源被丢弃', () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-events-'))
+    writeFileSync(join(home, 'config.yaml'), [
+      'events:',
+      '  sources:',
+      '    github:',
+      '      enabled: false',
+      '      kind: github',
+      '      repo: ""',
+      '',
+    ].join('\n'), 'utf8')
+    const config = loadConfig(home, {})
+    expect(config.events.sources.github).toBeUndefined()
+  })
+
+  it('GitHub 来源按仓库与事件类型订阅，不再有项目线索等参数', () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-events-'))
+    writeFileSync(join(home, 'config.yaml'), [
+      'events:',
+      '  enabled: true',
+      '  sources:',
+      '    github-1:',
+      '      enabled: true',
+      '      kind: github',
+      '      repo: blankPen/router-agent',
+      '      events: [issues.opened, pull_request.merged, workflow_run.failure]',
+      '',
+    ].join('\n'), 'utf8')
+    const config = loadConfig(home, {})
+    const source = config.events.sources['github-1']
+    expect(source?.repo).toBe('blankPen/router-agent')
+    expect(source?.events).toEqual(['issues.opened', 'pull_request.merged', 'workflow_run.failure'])
+    // 旧的项目线索 / 起始分支 / 标签白名单参数不再进入配置。
+    expect(source).not.toHaveProperty('project')
+    expect(source).not.toHaveProperty('branch')
+    expect(source).not.toHaveProperty('labels')
+  })
+
+  it('GitHub 来源没写事件类型时默认订阅全部类型', () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-events-'))
+    writeFileSync(join(home, 'config.yaml'), [
+      'events:',
+      '  sources:',
+      '    github-1:',
+      '      kind: github',
+      '      repo: a/b',
+      '',
+    ].join('\n'), 'utf8')
+    const config = loadConfig(home, {})
+    expect(config.events.sources['github-1']?.events?.length).toBeGreaterThan(0)
+  })
+
+  it('写 GitHub 事件类型时只认目录里的类型', () => {
+    const config = defaultConfig()
+    config.events.sources['github-1'] = { enabled: true, kind: 'github', repo: 'a/b', events: [] }
+    const bad = applyConfigPatch(config, { 'events.sources.github-1.events': ['issues.exploded'] })
+    expect(bad.errors[0]?.message).toContain('issues.exploded')
+    const good = applyConfigPatch(config, { 'events.sources.github-1.events': ['issues.opened'] })
+    expect(good.errors).toEqual([])
+    expect(config.events.sources['github-1']?.events).toEqual(['issues.opened'])
+  })
+
+  it('整条写入 GitHub 仓库订阅', () => {
     const config = defaultConfig()
     const result = applyConfigPatch(config, {
+      'events.sources.github-1': {
+        enabled: true,
+        kind: 'github',
+        repo: 'blankPen/router-agent',
+        events: ['issues.opened', 'workflow_run.failure'],
+      },
+    })
+    expect(result.errors).toEqual([])
+    expect(config.events.sources['github-1']).toEqual({
+      enabled: true,
+      kind: 'github',
+      repo: 'blankPen/router-agent',
+      events: ['issues.opened', 'workflow_run.failure'],
+    })
+  })
+
+  it('整条写入时校验仓库地址与事件类型', () => {
+    const config = defaultConfig()
+    const noRepo = applyConfigPatch(config, { 'events.sources.github-1': { enabled: true, kind: 'github', events: [] } })
+    expect(noRepo.errors[0]?.message).toContain('仓库')
+    const badType = applyConfigPatch(config, {
+      'events.sources.github-1': { enabled: true, kind: 'github', repo: 'a/b', events: ['issues.exploded'] },
+    })
+    expect(badType.errors[0]?.message).toContain('issues.exploded')
+  })
+
+  it('传空值删除整条仓库订阅', () => {
+    const config = defaultConfig()
+    config.events.sources['github-1'] = { enabled: true, kind: 'github', repo: 'a/b', events: [] }
+    const result = applyConfigPatch(config, { 'events.sources.github-1': null })
+    expect(result.errors).toEqual([])
+    expect(config.events.sources['github-1']).toBeUndefined()
+  })
+
+  it('配置补丁允许改决策 prompt 与来源字段', () => {
+    const config = defaultConfig()
+    config.events.sources['github-1'] = { enabled: true, kind: 'github', repo: 'a/b', events: [] }
+    const result = applyConfigPatch(config, {
       'events.decision.prompt': '# 新规则',
-      'events.sources.github.enabled': true,
-      'events.sources.github.defaultPriority': 'P0',
+      'events.sources.github-1.enabled': true,
+      'events.sources.github-1.defaultPriority': 'P0',
     })
     expect(result.errors).toEqual([])
     expect(config.events.decision.prompt).toBe('# 新规则')
-    expect(config.events.sources.github?.enabled).toBe(true)
-    expect(config.events.sources.github?.defaultPriority).toBe('P0')
+    expect(config.events.sources['github-1']?.enabled).toBe(true)
+    expect(config.events.sources['github-1']?.defaultPriority).toBe('P0')
   })
 
   it('未知来源与未知字段被拒绝', () => {
     const config = defaultConfig()
     const unknownSource = applyConfigPatch(config, { 'events.sources.nope.enabled': true })
     expect(unknownSource.errors[0]?.message).toContain('未知事件来源')
-    const unknownField = applyConfigPatch(config, { 'events.sources.github.whatever': 'x' })
+    config.events.sources['github-1'] = { enabled: true, kind: 'github', repo: 'a/b', events: [] }
+    const unknownField = applyConfigPatch(config, { 'events.sources.github-1.whatever': 'x' })
     expect(unknownField.errors[0]?.message).toContain('不是可编辑的事件来源字段')
   })
 

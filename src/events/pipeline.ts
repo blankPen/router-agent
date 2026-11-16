@@ -97,7 +97,7 @@ export class EventPipeline {
       status: 'pending',
       execution: 'none',
       priority: normalizeEventPriority(source.defaultPriority),
-      eventType: source.defaultType ?? '',
+      eventType: envelope.eventType ?? source.defaultType ?? '',
       needsReview: false,
       updatedAt: now,
       attempts: 0,

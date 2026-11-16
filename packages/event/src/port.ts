@@ -13,6 +13,10 @@ export interface EventEnvelope {
   title: string
   /** 正文：判定与派工的主要依据。 */
   body: string
+  /** 事件类型（如 `issues.opened`）；缺省由来源的默认类型决定。 */
+  eventType?: string
+  /** 来源侧的单调递增 id；来源用它做增量拉取。 */
+  id?: string
   /** 事件在来源侧的链接；回写结论时用。 */
   url?: string
   /** 原始载荷，便于审计与回放。 */

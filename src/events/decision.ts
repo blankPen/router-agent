@@ -141,17 +141,14 @@ export class EventDecisionService {
     if (output.project && !project) {
       reasons.push(`项目「${output.project}」不在候选清单里`)
     }
-    // 没有模型可用（provider=rule）时，订阅配置里人工写明的项目就是结论；
-    // 有模型时它只是线索，归属项目交给模型按 prompt 判定。
-    if (!project && this.decision.provider === 'rule' && input.source.project) {
-      project = this.matchProject(input.projects, input.source.project)
-      if (project) reasons.unshift(`按订阅配置归入项目「${project.name}」`)
-    }
-    // 兜底策略是 pending 时，模型没判出项目就用订阅线索顶上：
+    // 模型没判出归属时，用订阅的仓库名兜底：
     // 事件有归属才能留在队列里等下一轮重判，而不是只能转人工。
-    if (!project && this.decision.fallback === 'pending' && input.source.project) {
-      project = this.matchProject(input.projects, input.source.project)
-      if (project) reasons.unshift(`按订阅配置归入项目「${project.name}」`)
+    if (!project) {
+      const byRepo = matchProjectByRepo(input.projects, input.source.repo ?? '')
+      if (byRepo) {
+        project = byRepo
+        reasons.unshift(`按订阅仓库归入项目「${byRepo.name}」`)
+      }
     }
 
     const skillId = (output.skill ?? '').trim()
@@ -179,7 +176,7 @@ export class EventDecisionService {
     if (output.reason?.trim()) reasons.push(output.reason.trim())
 
     const projectConfig = project
-    const branch = input.source.branch?.trim() || projectConfig?.defaultBranch || ''
+    const branch = projectConfig?.defaultBranch || ''
 
     return {
       actionable,
@@ -207,6 +204,7 @@ export class EventDecisionService {
       || project.repo.trim().toLowerCase().endsWith(`/${want}`),
     )
   }
+
 }
 
 /**
@@ -235,9 +233,9 @@ export const ruleDecisionPort: EventDecisionPort = {
   name: 'rule',
   async decide(input: EventDecisionInput): Promise<EventDecisionOutput | null> {
     const source = input.source
-    const labels = (source.labels ?? []).map(label => label.trim().toLowerCase()).filter(Boolean)
+    const labels = labelsOf(input.event)
     const risky = labels.some(label => RISK_LABELS.includes(label))
-    const eventType = (source.defaultType ?? '').trim() || defaultTypeOf(input.event.sourceKind)
+    const eventType = input.event.eventType || (source.defaultType ?? '').trim() || defaultTypeOf(input.event.sourceKind)
     const output: EventDecisionOutput = {
       actionable: true,
       priority: risky ? 'P0' : normalizeEventPriority(source.defaultPriority),
@@ -245,10 +243,36 @@ export const ruleDecisionPort: EventDecisionPort = {
       ...(risky ? { needsReview: true, reason: '命中风险标签，需要人工确认' } : {}),
       confidence: 1,
     }
-    // 来源自己写明了项目时，这只是线索：仍然交给模型结合 prompt 判定。
-    if (!risky && !source.project) return output
     return output
   },
+}
+
+/**
+ * 按订阅的 GitHub 仓库名匹配项目。
+ *
+ * 项目清单里存的是本地仓库路径，GitHub 订阅里是 `owner/repo`；
+ * 仓库名与项目名或路径末段一致就算命中。
+ */
+export function matchProjectByRepo(projects: ProjectConfig[], repo: string): ProjectConfig | undefined {
+  const name = repo.trim().toLowerCase().split('/').pop() ?? ''
+  if (!name) return undefined
+  return projects.find(project =>
+    project.name.trim().toLowerCase() === name
+    || project.repo.trim().toLowerCase().split('/').pop() === name,
+  )
+}
+
+/** 事件上的标签；来源载荷里的 issue.labels 与事件自身的 labels 都认。 */
+function labelsOf(event: EventRecord): string[] {
+  const raw = event.raw
+  if (!raw || typeof raw !== 'object') return []
+  const row = raw as Record<string, unknown>
+  const issue = row.issue && typeof row.issue === 'object' ? row.issue as Record<string, unknown> : null
+  const source = issue && Array.isArray(issue.labels) ? issue.labels : (Array.isArray(row.labels) ? row.labels : [])
+  return source
+    .map(label => String(typeof label === 'object' && label ? (label as Record<string, unknown>).name ?? '' : label))
+    .map(label => label.trim().toLowerCase())
+    .filter(Boolean)
 }
 
 /** 按来源种类给一个默认事件类型。 */

@@ -6,6 +6,13 @@ import {
   eventSourcePathsIn,
   sourceFieldDefs,
 } from '../../src/web/client/event-sources.js'
+import {
+  githubSourceId,
+  githubRepoIssue,
+  nextGithubSourceId,
+  toggleEventType,
+  withGithubRepo,
+} from '../../src/web/client/github-subscriptions.js'
 
 describe('事件来源字段映射', () => {
   it('来源字段写成 events.sources.<id>.<key> 路径，类型按声明换算', () => {
@@ -62,6 +69,43 @@ describe('插件来源的字段', () => {
       'events.sources.demo-source.options.verbose',
     ])
     expect(defs.map(def => def.kind)).toEqual(['text', 'switch'])
+  })
+})
+
+describe('GitHub 仓库订阅', () => {
+  it('来源 id 按序号递增，不跟已有的重号', () => {
+    expect(githubSourceId(1)).toBe('github-1')
+    expect(nextGithubSourceId([])).toBe('github-1')
+    expect(nextGithubSourceId(['github-1', 'github-2'])).toBe('github-3')
+    // 非 GitHub 的来源 id 不占号
+    expect(nextGithubSourceId(['feishu', 'github-1'])).toBe('github-2')
+  })
+
+  it('新增仓库订阅时默认启用并订阅全部事件类型', () => {
+    const source = withGithubRepo('github-1', 'blankPen/router-agent')
+    expect(source).not.toBeNull()
+    expect(source?.enabled).toBe(true)
+    expect(source?.kind).toBe('github')
+    expect(source?.repo).toBe('blankPen/router-agent')
+    expect(source?.events).toEqual([])
+  })
+
+  it('仓库地址为空时不生成订阅', () => {
+    expect(withGithubRepo('github-1', '  ')).toBeNull()
+  })
+
+  it('仓库地址格式不对时给出提示', () => {
+    expect(githubRepoIssue('')).toContain('请填写仓库地址')
+    expect(githubRepoIssue('router-agent')).toContain('owner/repo')
+    expect(githubRepoIssue('blankPen/router-agent')).toBeNull()
+  })
+
+  it('勾选事件类型时按目录顺序排列', () => {
+    expect(toggleEventType(['workflow_run.failure'], 'issues.opened', true)).toEqual([
+      'issues.opened',
+      'workflow_run.failure',
+    ])
+    expect(toggleEventType(['issues.opened', 'issues.closed'], 'issues.opened', false)).toEqual(['issues.closed'])
   })
 })
 
