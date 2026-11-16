@@ -31,7 +31,7 @@ function eventOf(over: Partial<EventRecord> = {}): EventRecord {
 function inputOf(over: Partial<EventDecisionInput> = {}): EventDecisionInput {
   return {
     event: eventOf(),
-    source: { enabled: true, kind: 'github', defaultPriority: 'P2', defaultType: 'issue' },
+    source: { enabled: true, kind: 'github' },
     projects: PROJECTS,
     skills: EVENT_SKILLS,
     decision: { provider: 'rule', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
@@ -42,13 +42,13 @@ function inputOf(over: Partial<EventDecisionInput> = {}): EventDecisionInput {
 }
 
 describe('事件决策', () => {
-  it('规则先判：来源默认优先级与类型生效，模型不参与', async () => {
+  it('规则先判：订阅不带优先级，规则只给中性档位，类型取事件自己的', async () => {
     const service = new EventDecisionService({
       decision: { provider: 'rule', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
       rule: ruleDecisionPort,
     })
     const result = await service.decide(inputOf())
-    expect(result.verdict.priority).toBe('P2')
+    expect(result.verdict.priority).toBe('P3')
     expect(result.verdict.eventType).toBe('issue')
     expect(result.basis).toBe('rule')
   })
@@ -60,7 +60,7 @@ describe('事件决策', () => {
     })
     const result = await service.decide(inputOf({
       event: eventOf({ raw: { labels: [{ name: 'security' }] } }),
-      source: { enabled: true, kind: 'github', defaultPriority: 'P3' },
+      source: { enabled: true, kind: 'github', repo: 'blankPen/router-agent' },
     }))
     expect(result.verdict.priority).toBe('P0')
     expect(result.verdict.needsReview).toBe(true)
@@ -78,7 +78,7 @@ describe('事件决策', () => {
     })
     const result = await service.decide(inputOf({
       event: eventOf({ raw: { labels: [{ name: 'security' }] } }),
-      source: { enabled: true, kind: 'github', repo: 'blankPen/router-agent', defaultPriority: 'P3' },
+      source: { enabled: true, kind: 'github', repo: 'blankPen/router-agent' },
     }))
     expect(result.verdict.needsReview).toBe(true)
   })
@@ -173,7 +173,7 @@ describe('事件决策', () => {
       model,
     })
     const result = await service.decide(inputOf({
-      source: { enabled: true, kind: 'github', repo: 'blankPen/router-agent', defaultPriority: 'P2' },
+      source: { enabled: true, kind: 'github', repo: 'blankPen/router-agent' },
     }))
     expect(result.verdict.needsReview).toBe(false)
     expect(result.verdict.decided).toBe(false)
@@ -190,7 +190,7 @@ describe('事件决策', () => {
       model,
     })
     const result = await service.decide(inputOf({
-      source: { enabled: true, kind: 'github', repo: 'blankPen/router-agent', defaultPriority: 'P2' },
+      source: { enabled: true, kind: 'github', repo: 'blankPen/router-agent' },
     }))
     expect(result.verdict.needsReview).toBe(false)
   })
@@ -216,7 +216,7 @@ describe('事件决策', () => {
       rule: ruleDecisionPort,
     })
     const result = await service.decide(inputOf({
-      source: { enabled: true, kind: 'github', repo: 'blankPen/router-agent', defaultPriority: 'P2' },
+      source: { enabled: true, kind: 'github', repo: 'blankPen/router-agent' },
     }))
     expect(result.verdict.project).toBe('router-agent')
     expect(result.verdict.needsReview).toBe(false)
@@ -228,9 +228,31 @@ describe('事件决策', () => {
       rule: ruleDecisionPort,
     })
     const result = await service.decide(inputOf({
-      source: { enabled: true, kind: 'github', repo: 'someone/unknown-repo', defaultPriority: 'P2' },
+      source: { enabled: true, kind: 'github', repo: 'someone/unknown-repo' },
     }))
     expect(result.verdict.project).toBe('')
     expect(result.verdict.needsReview).toBe(true)
+  })
+})
+
+/**
+ * 真实 GitHub 事件载荷里，Issue 标签在 `payload.issue.labels`，
+ * 不在顶层 `issue.labels`。护栏读错位置就等于没有护栏。
+ */
+describe('事件决策 · 风险标签护栏', () => {
+  it('标签在 payload.issue.labels 时也命中风险标签', async () => {
+    const service = new EventDecisionService({
+      decision: { provider: 'rule', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
+      rule: ruleDecisionPort,
+    })
+    const result = await service.decide(inputOf({
+      event: eventOf({
+        raw: { type: 'IssuesEvent', payload: { issue: { number: 12, labels: [{ name: 'security' }] } } },
+      }),
+      source: { enabled: true, kind: 'github', repo: 'blankPen/router-agent' },
+    }))
+    expect(result.verdict.priority).toBe('P0')
+    expect(result.verdict.needsReview).toBe(true)
+    expect(result.verdict.reason).toContain('风险标签')
   })
 })

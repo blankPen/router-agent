@@ -23,8 +23,6 @@ describe('事件配置', () => {
       '      enabled: true',
       '      kind: github',
       '      repo: blankPen/router-agent',
-      '      labels: [bug]',
-      '      defaultPriority: P1',
       '  decision:',
       '    provider: llm',
       '    confidenceThreshold: 0.8',
@@ -38,7 +36,6 @@ describe('事件配置', () => {
     const config = loadConfig(home, {})
     expect(config.events.enabled).toBe(true)
     expect(config.events.sources.github?.repo).toBe('blankPen/router-agent')
-    expect(config.events.sources.github?.defaultPriority).toBe('P1')
     expect(config.events.decision.provider).toBe('llm')
     expect(config.events.decision.confidenceThreshold).toBe(0.8)
     expect(config.events.policy.peak.start).toBe('10:00')
@@ -176,12 +173,10 @@ describe('事件配置', () => {
     const result = applyConfigPatch(config, {
       'events.decision.prompt': '# 新规则',
       'events.sources.github-1.enabled': true,
-      'events.sources.github-1.defaultPriority': 'P0',
     })
     expect(result.errors).toEqual([])
     expect(config.events.decision.prompt).toBe('# 新规则')
     expect(config.events.sources['github-1']?.enabled).toBe(true)
-    expect(config.events.sources['github-1']?.defaultPriority).toBe('P0')
   })
 
   it('未知来源与未知字段被拒绝', () => {
@@ -221,5 +216,36 @@ describe('事件配置', () => {
     const config = defaultConfig()
     const result = applyConfigPatch(config, { 'events.enabled': true })
     expect(result.errors).toEqual([])
+  })
+})
+
+describe('事件来源订阅 · 纯粹订阅', () => {
+  it('订阅里不再有默认优先级、默认类型与每日配额', () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-events-'))
+    writeFileSync(join(home, 'config.yaml'), [
+      'events:',
+      '  sources:',
+      '    github-1:',
+      '      enabled: true',
+      '      kind: github',
+      '      repo: blankPen/router-agent',
+      '      events: [issues.opened]',
+      '      defaultPriority: P1',
+      '      defaultType: issue',
+      '      dailyLimit: 10',
+      '',
+    ].join('\n'), 'utf8')
+    const config = loadConfig(home, {})
+    const source = config.events.sources['github-1']
+    expect(source).not.toHaveProperty('defaultPriority')
+    expect(source).not.toHaveProperty('defaultType')
+    expect(source).not.toHaveProperty('dailyLimit')
+  })
+
+  it('订阅里写默认优先级这类参数会被拒绝', () => {
+    const config = defaultConfig()
+    config.events.sources['github-1'] = { enabled: true, kind: 'github', repo: 'a/b', events: [] }
+    const result = applyConfigPatch(config, { 'events.sources.github-1.defaultPriority': 'P0' })
+    expect(result.errors[0]?.message).toContain('不是可编辑的事件来源字段')
   })
 })

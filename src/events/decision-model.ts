@@ -78,7 +78,7 @@ export function createJevDecisionPort(client: JevClient, deps: { logger?: Logger
       return {
         actionable: (answers.actionable ?? 0) >= 0.5,
         priority,
-        eventType: input.source.defaultType ?? '',
+        eventType: input.event.eventType ?? '',
         ...(project.key ? { project: project.key.replace(/^project:/, '') } : {}),
         ...(skill.key ? { skill: skill.key.replace(/^skill:/, '') } : {}),
         needsReview: (answers.needsReview ?? 0) >= 0.5,

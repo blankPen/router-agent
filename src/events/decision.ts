@@ -226,19 +226,20 @@ function mergeOutput(rule: EventDecisionOutput, model: EventDecisionOutput): Eve
 /**
  * 规则端口：完全确定性的判定，不调模型、不花钱。
  *
- * 规则只给「事实」：来源默认优先级与类型、风险标签必须人审。
- * 其余（项目、skill）留给模型或人工。
+ * 规则只给「事实」：风险标签必须人审。
+ * 其余（优先级、项目、skill）留给模型或人工。
  */
 export const ruleDecisionPort: EventDecisionPort = {
   name: 'rule',
   async decide(input: EventDecisionInput): Promise<EventDecisionOutput | null> {
-    const source = input.source
     const labels = labelsOf(input.event)
     const risky = labels.some(label => RISK_LABELS.includes(label))
-    const eventType = input.event.eventType || (source.defaultType ?? '').trim() || defaultTypeOf(input.event.sourceKind)
+    const eventType = input.event.eventType || defaultTypeOf(input.event.sourceKind)
     const output: EventDecisionOutput = {
       actionable: true,
-      priority: risky ? 'P0' : normalizeEventPriority(source.defaultPriority),
+      // 订阅里不写优先级：规则只认风险标签提 P0，其余按中性档位，
+      // 真正的优先级由决策模型按 prompt 判定。
+      priority: risky ? 'P0' : 'P3',
       eventType,
       ...(risky ? { needsReview: true, reason: '命中风险标签，需要人工确认' } : {}),
       confidence: 1,
@@ -262,12 +263,20 @@ export function matchProjectByRepo(projects: ProjectConfig[], repo: string): Pro
   )
 }
 
-/** 事件上的标签；来源载荷里的 issue.labels 与事件自身的 labels 都认。 */
+/**
+ * 事件上的标签。
+ *
+ * 真实 GitHub 载荷里标签在 `payload.issue.labels`，不在顶层 `issue.labels`；
+ * 两个位置都读，护栏才不会因为路径写错而失效。
+ */
 function labelsOf(event: EventRecord): string[] {
   const raw = event.raw
   if (!raw || typeof raw !== 'object') return []
   const row = raw as Record<string, unknown>
-  const issue = row.issue && typeof row.issue === 'object' ? row.issue as Record<string, unknown> : null
+  const payload = row.payload && typeof row.payload === 'object' ? row.payload as Record<string, unknown> : null
+  const issue = payload?.issue && typeof payload.issue === 'object'
+    ? payload.issue as Record<string, unknown>
+    : (row.issue && typeof row.issue === 'object' ? row.issue as Record<string, unknown> : null)
   const source = issue && Array.isArray(issue.labels) ? issue.labels : (Array.isArray(row.labels) ? row.labels : [])
   return source
     .map(label => String(typeof label === 'object' && label ? (label as Record<string, unknown>).name ?? '' : label))

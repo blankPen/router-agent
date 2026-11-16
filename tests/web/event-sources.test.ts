@@ -19,17 +19,14 @@ describe('事件来源字段映射', () => {
     const defs = sourceFieldDefs('github', [
       { key: 'repo', label: '仓库', kind: 'text' },
       { key: 'intervalMs', label: '轮询间隔（毫秒）', kind: 'number' },
-      { key: 'labels', label: '标签白名单', kind: 'list' },
-      { key: 'defaultPriority', label: '默认优先级', kind: 'select', options: ['P0', 'P1'] },
+      { key: 'events', label: '监听内容', kind: 'list' },
     ])
     expect(defs.map(def => def.path)).toEqual([
       'events.sources.github.repo',
       'events.sources.github.intervalMs',
-      'events.sources.github.labels',
-      'events.sources.github.defaultPriority',
+      'events.sources.github.events',
     ])
-    expect(defs.map(def => def.kind)).toEqual(['text', 'number', 'list', 'select'])
-    expect(defs[3]?.options).toEqual([{ value: 'P0', label: 'P0' }, { value: 'P1', label: 'P1' }])
+    expect(defs.map(def => def.kind)).toEqual(['text', 'number', 'list'])
   })
 
   it('来源的 secret 字段按密码字段渲染，不在页面上明文显示', () => {

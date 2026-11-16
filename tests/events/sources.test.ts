@@ -51,9 +51,13 @@ function runnerOf(responses: Record<string, { code: number; stdout: string; stde
     run: async argv => {
       calls.push(argv)
       const key = argv[0] === 'api'
-        ? (argv[1] ?? '').split('?')[0]!
+        ? (argv[1] ?? '')
         : argv[0] === 'pr' ? `pr ${argv[1] ?? ''}` : argv[0]!
-      const hit = responses[key] ?? responses[argv[0] ?? ''] ?? { code: 1, stdout: '', stderr: 'not found' }
+      // 先按带 query 的完整 URL 精确匹配，再退回不带 query 的路径。
+      const hit = responses[key]
+        ?? responses[key.split('?')[0]!]
+        ?? responses[argv[0] ?? '']
+        ?? { code: 1, stdout: '', stderr: 'not found' }
       return { code: hit.code, stdout: hit.stdout, stderr: hit.stderr ?? '' }
     },
   }
@@ -63,7 +67,7 @@ function runnerOf(responses: Record<string, { code: number; stdout: string; stde
 describe('GitHub 事件来源', () => {
   it('Issue 与 PR 事件按订阅类型过滤后入队', async () => {
     const { runner } = runnerOf({
-      'repos/a/b/events': { code: 0, stdout: EVENTS_JSON },
+      'repos/a/b/events?per_page=100&page=1': { code: 0, stdout: EVENTS_JSON },
       'pr view': { code: 0, stdout: JSON.stringify({ number: 110, title: '实现事件总线', body: 'PR 正文' }) },
     })
     const source = new GithubEventSource('github-1', {
@@ -84,7 +88,7 @@ describe('GitHub 事件来源', () => {
 
   it('没订阅的类型不进队列', async () => {
     const { runner } = runnerOf({
-      'repos/a/b/events': { code: 0, stdout: EVENTS_JSON },
+      'repos/a/b/events?per_page=100&page=1': { code: 0, stdout: EVENTS_JSON },
       'pr view': { code: 0, stdout: '{}' },
     })
     const source = new GithubEventSource('github-1', {
@@ -100,7 +104,7 @@ describe('GitHub 事件来源', () => {
   it('Action 执行失败也算一条事件', async () => {
     const { runner } = runnerOf({
       'repos/a/b/events': { code: 0, stdout: '[]' },
-      'repos/a/b/actions/runs': { code: 0, stdout: RUNS_JSON },
+      'repos/a/b/actions/runs?per_page=100&page=1': { code: 0, stdout: RUNS_JSON },
     })
     const source = new GithubEventSource('github-1', {
       enabled: true,
@@ -117,7 +121,7 @@ describe('GitHub 事件来源', () => {
   it('Action 订阅里含「执行结束」时，成功与失败都算', async () => {
     const { runner } = runnerOf({
       'repos/a/b/events': { code: 0, stdout: '[]' },
-      'repos/a/b/actions/runs': { code: 0, stdout: RUNS_JSON },
+      'repos/a/b/actions/runs?per_page=100&page=1': { code: 0, stdout: RUNS_JSON },
     })
     const source = new GithubEventSource('github-1', {
       enabled: true,
@@ -144,7 +148,7 @@ describe('GitHub 事件来源', () => {
 
   it('只处理上次之后的新事件，不重复入队', async () => {
     const { runner } = runnerOf({
-      'repos/a/b/events': { code: 0, stdout: EVENTS_JSON },
+      'repos/a/b/events?per_page=100&page=1': { code: 0, stdout: EVENTS_JSON },
       'pr view': { code: 0, stdout: JSON.stringify({ number: 110, title: '实现事件总线', body: 'PR 正文' }) },
     })
     const cursor = new Map<string, string>()
@@ -169,7 +173,7 @@ describe('GitHub 事件来源', () => {
 
   it('有游标时只取比游标更新的事件', async () => {
     const { runner } = runnerOf({
-      'repos/a/b/events': { code: 0, stdout: EVENTS_JSON },
+      'repos/a/b/events?per_page=100&page=1': { code: 0, stdout: EVENTS_JSON },
       'pr view': { code: 0, stdout: JSON.stringify({ number: 110, title: '实现事件总线', body: 'PR 正文' }) },
     })
     const source = new GithubEventSource('github-1', {
@@ -190,7 +194,7 @@ describe('GitHub 事件来源', () => {
 
   it('PR 事件缺标题时用 pr view 补上', async () => {
     const { runner, calls } = runnerOf({
-      'repos/a/b/events': { code: 0, stdout: EVENTS_JSON },
+      'repos/a/b/events?per_page=100&page=1': { code: 0, stdout: EVENTS_JSON },
       'pr view': { code: 0, stdout: JSON.stringify({ number: 110, title: '实现事件总线', body: 'PR 正文' }) },
     })
     const source = new GithubEventSource('github-1', {
@@ -217,5 +221,104 @@ describe('GitHub 事件来源', () => {
       workflow_runs: [{ id: 1, name: 'x', status: 'in_progress', created_at: '2026-11-15T00:00:00Z' }],
     }), 'a/b', ['workflow_run.completed'])
     expect(events).toHaveLength(0)
+  })
+})
+
+/** 一页 Issue/PR 事件（真实 GitHub 每页 100 条，page4 起为空）。 */
+function pageJson(items: unknown[]): string {
+  return JSON.stringify(items)
+}
+
+const PR_EVENT = (id: string, number: number) => ({
+  id,
+  type: 'PullRequestEvent',
+  actor: { login: 'blankPen' },
+  created_at: '2026-11-16T09:00:00Z',
+  payload: {
+    action: 'opened',
+    pull_request: { number, title: `PR ${number}`, body: null, html_url: `https://github.com/a/b/pull/${number}`, state: 'open', merged: false },
+  },
+})
+
+describe('GitHub 事件来源 · 分页', () => {
+  it('事件流只拉一页时，第 2 页里的事件永远收不到', async () => {
+    // 第 1 页 100 条（全是无关的 PushEvent），第 2 页才有订阅的 PR 事件。
+    const page1 = Array.from({ length: 100 }, (_, index) => ({
+      id: String(90000000000 + index),
+      type: 'PushEvent',
+      actor: { login: 'x' },
+      created_at: '2026-11-16T10:00:00Z',
+      payload: { action: null },
+    }))
+    const page2 = [PR_EVENT('20254670660', 111)]
+    const { runner, calls } = runnerOf({
+      'repos/a/b/events?per_page=100&page=1': { code: 0, stdout: pageJson(page1) },
+      'repos/a/b/events?per_page=100&page=2': { code: 0, stdout: pageJson(page2) },
+      'pr view': { code: 0, stdout: JSON.stringify({ title: 'PR 111', body: '' }) },
+    })
+    const source = new GithubEventSource('github-1', {
+      enabled: true,
+      kind: 'github',
+      repo: 'a/b',
+      events: ['pull_request.opened'],
+    }, { runner })
+    const events = await source.poll()
+    expect(calls.some(argv => argv[1]?.includes('page=2'))).toBe(true)
+    expect(events.map(event => event.eventType)).toEqual(['pull_request.opened'])
+  })
+})
+
+describe('GitHub 事件来源 · Action 事件类型', () => {
+  it('工作流被触发（还没结论）时记一条「触发」事件', async () => {
+    const { runner } = runnerOf({
+      'repos/a/b/events?per_page=100&page=1': { code: 0, stdout: '[]' },
+      'repos/a/b/actions/runs?per_page=100&page=1': {
+        code: 0,
+        stdout: JSON.stringify({
+          workflow_runs: [{
+            id: 99,
+            name: '发布 npm 包',
+            status: 'in_progress',
+            conclusion: null,
+            created_at: '2026-11-16T10:00:00Z',
+            updated_at: '2026-11-16T10:00:05Z',
+            html_url: 'https://github.com/a/b/actions/runs/99',
+            head_branch: 'main',
+            display_title: '发布 npm 包',
+          }],
+        }),
+      },
+    })
+    const source = new GithubEventSource('github-1', {
+      enabled: true,
+      kind: 'github',
+      repo: 'a/b',
+      events: ['workflow_run.requested'],
+    }, { runner })
+    const events = await source.poll()
+    expect(events.map(event => event.eventType)).toEqual(['workflow_run.requested'])
+  })
+
+  it('订阅「执行结束」时，skipped 与 action_required 也算结束', async () => {
+    const { runner } = runnerOf({
+      'repos/a/b/events?per_page=100&page=1': { code: 0, stdout: '[]' },
+      'repos/a/b/actions/runs?per_page=100&page=1': {
+        code: 0,
+        stdout: JSON.stringify({
+          workflow_runs: [
+            { id: 1, name: 'a', status: 'completed', conclusion: 'skipped', created_at: '2026-11-16T10:00:00Z', updated_at: '2026-11-16T10:01:00Z', html_url: 'u1', head_branch: 'main', display_title: 'a' },
+            { id: 2, name: 'b', status: 'completed', conclusion: 'action_required', created_at: '2026-11-16T10:00:00Z', updated_at: '2026-11-16T10:01:00Z', html_url: 'u2', head_branch: 'main', display_title: 'b' },
+          ],
+        }),
+      },
+    })
+    const source = new GithubEventSource('github-1', {
+      enabled: true,
+      kind: 'github',
+      repo: 'a/b',
+      events: ['workflow_run.completed'],
+    }, { runner })
+    const events = await source.poll()
+    expect(events.map(event => event.eventType)).toEqual(['workflow_run.completed', 'workflow_run.completed'])
   })
 })

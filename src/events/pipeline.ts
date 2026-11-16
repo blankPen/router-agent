@@ -96,8 +96,9 @@ export class EventPipeline {
       receivedAt: envelope.receivedAt ?? now,
       status: 'pending',
       execution: 'none',
-      priority: normalizeEventPriority(source.defaultPriority),
-      eventType: envelope.eventType ?? source.defaultType ?? '',
+      // 订阅是纯粹的：入队时不预设优先级与类型，判定阶段再定。
+      priority: 'P3',
+      eventType: envelope.eventType ?? '',
       needsReview: false,
       updatedAt: now,
       attempts: 0,
@@ -437,8 +438,8 @@ export class EventPipeline {
         return { allowed: false, reason: `今日全局配额 ${globalLimit} 条已用完，顺延等待` }
       }
     }
-    // 来源自己配了每日配额就以它为准，否则用策略里的统一值。
-    const sourceLimit = config.events.sources[event.sourceId]?.dailyLimit ?? policy.perSourceDailyLimit
+    // 单来源每日上限只由策略统一决定，不写在订阅里。
+    const sourceLimit = policy.perSourceDailyLimit
     if (sourceLimit > 0) {
       const since = startOfDay(this.clock())
       const count = this.store.countEventsSince(event.sourceId, since)

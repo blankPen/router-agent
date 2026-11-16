@@ -15,7 +15,7 @@ function setup(over: Partial<AppConfig> = {}) {
       ...defaultConfig().events,
       sources: {
         ...defaultConfig().events.sources,
-        github: { enabled: true, kind: 'github', repo: 'blankPen/router-agent', defaultPriority: 'P2', defaultType: 'issue' },
+        github: { enabled: true, kind: 'github', repo: 'blankPen/router-agent' },
       },
     },
     ...over,
@@ -44,9 +44,6 @@ const SOURCE = {
   enabled: true,
   kind: 'github' as const,
   repo: 'blankPen/router-agent',
-  project: 'router-agent',
-  defaultPriority: 'P2' as const,
-  defaultType: 'issue',
 }
 
 describe('事件管线', () => {
@@ -107,9 +104,9 @@ describe('事件管线', () => {
     expect(store.getEvent(event.id)?.status).toBe('invalid')
   })
 
-  it('来源自己配的每日配额以它为准，超了的事件顺延等下一轮', async () => {
+  it('单来源每日上限由策略统一决定，超了的事件顺延等下一轮', async () => {
     const { store, pipeline, config } = setup()
-    config.events.sources.github = { ...SOURCE, dailyLimit: 1 }
+    config.events.policy.perSourceDailyLimit = 1
     const first = pipeline.ingest('github', SOURCE, { externalId: 'issue:a#7', title: '崩溃', body: '崩了' })
     await pipeline.process(first)
     const second = pipeline.ingest('github', SOURCE, { externalId: 'issue:a#8', title: '崩溃', body: '崩了' })

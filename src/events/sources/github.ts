@@ -13,6 +13,9 @@ import { GITHUB_EVENT_TYPES, githubEventLabel, type GithubEventType } from '#cor
 import type { CommandRunner } from '#infra/process.js'
 import { errorMessage, noopLogger, type Logger } from '#infra/logger.js'
 
+/** GitHub 事件流与工作流列表最多翻几页；feed 本身最多 300 条。 */
+const MAX_EVENT_PAGES = 3
+
 export interface GithubEventSourceDeps {
   /** 执行 gh 的运行器；测试注入。 */
   runner: CommandRunner
@@ -60,37 +63,47 @@ export class GithubEventSource implements EventSource {
 
     const envelopes: EventEnvelope[] = []
     if (wanted.some(type => type.kind !== 'workflow_run')) {
-      const result = await this.runner.run(
-        ['api', `repos/${repo}/events?per_page=${this.limit}`],
-        { timeoutMs: 60_000 },
-      )
-      if (result.code !== 0) {
-        // 拉取失败只记日志：来源不可用不该让整条管线停摆，下次轮询还会再试。
-        this.logger.warn('event:github-poll-failed', {
-          sourceId: this.id,
-          repo,
-          detail: (result.stderr || result.stdout).slice(0, 200),
-        })
-      } else {
+      // 事件流一页装不下的订阅事件：GitHub 的 feed 每页 100 条、最多翻到 300 条，
+      // 只拉第 1 页会把排在后面的 Issue / PR 事件整片丢掉。
+      for (let page = 1; page <= MAX_EVENT_PAGES; page += 1) {
+        const result = await this.runner.run(
+          ['api', `repos/${repo}/events?per_page=${this.limit}&page=${page}`],
+          { timeoutMs: 60_000 },
+        )
+        if (result.code !== 0) {
+          // 拉取失败只记日志：来源不可用不该让整条管线停摆，下次轮询还会再试。
+          this.logger.warn('event:github-poll-failed', {
+            sourceId: this.id,
+            repo,
+            detail: (result.stderr || result.stdout).slice(0, 200),
+          })
+          break
+        }
         const parsed = parseGithubEvents(result.stdout, repo, wantedIds)
+        // 结束条件看本页原始条数：本页没有订阅事件不代表后面没有
+        // （feed 里混着大量 PushEvent，订阅事件可能排在第 2、3 页）。
+        if (pageEntryCount(result.stdout) === 0) break
         await this.fillPullRequestDetails(parsed, repo)
         envelopes.push(...this.freshEvents(parsed, `github:${repo}`))
       }
     }
 
     if (wanted.some(type => type.kind === 'workflow_run')) {
-      const result = await this.runner.run(
-        ['api', `repos/${repo}/actions/runs?per_page=${this.limit}`],
-        { timeoutMs: 60_000 },
-      )
-      if (result.code !== 0) {
-        this.logger.warn('event:github-poll-failed', {
-          sourceId: this.id,
-          repo,
-          detail: (result.stderr || result.stdout).slice(0, 200),
-        })
-      } else {
+      for (let page = 1; page <= MAX_EVENT_PAGES; page += 1) {
+        const result = await this.runner.run(
+          ['api', `repos/${repo}/actions/runs?per_page=${this.limit}&page=${page}`],
+          { timeoutMs: 60_000 },
+        )
+        if (result.code !== 0) {
+          this.logger.warn('event:github-poll-failed', {
+            sourceId: this.id,
+            repo,
+            detail: (result.stderr || result.stdout).slice(0, 200),
+          })
+          break
+        }
         const parsed = parseGithubRuns(result.stdout, repo, wantedIds)
+        if (pageEntryCount(result.stdout) === 0) break
         envelopes.push(...this.freshEvents(parsed, `github:${repo}:runs`))
       }
     }
@@ -270,27 +283,23 @@ export function parseGithubRuns(stdout: string, repo: string, wanted: string[]):
     if (!Number.isFinite(id) || id <= 0) continue
     const status = String(row.status ?? '')
     const conclusion = String(row.conclusion ?? '')
-    // 进行中的工作流没有结论，既不算「结束」也不算「失败」。
-    if (status !== 'completed' || !conclusion) continue
-    // 结论决定精确类型；「执行结束」是通配，成功与失败都算。
-    const exact = `workflow_run.${conclusion}`
-    const hit = wanted.includes(exact)
-      || (wanted.includes('workflow_run.completed') && (conclusion === 'success' || conclusion === 'failure' || conclusion === 'cancelled'))
-    if (!hit) continue
-    const eventType = wanted.includes(exact) ? exact : 'workflow_run.completed'
+    const eventType = runEventType(status, conclusion, wanted)
+    if (!eventType) continue
     const name = String(row.name ?? '').trim() || '工作流'
     const title = String(row.display_title ?? '').trim()
     const url = String(row.html_url ?? '')
     const createdAt = String(row.created_at ?? '')
+    // 幂等键带上状态：同一次运行先「触发」后「失败」是两条不同事件。
+    const phase = conclusion || status
     out.push({
-      externalId: `workflow_run:${repo}#${id}:${conclusion}`,
+      externalId: `workflow_run:${repo}#${id}:${phase}`,
       title: `${githubEventLabel(eventType)} · ${name}`,
       eventType,
       id: String(id),
       body: [
         title ? `触发内容：${title}` : '',
         `工作流：${name}`,
-        `结论：${conclusion}`,
+        conclusion ? `结论：${conclusion}` : `状态：${status}`,
         row.head_branch ? `分支：${String(row.head_branch)}` : '',
       ].filter(Boolean).join('\n'),
       ...(url ? { url } : {}),
@@ -308,6 +317,22 @@ function bodyOf(subject: Record<string, unknown>, payload: Record<string, unknow
   const review = isRecord(payload.review) ? String(payload.review.body ?? '') : ''
   const description = String(subject.body ?? '')
   return [description, comment, review].filter(Boolean).join('\n\n')
+}
+
+/**
+ * 工作流的当前状态 → 订阅类型 id；没命中订阅返回 null。
+ *
+ * 还没跑完的算「触发」（requested）；跑完了按结论取精确类型
+ * （success / failure / cancelled …），「执行结束」（completed）是通配，全都算。
+ */
+function runEventType(status: string, conclusion: string, wanted: string[]): string | null {
+  if (!conclusion) {
+    // 进行中 / 排队中：只当「触发」事件，没有结论就没有结论类事件。
+    return wanted.includes('workflow_run.requested') ? 'workflow_run.requested' : null
+  }
+  const exact = `workflow_run.${conclusion}`
+  if (wanted.includes(exact)) return exact
+  return wanted.includes('workflow_run.completed') ? 'workflow_run.completed' : null
 }
 
 /**
@@ -331,3 +356,15 @@ function subscriptionTypeOf(type: string, action: string, isPull: boolean, merge
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+
+/** 这一页里有多少条原始记录；解析不出来当 0 条（停止翻页）。 */
+function pageEntryCount(stdout: string): number {
+  try {
+    const parsed: unknown = JSON.parse(stdout || '[]')
+    if (Array.isArray(parsed)) return parsed.length
+    if (isRecord(parsed) && Array.isArray(parsed.workflow_runs)) return parsed.workflow_runs.length
+    return 0
+  } catch {
+    return 0
+  }
+}

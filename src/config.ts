@@ -297,12 +297,6 @@ export interface EventSourceConfig {
   events?: string[]
   /** 轮询间隔（毫秒）。 */
   intervalMs?: number
-  /** 事件默认优先级。 */
-  defaultPriority?: EventPriority
-  /** 事件默认类型。 */
-  defaultType?: string
-  /** 该来源每日配额（条）。 */
-  dailyLimit?: number
 }
 
 /** 事件决策策略：判定依据（自然语言 prompt）与护栏。 */
@@ -914,9 +908,6 @@ function parseEvents(value: unknown, base: EventsSettings): EventsSettings {
       ...(typeof raw.repo === 'string' ? { repo: raw.repo } : {}),
       ...(Array.isArray(raw.events) ? { events: stringArray(raw.events, []) } : {}),
       ...(typeof raw.intervalMs === 'number' ? { intervalMs: raw.intervalMs } : {}),
-      ...(raw.defaultPriority ? { defaultPriority: normalizeEventPriority(raw.defaultPriority) } : {}),
-      ...(typeof raw.defaultType === 'string' ? { defaultType: raw.defaultType } : {}),
-      ...(typeof raw.dailyLimit === 'number' ? { dailyLimit: raw.dailyLimit } : {}),
     }
     // GitHub 来源没写事件类型 = 订阅全部类型；写了的只认目录里的类型。
     if (sources[id]!.kind === 'github') {
@@ -1883,9 +1874,6 @@ const EVENT_SOURCE_FIELDS: Record<string, 'text' | 'number' | 'boolean' | 'list'
   repo: 'text',
   events: 'githubEvents',
   intervalMs: 'number',
-  defaultPriority: 'priority',
-  defaultType: 'text',
-  dailyLimit: 'number',
 }
 
 /** 校验单个事件来源字段；字段名不认识就拒绝，避免面板写错键名。 */

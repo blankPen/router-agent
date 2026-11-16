@@ -43,6 +43,8 @@ export const GITHUB_EVENT_TYPES: readonly GithubEventType[] = [
   { id: 'workflow_run.completed', kind: 'workflow_run', action: 'completed', label: 'Action 执行结束' },
   { id: 'workflow_run.failure', kind: 'workflow_run', action: 'failure', label: 'Action 执行失败' },
   { id: 'workflow_run.cancelled', kind: 'workflow_run', action: 'cancelled', label: 'Action 被取消' },
+  { id: 'workflow_run.skipped', kind: 'workflow_run', action: 'skipped', label: 'Action 被跳过' },
+  { id: 'workflow_run.action_required', kind: 'workflow_run', action: 'action_required', label: 'Action 需要人工处理' },
 ]
 
 const TYPE_BY_ID = new Map(GITHUB_EVENT_TYPES.map(type => [type.id, type]))
