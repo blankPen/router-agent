@@ -65,6 +65,7 @@ export class GithubEventSource implements EventSource {
     if (wanted.some(type => type.kind !== 'workflow_run')) {
       // 事件流一页装不下的订阅事件：GitHub 的 feed 每页 100 条、最多翻到 300 条，
       // 只拉第 1 页会把排在后面的 Issue / PR 事件整片丢掉。
+      const pages: EventEnvelope[] = []
       for (let page = 1; page <= MAX_EVENT_PAGES; page += 1) {
         const result = await this.runner.run(
           ['api', `repos/${repo}/events?per_page=${this.limit}&page=${page}`],
@@ -84,11 +85,13 @@ export class GithubEventSource implements EventSource {
         // （feed 里混着大量 PushEvent，订阅事件可能排在第 2、3 页）。
         if (pageEntryCount(result.stdout) === 0) break
         await this.fillPullRequestDetails(parsed, repo)
-        envelopes.push(...this.freshEvents(parsed, `github:${repo}`))
+        pages.push(...parsed)
       }
+      envelopes.push(...this.freshEvents(pages, `github:${repo}`))
     }
 
     if (wanted.some(type => type.kind === 'workflow_run')) {
+      const pages: EventEnvelope[] = []
       for (let page = 1; page <= MAX_EVENT_PAGES; page += 1) {
         const result = await this.runner.run(
           ['api', `repos/${repo}/actions/runs?per_page=${this.limit}&page=${page}`],
@@ -104,8 +107,9 @@ export class GithubEventSource implements EventSource {
         }
         const parsed = parseGithubRuns(result.stdout, repo, wantedIds)
         if (pageEntryCount(result.stdout) === 0) break
-        envelopes.push(...this.freshEvents(parsed, `github:${repo}:runs`))
+        pages.push(...parsed)
       }
+      envelopes.push(...this.freshEvents(pages, `github:${repo}:runs`))
     }
     return envelopes
   }
@@ -157,10 +161,11 @@ export class GithubEventSource implements EventSource {
   }
 
   /**
-   * 丢掉上次已见过的���件。
+   * 丢掉上次已见过的事件，并推进游标。
    *
-   * GitHub 的事件 id 是单调递增的数字串，按大小比就能判断新旧；
-   * 游标记的是已处理过的最大 id。
+   * 同一族里的 GitHub 事件 id 严格降序，所以游标记「已处理过的最大 id」。
+   * 注意：必须等所有页都拉完后一次性算 —— 同一族里第 1 页的 id 反而比第 2 页大，
+   * 每页各算一次会让第 1 页把游标推过头，后面几页的事件全被当成旧事件丢掉。
    */
   private freshEvents(events: EventEnvelope[], cursorKey: string): EventEnvelope[] {
     if (!this.cursor) return events

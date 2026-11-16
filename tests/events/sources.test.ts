@@ -322,3 +322,37 @@ describe('GitHub 事件来源 · Action 事件类型', () => {
     expect(events.map(event => event.eventType)).toEqual(['workflow_run.completed', 'workflow_run.completed'])
   })
 })
+
+/**
+ * GitHub 事件流同一族里的 id 是严格降序的，所以「第 1 页的 id 比第 2 页大」。
+ * 若每页各自推进游标，第 1 页就把游标推过头，第 2 页的事件全被当成旧事件丢掉。
+ */
+describe('GitHub 事件来源 · 多页游标', () => {
+  it('第 2 页的事件 id 比第 1 页小，不会被第 1 页推进的游标挡掉', async () => {
+    const page1 = [PR_EVENT('20254670660', 111)]
+    const page2 = [PR_EVENT('20254670000', 112)]
+    const { runner } = runnerOf({
+      'repos/a/b/events?per_page=100&page=1': { code: 0, stdout: JSON.stringify(page1) },
+      'repos/a/b/events?per_page=100&page=2': { code: 0, stdout: JSON.stringify(page2) },
+      'pr view': { code: 0, stdout: JSON.stringify({ title: 'x', body: '' }) },
+    })
+    const cursor = new Map<string, string>()
+    const source = new GithubEventSource('github-1', {
+      enabled: true,
+      kind: 'github',
+      repo: 'a/b',
+      events: ['pull_request.opened'],
+    }, {
+      runner,
+      cursor: {
+        get: key => cursor.get(key) ?? null,
+        set: (key, value) => { cursor.set(key, value) },
+      },
+    })
+    const events = await source.poll()
+    expect(events.map(event => event.externalId)).toEqual([
+      'pull_request:a/b#111:20254670660',
+      'pull_request:a/b#112:20254670000',
+    ])
+  })
+})
