@@ -28,6 +28,23 @@ export interface SourceMeta {
   fields: SourceFieldMeta[]
 }
 
+/** GitHub 来源在配置页收成一张卡片后的摘要。 */
+export interface GithubSourceSummary {
+  /** 已添加的仓库数；每个仓库对应配置里的一条 GitHub 来源。 */
+  repos: number
+  /** 至少一个仓库开着时，整张 GitHub 卡片算启用。 */
+  enabled: boolean
+}
+
+/** 把多条 GitHub 仓库来源聚合为一张卡片的状态。 */
+export function githubSourceSummary(sources: Array<{ kind?: string; enabled: boolean }>): GithubSourceSummary {
+  const github = sources.filter(source => source.kind === 'github')
+  return {
+    repos: github.length,
+    enabled: github.some(source => source.enabled),
+  }
+}
+
 /** 来源字段的声明类型 → 配置页字段类型。 */
 function fieldKindOf(meta: SourceFieldMeta): FieldKind {
   if (meta.kind === 'number') return 'number'

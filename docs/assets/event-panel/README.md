@@ -54,9 +54,11 @@
 
 | 截图 | 说明 |
 |-|-|
-| `github-subscriptions.png` | 当前配置页的 GitHub 订阅区：每个仓库一张卡，卡上带启用开关、监听内容摘要、「监听内容」与「删除」按钮；右上角「添加仓库」可以继续加 |
-| `github-add-repo.png` | 「添加仓库」弹窗：只填 `owner/repo`，校验格式后生成一条独立订阅，不再要求项目线索、起始分支或默认优先级 |
-| `github-events.png` | 「监听内容」弹窗：按 Issue / Pull Request / Action 三组多选，共 21 项；一个都不勾表示全部接收 |
+| `github-before-source-cards.png` | 改造前：GitHub 仓库直接铺在「事件来源」层，每个仓库一张卡，右上角是「添加仓库」 |
+| `github-subscriptions.png` | 改造后：来源层只留一张 GitHub 卡片；仓库数量、启用开关与「设置」入口都在卡上，和 feishu 卡片同级 |
+| `github-before-settings.png` | 改造前：添加仓库是独立弹窗，监听内容还要再进另一个弹窗 |
+| `github-settings.png` | 改造后：点 GitHub 卡片的「设置」，同一个弹窗里添加仓库、开关单仓库、删除、进入监听内容 |
+| `github-events.png` | 点「监听内容」后在同一弹窗内切换：按 Issue / Pull Request / Action 三组多选，共 21 项 |
 
 订阅行为：
 

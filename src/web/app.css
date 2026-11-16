@@ -2837,14 +2837,19 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 }
 .source-card-fields { font-size: 11px; color: var(--faint); }
 
-/* GitHub 仓库订阅区：一个仓库一张卡，卡上选监听内容。 */
-.github-subs { margin-bottom: 20px; }
-.github-subs-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+/* GitHub 设置弹窗：仓库列表 + 添加行。 */
+.github-settings { gap: 14px; }
+.github-settings-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
   gap: 12px;
-  padding: 0 var(--card-pad-x);
 }
+.github-settings-head h4 { margin: 0; font-size: 12px; font-weight: 600; }
+.github-settings-head span { font-size: 11px; color: var(--faint); }
+.github-add-row { display: flex; align-items: flex-end; gap: 8px; }
+.github-add-row .modal-field { flex: 1; min-width: 0; }
+.github-settings-list { display: flex; flex-direction: column; gap: 8px; }
 .github-sub {
   display: flex;
   flex-direction: column;
@@ -2854,6 +2859,7 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
 }
+.github-settings-list .github-sub { background: var(--raised); }
 .github-sub.on { border-color: color-mix(in srgb, var(--accent) 38%, var(--border)); }
 .github-sub-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .github-sub-repo {
@@ -2875,8 +2881,10 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
   -webkit-box-orient: vertical;
 }
 .github-sub-actions { display: flex; align-items: center; gap: 8px; }
+.toggle:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* 监听内容弹窗：按类别分组的复选框。 */
+.github-events-picker { display: flex; flex-direction: column; gap: 12px; }
 .github-events-toolbar {
   display: flex;
   align-items: center;

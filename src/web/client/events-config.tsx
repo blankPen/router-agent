@@ -9,8 +9,8 @@ import { useMemo, useState } from 'react'
 import { getJson, sendJson, type ConfigDoc } from './api.js'
 import { npmPackageOf } from './npm-package.js'
 import { SourceLogo } from './event-source-logos.js'
-import { sourceFieldDefs, type SourceMeta } from './event-sources.js'
-import { GithubSubscriptions } from './github-subscriptions.js'
+import { githubSourceSummary, sourceFieldDefs, type SourceMeta } from './event-sources.js'
+import { GithubSourceSettings, githubSubscriptionsOf } from './github-subscriptions.js'
 import { getByPath, type FieldDef } from './fields.js'
 import { Icon } from './icons.js'
 
@@ -55,8 +55,15 @@ export function EventSourcesConfig({ sources, draft, defaults, setField, errors,
 }): JSX.Element {
   const [editing, setEditing] = useState<SourceMeta | null>(null)
   const [adding, setAdding] = useState(false)
+  const [githubOpen, setGithubOpen] = useState(false)
 
-  // GitHub 来源单独成区：仓库卡片 + 添加按钮，不混在通用来源卡片里。
+  // 每个仓库仍是一条独立来源，配置页把它们聚合为一张 GitHub 卡片。
+  const githubSubs = useMemo(() => githubSubscriptionsOf(draft), [draft])
+  const github = useMemo(
+    () => githubSourceSummary(githubSubs.map(item => item.source)),
+    [githubSubs],
+  )
+  const githubError = sources.some(source => source.kind === 'github' && source.status === 'error')
   const cards = useMemo(() => sources
     .filter(source => source.kind !== 'github')
     .map(source => ({
@@ -64,54 +71,85 @@ export function EventSourcesConfig({ sources, draft, defaults, setField, errors,
       fields: sourceFieldDefs(source.id, source.fields),
     })), [sources])
 
+  const toggleGithub = (enabled: boolean): void => {
+    for (const { id } of githubSubs) setField(`events.sources.${id}.enabled`, enabled)
+  }
+
   return (
     <>
-      <GithubSubscriptions draft={draft} setField={setField} />
-
-      {cards.length > 0 && (
-        <>
-          <div className="source-cards-head">
-            <p className="editor-hint">其它来源：开关与参数改完点底部「保存配置」即生效。</p>
-            <button className="btn tiny" onClick={() => setAdding(true)}>
-              <Icon name="plus" size={12} />添加自定义事件
+      <div className="source-cards-head">
+        <p className="editor-hint">开关与参数改完点底部「保存配置」即生效。</p>
+        <button className="btn tiny" onClick={() => setAdding(true)}>
+          <Icon name="plus" size={12} />添加自定义事件
+        </button>
+      </div>
+      <div className="source-cards">
+        <article className={`source-card ${github.enabled ? 'on' : ''}`}>
+          <div className="source-card-top">
+            <span className="source-logo"><SourceLogo kind="github" /></span>
+            <div className="source-card-title">
+              <strong>GitHub</strong>
+              <span>仓库订阅</span>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={github.enabled}
+              className={`toggle ${github.enabled ? 'on' : ''}`}
+              disabled={github.repos === 0}
+              onClick={() => toggleGithub(!github.enabled)}
+            >
+              <span className="toggle-track"><span className="toggle-knob" /></span>
             </button>
           </div>
-          <div className="source-cards">
-            {cards.map(({ source, fields }) => {
-              const enabled = Boolean(getByPath(draft, `events.sources.${source.id}.enabled`))
-              return (
-                <article key={source.id} className={`source-card ${enabled ? 'on' : ''}`}>
-                  <div className="source-card-top">
-                    <span className="source-logo"><SourceLogo kind={source.kind} /></span>
-                    <div className="source-card-title">
-                      <strong>{source.id}</strong>
-                      <span>
-                        {KIND_LABEL[source.kind] ?? source.kind}
-                        {source.placeholder && <em className="source-card-placeholder">暂未开放</em>}
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={enabled}
-                      className={`toggle ${enabled ? 'on' : ''}`}
-                      onClick={() => setField(`events.sources.${source.id}.enabled`, !enabled)}
-                    >
-                      <span className="toggle-track"><span className="toggle-knob" /></span>
-                    </button>
-                  </div>
-                  <p className="source-card-status">{source.message ?? STATUS_TEXT[source.status] ?? source.status}</p>
-                  {source.package && <p className="source-card-package" title={source.package}>{source.package}</p>}
-                  <div className="source-card-actions">
-                    <button className="btn tiny" onClick={() => setEditing(source)}>设置</button>
-                    <span className="source-card-fields">{fields.length} 项可配置</span>
-                  </div>
-                </article>
-              )
-            })}
+          <p className="source-card-status">
+            {github.repos === 0
+              ? '还没有添加仓库'
+              : githubError
+                ? '部分仓库拉取失败'
+                : github.enabled
+                  ? `${github.repos} 个仓库，监听 Issue / PR / Action`
+                  : `${github.repos} 个仓库，当前已停用`}
+          </p>
+          <div className="source-card-actions">
+            <button className="btn tiny" onClick={() => setGithubOpen(true)}>设置</button>
+            <span className="source-card-fields">{github.repos} 个仓库</span>
           </div>
-        </>
-      )}
+        </article>
+
+        {cards.map(({ source, fields }) => {
+          const enabled = Boolean(getByPath(draft, `events.sources.${source.id}.enabled`))
+          return (
+            <article key={source.id} className={`source-card ${enabled ? 'on' : ''}`}>
+              <div className="source-card-top">
+                <span className="source-logo"><SourceLogo kind={source.kind} /></span>
+                <div className="source-card-title">
+                  <strong>{source.id}</strong>
+                  <span>
+                    {KIND_LABEL[source.kind] ?? source.kind}
+                    {source.placeholder && <em className="source-card-placeholder">暂未开放</em>}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={enabled}
+                  className={`toggle ${enabled ? 'on' : ''}`}
+                  onClick={() => setField(`events.sources.${source.id}.enabled`, !enabled)}
+                >
+                  <span className="toggle-track"><span className="toggle-knob" /></span>
+                </button>
+              </div>
+              <p className="source-card-status">{source.message ?? STATUS_TEXT[source.status] ?? source.status}</p>
+              {source.package && <p className="source-card-package" title={source.package}>{source.package}</p>}
+              <div className="source-card-actions">
+                <button className="btn tiny" onClick={() => setEditing(source)}>设置</button>
+                <span className="source-card-fields">{fields.length} 项可配置</span>
+              </div>
+            </article>
+          )
+        })}
+      </div>
 
       {editing && (
         <SourceSettingsDialog
@@ -132,6 +170,13 @@ export function EventSourcesConfig({ sources, draft, defaults, setField, errors,
           }}
           onNotice={onNotice}
           onClose={() => setAdding(false)}
+        />
+      )}
+      {githubOpen && (
+        <GithubSourceSettings
+          draft={draft}
+          setField={setField}
+          onClose={() => setGithubOpen(false)}
         />
       )}
     </>

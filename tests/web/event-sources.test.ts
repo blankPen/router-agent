@@ -4,6 +4,7 @@ import {
   eventSourceFields,
   eventSourcePaths,
   eventSourcePathsIn,
+  githubSourceSummary,
   sourceFieldDefs,
 } from '../../src/web/client/event-sources.js'
 import {
@@ -52,6 +53,30 @@ describe('配置页的事件总线分组', () => {
     expect(paths).toContain('events.enabled')
     expect(paths).toContain('events.decision.prompt')
     expect(paths).toContain('events.policy.dailyEventLimit')
+  })
+})
+
+describe('GitHub 来源聚合', () => {
+  const source = (id: string, kind: string, enabled: boolean) => ({
+    id,
+    kind,
+    enabled,
+    builtin: true,
+    status: 'ok',
+    fields: [],
+  })
+
+  it('多个仓库来源只算作一张 GitHub 卡片', () => {
+    const summary = githubSourceSummary([
+      source('github-1', 'github', true),
+      source('feishu', 'feishu', true),
+      source('github-2', 'github', false),
+    ])
+    expect(summary).toEqual({ repos: 2, enabled: true })
+  })
+
+  it('没有仓库时 GitHub 卡片保持关闭', () => {
+    expect(githubSourceSummary([source('feishu', 'feishu', true)])).toEqual({ repos: 0, enabled: false })
   })
 })
 

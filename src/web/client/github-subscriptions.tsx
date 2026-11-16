@@ -1,7 +1,7 @@
 /**
- * GitHub 仓库订阅的界面：添加仓库、逐仓库选监听内容。
+ * GitHub 来源的设置弹窗：添加仓库、逐仓库选监听内容。
  *
- * 一个仓库 = 一张卡，卡上能开关订阅、选监听哪些事件、删掉这条订阅。
+ * 来源层只显示一张 GitHub 卡片；仓库列表与增删都收在设置弹窗里。
  * 监听内容按 Issue / PR / Action 分组多选，空选表示全部都收。
  */
 import { useState } from 'react'
@@ -18,7 +18,7 @@ interface GithubSubscription {
 }
 
 /** 读草稿里的 GitHub 订阅。 */
-function subscriptionsOf(draft: ConfigDoc | null): Array<{ id: string; source: GithubSubscription }> {
+export function githubSubscriptionsOf(draft: ConfigDoc | null): Array<{ id: string; source: GithubSubscription }> {
   const sources = draft?.events?.sources
   if (!sources || typeof sources !== 'object') return []
   const out: Array<{ id: string; source: GithubSubscription }> = []
@@ -89,86 +89,136 @@ export function toggleEventType(current: string[], id: string, checked: boolean)
   return GITHUB_EVENT_TYPES.map(type => type.id).filter(item => set.has(item))
 }
 
-/** GitHub 仓库订阅区：卡片列表 + 「添加仓库」按钮。 */
-export function GithubSubscriptions({ draft, setField }: {
+/** GitHub 来源的设置弹窗：仓库列表 + 添加仓库 + 逐仓库选监听内容。 */
+export function GithubSourceSettings({ draft, setField, onClose }: {
   draft: ConfigDoc | null
   setField: (path: string, value: unknown) => void
+  onClose: () => void
 }): JSX.Element {
-  const [adding, setAdding] = useState(false)
+  const [repo, setRepo] = useState('')
+  const [error, setError] = useState<string | null>(null)
   const [editing, setEditing] = useState<string | null>(null)
-  const subscriptions = subscriptionsOf(draft)
+  const subscriptions = githubSubscriptionsOf(draft)
+  const editingSource = editing ? subscriptions.find(item => item.id === editing)?.source : undefined
 
   const write = (id: string, source: GithubSubscription | null): void => {
     setField(`events.sources.${id}`, source)
   }
 
+  const add = (): void => {
+    const issue = githubRepoIssue(repo)
+    if (issue) {
+      setError(issue)
+      return
+    }
+    const id = nextGithubSourceId(Object.keys(draft?.events?.sources ?? {}))
+    const source = withGithubRepo(id, repo)
+    if (!source) {
+      setError('请填写仓库地址')
+      return
+    }
+    write(id, source)
+    setRepo('')
+    setError(null)
+  }
+
   return (
-    <div className="github-subs">
-      <div className="source-cards-head">
-        <p className="editor-hint">
-          每个仓库一条订阅：只收你勾选的事件，收到的动静先进事件队列，由决策判断要不要处理。
-        </p>
-        <button className="btn tiny" onClick={() => setAdding(true)}>
-          <Icon name="plus" size={12} />添加仓库
-        </button>
-      </div>
+    <div className="modal-layer">
+      <button className="modal-backdrop" aria-label="关闭" onClick={onClose} />
+      <div className="modal modal-wide" role="dialog" aria-modal="true" aria-label="GitHub 设置">
+        <header className="modal-head">
+          <div>
+            <h3>{editingSource ? '监听内容' : 'GitHub 设置'}</h3>
+            <p>
+              {editingSource
+                ? `${editingSource.repo || '未填仓库'}：勾选要收的事件；一个都不勾表示全部都收。`
+                : '一个仓库一条订阅：只收你勾选的事件，收到的动静先进事件队列，由决策判断要不要处理。'}
+            </p>
+          </div>
+          <button className="icon-btn" title="关闭" onClick={onClose}><Icon name="close" size={14} /></button>
+        </header>
+        <div className="modal-body github-settings">
+          {editingSource ? (
+            <GithubEventsPicker
+              value={editingSource.events ?? []}
+              onChange={events => {
+                if (editing) write(editing, { ...editingSource, events })
+              }}
+            />
+          ) : (
+            <>
+              <div className="github-settings-head">
+                <h4>仓库</h4>
+                <span>{subscriptions.length} 个已添加</span>
+              </div>
+              <div className="github-add-row">
+                <label className={`modal-field ${error ? 'has-error' : ''}`}>
+                  <span>仓库地址</span>
+                  <input
+                    className="text-input"
+                    value={repo}
+                    placeholder="owner/repo"
+                    onChange={event => {
+                      setRepo(event.target.value)
+                      setError(null)
+                    }}
+                    onKeyDown={event => { if (event.key === 'Enter') add() }}
+                  />
+                </label>
+                <button className="btn primary" onClick={add}><Icon name="plus" size={12} />添加</button>
+              </div>
+              {error
+                ? <p className="modal-field-error">{error}</p>
+                : <p className="modal-field-hint">需要已安装并登录 gh CLI 才能拉到事件。</p>}
 
-      {subscriptions.length === 0 ? (
-        <p className="editor-empty">还没有订阅任何 GitHub 仓库。点「添加仓库」填一个 owner/repo。</p>
-      ) : (
-        <div className="github-subs-list">
-          {subscriptions.map(({ id, source }) => (
-            <article key={id} className={`github-sub ${source.enabled ? 'on' : ''}`}>
-              <div className="github-sub-top">
-                <span className="github-sub-repo">{source.repo || '（未填仓库）'}</span>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={Boolean(source.enabled)}
-                  className={`toggle small ${source.enabled ? 'on' : ''}`}
-                  onClick={() => write(id, { ...source, enabled: !source.enabled })}
-                >
-                  <span className="toggle-track"><span className="toggle-knob" /></span>
-                </button>
-              </div>
-              <p className="github-sub-events">{eventsSummary(source.events ?? [])}</p>
-              <div className="github-sub-actions">
-                <button className="btn tiny" onClick={() => setEditing(id)}>监听内容</button>
-                <button
-                  className="btn tiny danger"
-                  onClick={() => {
-                    if (confirm(`删除订阅 ${source.repo || id}？`)) write(id, null)
-                  }}
-                >
-                  <Icon name="trash" size={12} />删除
-                </button>
-              </div>
-            </article>
-          ))}
+              {subscriptions.length === 0 ? (
+                <p className="editor-empty">还没有订阅任何 GitHub 仓库。填一个 owner/repo 就能添加。</p>
+              ) : (
+                <div className="github-settings-list">
+                  {subscriptions.map(({ id, source }) => (
+                    <article key={id} className={`github-sub ${source.enabled ? 'on' : ''}`}>
+                      <div className="github-sub-top">
+                        <span className="github-sub-repo">{source.repo || '（未填仓库）'}</span>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={Boolean(source.enabled)}
+                          className={`toggle small ${source.enabled ? 'on' : ''}`}
+                          onClick={() => write(id, { ...source, enabled: !source.enabled })}
+                        >
+                          <span className="toggle-track"><span className="toggle-knob" /></span>
+                        </button>
+                      </div>
+                      <p className="github-sub-events">{eventsSummary(source.events ?? [])}</p>
+                      <div className="github-sub-actions">
+                        <button className="btn tiny" onClick={() => setEditing(id)}>监听内容</button>
+                        <button
+                          className="btn tiny danger"
+                          onClick={() => {
+                            if (confirm(`删除订阅 ${source.repo || id}？`)) write(id, null)
+                          }}
+                        >
+                          <Icon name="trash" size={12} />删除
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
         </div>
-      )}
-
-      {adding && (
-        <AddRepoDialog
-          existingIds={Object.keys(draft?.events?.sources ?? {})}
-          onAdd={(id, source) => {
-            write(id, source)
-            setAdding(false)
-          }}
-          onClose={() => setAdding(false)}
-        />
-      )}
-      {editing && (
-        <GithubEventsDialog
-          repo={subscriptions.find(item => item.id === editing)?.source.repo ?? ''}
-          value={subscriptions.find(item => item.id === editing)?.source.events ?? []}
-          onChange={events => {
-            const current = subscriptions.find(item => item.id === editing)
-            if (current) write(editing, { ...current.source, events })
-          }}
-          onClose={() => setEditing(null)}
-        />
-      )}
+        <footer className="modal-foot">
+          {editingSource ? (
+            <>
+              <button className="btn ghost" onClick={() => setEditing(null)}>返回</button>
+              <button className="btn primary" onClick={() => setEditing(null)}>完成</button>
+            </>
+          ) : (
+            <button className="btn primary" onClick={onClose}>完成</button>
+          )}
+        </footer>
+      </div>
     </div>
   )
 }
@@ -179,73 +229,10 @@ function eventsSummary(events: string[]): string {
   return events.map(id => githubEventLabel(id)).join('、')
 }
 
-/** 添加仓库：填 owner/repo，生成一条新的订阅。 */
-function AddRepoDialog({ existingIds, onAdd, onClose }: {
-  existingIds: string[]
-  onAdd: (id: string, source: GithubSubscription) => void
-  onClose: () => void
-}): JSX.Element {
-  const [repo, setRepo] = useState('')
-  const [error, setError] = useState<string | null>(null)
-
-  const submit = (): void => {
-    const issue = githubRepoIssue(repo)
-    if (issue) {
-      setError(issue)
-      return
-    }
-    const id = nextGithubSourceId(existingIds)
-    const source = withGithubRepo(id, repo)
-    if (!source) {
-      setError('请填写仓库地址')
-      return
-    }
-    onAdd(id, source)
-  }
-
-  return (
-    <div className="modal-layer">
-      <button className="modal-backdrop" aria-label="关闭" onClick={onClose} />
-      <div className="modal" role="dialog" aria-modal="true" aria-label="添加仓库">
-        <header className="modal-head">
-          <div>
-            <h3>添加 GitHub 仓库</h3>
-            <p>填仓库地址就能订阅；监听内容在添加后按需勾选。</p>
-          </div>
-          <button className="icon-btn" title="关闭" onClick={onClose}><Icon name="close" size={14} /></button>
-        </header>
-        <div className="modal-body">
-          <label className={`modal-field ${error ? 'has-error' : ''}`}>
-            <span>仓库地址</span>
-            <input
-              className="text-input"
-              value={repo}
-              placeholder="owner/repo"
-              autoFocus
-              onChange={event => {
-                setRepo(event.target.value)
-                setError(null)
-              }}
-              onKeyDown={event => { if (event.key === 'Enter') submit() }}
-            />
-            {error ? <em className="modal-field-error">{error}</em> : <em className="modal-field-hint">需要已安装并登录 gh CLI 才能拉到事件。</em>}
-          </label>
-        </div>
-        <footer className="modal-foot">
-          <button className="btn ghost" onClick={onClose}>取消</button>
-          <button className="btn primary" onClick={submit}>添加</button>
-        </footer>
-      </div>
-    </div>
-  )
-}
-
 /** 监听内容：按 Issue / PR / Action 分组多选。 */
-function GithubEventsDialog({ repo, value, onChange, onClose }: {
-  repo: string
+function GithubEventsPicker({ value, onChange }: {
   value: string[]
   onChange: (events: string[]) => void
-  onClose: () => void
 }): JSX.Element {
   const groups = githubEventTypesByKind()
   const allIds = groups.flatMap(group => group.types.map(type => type.id))
@@ -253,43 +240,28 @@ function GithubEventsDialog({ repo, value, onChange, onClose }: {
   const allOn = allIds.every(id => selected.has(id))
 
   return (
-    <div className="modal-layer">
-      <button className="modal-backdrop" aria-label="关闭" onClick={onClose} />
-      <div className="modal" role="dialog" aria-modal="true" aria-label="监听内容">
-        <header className="modal-head">
-          <div>
-            <h3>监听内容</h3>
-            <p>{repo || '未填仓库'}：勾选要收的事件；一个都不勾表示全部都收。</p>
-          </div>
-          <button className="icon-btn" title="关闭" onClick={onClose}><Icon name="close" size={14} /></button>
-        </header>
-        <div className="modal-body">
-          <div className="github-events-toolbar">
-            <button className="btn tiny" onClick={() => onChange(allOn ? [] : allIds)}>
-              {allOn ? '全部取消' : '全选'}
-            </button>
-            <span className="github-events-count">已选 {value.length} / {allIds.length}</span>
-          </div>
-          {groups.map(group => (
-            <fieldset key={group.kind} className="github-events-group">
-              <legend>{group.label}</legend>
-              {group.types.map(type => (
-                <label key={type.id} className="github-events-item">
-                  <input
-                    type="checkbox"
-                    checked={selected.has(type.id)}
-                    onChange={event => onChange(toggleEventType(value, type.id, event.target.checked))}
-                  />
-                  <span>{type.label}</span>
-                </label>
-              ))}
-            </fieldset>
-          ))}
-        </div>
-        <footer className="modal-foot">
-          <button className="btn primary" onClick={onClose}>完成</button>
-        </footer>
+    <div className="github-events-picker">
+      <div className="github-events-toolbar">
+        <button className="btn tiny" onClick={() => onChange(allOn ? [] : allIds)}>
+          {allOn ? '全部取消' : '全选'}
+        </button>
+        <span className="github-events-count">已选 {value.length} / {allIds.length}</span>
       </div>
+      {groups.map(group => (
+        <fieldset key={group.kind} className="github-events-group">
+          <legend>{group.label}</legend>
+          {group.types.map(type => (
+            <label key={type.id} className="github-events-item">
+              <input
+                type="checkbox"
+                checked={selected.has(type.id)}
+                onChange={event => onChange(toggleEventType(value, type.id, event.target.checked))}
+              />
+              <span>{type.label}</span>
+            </label>
+          ))}
+        </fieldset>
+      ))}
     </div>
   )
 }
