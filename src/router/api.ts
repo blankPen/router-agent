@@ -1,10 +1,11 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { timingSafeEqual as timingSafeEqualBytes } from 'node:crypto'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { extname, join, normalize, resolve } from 'node:path'
 import type { Store } from '../store/db.js'
 import type { Engine } from '../core/engine.js'
-import { applyConfigPatch, HOT_CONFIG_PREFIXES, isKnownRuntimeId, policyOf, publicConfig, publicDefaults, publicPlugins, requiresRestart, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
+import { applyConfigPatch, HOT_CONFIG_PREFIXES, isKnownRuntimeId, isLoopbackHost, policyOf, publicConfig, publicDefaults, publicPlugins, requiresRestart, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
 import { InstallStartError, type AcpRuntimeAdmin } from '@router-agent/runtime-acp'
 import { normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
 import { ReportRejectedError } from '#runtime/evidence-gate.js'
@@ -192,6 +193,22 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://localhost')
     const path = url.pathname
+
+    // 面板开放访问时（配了令牌），API 请求都要带令牌。
+    // 不按来源 IP 放行本机：内网穿透的流量也是从 127.0.0.1 进来的，放行等于没有鉴权。
+    // 静态资源不拦：面板外壳本身不含敏感信息，数据一律走 API。
+    // 事件注入口不拦：外部系统用来源自己的密钥（x-ra-event-secret）鉴权，与面板令牌是两套事。
+    if (path.startsWith('/api/')
+      && !isEventInjectPath(config, path)
+      && !isAuthorized(req, config.server.token)) {
+      logger.warn('api:access-denied', {
+        method: req.method,
+        path,
+        remote: req.socket.remoteAddress ?? '',
+        host: String(req.headers.host ?? ''),
+      })
+      return respond(res, 401, { error: 'token-required', message: '面板已开放访问，请带 x-ra-token 请求头' })
+    }
 
     if (path === '/api/status' && req.method === 'GET') {
       const tickets = opts.store.listTickets({ limit: 500 })
@@ -1066,9 +1083,15 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
   }
 
   const port = opts.port ?? 0
+  const host = config.server.host
+  // 对外监听却没有令牌：宁可起不来，也不能开一个谁都能改配置的口子。
+  if (!isLoopbackHost(host) && !config.server.token) {
+    logger.error('api:access-token-missing', { host })
+    throw new Error(`监听 ${host} 需要配置访问令牌（server.token）`)
+  }
   await new Promise<void>((resolvePromise, reject) => {
     server.once('error', reject)
-    server.listen(port, '127.0.0.1', () => {
+    server.listen(port, host, () => {
       server.off('error', reject)
       resolvePromise()
     })
@@ -1086,6 +1109,26 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * 请求是否被允许访问面板 API。
+ *
+ * 令牌为空时不做校验（只在本机监听时的默认形态）；
+ * 令牌非空时，请求头 `x-ra-token` 里必须带对令牌。
+ */
+function isAuthorized(req: IncomingMessage, token: string): boolean {
+  if (!token) return true
+  const header = String(req.headers['x-ra-token'] ?? '')
+  return Boolean(header) && timingSafeEqual(header, token)
+}
+
+/** 定长比较，避免令牌被逐字节试探；长度不同直接判否。 */
+function timingSafeEqual(a: string, b: string): boolean {
+  const left = Buffer.from(a)
+  const right = Buffer.from(b)
+  // timingSafeEqual 要求等长输入，长度不同先判否。
+  return left.length === right.length && timingSafeEqualBytes(left, right)
 }
 
 /** 上报里的三态布尔：true / false / 未声明。字符串兼容旧客户端。 */

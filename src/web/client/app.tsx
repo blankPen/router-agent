@@ -61,6 +61,7 @@ import {
   type LocalProviderList,
   type LocalProviderView,
   type PluginView,
+  type ApiError,
 } from './api.js'
 import { Icon, LogoMark } from './icons.js'
 import { defaultSelectedPaths, mergeImportedProjects, type ScanCandidate } from './project-scan.js'
@@ -78,6 +79,7 @@ import {
   runtimeStatusLabel,
 } from './runtime-model.js'
 import { hashForTab, tabFromHash, type Tab } from './tabs.js'
+import { captureTokenFromUrl } from './access-token.js'
 import { THEME_MODE_LABEL, nextThemeMode, useThemeMode, type ThemeMode } from './theme.js'
 import {
   readSkippedVersion,
@@ -279,7 +281,34 @@ function sleep(ms: number): Promise<void> {
 
 type RestartPhase = 'idle' | 'restarting' | 'done' | 'error'
 
+/**
+ * 面板开放访问后的「没带令牌」提示屏。
+ *
+ * 服务端对 API 全量校验令牌，缺令牌时整个面板都读不到数据。
+ * 与其让每个页面各报一次错，不如一屏说清楚该怎么打开。
+ */
+function AccessDenied(): JSX.Element {
+  return (
+    <div className="access-denied">
+      <div className="access-denied-card">
+        <Icon name="alert" size={22} />
+        <h1>面板已开放访问，需要访问令牌</h1>
+        <p>
+          当前地址没有带上访问令牌，API 请求都被拒绝了。
+          请用 <code>ra start</code> 打印的完整地址打开（末尾带 <code>?token=…</code>），
+          或在本机执行 <code>ra web</code> 重新打开面板。
+        </p>
+        <small>令牌在 config.yaml 的 server.token，也可以用 ra config set server.token &lt;令牌&gt; 自行设置。</small>
+      </div>
+    </div>
+  )
+}
+
 function App(): JSX.Element {
+  // 面板开放访问时令牌在地址栏里：先取出来存好，再把地址栏里的明文抹掉。
+  useEffect(() => { captureTokenFromUrl() }, [])
+  // 服务端要求令牌但当前没有：整个面板都用不了，先挡一屏说明。
+  const [accessDenied, setAccessDenied] = useState(false)
   // `ra start` 会带 #setup 打开面板；刷新时也从 hash 恢复当前页签。
   const [tab, setTab] = useState<Tab>(() => tabFromHash(window.location.hash) ?? 'tickets')
   const [status, setStatus] = useState<ServiceStatus | null>(null)
@@ -328,7 +357,10 @@ function App(): JSX.Element {
 
   useEffect(() => {
     const load = (): void => {
-      void getJson<ServiceStatus>('/api/status').then(setStatus).catch(() => undefined)
+      void getJson<ServiceStatus>('/api/status').then(setStatus).catch(error => {
+        // 面板开放访问后没带令牌：整个界面都读不到数据，直接说清楚比到处报错好。
+        setAccessDenied((error as ApiError).code === 'token-required')
+      })
     }
     load()
     const timer = setInterval(load, 15_000)
@@ -442,6 +474,7 @@ function App(): JSX.Element {
 
   return (
     <div className="shell">
+      {accessDenied && <AccessDenied />}
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-mark"><LogoMark size={34} /></span>

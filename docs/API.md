@@ -2,6 +2,8 @@
 
 Router 在 `server.port`（默认 3083）上提供本地 HTTP API，供 Web 面板、CLI 与 `ra report` 使用。
 
+默认只监听 `127.0.0.1`。把 `server.host` 改成 `0.0.0.0` 即开放局域网与内网穿透访问，此时服务端会校验每个 `/api/*` 请求的 `x-ra-token` 请求头（令牌在 `server.token` 配置里），不符返回 401 `token-required`。详见 [CONFIGURATION.md · 局域网与内网穿透访问](CONFIGURATION.md#局域网与内网穿透访问)。
+
 | 方法 | 路径 | 说明 |
 |-|-|-|
 | GET | `/api/status` | 服务与工单概览 |

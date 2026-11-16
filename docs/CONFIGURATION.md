@@ -132,6 +132,10 @@ projects: []
 
 server:
   port: 3083
+  # 监听地址：默认 127.0.0.1 只本机可访问；改成 0.0.0.0 即开放局域网与内网穿透访问。
+  host: 127.0.0.1
+  # 访问令牌：host 不是回环地址时必填；没配会在启动时自动生成并写回本文件。
+  # token: ""
 ```
 
 日常调整不需要编辑整份文件：
@@ -163,6 +167,8 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 | `runtime.options.<运行时>.<键>` | 运行时自己的选项；键由该运行时声明，见「运行时选项」 |
 | `runtime.plugins.<runtime id>` | npm 包名、`./path`，或 `{ package / path / plugin, entry?, enabled? }`；id 取自插件包声明的 `meta.id`，见 [RUNTIME.md](RUNTIME.md) |
 | `server.port` | 1–65535 |
+| `server.host` | IPv4 或主机名；默认 `127.0.0.1`，`0.0.0.0` 表示开放到所有网卡 |
+| `server.token` | 面板访问令牌；开放监听时必填，只写不回显 |
 | `feishu.appId` / `reaction` / `directMessages` / `allowed` / `bots` / `botOpenIds` / `botNames` | 字符串、布尔或逗号分隔列表 |
 | `feishu.chats` | 逗号分隔 chat_id；已有条目的消息范围 / 绑定 / sync 保留，新条目默认 `mention` |
 | `llm.baseUrl` / `llm.model` / `llm.apiKey` | 模型连接信息 |
@@ -183,6 +189,30 @@ ra config edit                            # 用 $EDITOR 编辑整份配置（不
 | `runtime.plugins.<runtime id>` | `ra runtime add '@acme/runtime-demo'` | 装好包并读出它声明的 id 后写入配置 |
 
 `router.session.*`、`router.persona.*`、`feishu.images.*` 不在 `config set` 的白名单里，用 `ra config edit` 或 Web 面板改；`worker.tools.*` 面板不提供，只能 `ra config edit` 直接改文件。
+
+## 局域网与内网穿透访问
+
+面板默认只监听 `127.0.0.1`，只有本机能访问。要让局域网内的同事、或内网穿透的入口访问，改监听地址：
+
+```bash
+ra config set server.host 0.0.0.0    # 开放到所有网卡
+ra start                              # 打印带令牌的局域网地址
+```
+
+开放监听时有两点要清楚：
+
+- **必须带访问令牌**。`server.host` 不是回环地址时，服务端会校验每个 API 请求的 `x-ra-token`；没配令牌会在启动时自动生成一个并写回 `config.yaml`。令牌只写不回显，Web 面板里也只显示「已配置」。
+- **不按来源 IP 放行本机**。内网穿透的流量也是从 `127.0.0.1` 进来的，按 IP 放行等于没有鉴权，所以本机请求同样要带令牌。
+
+`ra start` / `ra web` 打印的地址已经带上 `?token=…`：用这个地址打开面板，前端会把令牌存进当前标签页并从地址栏里抹掉明文，之后的请求自动带上令牌。直接手输地址没有令牌时，面板会提示用带令牌的地址重新打开。
+
+也可以自己指定令牌：
+
+```bash
+ra config set server.token my-secret-token
+```
+
+改完 `server.host` / `server.token` 都要重启服务才生效。只想本机看，把 `server.host` 改回 `127.0.0.1` 即可。
 
 ## 运行时选项
 

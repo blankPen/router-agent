@@ -51,6 +51,7 @@ import { scanLocalProjects } from '../router/project-scan.js'
 import { createLogAssistant } from '../router/log-assistant.js'
 import { createDiagnosisTools } from '../router/diagnosis-tools.js'
 import { createIssueReporter } from '../router/issue-report.js'
+import { ensureServerToken, panelUrlList, tokenHeader } from './panel-url.js'
 
 // 版本号以 package.json 为唯一来源（见 src/update/index.ts），`ra -v` 与更新检查共用同一个值。
 export const VERSION: string = PACKAGE_VERSION
@@ -443,7 +444,7 @@ async function cmdReply(home: string, opts: ReplyOptions & { port?: string }, ou
     ? (title: string, markdown: string) => createFeishuDocumenter({ runner: output.lark ?? createLarkRunner() }).createDocument(title, markdown)
     : undefined
   return runReply(
-    { home, port, stdout: output.stdout, stderr: output.stderr, ...(createDocument ? { createDocument } : {}) },
+    { home, port, stdout: output.stdout, stderr: output.stderr, ...(config.server.token ? { token: config.server.token } : {}), ...(createDocument ? { createDocument } : {}) },
     opts,
   )
 }
@@ -826,7 +827,7 @@ async function cmdTicketStop(home: string, ticketId: string, output: CliIo): Pro
   try {
     const res = await fetch(`http://127.0.0.1:${config.server.port}/api/tickets/${ticketId}/stop`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...tokenHeader(config) },
       body: JSON.stringify({ reason: 'ra ticket --stop' }),
     })
     if (res.ok) {
@@ -909,6 +910,9 @@ function cmdConfig(home: string, output: CliIo): number {
   return 0
 }
 
+/** 回显时需要打码的配置项：密钥类字段不进 shell 历史 / 日志。 */
+const SECRET_CONFIG_KEYS = new Set(['llm.apiKey', 'decision.jev.apiKey', 'server.token'])
+
 function cmdConfigSet(home: string, key: string, value: string, output: CliIo): number {
   ensureHome(home)
   const path = join(home, 'config.yaml')
@@ -920,7 +924,7 @@ function cmdConfigSet(home: string, key: string, value: string, output: CliIo): 
   }
   writeConfig(home, config)
   // 密钥类字段不回显明文，避免进 shell 历史 / 日志。
-  output.stdout(key === 'llm.apiKey' ? `${key} = ******` : `${key} = ${value}`)
+  output.stdout(SECRET_CONFIG_KEYS.has(key) ? `${key} = ******` : `${key} = ${value}`)
   output.stdout(`已写入 ${path}`)
   return 0
 }
@@ -1096,7 +1100,7 @@ async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
 
 function cmdWeb(home: string, output: CliIo): number {
   const config = loadConfig(home)
-  const url = `http://127.0.0.1:${config.server.port}/`
+  const url = panelUrlList(home, config)[0]!
   output.stdout(`Web 面板: ${url}`)
   openPanel(url, output)
   return 0
@@ -1106,12 +1110,13 @@ async function cmdStart(home: string, opts: { foreground?: boolean; open?: boole
   ensureHome(home)
   const config = loadConfig(home, output.env as NodeJS.ProcessEnv)
   // 直接落到「初始化」页：ra start 之后要配的运行时 / 项目 / 飞书 / 群都在这里。
-  const panelUrl = `http://127.0.0.1:${config.server.port}/#setup`
+  const panelUrls = panelUrlList(home, config, '#setup')
+  const panelUrl = panelUrls[0]!
   const shouldOpen = opts.open !== false
   const pid = readPid(home)
   if (pid && alive(pid)) {
     output.stdout(`服务已在运行 (pid ${pid})`)
-    output.stdout(`Web 面板: ${panelUrl}`)
+    printPanelUrls(panelUrls, output)
     if (shouldOpen) await openPanelWhenReady(panelUrl, output)
     return 0
   }
@@ -1145,9 +1150,14 @@ async function cmdStart(home: string, opts: { foreground?: boolean; open?: boole
   writeFileSync(join(home, 'router-agent.pid'), String(child.pid ?? ''), 'utf8')
   output.stdout(`Router 服务已启动 (pid ${child.pid})`)
   output.stdout(`日志: ${join(home, 'logs', 'router-agent.log')}`)
-  output.stdout(`Web 面板: ${panelUrl}`)
+  printPanelUrls(panelUrls, output)
   if (shouldOpen) await openPanelWhenReady(panelUrl, output)
   return 0
+}
+
+/** 打印面板地址；对外开放时把局域网地址一并列出。 */
+function printPanelUrls(urls: string[], output: CliIo): void {
+  for (const url of urls) output.stdout(`Web 面板: ${url}`)
 }
 
 /** 服务就绪探测与浏览器打开：给服务 10 秒，避免刚启动时开出 404 白页。 */
@@ -1215,6 +1225,13 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   const logger = createLogger(home, output)
   const config = loadConfig(home, process.env, { logger })
   ensureHome(home)
+  // 对外开放却没有令牌：生成一个并落盘。
+  // 令牌必须持久化——每次启动换一个的话，已经发出去的地址会突然失效。
+  const tokenBefore = config.server.token
+  ensureServerToken(home, config)
+  if (!tokenBefore && config.server.token) {
+    logger.info('server:token-generated', { host: config.server.host })
+  }
   // 运行时探测在后台跑：先读缓存，API 立即可用，探测完成后刷新。
   const runtimeAdmin = new AcpRuntimeAdmin({ home, env: process.env, config })
   // 插件 npm 包安装任务：面板「安装依赖」与 CLI 共用同一套安装逻辑。
@@ -1741,7 +1758,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       }
     },
   })
-  logger.info('api:listening', { port: config.server.port })
+  logger.info('api:listening', { port: config.server.port, host: config.server.host })
   // 首查走后台，失败只进日志；之后每 6 小时刷新一次，面板读到的是缓存结果。
   void updateService.check(true)
   const updateTimer = setInterval(() => { void updateService.check(true) }, 6 * 60 * 60 * 1_000)
@@ -1809,9 +1826,9 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   if (service) {
     refreshChats()
     await service.start()
-    output.stdout(`Router 服务运行中：http://127.0.0.1:${config.server.port}/`)
+    output.stdout(`Router 服务运行中：${panelUrlList(home, config)[0]}`)
   } else {
-    output.stdout(`Web 配置服务运行中：http://127.0.0.1:${config.server.port}/（LLM 未配置，Router 未启动）`)
+    output.stdout(`Web 配置服务运行中：${panelUrlList(home, config)[0]}（LLM 未配置，Router 未启动）`)
   }
 
   const stopRuntime = (): void => {

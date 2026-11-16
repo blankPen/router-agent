@@ -254,7 +254,10 @@ Router 不做对话，只在必要时说话：
 | `policy:updated` | CLI | `version` `acceptMode` | 面板保存后策略版本变化 |
 | `config:patch-rejected` / `config:write-failed` | HTTP API | `errors` / `detail` | 面板保存的配置校验失败或落盘失败 |
 | `api:config` | HTTP API | `changed` `policyChanged` `restartRequired` `identityEffective` | 配置保存成功、是否需要重启、允许名单是否已即时生效 |
-| `api:listening` | CLI | `port` | HTTP API 已监听 |
+| `api:listening` | CLI | `port` `host` | HTTP API 已监听 |
+| `api:access-denied` | HTTP API | `method` `path` `remote` `host` | 开放监听后请求没带访问令牌，被 401 拒绝 |
+| `api:access-token-missing` | HTTP API | `host` | 对外监听却没有访问令牌，服务拒绝启动 |
+| `server:token-generated` | CLI | `host` | 开放监听但没配令牌，启动时自动生成并写回配置 |
 | `api:report` | HTTP API | `ticketId` `state` `turn` | HTTP 通道收到的 worker 上报 |
 | `api:spec` | HTTP API | `spec` `action` | 人格 / 规范文本保存或重置 |
 | `api:workspace-cleanup` | HTTP API | `requested` `runtimeId` `removed` `skipped` | 面板批量清理工作区成功 |

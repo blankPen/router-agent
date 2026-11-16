@@ -465,9 +465,23 @@ export const CONFIG_GROUPS: ConfigGroup[] = [
       {
         id: 'service',
         title: '服务与门禁',
-        description: '面板端口与工单交付门禁。',
+        description: '面板监听地址、访问令牌与工单交付门禁。',
         fields: [
           { path: 'server.port', label: '面板端口', kind: 'number', min: 1, max: 65_535, unit: '端口' },
+          {
+            path: 'server.host',
+            label: '监听地址',
+            kind: 'text',
+            placeholder: '127.0.0.1',
+            hint: '默认 127.0.0.1 只本机可访问；改成 0.0.0.0 即开放局域网访问（需要访问令牌）',
+          },
+          {
+            path: 'server.token',
+            label: '访问令牌',
+            kind: 'password',
+            placeholder: '留空 = 保持已配置的令牌',
+            hint: '开放监听时必填：局域网与内网穿透访问面板要带这个令牌；只写入 config.yaml，保存后不回显',
+          },
           {
             path: 'worker.evidence.ui',
             label: 'UI 证据门禁',

@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -253,6 +253,9 @@ export interface WorkspaceSettings {
 export const LLM_APIS = ['openai-completions', 'anthropic-messages'] as const
 export type LlmApi = typeof LLM_APIS[number]
 
+/** 面板默认监听地址：只允许本机访问。 */
+export const DEFAULT_SERVER_HOST = '127.0.0.1'
+
 export interface LlmSettings {
   baseUrl?: string
   apiKey?: string
@@ -377,7 +380,13 @@ export interface AppConfig {
   channels?: Record<string, PluginEntry>
   /** 事件总线：来源订阅、决策策略与管线策略。 */
   events: EventsSettings
-  server: { port: number }
+  server: {
+    port: number
+    /** 监听地址；默认 127.0.0.1（只本机可访问），改成 0.0.0.0 即开放局域网访问。 */
+    host: string
+    /** 访问令牌；host 不是本机地址时必填，非本机请求必须带 `x-ra-token`。 */
+    token: string
+  }
   llm?: LlmSettings
   decision: DecisionSettings
 }
@@ -580,7 +589,7 @@ export function defaultConfig(): AppConfig {
         reviewChatId: '',
       },
     },
-    server: { port: 3083 },
+    server: { port: 3083, host: DEFAULT_SERVER_HOST, token: '' },
   }
 }
 
@@ -696,6 +705,11 @@ projects: []
 
 server:
   port: 3083
+  # 监听地址：默认 127.0.0.1 只本机可访问；改成 0.0.0.0 即开放局域网与内网穿透访问。
+  host: 127.0.0.1
+  # 访问令牌：host 不是回环地址时必填（没配会在启动时自动生成并写回本文件）。
+  # 面板的每个 API 请求都要带 x-ra-token；令牌只写不回显。
+  # token: ""
 
 # 模型配置必填：baseUrl / model / apiKey 三项缺一不可，未配置时服务启动会直接报错；
 # 也可以在 Web 面板「初始化 · LLM Provider」里填写，或从 Claude Code / CCSwitch / Pi / OpenCode / Magpie 的本地配置导入
@@ -763,6 +777,8 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
 
   const acceptMode = pickAcceptMode(doc.policy?.acceptMode, base.policy.acceptMode)
   const port = Number(doc.server?.port)
+  const host = normalizeServerHost(doc.server?.host)
+  const token = typeof doc.server?.token === 'string' ? doc.server.token.trim() : ''
   const progressDoc = doc.progress ?? {}
   const progressSyncMs = Number(progressDoc.syncMs)
   const progressProbeMs = Number(progressDoc.probeMs)
@@ -869,7 +885,11 @@ runtime: {
     },
     ...(Object.keys(channelPlugins).length > 0 ? { channels: channelPlugins } : {}),
     events: parseEvents(doc.events, base.events),
-    server: { port: Number.isFinite(port) && port >= 0 && port < 65536 ? port : base.server.port },
+    server: {
+      port: Number.isFinite(port) && port >= 0 && port < 65536 ? port : base.server.port,
+      host,
+      token,
+    },
     ...(isRecord(doc.llm) ? { llm: parseLlm(doc.llm) } : {}),
     decision: parseDecision(doc.decision, env),
   }
@@ -1471,7 +1491,11 @@ export function writeConfig(home: string, config: AppConfig): void {
       policy: config.events.policy,
     },
     projects: config.projects,
-    server: { port: config.server.port },
+    server: {
+      port: config.server.port,
+      host: config.server.host,
+      ...(config.server.token ? { token: config.server.token } : {}),
+    },
   }
   if (config.llm) doc.llm = config.llm
   const header = [
@@ -1562,6 +1586,13 @@ export function publicConfig(config: AppConfig): Record<string, unknown> {
       }
       eventsDoc.sources = next
     }
+  }
+
+  // 访问令牌明文不下发；tokenSet 只用来告诉面板「已经配过」。
+  const serverDoc = doc.server as Record<string, unknown> | undefined
+  if (serverDoc && typeof serverDoc === 'object') {
+    serverDoc.tokenSet = Boolean(serverDoc.token)
+    delete serverDoc.token
   }
 
   // ACP 适配器的 env 可能包含 API key：只下发 key 名，不下发明文。
@@ -1751,6 +1782,40 @@ interface Validator {
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+
+/**
+ * 监听地址归一化：只接受 IPv4 字面量或主机名，非法值回退到默认的 127.0.0.1。
+ *
+ * 校验放在配置层，服务端 listen 时不用再猜用户写了什么。
+ */
+export function normalizeServerHost(value: unknown): string {
+  if (typeof value !== 'string') return DEFAULT_SERVER_HOST
+  const host = value.trim()
+  if (!host) return DEFAULT_SERVER_HOST
+  // IPv4 字面量：四段 0-255。
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
+    return host.split('.').every(part => Number(part) <= 255) ? host : DEFAULT_SERVER_HOST
+  }
+  // 主机名：字母数字、点、横线，不允许路径与端口。
+  if (/^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$/.test(host)) return host
+  return DEFAULT_SERVER_HOST
+}
+
+/**
+ * 判断监听地址是不是「只本机」。
+ *
+ * 只有回环地址（127.0.0.0/8、::1）算本机；0.0.0.0 与其它 IP 都算对外开放。
+ */
+export function isLoopbackHost(host: string): boolean {
+  const value = host.trim().toLowerCase()
+  if (value === '::1' || value === 'localhost') return true
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(value)
+}
+
+/** 面板访问令牌：32 位十六进制随机串。 */
+export function generateServerToken(): string {
+  return randomBytes(16).toString('hex')
+}
 
 const stringValue: Validator = {
   check: value => (typeof value === 'string' ? null : '需要字符串'),
@@ -1964,6 +2029,16 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
 
   'worker.evidence.ui': enumValue(UI_EVIDENCE_MODES),
   'server.port': intValue(1, 65_535),
+  'server.host': {
+    check: value => {
+      if (typeof value !== 'string') return '需要字符串'
+      return normalizeServerHost(value) === value.trim() ? null : '不是合法的监听地址（IPv4 或主机名）'
+    },
+  },
+  // 令牌允许空串：留空表示不启用鉴权（只在本机监听时才安全）。
+  'server.token': {
+    check: value => (typeof value === 'string' ? null : '需要字符串'),
+  },
 
   'llm.baseUrl': stringValue,
   'llm.model': stringValue,
@@ -2178,6 +2253,12 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
         if (result.error) errors.push({ path, message: result.error })
         else accepted.push({ path, value: result.value })
       }
+      continue
+    }
+    // 令牌明文不下发给面板：回传空串表示「保持已配置的令牌」，与 llm.apiKey 同义。
+    if (path === 'server.token' && typeof value === 'string' && !value.trim()) {
+      if (config.server.token) continue
+      errors.push({ path, message: '访问令牌不能为空' })
       continue
     }
     const validator = path === 'runtime.default' ? runtimeIdValueFor(config, declared) : CONFIG_VALIDATORS[path]
@@ -2536,6 +2617,15 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
       config.server.port = v
       return true
     }
+    case 'server.host': {
+      const host = normalizeServerHost(value)
+      if (host !== value) return false
+      config.server.host = host
+      return true
+    }
+    case 'server.token':
+      config.server.token = value
+      return true
     case 'runtime.default': {
       const id = normalizeRuntimeId(value)
       if (!isKnownRuntimeId(config, id)) return false

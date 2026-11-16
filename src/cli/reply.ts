@@ -35,6 +35,8 @@ export interface ReplyOptions {
 export interface ReplyDeps {
   home: string
   port: number
+  /** 面板访问令牌；面板开放访问时上报请求必须带上。 */
+  token?: string
   stdout(line: string): void
   stderr(line: string): void
   fetchImpl?: typeof fetch
@@ -119,7 +121,7 @@ export async function runReply(deps: ReplyDeps, opts: ReplyOptions): Promise<num
   try {
     const res = await fetchImpl(`http://127.0.0.1:${deps.port}/api/reports`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(deps.token ? { 'x-ra-token': deps.token } : {}) },
       body: JSON.stringify(payload),
     })
     const text = await res.text()
