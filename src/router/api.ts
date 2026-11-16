@@ -96,12 +96,8 @@ export interface EventApiPort {
   listSources(): unknown[]
   /** 面板操作：批准 / 驳回 / 延后 / 忽略 / 重试 / 改优先级。 */
   apply(eventId: string, action: string, options: { priority?: string; project?: string }): Promise<unknown | null>
-  /** 外部系统注入事件（HTTP 来源）。 */
-  inject(sourceId: string, envelope: { externalId: string; title: string; body: string; url?: string }): unknown
   /** 当前决策策略与 prompt 版本。 */
   decision(): { provider: string; prompt: string; confidenceThreshold: number; fallback: string; version: number }
-  /** 各来源的注入密钥（面板展示用：只提示是否已配置）。 */
-  sourceSecrets(): Record<string, boolean>
   /** 按状态统计事件条数（面板统计卡用；不受列表 limit 影响）。 */
   counts(): Record<string, number>
 }
@@ -197,10 +193,7 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
     // 面板开放访问时（配了令牌），API 请求都要带令牌。
     // 不按来源 IP 放行本机：内网穿透的流量也是从 127.0.0.1 进来的，放行等于没有鉴权。
     // 静态资源不拦：面板外壳本身不含敏感信息，数据一律走 API。
-    // 事件注入口不拦：外部系统用来源自己的密钥（x-ra-event-secret）鉴权，与面板令牌是两套事。
-    if (path.startsWith('/api/')
-      && !isEventInjectPath(config, path)
-      && !isAuthorized(req, config.server.token)) {
+    if (path.startsWith('/api/') && !isAuthorized(req, config.server.token)) {
       logger.warn('api:access-denied', {
         method: req.method,
         path,
@@ -335,7 +328,6 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         }),
         sources: opts.events.listSources(),
         decision: opts.events.decision(),
-        sourceSecrets: opts.events.sourceSecrets(),
         counts: opts.events.counts(),
         // 候选项目：人工批准时用来挑归属项目（事件本身不绑项目）。
         projects: config.projects.map(project => ({ name: project.name, repo: project.repo })),
@@ -358,48 +350,6 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       if (!result) return respond(res, 404, { error: 'event-not-found' })
       onEvent({ event: 'api:event-action', eventId, action })
       return respond(res, 200, { event: result })
-    }
-
-    // 外部系统注入事件：走 HTTP 事件来源，密钥校验在来源配置里。
-    if (req.method === 'POST' && isEventInjectPath(config, path)) {
-      if (!opts.events) return respond(res, 404, { error: 'events-not-supported' })
-      // 总开关或来源开关关着就不收：跟「来源已关闭」保持一致。
-      if (!config.events.enabled) {
-        logger.warn('event:inject-rejected', { path, reason: 'events-disabled' })
-        return respond(res, 404, { error: 'events-disabled', message: '事件总线已关闭' })
-      }
-      const body = await readJson(req)
-      const sourceId = injectSourceOf(config, path, String(body.sourceId ?? ''))
-      if (!sourceId) {
-        logger.warn('event:inject-rejected', { path, reason: 'no-source-for-path' })
-        return respond(res, 404, { error: 'inject-path-not-found', message: '这条路径没有对应的 http 事件来源' })
-      }
-      if (!config.events.sources[sourceId]?.enabled) {
-        logger.warn('event:inject-rejected', { sourceId, reason: 'source-disabled' })
-        return respond(res, 404, { error: 'source-disabled', message: '这个事件来源已关闭' })
-      }
-      const secret = String(req.headers['x-ra-event-secret'] ?? body.secret ?? '')
-      const expected = String((config.events.sources[sourceId]?.secret ?? ''))
-      if (expected && secret !== expected) {
-        logger.warn('event:inject-rejected', { sourceId, reason: 'secret-mismatch' })
-        return respond(res, 401, { error: 'secret-invalid' })
-      }
-      try {
-        const event = opts.events.inject(sourceId, {
-          externalId: String(body.externalId ?? ''),
-          title: String(body.title ?? ''),
-          body: String(body.body ?? ''),
-          ...(typeof body.url === 'string' ? { url: body.url } : {}),
-        })
-        return respond(res, 201, { event })
-      } catch (error) {
-        // 来源限流是「等一会儿再来」，不是请求本身有问题。
-        if (errorMessage(error).includes('rate-limited')) {
-          logger.warn('event:inject-rejected', { sourceId, reason: 'rate-limited' })
-          return respond(res, 429, { error: 'rate-limited', message: '该来源每分钟条数已达上限，请稍后再推' })
-        }
-        return respond(res, 400, { error: 'inject-failed', message: errorMessage(error) })
-      }
     }
 
     if (path === '/api/workspaces' && req.method === 'GET') {
@@ -1279,37 +1229,3 @@ function legacyReply(raw: unknown): string {
   return [String(value.content ?? '').trim(), String(value.url ?? '').trim()].filter(Boolean).join('\n\n')
 }
 
-/** 事件注入接口的默认路径。 */
-const DEFAULT_EVENT_INJECT_PATH = '/api/events/inject'
-
-/** 配了 path 的 http 来源：请求路径 → 来源 id。 */
-function httpSourcePathOf(config: AppConfig, requestPath: string): string | undefined {
-  for (const [id, source] of Object.entries(config.events.sources)) {
-    if (source.kind !== 'http') continue
-    const configured = (source.path ?? '').trim()
-    if (configured && configured === requestPath) return id
-  }
-  return undefined
-}
-
-/** 这条路径算不算事件注入口：默认路径，或者某个来源自己配的路径。 */
-function isEventInjectPath(config: AppConfig, requestPath: string): boolean {
-  return requestPath === DEFAULT_EVENT_INJECT_PATH || httpSourcePathOf(config, requestPath) !== undefined
-}
-
-/**
- * 注入事件落到哪个来源。
- *
- * 来源配了 path 就按路径走；没配就走默认路径，请求体里可以指明 sourceId。
- * 来源把接口挪到别的路径后，默认路径就不再收它的事件。
- */
-function injectSourceOf(config: AppConfig, requestPath: string, bodySourceId: string): string | undefined {
-  const byPath = httpSourcePathOf(config, requestPath)
-  if (byPath) return byPath
-  if (requestPath !== DEFAULT_EVENT_INJECT_PATH) return undefined
-  const id = bodySourceId.trim() || 'http'
-  const source = config.events.sources[id]
-  if (!source || source.kind !== 'http') return undefined
-  const configured = (source.path ?? '').trim()
-  return !configured || configured === DEFAULT_EVENT_INJECT_PATH ? id : undefined
-}

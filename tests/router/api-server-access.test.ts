@@ -116,37 +116,6 @@ describe('面板对外访问', () => {
     await server.close()
   })
 
-  it('事件注入口不拦：外部系统用来源自己的密钥鉴权', async () => {
-    const config = defaultConfig()
-    config.server.host = '0.0.0.0'
-    config.server.token = 'lan-secret-token'
-    config.events.enabled = true
-    config.events.sources.http = { enabled: true, kind: 'http', path: '/api/events/inject' }
-    const injected: string[] = []
-    const store = new Store(':memory:')
-    const engine = new Engine({ store, policy: policyOf(config), ids: { next: p => `${p}_1` } })
-    const server = await createApiServer({
-      engine,
-      store,
-      config,
-      events: {
-        listEvents: () => [],
-        listSources: () => [],
-        apply: async () => null,
-        inject: (sourceId) => { injected.push(sourceId); return { id: 'evt_1' } },
-        decision: () => ({ provider: 'rule', prompt: '', confidenceThreshold: 0.6, fallback: 'review', version: 1 }),
-        sourceSecrets: () => ({ http: true }),
-        counts: () => ({ pending: 0, review: 0, done: 0, invalid: 0 }),
-      },
-    })
-
-    const res = await call(server, 'POST', '/api/events/inject', { sourceId: 'http', title: 't' })
-    // 没带来源密钥也不该被面板令牌拦下：这一路有自己的鉴权。
-    expect(res.status).toBe(201)
-    expect(injected).toEqual(['http'])
-    await server.close()
-  })
-
   it('静态资源不拦：面板外壳本身不含敏感信息', async () => {
     const config = defaultConfig()
     config.server.host = '0.0.0.0'

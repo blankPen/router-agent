@@ -1057,13 +1057,4 @@ describe('关单后的工作区回收配置', () => {
     expect(published.decision.jev).toEqual({ model: 'jev-latest', apiKeySet: true })
     expect(JSON.stringify(published)).not.toContain('jev-secret')
   })
-
-  it('publicConfig 遮蔽事件来源的验签密钥', () => {
-    const cfg = defaultConfig()
-    cfg.events.sources.http = { enabled: true, kind: 'http', path: '/api/events/inject', secret: 'inject-secret' }
-    const published = publicConfig(cfg) as { events: { sources: Record<string, Record<string, unknown>> } }
-    expect(published.events.sources.http?.secret).toBeUndefined()
-    expect(published.events.sources.http?.secretSet).toBe(true)
-    expect(JSON.stringify(published)).not.toContain('inject-secret')
-  })
 })

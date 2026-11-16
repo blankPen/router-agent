@@ -28,15 +28,13 @@ export interface EventEnvelope {
   context?: Record<string, string>
 }
 
-/** 事件来源的公共契约。轮询型实现 poll，订阅型实现 start。 */
+/** 事件来源的公共契约：轮询型实现 poll。 */
 export interface EventSource {
   readonly id: string
-  /** 来源种类：github / http / schedule / 自定义插件 id。 */
+  /** 来源种类：github / feishu / 自定义插件 id。 */
   readonly kind: string
   /** 拉取一批新事件；没有新事件返回空数组。 */
   poll?(): Promise<EventEnvelope[]> | EventEnvelope[]
-  /** 订阅型来源：把事件推进来。 */
-  start?(sink: (event: EventEnvelope) => void): Promise<void> | void
   stop?(): void
   /**
    * 把结论回写到来源（Issue 评论 / HTTP 回调）。

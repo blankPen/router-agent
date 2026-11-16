@@ -23,8 +23,6 @@ const STATUS_TEXT: Record<string, string> = {
 
 const KIND_LABEL: Record<string, string> = {
   github: 'GitHub Issue',
-  http: 'HTTP 推送',
-  schedule: '定时任务',
   feishu: '飞书',
   plugin: '自定义来源',
   event: '事件来源',

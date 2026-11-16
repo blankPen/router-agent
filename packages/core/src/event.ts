@@ -66,7 +66,7 @@ export interface EventRecord {
   id: string
   /** 来源实例 id（配置里的订阅 id）。 */
   sourceId: string
-  /** 来源种类：github / http / schedule / 自定义插件 id。 */
+  /** 来源种类：github / feishu / 自定义插件 id。 */
   sourceKind: string
   /** 来源自己的事件 id；同一来源内唯一，用于幂等。 */
   externalId: string

@@ -272,8 +272,6 @@ Router 不做对话，只在必要时说话：
 | `event:source-duplicate` | Event | `sourceId` | 同名来源重复注册，先注册的继续跑（插件重载不覆盖正在跑的来源） |
 | `event:source-stop-failed` | Event | `sourceId` `detail` | 停来源抛错；不影响其它来源 |
 | `event:ingested` | Event | `eventId` `sourceId` `sourceKind` `externalId` `title` | 事件进入队列 |
-| `event:inject-rejected` | Event | `sourceId` `reason` / `path` `reason` | HTTP 注入被拒：密钥不对（`secret-mismatch`）、这条路径没有对应的 http 来源（`no-source-for-path`）、总开关关着（`events-disabled`）或来源开关关着（`source-disabled`） |
-| `event:rate-limited` | Event | `sourceId` `limit` | 来源每分钟条数已达上限，本次推送被拒 |
 | `event:duplicate` | Event | `eventId` `sourceId` `externalId` | 同一来源的同一事件重复到达，按幂等忽略 |
 | `event:invalid` | Event | `eventId` `sourceId` `reason` | 事件被判为无效（P4），只留记录不再处理 |
 | `event:review-queued` | Event | `eventId` `sourceId` `priority` `reason` | 事件需要人审，已进待审核队列 |

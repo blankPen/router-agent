@@ -54,7 +54,7 @@ export interface LoadedEventPlugins {
 /**
  * 加载事件来源插件并注册来源。
  *
- * 只有配置里声明了插件入口的来源 id 才会尝试加载；内置来源（github / http / schedule）
+ * 只有配置里声明了插件入口的来源 id 才会尝试加载；内置来源（github / feishu）
  * 由宿主直接装配，不走这里。
  */
 export async function loadEventPlugins(

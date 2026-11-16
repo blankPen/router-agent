@@ -9,7 +9,6 @@ describe('事件配置', () => {
     const config = defaultConfig()
     expect(config.events.enabled).toBe(false)
     expect(config.events.sources.github?.enabled).toBe(false)
-    expect(config.events.sources.http?.enabled).toBe(false)
     expect(config.events.decision.prompt.length).toBeGreaterThan(0)
   })
 
@@ -43,6 +42,31 @@ describe('事件配置', () => {
     expect(config.events.decision.confidenceThreshold).toBe(0.8)
     expect(config.events.policy.peak.start).toBe('10:00')
     expect(config.events.policy.peak.priorities).toEqual(['P0', 'P1'])
+  })
+
+  it('旧配置里的 http 与 schedule 来源被丢弃', () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-events-'))
+    writeFileSync(join(home, 'config.yaml'), [
+      'events:',
+      '  enabled: true',
+      '  sources:',
+      '    github:',
+      '      enabled: true',
+      '      kind: github',
+      '    http:',
+      '      enabled: true',
+      '      kind: http',
+      '      path: /api/events/inject',
+      '    schedule:',
+      '      enabled: true',
+      '      kind: schedule',
+      '      title: 定时任务',
+      '',
+    ].join('\n'), 'utf8')
+    const config = loadConfig(home, {})
+    expect(config.events.sources.github?.enabled).toBe(true)
+    expect(config.events.sources.http).toBeUndefined()
+    expect(config.events.sources.schedule).toBeUndefined()
   })
 
   it('配置补丁允许改决策 prompt 与来源字段', () => {

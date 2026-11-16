@@ -15,8 +15,6 @@ import type { CommandRunner } from '#infra/process.js'
 import type { EventAction, EventPipeline } from './pipeline.js'
 import { FeishuEventSource } from './sources/feishu.js'
 import { GithubEventSource } from './sources/github.js'
-import { HttpEventSource } from './sources/http.js'
-import { ScheduleEventSource } from './sources/schedule.js'
 
 /** 面板展示用的来源视图。 */
 export interface EventSourceView {
@@ -48,19 +46,6 @@ const BUILTIN_FIELDS: Record<string, EventSourceView['fields']> = {
     { key: 'defaultPriority', label: '默认优先级', kind: 'select', options: ['P0', 'P1', 'P2', 'P3', 'P4'] },
     { key: 'dailyLimit', label: '每日配额', kind: 'number', hint: '本来源单独的上限；留空用「成本与时间窗」里的单来源配额' },
   ],
-  http: [
-    { key: 'path', label: '接口路径', kind: 'text', hint: '外部系统注入事件的接口；改了就换路径' },
-    { key: 'secret', label: '验签密钥', kind: 'text' },
-    { key: 'rateLimitPerMin', label: '每分钟条数上限', kind: 'number', hint: '超了直接拒（429）；填 0 表示不限' },
-    { key: 'defaultPriority', label: '默认优先级', kind: 'select', options: ['P0', 'P1', 'P2', 'P3', 'P4'] },
-  ],
-  schedule: [
-    { key: 'title', label: '任务标题', kind: 'text' },
-    { key: 'body', label: '任务正文', kind: 'textarea' },
-    { key: 'intervalMs', label: '间隔（毫秒）', kind: 'number' },
-    { key: 'defaultPriority', label: '默认优先级', kind: 'select', options: ['P0', 'P1', 'P2', 'P3', 'P4'] },
-    { key: 'project', label: '归属项目', kind: 'text' },
-  ],
   feishu: [],
 }
 
@@ -87,7 +72,6 @@ export class EventManager {
   private logger: Logger
   private tickMs: number
   private sources = new Map<string, EventSource>()
-  private httpSources = new Map<string, HttpEventSource>()
   private timers = new Map<string, ReturnType<typeof setInterval>>()
   private tickTimer: ReturnType<typeof setInterval> | null = null
   private status = new Map<string, { status: EventSourceView['status']; message?: string; lastPolledAt?: string }>()
@@ -131,7 +115,6 @@ export class EventManager {
       }
     }
     this.sources.clear()
-    this.httpSources.clear()
     this.logger.info('event:manager-stopped', {})
   }
 
@@ -147,7 +130,6 @@ export class EventManager {
       }
     }
     this.sources.clear()
-    this.httpSources.clear()
 
     const config = this.config()
     if (!config.events.enabled) {
@@ -160,7 +142,6 @@ export class EventManager {
       const built = this.buildSource(id, source)
       if (!built) continue
       this.sources.set(id, built)
-      if (built.kind === 'http') this.httpSources.set(id, built as HttpEventSource)
     }
 
     // 自定义来源插件：只有配置里写了 plugin 的来源 id 才会加载。
@@ -177,9 +158,9 @@ export class EventManager {
     this.pluginOptions = plugins.optionsById
 
     for (const [id, source] of this.sources) {
-      const interval = this.intervalOf(id, source)
+      const interval = this.intervalOf(id)
       if (typeof source.poll !== 'function') {
-        this.status.set(id, { status: 'ok', message: '订阅型来源，等待事件推送' })
+        this.status.set(id, { status: 'ok', message: '推送型来源，由来源自己拉取' })
         continue
       }
       const timer = setInterval(() => {
@@ -189,15 +170,6 @@ export class EventManager {
       void this.pollSource(id, source)
     }
     this.logger.info('event:sources-loaded', { count: this.sources.size })
-  }
-
-  /** 外部注入事件（HTTP 来源）。 */
-  inject(sourceId: string, envelope: EventEnvelope): EventRecord {
-    const source = this.httpSources.get(sourceId)
-    const config = this.config().events.sources[sourceId]
-    if (!source || !config) throw new Error(`event:source-not-found:${sourceId}`)
-    const normalized = source.inject(envelope)
-    return this.pipeline.ingest(sourceId, config, normalized)
   }
 
   /** 面板用：来源列表。 */
@@ -213,10 +185,7 @@ export class EventManager {
         id,
         kind: source.kind ?? (source.plugin ? 'plugin' : 'event'),
         enabled: source.enabled,
-        // 验签密钥明文不下发，字段上只标「已配置」，面板据此提示留空即保持。
-        fields: fields.map(field => field.key === 'secret'
-          ? { ...field, hint: source.secret ? '已配置；留空 = 保持当前密钥' : (field.hint ?? '') }
-          : field),
+        fields,
         status: status?.status ?? (source.enabled ? 'idle' : 'unsupported'),
         ...(status?.message ? { message: status.message } : {}),
         ...(status?.lastPolledAt ? { lastPolledAt: status.lastPolledAt } : {}),
@@ -320,10 +289,6 @@ export class EventManager {
     switch (config.kind) {
       case 'github':
         return new GithubEventSource(id, config, { runner: this.runner, logger: this.logger })
-      case 'http':
-        return new HttpEventSource(id, config, { logger: this.logger, now: () => new Date(this.clock()) })
-      case 'schedule':
-        return new ScheduleEventSource(id, config)
       case 'feishu':
         return new FeishuEventSource(id, config, { logger: this.logger })
       default:
@@ -333,10 +298,10 @@ export class EventManager {
   }
 
   /** 轮询间隔：来源自己配的优先。 */
-  private intervalOf(id: string, source: EventSource): number {
+  private intervalOf(id: string): number {
     const configured = this.config().events.sources[id]?.intervalMs
     if (typeof configured === 'number' && configured > 0) return configured
-    return source.kind === 'schedule' ? 3_600_000 : 300_000
+    return 300_000
   }
 }
 

@@ -154,7 +154,7 @@ export default plugin
 
 协议与配置形状见 [CONFIGURATION.md](CONFIGURATION.md#自定义事件来源npm-插件)。
 
-内置来源（github / http / schedule / feishu）由宿主直接装配，不走插件机制。
+内置来源（github / feishu）由宿主直接装配，不走插件机制。
 
 ## 新增一个内置 runtime / channel
 

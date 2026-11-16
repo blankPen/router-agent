@@ -347,21 +347,6 @@ events:
       branch: main
       defaultPriority: P2
       dailyLimit: 50                 # 本来源的每日配额；不填就用 policy.perSourceDailyLimit
-    http:
-      enabled: true
-      kind: http
-      path: /api/events/inject       # 外部系统注入事件的接口；改了就换路径
-      secret: ""                     # 验签密钥，防重放
-      rateLimitPerMin: 30            # 每分钟条数上限，超了直接拒（429）；0 = 不限
-      defaultPriority: P2
-    schedule:
-      enabled: true
-      kind: schedule
-      intervalMs: 3600000
-      title: 每日依赖巡检
-      body: 检查依赖是否有安全更新
-      defaultPriority: P3
-      project: router-agent
     feishu:
       enabled: false                 # 飞书群消息由消息链路处理，这里只留开关
       kind: feishu
@@ -387,27 +372,7 @@ events:
     reviewChatId: ""                 # 审核通知发到哪个会话；留空只落面板
 ```
 
-**外部系统注入事件**：
-
-```bash
-curl -X POST http://127.0.0.1:3083/api/events/inject \
-  -H 'Content-Type: application/json' \
-  -H 'x-ra-event-secret: <配置里的 secret>' \
-  -d '{"sourceId":"http","externalId":"alert-42","title":"磁盘告警","body":"data 分区使用率 92%"}'
-```
-
-接口路径按来源配置走：`events.sources.<id>.path` 配了就用配的路径，来源挪走路径后默认路径就不再收它的事件。返回码含义：
-
-| 码 | 含义 |
-|-|-|
-| `201` | 事件已入队 |
-| `401` | 密钥不对（`x-ra-event-secret` 与配置里的 `secret` 不一致） |
-| `404` | 这条路径没有对应的 http 事件来源 / 总开关关着 / 这个来源开关关着 |
-| `429` | 该来源每分钟条数已达上限，稍后再推 |
-
-返回的事件会进队列，等下一次决策 tick 判定。判定结论与派发结果都在面板「事件」页能看到（事件页只做查看与审核，来源与判定策略一律回「配置 → 事件总线」改）。
-
-**验签密钥不下发给面板**：`/api/config` 只回 `secretSet: true/false`，明文留在 `config.yaml` 里。面板上留空表示「保持当前密钥」，不会把已配的密钥清掉。
+事件进队列后等下一次决策 tick 判定。判定结论与派发结果都在面板「事件」页能看到（事件页只做查看与审核，来源与判定策略一律回「配置 → 事件总线」改）。
 
 **`fallback` 决定「判不出来」时怎么办**：
 
@@ -436,7 +401,7 @@ curl -X POST http://127.0.0.1:3083/api/events/inject \
 
 ### 自定义事件来源（npm 插件）
 
-内置来源（github / http / schedule / feishu）不够用时，可以装一个事件来源插件 —— 和「添加运行时」是同一套机制：面板「配置 → 事件总线 → 添加自定义事件」填 npm 包名，走 `npm install` 装到 `<RA_HOME>/node_modules`。
+内置来源（github / feishu）不够用时，可以装一个事件来源插件 —— 和「添加运行时」是同一套机制：面板「配置 → 事件总线 → 添加自定义事件」填 npm 包名，走 `npm install` 装到 `<RA_HOME>/node_modules`。
 
 插件包默认导出一个对象：
 

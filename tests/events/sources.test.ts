@@ -1,7 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import { GithubEventSource, parseGithubIssues } from '../../src/events/sources/github.js'
-import { HttpEventSource } from '../../src/events/sources/http.js'
-import { ScheduleEventSource } from '../../src/events/sources/schedule.js'
 import type { CommandRunner } from '#infra/process.js'
 
 const ISSUE_JSON = JSON.stringify([
@@ -42,38 +40,6 @@ describe('事件来源', () => {
     expect(calls[0]?.[0]).toBe('issue')
     expect(calls[0]?.[1]).toBe('comment')
     expect(calls[0]).toContain('12')
-  })
-
-  it('定时任务在同一个时间窗内只产出一条事件', () => {
-    const at = new Date('2026-11-13T10:00:00Z')
-    const source = new ScheduleEventSource('schedule', { enabled: true, kind: 'schedule', intervalMs: 3_600_000, title: '巡检', body: '检查依赖' }, { now: () => at })
-    const first = source.poll()
-    const second = source.poll()
-    expect(first[0]?.externalId).toBe(second[0]?.externalId)
-    expect(first[0]?.title).toBe('巡检')
-  })
-
-  it('HTTP 来源按每分钟条数上限拦截超量推送', () => {
-    const at = new Date('2026-11-13T10:00:30Z')
-    const source = new HttpEventSource('http', { enabled: true, kind: 'http', rateLimitPerMin: 2 }, { now: () => at })
-    expect(() => source.inject({ externalId: 'x#1', title: 'a', body: 'b' })).not.toThrow()
-    expect(() => source.inject({ externalId: 'x#2', title: 'a', body: 'b' })).not.toThrow()
-    expect(() => source.inject({ externalId: 'x#3', title: 'a', body: 'b' })).toThrow(/rate-limited/)
-  })
-
-  it('HTTP 来源的每分钟计数到下一分钟重新开始', () => {
-    let at = new Date('2026-11-13T10:00:30Z')
-    const source = new HttpEventSource('http', { enabled: true, kind: 'http', rateLimitPerMin: 1 }, { now: () => at })
-    source.inject({ externalId: 'x#1', title: 'a', body: 'b' })
-    expect(() => source.inject({ externalId: 'x#2', title: 'a', body: 'b' })).toThrow(/rate-limited/)
-    at = new Date('2026-11-13T10:01:10Z')
-    expect(() => source.inject({ externalId: 'x#3', title: 'a', body: 'b' })).not.toThrow()
-  })
-
-  it('HTTP 来源拒绝没有 externalId 或空正文的事件', () => {
-    const source = new HttpEventSource('http', { enabled: true, kind: 'http' })
-    expect(() => source.inject({ externalId: '', title: 'a', body: 'b' })).toThrow(/external-id/)
-    expect(() => source.inject({ externalId: 'x', title: '', body: '' })).toThrow(/empty/)
   })
 
   it('解析 GitHub 输出时忽略没有序号的条目', () => {

@@ -228,8 +228,8 @@ function mergeOutput(rule: EventDecisionOutput, model: EventDecisionOutput): Eve
 /**
  * 规则端口：完全确定性的判定，不调模型、不花钱。
  *
- * 规则只给「事实」：来源默认优先级与类型、风险标签必须人审、
- * 定时任务固定走汇总播报。其余（项目、skill）留给模型或人工。
+ * 规则只给「事实」：来源默认优先级与类型、风险标签必须人审。
+ * 其余（项目、skill）留给模型或人工。
  */
 export const ruleDecisionPort: EventDecisionPort = {
   name: 'rule',
@@ -238,12 +238,10 @@ export const ruleDecisionPort: EventDecisionPort = {
     const labels = (source.labels ?? []).map(label => label.trim().toLowerCase()).filter(Boolean)
     const risky = labels.some(label => RISK_LABELS.includes(label))
     const eventType = (source.defaultType ?? '').trim() || defaultTypeOf(input.event.sourceKind)
-    const skill = input.event.sourceKind === 'schedule' ? 'daily-digest' : ''
     const output: EventDecisionOutput = {
       actionable: true,
       priority: risky ? 'P0' : normalizeEventPriority(source.defaultPriority),
       eventType,
-      ...(skill ? { skill } : {}),
       ...(risky ? { needsReview: true, reason: '命中风险标签，需要人工确认' } : {}),
       confidence: 1,
     }
@@ -255,7 +253,6 @@ export const ruleDecisionPort: EventDecisionPort = {
 
 /** 按来源种类给一个默认事件类型。 */
 function defaultTypeOf(sourceKind: string): string {
-  if (sourceKind === 'schedule') return 'digest'
   if (sourceKind === 'github') return 'issue'
   return 'event'
 }

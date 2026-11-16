@@ -13,23 +13,6 @@ export function SourceLogo({ kind, size = 20 }: { kind: string; size?: number })
         </>
       )
     }
-    if (kind === 'http') {
-      return (
-        <>
-          <circle cx="12" cy="12" r="9" />
-          <path d="M3 12h18" />
-          <path d="M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18" />
-        </>
-      )
-    }
-    if (kind === 'schedule') {
-      return (
-        <>
-          <circle cx="12" cy="12" r="9" />
-          <path d="M12 7v5l3 2" />
-        </>
-      )
-    }
     if (kind === 'feishu') {
       return (
         <>

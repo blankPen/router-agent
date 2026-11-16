@@ -1695,7 +1695,6 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
           ...(options.project ? { project: options.project } : {}),
         },
       ),
-      inject: (sourceId, envelope) => eventWiring.manager.inject(sourceId, envelope),
       decision: () => {
         const decision = config.events.decision
         const version = Number(store.getCursor('events:decision-prompt-version') ?? '1')
@@ -1707,9 +1706,6 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
           version: Number.isFinite(version) && version > 0 ? version : 1,
         }
       },
-      sourceSecrets: () => Object.fromEntries(
-        Object.entries(config.events.sources).map(([id, source]) => [id, Boolean(source.secret)]),
-      ),
       counts: () => eventWiring.manager.countEvents(),
     },
     ...(feishuChannel?.admin ? { feishuBot: feishuChannel.admin } : {}),

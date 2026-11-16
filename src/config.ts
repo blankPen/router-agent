@@ -285,7 +285,7 @@ export interface DecisionSettings {
 export interface EventSourceConfig {
   enabled: boolean
   /** 内置来源种类；自定义插件来源留空。 */
-  kind?: 'github' | 'http' | 'schedule' | 'feishu'
+  kind?: 'github' | 'feishu'
   /** 自定义来源插件入口：npm 包名或本地路径。 */
   plugin?: string
   /** 插件自己声明的字段取值。 */
@@ -300,16 +300,6 @@ export interface EventSourceConfig {
   project?: string
   /** 派工起始分支。 */
   branch?: string
-  /** HTTP 来源：对外注入事件的接口路径。 */
-  path?: string
-  /** HTTP 来源：验签密钥，防重放。 */
-  secret?: string
-  /** HTTP 来源：每分钟条数上限。 */
-  rateLimitPerMin?: number
-  /** 定时任务来源：任务标题。 */
-  title?: string
-  /** 定时任务来源：任务正文。 */
-  body?: string
   /** 事件默认优先级。 */
   defaultPriority?: EventPriority
   /** 事件默认类型。 */
@@ -570,8 +560,6 @@ export function defaultConfig(): AppConfig {
       enabled: false,
       sources: {
         github: { enabled: false, kind: 'github', repo: '', intervalMs: 300_000, labels: [], defaultPriority: 'P2', dailyLimit: 50 },
-        http: { enabled: false, kind: 'http', path: '/api/events/inject', secret: '', rateLimitPerMin: 30, defaultPriority: 'P2' },
-        schedule: { enabled: false, kind: 'schedule', intervalMs: 3_600_000, title: '定时任务', body: '', defaultPriority: 'P3' },
         feishu: { enabled: false, kind: 'feishu' },
       },
       decision: {
@@ -898,6 +886,9 @@ runtime: {
   return config
 }
 
+/** 已下线的内置事件来源种类；旧配置里的这些条目直接丢掉。 */
+const REMOVED_EVENT_SOURCE_KINDS = new Set(['http', 'schedule'])
+
 /** 解析事件总线配置；逐项兜底，缺省值来自 defaultConfig。 */
 function parseEvents(value: unknown, base: EventsSettings): EventsSettings {
   if (!isRecord(value)) return base
@@ -905,6 +896,8 @@ function parseEvents(value: unknown, base: EventsSettings): EventsSettings {
   const rawSources = isRecord(value.sources) ? value.sources : {}
   for (const [id, raw] of Object.entries(rawSources)) {
     if (!isRecord(raw)) continue
+    // 已下线的来源种类（http / schedule）：直接丢掉，不留成面板里的幽灵来源。
+    if (REMOVED_EVENT_SOURCE_KINDS.has(String(raw.kind ?? ''))) continue
     const fallback = base.sources[id] ?? { enabled: false }
     sources[id] = {
       enabled: booleanOr(raw.enabled, fallback.enabled),
@@ -916,11 +909,6 @@ function parseEvents(value: unknown, base: EventsSettings): EventsSettings {
       ...(Array.isArray(raw.labels) ? { labels: stringArray(raw.labels, []) } : {}),
       ...(typeof raw.project === 'string' ? { project: raw.project } : {}),
       ...(typeof raw.branch === 'string' ? { branch: raw.branch } : {}),
-      ...(typeof raw.path === 'string' ? { path: raw.path } : {}),
-      ...(typeof raw.secret === 'string' ? { secret: raw.secret } : {}),
-      ...(typeof raw.rateLimitPerMin === 'number' ? { rateLimitPerMin: raw.rateLimitPerMin } : {}),
-      ...(typeof raw.title === 'string' ? { title: raw.title } : {}),
-      ...(typeof raw.body === 'string' ? { body: raw.body } : {}),
       ...(raw.defaultPriority ? { defaultPriority: normalizeEventPriority(raw.defaultPriority) } : {}),
       ...(typeof raw.defaultType === 'string' ? { defaultType: raw.defaultType } : {}),
       ...(typeof raw.dailyLimit === 'number' ? { dailyLimit: raw.dailyLimit } : {}),
@@ -1566,28 +1554,6 @@ export function publicConfig(config: AppConfig): Record<string, unknown> {
     apiKeySet: Boolean(jev.apiKey),
   }
 
-  // 事件来源的验签密钥明文不下发；secretSet 只用来告诉面板「已经配过」。
-  const eventsDoc = doc.events as Record<string, unknown> | undefined
-  if (eventsDoc && typeof eventsDoc === 'object') {
-    const sources = eventsDoc.sources
-    if (sources && typeof sources === 'object' && !Array.isArray(sources)) {
-      const next: Record<string, unknown> = {}
-      for (const [id, value] of Object.entries(sources as Record<string, unknown>)) {
-        if (!value || typeof value !== 'object' || Array.isArray(value)) {
-          next[id] = value
-          continue
-        }
-        const entry = { ...(value as Record<string, unknown>) }
-        if (typeof entry.secret === 'string') {
-          entry.secretSet = Boolean(entry.secret)
-          delete entry.secret
-        }
-        next[id] = entry
-      }
-      eventsDoc.sources = next
-    }
-  }
-
   // 访问令牌明文不下发；tokenSet 只用来告诉面板「已经配过」。
   const serverDoc = doc.server as Record<string, unknown> | undefined
   if (serverDoc && typeof serverDoc === 'object') {
@@ -1905,11 +1871,6 @@ const EVENT_SOURCE_FIELDS: Record<string, 'text' | 'number' | 'boolean' | 'list'
   labels: 'list',
   project: 'text',
   branch: 'text',
-  path: 'text',
-  secret: 'text',
-  rateLimitPerMin: 'number',
-  title: 'text',
-  body: 'text',
   defaultPriority: 'priority',
   defaultType: 'text',
   dailyLimit: 'number',
@@ -2230,12 +2191,6 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
         const ok = typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
         if (!ok) errors.push({ path, message: '插件选项只接受字符串、数字或布尔值' })
         else accepted.push({ path, value })
-        continue
-      }
-      // 验签密钥明文不下发给面板，面板回传空串表示「保持已配置的密钥」。
-      if (key === 'secret' && typeof value === 'string' && !value.trim()) {
-        if (source?.secret) continue
-        errors.push({ path, message: '验签密钥不能为空' })
         continue
       }
       const message = validateEventSourceField(key, value)
