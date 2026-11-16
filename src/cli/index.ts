@@ -1815,8 +1815,9 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   }
   const chatTimer = service ? setInterval(refreshChats, 600_000) : null
   chatTimer?.unref()
+  // 总开关关着也要起管理器：面板随时可能打开它，起晚了判定管线不会跟着启动。
+  await eventWiring.manager.start()
   if (config.events.enabled) {
-    await eventWiring.manager.start()
     output.stdout(`事件总线已启动（${Object.keys(config.events.sources).filter(id => config.events.sources[id]?.enabled).length} 个来源已启用）。`)
   }
   if (service) {

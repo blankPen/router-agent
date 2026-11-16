@@ -55,4 +55,20 @@ describe('事件管理器', () => {
     expect(store.getEvent(event.id)?.ticketId).toBeTruthy()
     manager.stop()
   })
+
+  it('启动时总开关关着，之后打开也会开始判定', async () => {
+    const { store, config, pipeline, manager } = setup()
+    config.events.enabled = false
+    await manager.start()
+    const event = pipeline.ingest('github', SOURCE, { externalId: 'issue:x#3', title: '崩', body: '崩' })
+    await manager.runTick()
+    expect(store.getEvent(event.id)?.ticketId).toBeUndefined()
+
+    // 面板把总开关打开：来源装上，判定也跟着开始跑。
+    config.events.enabled = true
+    await manager.reloadSources()
+    await manager.runTick()
+    expect(store.getEvent(event.id)?.ticketId).toBeTruthy()
+    manager.stop()
+  })
 })

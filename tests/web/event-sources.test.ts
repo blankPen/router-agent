@@ -32,8 +32,8 @@ describe('事件来源字段映射', () => {
     expect(defs[3]?.options).toEqual([{ value: 'P0', label: 'P0' }, { value: 'P1', label: 'P1' }])
   })
 
-  it('验签密钥按密码字段渲染，不在页面上明文显示', () => {
-    const [secret] = sourceFieldDefs('http', [{ key: 'secret', label: '验签密钥', kind: 'text' }])
+  it('来源的 secret 字段按密码字段渲染，不在页面上明文显示', () => {
+    const [secret] = sourceFieldDefs('demo', [{ key: 'secret', label: '验签密钥', kind: 'text' }])
     expect(secret?.kind).toBe('password')
   })
 })
