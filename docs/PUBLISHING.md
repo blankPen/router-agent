@@ -20,6 +20,31 @@
 
 ## 发版流程
 
+### 三条分支的渠道对照
+
+仓库有三条长期分支，各自带一套 npm 发布渠道。**用户用哪个渠道安装，取决于用哪个 dist-tag**：
+
+| 分支 | 版本号形式 | npm dist-tag | 安装方式 | 说明 |
+| --- | --- | --- | --- | --- |
+| `main` | `vX.Y.Z` | `latest` | `npm i -g router-agent` | 稳定版 |
+| `beta` | `vX.Y.Z-beta.N` | `beta` | `npm i -g router-agent@beta` | 预发布，功能已成型 |
+| `alpha` | `vX.Y.Z-alpha.N` | `alpha` | `npm i -g router-agent@alpha` | 更早的预发布，实验性 |
+
+硬规则：
+
+- `beta` / `alpha` **绝不占用 `latest`**。预发布版本带着预发布后缀，即使误占了 `latest`，
+  `npm install` 也会因为 semver 规则装到它，所以工作流在发布前会校验 dist-tag 与分支是否匹配；
+- 三条分支**不会产出相同版本号**：预发布基座取自 npm 上的最新稳定版，后缀分别是 `-beta.N` / `-alpha.N`；
+- `beta` / `alpha` 发布后**不回写版本号到 `main`**：`main` 的版本号只跟稳定版对齐；
+- 稳定版 tag（`vX.Y.Z`）只允许从 `main` 推；`vX.Y.Z-beta.N` 只允许从 `beta` 推，`vX.Y.Z-alpha.N` 只允许从 `alpha` 推。
+
+版本号在 CI 内自动计算：
+
+- 稳定版：以分支上的 `package.json` 版本为基准升 patch（跳过 npm 上已占用的版本）；
+- 预发布：基线取 **npm 上的最新稳定版**（`npm view router-agent dist-tags.latest`），
+  取它的下一个 patch 作为预发布基座，再从 `-beta.1` / `-alpha.1` 开始找第一个未被占用的序号。
+  所以 `main` 发到 `0.3.41` 时，`beta` 发 `0.3.41-beta.1`、`alpha` 发 `0.3.41-alpha.1`，互不冲突。
+
 ### A. 合并到 main（推荐，自动升 patch）
 
 日常需求 PR 合并进 `main` 后，工作流会自动判断并发布，**不需要再手改版本号**：
@@ -82,8 +107,10 @@ Actions → 发布 npm 包 → Run workflow。发布的是所选分支 `package.
    否则 CLI 与独立包用的还是旧产物。
 1. **生成发布计划**（`scripts/release-plan.mjs`）：读取 `package.json` 的 `name`/`version`，
    结合触发方式、推送前的版本、本次改动的文件与提交信息，决定「发不发、发哪个版本」：
-   - tag / 手动触发：按当前版本发布，npm 上已有则跳过（tag 触发时会先校验 tag 与版本一致）；
+   - tag / 手动触发：按当前版本发布，npm 上已有则跳过（tag 触发时会先校验 tag 与版本一致、
+     tag 所在分支与渠道是否匹配）；
    - main 推送：命中跳过条件就跳过，否则自动升 patch（会跳过 npm 上已占用的版本）；
+   - beta / alpha 推送：以 npm 上的最新稳定版为基线自动算预发布版本号（见「三条分支的渠道对照」）；
 2. 校验 `NPM_TOKEN` 是否存在；
 3. `pnpm install --frozen-lockfile`；
 4. 自动升版时把 `package.json` 版本改成计划里的版本，并用 `--sync` 把所有 `@router-agent/*` 的版本与依赖同步到同一版本；
@@ -93,14 +120,19 @@ Actions → 发布 npm 包 → Run workflow。发布的是所选分支 `package.
    确认 token 用户是根包维护者。无权限时 npm 对已存在的包返回 **E404（伪装成不存在）**，不是 E403；
 6. `pnpm check`（类型检查 + 全量测试）；
 7. `pnpm build`（tsc + esbuild + 各包独立产物）；
-8. `node scripts/publish-packages.mjs --check-versions`：10 个包的目标版本必须都未占用，
+8. **发布前置校验**：版本号与发布计划一致、构建产物存在（`dist/cli/index.js` 等）、
+   dist-tag 与所在分支匹配（beta 分支必须是 `beta`、alpha 分支必须是 `alpha`）；
+9. `node scripts/publish-packages.mjs --check-versions`：10 个包的目标版本必须都未占用，
    避免「插件已发、根包 E404」的半发布状态；
-9. `node scripts/publish-packages.mjs` 按顺序发布 SDK / 插件，最后 `npm publish --provenance --json`
-   发布根包；任一包失败立即中止，并打印失败包名与 npm 原始输出末 10 行。
-10. 依据 `npm publish` 的退出码与 JSON 输出判定发布是否成功（`scripts/publish-result.mjs`），
+10. `node scripts/publish-packages.mjs --tag <dist-tag>` 按顺序发布 SDK / 插件，最后
+    `npm publish --provenance --json --tag <dist-tag>` 发布根包；
+    **必须显式带 `--tag`**，否则 npm 默认打 `latest`，预发布会占用稳定版渠道。
+    任一包失败立即中止，并打印失败包名与 npm 原始输出末 10 行。
+11. 依据 `npm publish` 的退出码与 JSON 输出判定发布是否成功（`scripts/publish-result.mjs`），
    判定结果写进 step outputs 传给后续步骤，不再回查 npm registry；
-11. 自动升版时把版本号提交回 `main`，让仓库与 npm 保持一致；提交里包含重新生成的
+12. 自动升版时把版本号提交回 `main`，让仓库与 npm 保持一致；提交里包含重新生成的
     `pnpm-lock.yaml`，否则仓库里的锁文件会与包清单脱节。
+    **只有稳定版渠道会回写**，`beta` / `alpha` 不会动 `main` 的版本号。
 
 ### 改了版本号要一起提交锁文件
 
@@ -113,6 +145,21 @@ node scripts/publish-packages.mjs --sync   # 同步各包版本并重新生成 p
 并把 `package.json`、`packages/*/package.json`、`pnpm-lock.yaml` 一起提交。
 `tests/scripts/lockfile-sync.test.ts` 会校验锁文件里的内部包版本与包清单一致，
 不一致时 `pnpm check` 就会失败，避免问题拖到 CI 才暴露。
+
+### 分支基线怎么维护
+
+`beta` / `alpha` 两条分支是从 `main` 切出来的长期分支，需要跟着 `main` 走：
+
+1. **先合 workflow 改动到 main**：发布策略的改动先走 PR 合进 `main`，
+   再把 `main` 合并（merge）进 `beta` / `alpha`，保证三条分支上的 workflow 是同一版本；
+2. **日常同步**：功能合进 `main` 后，把 `main` 合并进 `beta` / `alpha`，
+   两条分支随后各自发一版预发布；
+3. **版本号不手动改**：预发布版本号由 CI 算出（见「三条分支的渠道对照」），
+   分支上的 `package.json` 版本号会随 `main` 同步而变，这是正常的。
+   `main` 的版本号只由稳定版发布流程回写。
+
+分支落后太多时，用 merge（不是 rebase）同步：`beta` / `alpha` 上已经有自己的发布提交，
+rebase 会改写已发布版本的提交历史。
 
 ### 怎么判定发布成功
 
@@ -166,6 +213,20 @@ ra -v
 
 `ra -v` 的版本号在运行时读取 `package.json`，不会与 npm 上的版本漂移。
 
+装预发布渠道时带上 dist-tag：
+
+```bash
+npm i -g router-agent@beta    # 预发布
+npm i -g router-agent@alpha   # 更早的预发布
+npm i -g router-agent@latest  # 回到稳定版
+```
+
+看当前各渠道指向哪个版本：
+
+```bash
+npm view router-agent dist-tags
+```
+
 ## 首次发布的待办与风险
 
 - **LICENSE**：已采用 MIT，见根目录 `LICENSE` 与 `package.json` 的 `license` 字段；如需更换版权方，改 `LICENSE` 首行即可。
@@ -193,5 +254,8 @@ ra -v
 | `E409 ... cannot publish over existing version` | 同版本已发布 | 升版本号后重新发版；工作流正常情况下会提前跳过 |
 | 流水线报「只写进了暂存区」 | token 只有 `stage only` 权限，版本进了暂存区 | 改 token 权限，或在 Staged Packages 中 Approve |
 | `tag vX 与 package.json 版本不一致` | tag 与版本不同步 | `pnpm version` 重新打 tag 再推 |
+| `稳定 tag vX.Y.Z 不在 main 上` | 稳定 tag 从别的分支推了 | 稳定版只能从 `main` 推 tag；预发布请用 `vX.Y.Z-beta.N` / `vX.Y.Z-alpha.N` |
+| `beta tag vX.Y.Z-beta.N 必须从 beta 分支推送` | tag 与所在分支的渠道不匹配 | 从对应的分支推 tag，避免跨分支产出相同版本号 |
+| `dist-tag 必须是 beta / alpha` | 分支与渠道对不上 | 检查工作流的分支映射；预发布绝不能占用 `latest` |
 | 流水线提示「版本号回写 main 失败」 | main 分支保护禁止 Actions 直接推送 | 允许 Actions 推送，或忽略该提示：npm 已发布，下一次合集会以 npm 上最新版本为基准继续升 patch |
 | provenance 相关报错 | 缺少 `id-token: write` 或仓库/runner 不满足要求 | 检查工作流权限与仓库可见性 |
