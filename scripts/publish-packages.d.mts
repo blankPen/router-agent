@@ -11,5 +11,6 @@ export function scopeDiagnostic(name: string, stdout: string, stderr: string): s
 export function assertPublisher(packageName: string, whoami: string, owners: string): string
 export function verifyPublisher(packageName?: string, scope?: string): string
 export function publishMode(argv: readonly string[]): 'sync' | 'check-publisher' | 'check-versions' | 'dry-run' | 'publish'
+export function readDistTag(argv: readonly string[]): string
 export function versionExists(name: string, targetVersion: string): boolean
 export function assertUnpublished(names: readonly string[], targetVersion: string): void

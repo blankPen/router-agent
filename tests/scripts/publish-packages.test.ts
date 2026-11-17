@@ -6,6 +6,7 @@ import {
   assertPackable,
   scopeDiagnostic,
   publishMode,
+  readDistTag,
   syncManifest,
   syncRootDependencies,
   undeclaredDependencies,
@@ -29,6 +30,15 @@ describe('多包发布', () => {
     expect(publishMode(['--sync'])).toBe('sync')
     expect(publishMode(['--dry-run'])).toBe('dry-run')
     expect(publishMode([])).toBe('publish')
+  })
+
+  it('预发布渠道必须显式带 --tag，避免 npm 默认占用 latest', () => {
+    expect(readDistTag(['--tag', 'beta'])).toBe('beta')
+    expect(readDistTag(['--tag', 'alpha'])).toBe('alpha')
+    expect(readDistTag(['--tag', 'latest'])).toBe('latest')
+    // 没给 --tag 时返回空串，publishOne 不传 --tag，由 npm 用默认值。
+    expect(readDistTag([])).toBe('')
+    expect(readDistTag(['--tag'])).toBe('')
   })
 
   it('同步版本时只改内部包依赖，不动第三方依赖', () => {

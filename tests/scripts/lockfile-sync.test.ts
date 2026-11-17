@@ -37,3 +37,40 @@ describe('版本回写提交', () => {
     expect(gitAdd).toContain('pnpm-lock.yaml')
   })
 })
+
+/** 三条长期分支各走各的 npm 渠道，预发布绝不能占用 latest。 */
+describe('多分支发布渠道', () => {
+  const workflow = parseYaml(readFileSync(join(root, '.github/workflows/publish-npm.yml'), 'utf8'))
+
+  it('监听 main / beta / alpha 三条分支', () => {
+    const branches = workflow.on.push.branches as string[]
+    expect(branches).toContain('main')
+    expect(branches).toContain('beta')
+    expect(branches).toContain('alpha')
+  })
+
+  it('发布时带上 dist-tag，预发布不落到 latest', () => {
+    const steps = workflow.jobs.publish.steps as { name?: string; run?: string }[]
+    const publish = steps.find(step => step.name === '发布 SDK / 插件 / 根包到 npm')
+    const run = String(publish?.run ?? '')
+    // 插件与根包都要带 --tag，否则 npm 默认打 latest。
+    expect(run).toContain('scripts/publish-packages.mjs --tag "$DIST_TAG"')
+    expect(run).toContain('npm publish --provenance --json --tag "$DIST_TAG"')
+  })
+
+  it('版本号回写只对稳定版渠道生效', () => {
+    const steps = workflow.jobs.publish.steps as { name?: string; if?: string }[]
+    const writeback = steps.find(step => step.name === '回写版本号到 main')
+    expect(writeback?.if).toContain("needs.check.outputs.writeback == 'true'")
+  })
+
+  it('发布前校验 dist-tag 与所在分支匹配', () => {
+    const steps = workflow.jobs.publish.steps as { name?: string; run?: string }[]
+    const validate = steps.find(step => step.name === '校验发布前置条件')
+    const run = String(validate?.run ?? '')
+    expect(run).toContain('refs/heads/beta')
+    expect(run).toContain('refs/heads/alpha')
+    expect(run).toContain('dist-tag 必须是 beta')
+    expect(run).toContain('dist-tag 必须是 alpha')
+  })
+})
