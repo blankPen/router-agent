@@ -1,12 +1,23 @@
 name: 发布 npm 包
 
 # 触发方式：
-#   1. main 分支收到新提交（通常是 PR 合并）——自动判断是否需要发版：
+#   1. main / beta / alpha 分支收到新提交——自动判断是否需要发版。
+#      三条分支按渠道发到不同的 npm dist-tag，谁都不会占用 latest：
+#        main  → 稳定版 vX.Y.Z         → dist-tag: latest
+#        beta  → 预发布 vX.Y.Z-beta.N   → dist-tag: beta
+#        alpha → 预发布 vX.Y.Z-alpha.N  → dist-tag: alpha
+#      main 的行为与改造前完全一致：
 #      · 本次推送手动改过 package.json 的 version：按该版本发布（minor / major 发版）；
 #      · 否则自动升 patch（跳过 npm 上已占用的版本），发布成功后把版本号回写到 main；
 #      · 只改文档 / 测试 / CI，或提交信息含 [skip release] 时跳过，避免刷无意义的版本号。
+#      beta / alpha 的版本号在 CI 内自动计算：以 npm 上的最新稳定版为基线，
+#      取它的下一个 patch 作为预发布基座，再从 1 开始找第一个未被占用的 -beta.N / -alpha.N。
+#      两条分支的后缀不同，因此不会产出相同版本号，也不会占用 latest。
 #      发布时会按依赖顺序发布 @router-agent/* SDK、内置 runtime/channel 插件，最后发布根包。
-#   2. 推送形如 v0.1.1 的 tag（tag 必须与 package.json 的 version 一致），兼容原有发版方式。
+#   2. 推送发布 tag（tag 必须与 package.json 的 version 一致），兼容原有发版方式：
+#      · vX.Y.Z          → 稳定版，只有落在 main 上才允许发布（否则会占用 latest）；
+#      · vX.Y.Z-beta.N   → beta 预发布；
+#      · vX.Y.Z-alpha.N  → alpha 预发布。
 #   3. 在 Actions 页面手动 Run workflow（发布当前分支 package.json 里的版本）。
 #
 # 说明：GitHub 上的 PR 合并不会触发本地 git hooks，所以「main 合并自动升版」落在
@@ -15,6 +26,8 @@ on:
   push:
     branches:
       - main
+      - beta
+      - alpha
     tags:
       - 'v*'
   workflow_dispatch:
@@ -38,7 +51,9 @@ jobs:
     outputs:
       should_publish: ${{ steps.plan.outputs.should_publish }}
       release_version: ${{ steps.plan.outputs.release_version }}
-      auto_bump: ${{ steps.plan.outputs.auto_bump }}
+      apply_version: ${{ steps.plan.outputs.apply_version }}
+      dist_tag: ${{ steps.plan.outputs.dist_tag }}
+      writeback: ${{ steps.plan.outputs.writeback }}
       reason: ${{ steps.plan.outputs.reason }}
     steps:
       - name: 检出代码
@@ -64,6 +79,18 @@ jobs:
             exit 1
           fi
 
+      # 预发布分支的版本号以 npm 上的最新稳定版为基线，这里先把它查出来。
+      # 稳定版渠道（main）不需要基线，也就不会多一次 registry 请求。
+      - name: 查询 npm 上的最新稳定版
+        id: latest-stable
+        if: github.ref == 'refs/heads/beta' || github.ref == 'refs/heads/alpha'
+        run: |
+          set -euo pipefail
+          pkg="$(node -p "require('./package.json').name")"
+          stable="$(npm view "$pkg" dist-tags.latest 2>/dev/null || true)"
+          echo "latest_stable=${stable}" >> "$GITHUB_OUTPUT"
+          echo "npm 上的最新稳定版：${stable:-（还没有稳定版）}"
+
       - name: 生成发布计划
         id: plan
         env:
@@ -72,6 +99,8 @@ jobs:
           PLAN_SHA: ${{ github.sha }}
           PLAN_BEFORE: ${{ github.event.before }}
           PLAN_ACTOR: ${{ github.actor }}
+          PLAN_LATEST_STABLE: ${{ steps.latest-stable.outputs.latest_stable }}
+          PLAN_TAG_NAME: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: |
           set -euo pipefail
 
@@ -79,6 +108,41 @@ jobs:
             export PLAN_EVENT=tag
           else
             export PLAN_EVENT="$PLAN_EVENT_NAME"
+          fi
+
+          # tag 触发时需要知道这个提交属于哪条分支，先把三条长期分支都拉下来。
+          if [[ "$PLAN_EVENT" == "tag" ]]; then
+            git fetch --no-tags origin \
+              +refs/heads/main:refs/remotes/origin/main \
+              +refs/heads/beta:refs/remotes/origin/beta \
+              +refs/heads/alpha:refs/remotes/origin/alpha || true
+            # 列出这个提交落在哪些分支上。beta / alpha 会同步 main 的提交，
+            # 同一个提交可能同时在三条分支上，所以要全部列出来，
+            # 由发布计划按 tag 的渠道去核对。
+            tag_branches_file="${RUNNER_TEMP}/release-tag-branches.txt"
+            : > "$tag_branches_file"
+            for name in main beta alpha; do
+              if git rev-parse --verify --quiet "origin/$name" >/dev/null 2>&1 \
+                && git merge-base --is-ancestor "$PLAN_SHA" "origin/$name" 2>/dev/null; then
+                echo "$name" >> "$tag_branches_file"
+              fi
+            done
+            export PLAN_TAG_BRANCHES_FILE="$tag_branches_file"
+          else
+            empty_branches_file="${RUNNER_TEMP}/release-tag-branches-empty.txt"
+            : > "$empty_branches_file"
+            export PLAN_TAG_BRANCHES_FILE="$empty_branches_file"
+          fi
+
+          # 分支渠道：main 走稳定版 latest，beta / alpha 走各自的预发布 dist-tag。
+          if [[ "$PLAN_REF" == refs/heads/* ]]; then
+            export PLAN_BRANCH="${PLAN_REF#refs/heads/}"
+          else
+            export PLAN_BRANCH=main
+          fi
+
+          if [[ "$PLAN_EVENT" == "tag" ]]; then
+            echo "该提交所属分支：$(tr '\n' ' ' < "$PLAN_TAG_BRANCHES_FILE")"
           fi
 
           changed_file="${RUNNER_TEMP}/release-changed-files.txt"
@@ -114,7 +178,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      # 自动升版后需要把版本号提交回 main
+      # 自动升版后需要把版本号提交回 main（只有稳定版渠道会回写）
       contents: write
       id-token: write
     steps:
@@ -147,7 +211,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: 应用自动升级后的版本号
-        if: needs.check.outputs.auto_bump == 'true'
+        if: needs.check.outputs.apply_version == 'true'
         env:
           VERSION: ${{ needs.check.outputs.release_version }}
         run: |
@@ -157,7 +221,7 @@ jobs:
 
       # 手动改版本号的 PR 不会走 auto_bump，这里也要把所有包同步到根版本。
       - name: 同步所有包的版本号
-        if: needs.check.outputs.auto_bump != 'true'
+        if: needs.check.outputs.apply_version != 'true'
         run: node scripts/publish-packages.mjs --sync
 
       # E404 通常不是包不存在，而是 token 用户没有根包发布权限。必须在发布
@@ -173,6 +237,47 @@ jobs:
       - name: 构建
         run: pnpm build
 
+      # 发布前置校验：版本号一致、构建产物存在、dist-tag 与分支渠道匹配。
+      # 任一项不满足就在发布前失败，避免出现「发出去但装不上」的版本。
+      - name: 校验发布前置条件
+        env:
+          RELEASE_VERSION: ${{ needs.check.outputs.release_version }}
+          DIST_TAG: ${{ needs.check.outputs.dist_tag }}
+          PUBLISH_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          pkg_version="$(node -p "require('./package.json').version")"
+          if [ "$pkg_version" != "$RELEASE_VERSION" ]; then
+            echo "::error::package.json 版本 ${pkg_version} 与发布计划版本 ${RELEASE_VERSION} 不一致。"
+            exit 1
+          fi
+
+          # 构建产物必须齐全，否则 npm 包里会是空的 dist。
+          for artifact in dist/cli/index.js dist/packages/core/src/index.js bin/ra.js; do
+            if [ ! -f "$artifact" ]; then
+              echo "::error::缺少构建产物 ${artifact}，请先执行 pnpm build。"
+              exit 1
+            fi
+          done
+
+          # beta / alpha 绝不能占用 latest：预发布渠道用错 dist-tag 会让
+          # npm install 拿到未经稳定的版本。
+          case "$PUBLISH_REF" in
+            refs/heads/beta)
+              if [ "$DIST_TAG" != "beta" ]; then
+                echo "::error::beta 分支的 dist-tag 必须是 beta，实际为 ${DIST_TAG}。"
+                exit 1
+              fi
+              ;;
+            refs/heads/alpha)
+              if [ "$DIST_TAG" != "alpha" ]; then
+                echo "::error::alpha 分支的 dist-tag 必须是 alpha，实际为 ${DIST_TAG}。"
+                exit 1
+              fi
+              ;;
+          esac
+          echo "发布前置校验通过：版本 ${pkg_version}，dist-tag ${DIST_TAG}"
+
       # 先发 SDK 与插件，最后发根包；任一包已存在于同版本时视为失败并中止。
       # 根包 NPM_TOKEN 还必须能发布 @router-agent/* 作用域（首次发布尤甚）。
       - name: 检查待发布版本是否已被占用
@@ -186,12 +291,13 @@ jobs:
         id: publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          DIST_TAG: ${{ needs.check.outputs.dist_tag }}
         run: |
           set -euo pipefail
           # 每个包失败时打印可直接定位的包名与 npm 原始错误；失败即中止，
           # 避免根包已经存在、插件却已发出去的半发布状态。
-          node scripts/publish-packages.mjs
-          npm publish --provenance --json >"${RUNNER_TEMP}/npm-publish-stdout.json" 2>"${RUNNER_TEMP}/npm-publish-stderr.log"
+          node scripts/publish-packages.mjs --tag "$DIST_TAG"
+          npm publish --provenance --json --tag "$DIST_TAG" >"${RUNNER_TEMP}/npm-publish-stdout.json" 2>"${RUNNER_TEMP}/npm-publish-stderr.log"
           node scripts/publish-result.mjs \
             --stdout "${RUNNER_TEMP}/npm-publish-stdout.json" \
             --stderr "${RUNNER_TEMP}/npm-publish-stderr.log" \
@@ -202,7 +308,7 @@ jobs:
       # 回写版本号只是让仓库与 npm 对齐。即使被分支保护拦下，本次发布也已成功；
       # 下一次发布会以 npm 上最新版本为基准继续升 patch，不会重复发布。
       - name: 回写版本号到 main
-        if: needs.check.outputs.auto_bump == 'true' && steps.publish.outputs.published == 'true'
+        if: needs.check.outputs.writeback == 'true' && steps.publish.outputs.published == 'true'
         env:
           VERSION: ${{ needs.check.outputs.release_version }}
         run: |
@@ -239,12 +345,15 @@ jobs:
 
       - name: 写入发布结果
         if: steps.publish.outputs.published == 'true'
+        env:
+          DIST_TAG: ${{ needs.check.outputs.dist_tag }}
         run: |
           name="$(node -p "require('./package.json').name")"
           version="$(node -p "require('./package.json').version")"
           {
             echo "### npm 发布结果"
             echo "- 已发布：https://www.npmjs.com/package/${name}/v/${version}"
+            echo "- 发布渠道：dist-tag = ${DIST_TAG}"
             echo "- 判定依据：npm publish 退出码 0，输出为 ${name}@${version}"
             echo "- 发布原因：${{ needs.check.outputs.reason }}"
           } >> "$GITHUB_STEP_SUMMARY"
