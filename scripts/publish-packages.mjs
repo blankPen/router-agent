@@ -158,13 +158,16 @@ export function undeclaredDependencies(dir) {
   return [...found.keys()].sort()
 }
 
-function publishOne(name, targetVersion) {
+function publishOne(name, targetVersion, distTag) {
   const pkg = readJson(packagePath(name))
   assertPackable(name, pkg)
   const out = `${name.replace(/[^a-zA-Z0-9_-]/g, '_')}.json`
   console.log(`[publish-packages] 发布 ${pkg.name}@${targetVersion}`)
+  // dist-tag 决定用户装到哪个渠道：latest / beta / alpha。
+  // npm 默认打 latest，预发布必须显式指定，否则会抢占稳定版渠道。
+  const tagArgs = distTag ? ['--tag', distTag] : []
   try {
-    const stdout = execFileSync('npm', ['publish', '--provenance', '--json', '--access', 'public'], {
+    const stdout = execFileSync('npm', ['publish', '--provenance', '--json', '--access', 'public', ...tagArgs], {
       cwd: packageDir(name),
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -287,8 +290,16 @@ export function publishMode(argv) {
   return 'publish'
 }
 
+/** 读出 --tag <dist-tag> 的值；没给就返回空串（npm 默认 latest）。 */
+export function readDistTag(argv) {
+  const index = argv.indexOf('--tag')
+  if (index === -1) return ''
+  return String(argv[index + 1] ?? '').trim()
+}
+
 async function main() {
-  const mode = publishMode(process.argv.slice(2))
+  const argv = process.argv.slice(2)
+  const mode = publishMode(argv)
   if (mode === 'sync') {
     // sync 是同步命令：回写版本号并重新生成锁文件。若不提前返回，会落到下面的发布循环，
     // 在 CI 未构建的检出里因缺少 dist 而失败（0.3.31 发布回归）。
@@ -313,7 +324,7 @@ async function main() {
       console.log(`[publish-packages] dry-run ${pkg.name}@${version}`)
       continue
     }
-    publishOne(name, version)
+    publishOne(name, version, readDistTag(argv))
   }
 }
 
