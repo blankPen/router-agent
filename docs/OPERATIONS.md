@@ -152,9 +152,11 @@ Router 不做对话，只在必要时说话：
 | `progress:sync-failed` | Service | `ticketId` `detail` | 进展合并同步抛错，不影响当轮回复 |
 | `progress:probe-failed` | Service | `ticketId` `detail` | 主动巡检单个工单失败 |
 | `outbox:sent` / `outbox:failed` | Outbox | `key` `text` / `error` | 对外通知结果 |
+| `outbox:unroutable` | Service | `ticketId` `key` `threadId` | 工单既没有可用通知群、threadId 也不是飞书消息 ID；直接跳过，不再入队重试 |
 | `outbox:repaired` | CLI | `count` | 启动时修复 N 条进程中断残留的 outbox 记录 |
 | `api:input` / `api:stop` / `api:policy` / `api:config` | HTTP API | — | 面板 / CLI 的操作 |
 | `idle:nudge` / `idle:stale` | Service | — | 空闲唤醒与失联标记 |
+| `idle:resumed` | Service | `ticketId` | 已标记 stale 的 worker 又出现新活动，解除 attention 与僵尸水位 |
 | `idle:transfer` | Service | `ticketId` | worker 已退出且无法恢复，转人工并通知发起人 |
 | `idle:blocked` | Service | `ticketId` `detail` | worker 正在等待人工处理（权限 / 输入），已通知发起人 |
 | `retention:baseline` | Service | `baselineAt` `openTickets` | 服务启动时重置闲置治理计时基线：启动前就已无进展的工单不补发提醒 |
@@ -166,6 +168,7 @@ Router 不做对话，只在必要时说话：
 | `pr:linked` / `pr:state` | Service | — | PR / MR 跟踪；PR 进入 `merged` / `closed` 只更新状态并通知发起人，工单保持开放，可继续追问 |
 | `pr:track-failed` | Service | `ticketId` `prNumber` `repo` `detail` | PR / MR 状态查询无结果；同一工单 + PR 只记一次 |
 | `recover:*` | Service | — | 重启对账 |
+| `recover:trigger-released` | Service | `released` | 重启时把中断在 `evaluating` 的 Trigger 放回 `pending`，避免消息被永久吞掉 |
 | `recover:interrupted` | Service | `ticketId` `turnId` `mode` `autoRecovered` | 发现 worker 上一轮被服务重启打断，按 `policy.interruptedRecovery` 处置 |
 | `recover:auto-resume` | Service | `ticketId` `turnId` | 自动补了一条 `kind=retry` 的输入，worker 从中断处接着做 |
 | `recover:auto-resume-failed` | Service | `ticketId` `turnId` `message` | 自动恢复投递失败；已提示用户回复「继续」手动接着做 |

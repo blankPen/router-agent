@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Store } from '../src/store/db.js'
 import { Engine } from '../src/core/engine.js'
-import { RouterService } from '../src/service.js'
+import { RouterService, outboxTargetOf } from '../src/service.js'
 import { defaultConfig, policyOf, type AppConfig, chatEntry } from '../src/config.js'
 import { } from '#core/policy.js'
 import type {
@@ -18,7 +18,7 @@ import type {
 } from '#runtime/port.js'
 import { WorkerRuntimeError } from '#runtime/port.js'
 import type { DecisionEngine, DecisionEngineResult, DecisionRequest } from '../src/router/decision-engine.js'
-import type { Trigger } from '#core/model.js'
+import type { Ticket, Trigger } from '#core/model.js'
 
 class FakeRuntime implements WorkerRuntime {
   readonly id = 'orca'
@@ -230,6 +230,24 @@ describe('RouterService 编排', () => {
     const assignment = store.latestAssignment(ticket.id)!
     expect(assignment.handle).toBe('term-1')
     expect(assignment.status).toBe('pending')
+  })
+
+  it('事件工单的 threadId 不是飞书消息 ID 时改发通知群，而不是当 message_id 回复', () => {
+    const eventTicket = {
+      id: 'tk_event',
+      title: 'CI 失败',
+      threadId: 'event:github-1:workflow_run:blankPen/router-agent#4225:failure',
+      source: 'event:github-1',
+      chatId: '',
+    } as Ticket
+
+    expect(outboxTargetOf(eventTicket, 'oc_admin')).toEqual({ channelId: 'oc_admin', threadId: '' })
+    expect(outboxTargetOf({ ...eventTicket, chatId: '' }, '')).toBeNull()
+  })
+
+  it('飞书工单仍用话题消息回复', () => {
+    const ticket = { channelId: 'feishu', chatId: 'oc_dev', threadId: 'feishu:oc_dev:om_root' } as Ticket
+    expect(outboxTargetOf(ticket, 'oc_admin')).toEqual({ channelId: 'oc_dev', threadId: 'om_root' })
   })
 
   it('并发上限生效：超出的工单排队而不是丢弃', async () => {
@@ -637,6 +655,43 @@ describe('RouterService 编排', () => {
     await service.runOnce()
     expect(runtime.delivered.length).toBe(before)
     expect(store.claimOutbox('2026-11-06T10:11:00.000Z', 20).filter(item => item.text.includes('执行会话已不存在'))).toHaveLength(0)
+  })
+
+  it('重启恢复时把研判途中中断的 Trigger 放回队列，消息不会被永久吞掉', async () => {
+    store.insertTrigger(makeTrigger({ id: 't_eval', externalId: 'om_eval' }))
+    store.claimPendingTriggers('2026-11-06T10:00:10.000Z')
+    expect(store.getTrigger('t_eval')?.disposition).toBe('evaluating')
+
+    await service.recover()
+
+    expect(store.getTrigger('t_eval')?.disposition).toBe('pending')
+    expect(logs.find(entry => entry.message === 'recover:trigger-released')).toMatchObject({
+      level: 'warn',
+      extra: { released: 1 },
+    })
+  })
+
+  it('stop() 等在途周期收尾后再返回，避免在途周期撞上已关闭的 DB', async () => {
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const runCycle = (service as unknown as { runCycle: () => Promise<void> }).runCycle.bind(service)
+    ;(service as unknown as { runCycle: () => Promise<void> }).runCycle = async () => {
+      await gate
+      await runCycle()
+    }
+
+    const running = service.runOnce()
+    const stopping = service.stop()
+    let stopped = false
+    void stopping.then(() => { stopped = true })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(stopped).toBe(false)
+
+    release()
+    await running
+    await stopping
+    expect(stopped).toBe(true)
   })
 
   it('worker 被删后不会因为未 ack 的旧输入反复重建（tk-51）', async () => {
@@ -1114,7 +1169,7 @@ describe('RouterService 编排', () => {
       const startedAt = T0 + 24 * HOUR
       const restarted = restartService(new Date(startedAt).toISOString())
       await restarted.start()
-      restarted.stop()
+      await restarted.stop()
 
       // 启动后的第一轮巡检：积压的闲置工单不补发提醒。
       await restarted.sweepRetention(startedAt + 5 * 60 * 1000)
@@ -1139,7 +1194,7 @@ describe('RouterService 编排', () => {
       const startedAt = T0 + 48 * HOUR
       const restarted = restartService(new Date(startedAt).toISOString())
       await restarted.start()
-      restarted.stop()
+      await restarted.stop()
 
       // 启动后的第一轮巡检：不关单，也不补发提醒。
       await restarted.sweepRetention(startedAt + 5 * 60 * 1000)
@@ -1159,7 +1214,7 @@ describe('RouterService 编排', () => {
     it('启动时记录闲置治理计时基线，便于排查为什么没有立刻提醒', async () => {
       const restarted = restartService(new Date(T0 + 24 * HOUR).toISOString())
       await restarted.start()
-      restarted.stop()
+      await restarted.stop()
 
       const baseline = logs.find(entry => entry.message === 'retention:baseline')
       expect(baseline).toBeTruthy()

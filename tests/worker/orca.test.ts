@@ -414,6 +414,30 @@ describe('OrcaRuntime', () => {
     expect(info?.lastOutputAt).toBe(new Date(1793897105303).toISOString())
   })
 
+  it('terminal list 偶发查不到终端时先报 unknown，连续缺失才判 lost，重新出现后恢复', async () => {
+    const empty = { code: 0, stdout: JSON.stringify({ ok: true, result: { terminals: [] } }), stderr: '' }
+    const running = {
+      code: 0,
+      stdout: JSON.stringify({
+        ok: true,
+        result: {
+          terminals: [{ handle: 'term-1', connected: true, writable: true, orphaned: false, lastOutputAt: '2026-11-06T10:00:00.000Z', worktreePath: '/tmp/wt', branch: 'main' }],
+        },
+      }),
+      stderr: '',
+    }
+    const runner = new FakeRunner([empty, empty, empty, running, empty])
+    const adapter = new OrcaRuntime({ runner, workersDir: '/tmp' })
+
+    expect(await adapter.status('term-1')).toMatchObject({ phase: 'unknown', alive: false })
+    expect(await adapter.status('term-1')).toMatchObject({ phase: 'unknown', alive: false })
+    expect(await adapter.status('term-1')).toMatchObject({ phase: 'lost', alive: false })
+
+    // 终端重新出现在列表里：当作一次成功观测，缺失计数清零。
+    expect(await adapter.status('term-1')).toMatchObject({ phase: 'running', alive: true })
+    expect(await adapter.status('term-1')).toMatchObject({ phase: 'unknown', alive: false })
+  })
+
   it('read 读取渲染屏幕尾部，供 Router 主动巡检', async () => {
     const runner = new FakeRunner([{
       code: 0,

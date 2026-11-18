@@ -466,6 +466,22 @@ export function memberHandledChats(config: AppConfig): string[] {
   return config.feishu.chats.filter(chat => chat.scope !== 'admins').map(chat => chat.chat)
 }
 
+/**
+ * 事件工单 / 无话题消息的通知群：审核群优先，其次管理员群，再按仓库找绑定群。
+ * 都没有时只有单群配置才兜底，避免把事件详情发到无关的群。
+ */
+export function eventNotifyChat(config: AppConfig, repo = ''): string {
+  const review = config.events.policy.reviewChatId.trim()
+  if (review) return review
+  const admin = config.feishu.chats.find(chat => chat.scope === 'admins')?.chat
+  if (admin) return admin
+  const name = repo.replace(/^(id|name|path):/, '').replace(/\\/g, '/').split('/').at(-1) ?? ''
+  const matched = name
+    ? config.feishu.chats.find(chat => chat.repo === repo || chat.repo === name)?.chat
+    : undefined
+  return matched ?? (config.feishu.chats.length === 1 ? config.feishu.chats[0]!.chat : '')
+}
+
 export function defaultConfig(): AppConfig {
   return {
     home: '',
