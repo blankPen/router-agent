@@ -300,13 +300,10 @@ export interface EventSourceConfig {
   intervalMs?: number
 }
 
-/** 事件决策策略：判定依据（自然语言 prompt）与护栏。 */
+/** 事件决策策略：判定方式与护栏；判定依据在每条规则里。 */
 export interface EventDecisionConfig {
   provider: 'jev' | 'llm' | 'rule'
-  /** 旧版全局 prompt；新装机器默认不参与判定。 */
-  prompt: string
-  /** 没有匹配规则时，是否把旧 prompt 当作全局兜底规则。 */
-  fallbackToPrompt?: boolean
+  /** 规则没给阈值时的兜底阈值。 */
   confidenceThreshold: number
   fallback: 'review' | 'pending'
 }
@@ -469,25 +466,6 @@ export function memberHandledChats(config: AppConfig): string[] {
   return config.feishu.chats.filter(chat => chat.scope !== 'admins').map(chat => chat.chat)
 }
 
-/** 默认决策 prompt：写清「哪类事件归哪个项目、走哪种处理方式、什么算急、拿不准怎么办」。 */
-export const DEFAULT_EVENT_DECISION_PROMPT = `# 项目归属
-- 事件来自哪个 GitHub 仓库，就归该仓库对应的项目
-- 标题或正文提到某个项目名，就归那个项目
-- 提到客服、退款、投诉，归 customer-service 项目
-- 提到部署、监控、告警，归 ops 项目
-
-# 处理方式
-- bug 类事件用 bug-triage：先复现再出根因，不要直接改代码
-- 需求或咨询类事件用 clarify-intake：信息不足先补齐，别急着执行
-- 通知、播报类事件只记录不执行
-
-# 优先级
-- 线上告警、生产故障：P0，立即执行
-- 明确的 bug：P1
-- 需求、咨询：P2
-- 其它：P3
-- 明显与项目无关的噪声：P4`
-
 export function defaultConfig(): AppConfig {
   return {
     home: '',
@@ -571,8 +549,6 @@ export function defaultConfig(): AppConfig {
       },
       decision: {
         provider: 'rule',
-        prompt: DEFAULT_EVENT_DECISION_PROMPT,
-        fallbackToPrompt: false,
         confidenceThreshold: 0.6,
         fallback: 'review',
       },
@@ -946,13 +922,6 @@ function parseEvents(value: unknown, base: EventsSettings, logger: Logger = noop
       provider: decisionDoc.provider === 'jev' || decisionDoc.provider === 'llm' || decisionDoc.provider === 'rule'
         ? decisionDoc.provider
         : base.decision.provider,
-      prompt: typeof decisionDoc.prompt === 'string' && decisionDoc.prompt.trim() ? decisionDoc.prompt : base.decision.prompt,
-      // 老配置只写了 prompt：保留原来的全局判定行为；新配置写回时会显式落 false。
-      fallbackToPrompt: typeof decisionDoc.fallbackToPrompt === 'boolean'
-        ? decisionDoc.fallbackToPrompt
-        : typeof decisionDoc.prompt === 'string' && decisionDoc.prompt.trim()
-          ? true
-          : base.decision.fallbackToPrompt,
       confidenceThreshold: positiveNumberOr(decisionDoc.confidenceThreshold, base.decision.confidenceThreshold, 0, 1),
       fallback: decisionDoc.fallback === 'pending' ? 'pending' : base.decision.fallback,
     },
@@ -2061,8 +2030,6 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
 
   'events.enabled': boolValue(),
   'events.decision.provider': enumValue(['jev', 'llm', 'rule']),
-  'events.decision.prompt': stringValue,
-  'events.decision.fallbackToPrompt': boolValue(),
   'events.decision.confidenceThreshold': numberValue(0, 1),
   'events.decision.fallback': enumValue(['review', 'pending']),
   'events.policy.peak.start': stringValue,

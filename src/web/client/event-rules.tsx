@@ -369,15 +369,6 @@ export function RuleEditor({ rule, groups, title, error, onChange, onClose, onSa
                 />
                 <p className="modal-hint">判不出归属项目时的兜底置信度。</p>
               </label>
-              <label className="modal-field">
-                <span className="rule-field-label">自动执行阈值<span className="rule-field-key">autoRun</span></span>
-                <input
-                  type="number" min={0} max={1} step={0.05}
-                  value={rule.thresholds.autoRun}
-                  onChange={event => onChange({ ...rule, thresholds: { ...rule.thresholds, autoRun: Number(event.target.value) } })}
-                />
-                <p className="modal-hint">自动执行判定的把握下限。</p>
-              </label>
             </div>
             <label className="modal-field">
               <span className="rule-field-label">强制人审的风险标签<span className="rule-field-key">逗号分隔</span></span>

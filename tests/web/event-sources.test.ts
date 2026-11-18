@@ -51,7 +51,7 @@ describe('配置页的事件总线分组', () => {
     expect(sources?.render).toBe('events')
     const paths = group?.blocks.flatMap(block => blockPaths(block)) ?? []
     expect(paths).toContain('events.enabled')
-    expect(paths).toContain('events.decision.prompt')
+    expect(paths).toContain('events.decision.provider')
     expect(paths).toContain('events.policy.dailyEventLimit')
   })
 })

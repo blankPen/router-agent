@@ -39,7 +39,7 @@ export interface EventEnvelope {
    * 来源已知的上下文线索（例如订阅里写明的仓库）。
    *
    * 这类线索只作为决策模型的输入，不直接决定归属项目：
-   * 归属项目由决策模型按可配置的决策 prompt 判定。
+   * 归属项目由决策模型按命中的决策规则判定。
    */
   context?: Record<string, string>
 }

@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import { EventDecisionService, ruleDecisionPort, type EventDecisionInput, type EventDecisionPort } from '../../src/events/decision.js'
 import { createJevDecisionPort, stateOf } from '../../src/events/decision-model.js'
 import { compileRuleTemplate } from '../../src/events/rules.js'
-import { EVENT_SKILLS } from '../../src/events/skills.js'
 import type { EventRecord } from '#core/event.js'
 import { JevClient } from '#infra/decision/jev-client.js'
 
@@ -36,10 +35,7 @@ function inputOf(over: Partial<EventDecisionInput> = {}): EventDecisionInput {
     event: eventOf(),
     source: { enabled: true, kind: 'github' },
     projects: PROJECTS,
-    skills: EVENT_SKILLS,
-    decision: { provider: 'rule', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
-    prompt: '',
-    promptVersion: 1,
+    decision: { provider: 'rule', confidenceThreshold: 0.6, fallback: 'review' },
     ...over,
   }
 }
@@ -47,7 +43,7 @@ function inputOf(over: Partial<EventDecisionInput> = {}): EventDecisionInput {
 describe('事件决策', () => {
   it('规则先判：订阅不带优先级，规则只给中性档位，类型取事件自己的', async () => {
     const service = new EventDecisionService({
-      decision: { provider: 'rule', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
+      decision: { provider: 'rule', confidenceThreshold: 0.6, fallback: 'review' },
       rule: ruleDecisionPort,
     })
     const result = await service.decide(inputOf())
@@ -63,7 +59,7 @@ describe('事件决策', () => {
       decide: async () => ({ project: 'router-agent', priority: 'P1', confidence: 0.9, eventType: 'bug' }),
     }
     const service = new EventDecisionService({
-      decision: { provider: 'llm', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
+      decision: { provider: 'llm', confidenceThreshold: 0.6, fallback: 'review' },
       rule: ruleDecisionPort,
       model,
     })
@@ -75,7 +71,7 @@ describe('事件决策', () => {
 
   it('命中风险标签的事件直接转人工并提到 P0', async () => {
     const service = new EventDecisionService({
-      decision: { provider: 'rule', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
+      decision: { provider: 'rule', confidenceThreshold: 0.6, fallback: 'review' },
       rule: ruleDecisionPort,
     })
     const result = await service.decide(inputOf({
@@ -92,7 +88,7 @@ describe('事件决策', () => {
       decide: async () => ({ project: 'router-agent', priority: 'P1', confidence: 0.95, needsReview: false, reason: '模型觉得可以直接做' }),
     }
     const service = new EventDecisionService({
-      decision: { provider: 'llm', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
+      decision: { provider: 'llm', confidenceThreshold: 0.6, fallback: 'review' },
       rule: ruleDecisionPort,
       model,
     })
@@ -110,7 +106,7 @@ describe('事件决策', () => {
       decide: async () => ({ project: 'router-agent', priority: 'P3', confidence: 0.95, needsReview: false }),
     }
     const service = new EventDecisionService({
-      decision: { provider: 'llm', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
+      decision: { provider: 'llm', confidenceThreshold: 0.6, fallback: 'review' },
       rule: ruleDecisionPort,
       model,
     })
@@ -127,7 +123,7 @@ describe('事件决策', () => {
       decide: async () => ({ project: 'router-agent', priority: 'P1', confidence: 0.9, needsReview: false }),
     }
     const service = new EventDecisionService({
-      decision: { provider: 'llm', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
+      decision: { provider: 'llm', confidenceThreshold: 0.6, fallback: 'review' },
       rule: ruleDecisionPort,
       model,
     })
@@ -141,7 +137,7 @@ describe('事件决策', () => {
       decide: async () => ({ project: 'not-exist', priority: 'P1', confidence: 0.9 }),
     }
     const service = new EventDecisionService({
-      decision: { provider: 'llm', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
+      decision: { provider: 'llm', confidenceThreshold: 0.6, fallback: 'review' },
       rule: ruleDecisionPort,
       model,
     })
@@ -157,7 +153,7 @@ describe('事件决策', () => {
       decide: async () => ({ project: 'router-agent', priority: 'P1', confidence: 0.2 }),
     }
     const service = new EventDecisionService({
-      decision: { provider: 'llm', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
+      decision: { provider: 'llm', confidenceThreshold: 0.6, fallback: 'review' },
       rule: ruleDecisionPort,
       model,
     })
@@ -172,7 +168,7 @@ describe('事件决策', () => {
       decide: async () => ({ project: 'router-agent', priority: 'P1', skill: 'bug-triage', confidence: 0.9, reason: '明确的 bug' }),
     }
     const service = new EventDecisionService({
-      decision: { provider: 'llm', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
+      decision: { provider: 'llm', confidenceThreshold: 0.6, fallback: 'review' },
       rule: ruleDecisionPort,
       model,
     })
@@ -190,7 +186,7 @@ describe('事件决策', () => {
       decide: async () => { throw new Error('模型超时') },
     }
     const service = new EventDecisionService({
-      decision: { provider: 'llm', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
+      decision: { provider: 'llm', confidenceThreshold: 0.6, fallback: 'review' },
       rule: ruleDecisionPort,
       model,
     })
@@ -206,7 +202,7 @@ describe('事件决策', () => {
       decide: async () => { throw new Error('模型超时') },
     }
     const service = new EventDecisionService({
-      decision: { provider: 'llm', prompt: '', confidenceThreshold: 0.6, fallback: 'pending' },
+      decision: { provider: 'llm', confidenceThreshold: 0.6, fallback: 'pending' },
       rule: ruleDecisionPort,
       model,
     })
@@ -223,7 +219,7 @@ describe('事件决策', () => {
       decide: async () => ({ project: 'router-agent', priority: 'P1', confidence: 0.2 }),
     }
     const service = new EventDecisionService({
-      decision: { provider: 'llm', prompt: '', confidenceThreshold: 0.6, fallback: 'pending' },
+      decision: { provider: 'llm', confidenceThreshold: 0.6, fallback: 'pending' },
       rule: ruleDecisionPort,
       model,
     })
@@ -239,7 +235,7 @@ describe('事件决策', () => {
       decide: async () => ({ priority: 'P1', confidence: 0.9 }),
     }
     const service = new EventDecisionService({
-      decision: { provider: 'llm', prompt: '', confidenceThreshold: 0.6, fallback: 'pending' },
+      decision: { provider: 'llm', confidenceThreshold: 0.6, fallback: 'pending' },
       rule: ruleDecisionPort,
       model,
     })
@@ -250,7 +246,7 @@ describe('事件决策', () => {
 
   it('没有模型时按订阅的仓库名归入同名项目', async () => {
     const service = new EventDecisionService({
-      decision: { provider: 'rule', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
+      decision: { provider: 'rule', confidenceThreshold: 0.6, fallback: 'review' },
       rule: ruleDecisionPort,
     })
     const result = await service.decide(inputOf({
@@ -262,7 +258,7 @@ describe('事件决策', () => {
 
   it('订阅的仓库名对不上项目时没有归属，转人工', async () => {
     const service = new EventDecisionService({
-      decision: { provider: 'rule', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
+      decision: { provider: 'rule', confidenceThreshold: 0.6, fallback: 'review' },
       rule: ruleDecisionPort,
     })
     const result = await service.decide(inputOf({
@@ -280,7 +276,7 @@ describe('事件决策', () => {
 describe('事件决策 · 风险标签护栏', () => {
   it('标签在 payload.issue.labels 时也命中风险标签', async () => {
     const service = new EventDecisionService({
-      decision: { provider: 'rule', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
+      decision: { provider: 'rule', confidenceThreshold: 0.6, fallback: 'review' },
       rule: ruleDecisionPort,
     })
     const result = await service.decide(inputOf({
@@ -307,7 +303,7 @@ describe('事件决策 · 规则化', () => {
       thresholds: { isValid: 0.4 },
     })
     const service = new EventDecisionService({
-      decision: { provider: 'llm', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
+      decision: { provider: 'llm', confidenceThreshold: 0.6, fallback: 'review' },
       rule: ruleDecisionPort,
       model,
     })
@@ -374,7 +370,7 @@ describe('事件决策 · 规则化', () => {
       guardrails: { riskLabels: ['custom-risk'] },
     })
     const service = new EventDecisionService({
-      decision: { provider: 'rule', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
+      decision: { provider: 'rule', confidenceThreshold: 0.6, fallback: 'review' },
       rule: ruleDecisionPort,
     })
     const security = await service.decide(inputOf({

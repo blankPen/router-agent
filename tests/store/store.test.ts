@@ -769,4 +769,37 @@ describe('事件队列', () => {
     expect(waiting.map(item => item.id)).toEqual(['evt_deferred'])
     db.close()
   })
+
+  it('旧库里的 prompt_version 列被去掉，事件本身不丢', () => {
+    // 旧版全局 prompt 删掉了，这一列不再有人写：迁移后不该留着它。
+    const dir = mkdtempSync(join(tmpdir(), 'ra-store-migrate-'))
+    const path = join(dir, 'state.db')
+    const legacy = new DatabaseSync(path)
+    legacy.exec(`CREATE TABLE events (
+      id TEXT PRIMARY KEY, source_id TEXT NOT NULL, source_kind TEXT NOT NULL, external_id TEXT NOT NULL,
+      title TEXT NOT NULL, body TEXT NOT NULL, url TEXT, raw TEXT, context TEXT, received_at TEXT NOT NULL,
+      status TEXT NOT NULL, execution TEXT NOT NULL DEFAULT 'none', priority TEXT NOT NULL,
+      event_type TEXT NOT NULL DEFAULT '', project TEXT, repo TEXT, branch TEXT, skill TEXT,
+      needs_review INTEGER NOT NULL DEFAULT 0, reason TEXT, confidence REAL, prompt_version INTEGER,
+      basis TEXT, rule_id TEXT, rule_version INTEGER, ticket_id TEXT, trigger_id TEXT, decided_at TEXT,
+      updated_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+      UNIQUE (source_id, external_id))`)
+    legacy.exec(`INSERT INTO events
+      (id, source_id, source_kind, external_id, title, body, received_at, status, execution, priority, event_type,
+       needs_review, prompt_version, basis, rule_id, rule_version, updated_at, attempts)
+      VALUES ('evt_legacy', 'github', 'github', 'issue:a#1', '旧事件', '内容', '2026-11-13T10:00:00.000Z',
+       'pending', 'none', 'P2', 'github.issues.opened', 0, 7, 'rule+llm', 'rule-issue', 3, '2026-11-13T10:00:00.000Z', 0)`)
+    legacy.close()
+
+    const db = new Store(path)
+    const migrated = db.getEvent('evt_legacy')!
+    expect(migrated.title).toBe('旧事件')
+    expect(migrated.ruleId).toBe('rule-issue')
+    expect(migrated.ruleVersion).toBe(3)
+    const columns = (db as unknown as { db: DatabaseSync })
+      .db.prepare('PRAGMA table_info(events)').all() as { name: string }[]
+    expect(columns.some(column => column.name === 'prompt_version')).toBe(false)
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
 })

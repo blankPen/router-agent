@@ -377,22 +377,11 @@ events:
         riskLabels: [security, prod, production, incident, payment, release]
       thresholds:
         isValid: 0.5
-        autoRun: 0.5
         projectPick: 0.4
       version: 1
   decision:
     provider: llm                    # jev | llm | rule
-    prompt: |                        # 旧版全局 prompt，仅作兼容
-      # 项目归属
-      - 来自 GitHub 仓库 xxx 的事件，归项目 router-agent
-      # 处理方式
-      - bug 类用 bug-triage
-      # 优先级
-      - 线上告警 P0
-      # 拿不准时
-      - 判断不了项目或优先级就标需人审
-    fallbackToPrompt: false          # true = 未匹配规则时仍用旧 prompt 判定（老配置兼容）
-    confidenceThreshold: 0.6         # 旧 prompt 兜底的置信度阈值
+    confidenceThreshold: 0.6         # 规则没写阈值时的兜底置信度阈值
     fallback: review                 # review 转人工 | pending 留队重试（见下方说明）
   policy:
     peak: { start: "09:00", end: "20:00", priorities: [P0, P1] }
@@ -418,11 +407,11 @@ events:
 
 `workflowPrompt` 会作为「执行流程」拼进 Worker 的授权范围；宿主的安全护栏（只改本仓库、不碰生产环境与发布）始终追加，规则和模型都不能覆盖。`guardrails.riskLabels` 命中时强制人审并提 P0。
 
-规则变更（新增 / 修改 / 整段保存）后，宿主会把这些类型下状态为 `undecided` 的事件重新激活成 `pending`；已经判定或已顺延的事件不会被重判。打开 `fallbackToPrompt` 或修改兜底 prompt 时，未判定事件也会重新激活。删除规则不会影响已开出的工单。
+规则变更（新增 / 修改 / 整段保存）后，宿主会把这些类型下状态为 `undecided` 的事件重新激活成 `pending`；已经判定或已顺延的事件不会被重判。删除规则不会影响已开出的工单。
 
 事件页的「规则命中」区按 `ruleId + status` 聚合展示每条规则命中了多少条事件（有效 / 人审 / 无效 / 合计）。长期 0 命中的规则通常说明 `eventType` 配错了。
 
-兼容说明：旧配置只有 `events.decision.prompt` 时，加载后 `fallbackToPrompt` 自动为 `true`，行为与升级前一致；新配置和新写回的配置显式写 `false`。
+判定依据只有规则一处：旧版全局 `events.decision.prompt` 与 `events.decision.fallbackToPrompt` 已删除，旧配置里残留的这两项会被忽略。
 
 ### GitHub 仓库订阅
 

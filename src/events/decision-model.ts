@@ -60,7 +60,7 @@ export function createJevDecisionPort(client: JevClient, deps: { logger?: Logger
         throw error
       }
       const isValid = numberAnswer(answers, 'is_valid')
-      const threshold = input.rule && input.rule.id !== 'legacy-prompt'
+      const threshold = input.rule
         ? input.rule.thresholds.isValid
         : input.decision.confidenceThreshold
       const valid = isValid >= threshold
@@ -96,7 +96,7 @@ export function systemPromptOf(input: EventDecisionInput): string {
     '你是事件总线里的决策模型。一次判定要同时回答：事件是否有效、能否自动执行、优先级、归属项目，以及可选的处理方式。',
     '',
     '# 规则意图（人工可配置）',
-    rule?.intent || input.prompt,
+    rule?.intent || '（没有命中规则）',
     '',
     '# 判定问题（按顺序回答，语义不可改变）',
     questionCatalogText(rule),
@@ -143,9 +143,9 @@ export function stateOf(input: EventDecisionInput): {
       url: event.url ?? '',
     },
     rule: {
-      id: input.rule?.id ?? 'legacy-prompt',
+      id: input.rule?.id ?? '',
       eventType: input.rule?.eventType ?? event.eventType,
-      intent: input.rule?.intent ?? input.prompt,
+      intent: input.rule?.intent ?? '',
       workflowPrompt: input.rule?.workflowPrompt ?? '',
     },
   }

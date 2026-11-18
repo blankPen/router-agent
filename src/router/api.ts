@@ -97,8 +97,8 @@ export interface EventApiPort {
   listSources(): unknown[]
   /** 面板操作：批准 / 驳回 / 延后 / 忽略 / 重试 / 改优先级。 */
   apply(eventId: string, action: string, options: { priority?: string; project?: string }): Promise<unknown | null>
-  /** 当前决策策略与 prompt 版本。 */
-  decision(): { provider: string; prompt: string; fallbackToPrompt?: boolean; confidenceThreshold: number; fallback: string; version: number }
+  /** 当前决策策略。 */
+  decision(): { provider: string; confidenceThreshold: number; fallback: string }
   /** 当前规则集。 */
   rules(): EventRule[]
   /** 按规则统计事件命中分布（ruleId → status → 条数）。 */

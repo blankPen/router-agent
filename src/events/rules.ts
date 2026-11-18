@@ -34,7 +34,6 @@ export interface EventRuleGuardrails {
 
 export interface EventRuleThresholds {
   isValid: number
-  autoRun: number
   projectPick: number
 }
 
@@ -58,7 +57,6 @@ export const DEFAULT_RULE_RISK_LABELS = ['security', 'prod', 'production', 'inci
 
 export const DEFAULT_RULE_THRESHOLDS: EventRuleThresholds = {
   isValid: 0.5,
-  autoRun: 0.5,
   projectPick: 0.4,
 }
 
@@ -160,31 +158,14 @@ export function findRule(rules: readonly EventRule[], eventType: string): EventR
   return rules.find(rule => rule.eventType === eventType)
 }
 
-/**
- * 旧 prompt 兼容：只在显式开启 fallbackToPrompt 时生成一条全局兜底规则。
- * 这条规则不落盘，避免把旧自然语言伪装成具体事件类型。
- */
-export function legacyRuleFromPrompt(prompt: string): EventRule {
-  const rule = compileRuleTemplate({
-    id: 'legacy-prompt',
-    eventType: '*',
-    intent: prompt,
-    workflowPrompt: '',
-  })
-  // 旧 prompt 只是兼容判定依据，不能直接变成 Worker 执行口径。
-  rule.workflowPrompt = ''
-  return rule
+/** 为事件解析规则：按事件类型精确匹配，匹配不上就不判定。 */
+export function ruleForEvent(rules: readonly EventRule[], eventType: string): EventRule | undefined {
+  return findRule(rules, eventType)
 }
 
-/** 为事件解析规则：具体类型优先，其次显式开启的全局兜底。 */
-export function ruleForEvent(rules: readonly EventRule[], eventType: string, fallbackPrompt?: string): EventRule | undefined {
-  return findRule(rules, eventType) ?? (fallbackPrompt ? legacyRuleFromPrompt(fallbackPrompt) : undefined)
-}
-
-/** 规则变更后需要重新激活的事件类型；兜底规则覆盖全部。 */
-export function ruleEventTypes(rules: readonly EventRule[], fallbackPrompt?: string): string[] | null {
-  if (fallbackPrompt) return null
-  return [...new Set(rules.map(rule => rule.eventType).filter(type => type && type !== '*'))]
+/** 规则变更后需要重新激活的事件类型。 */
+export function ruleEventTypes(rules: readonly EventRule[]): string[] {
+  return [...new Set(rules.map(rule => rule.eventType).filter(Boolean))]
 }
 
 /** 规则里可用的 skill 候选；缺省沿用全局闭集。 */
@@ -249,7 +230,6 @@ export function validateEventRule(value: unknown, index = 1): { error: string | 
       guardrails: { riskLabels, ...(skills ? { skills } : {}) },
       thresholds: {
         isValid: thresholdOf(thresholds.isValid, DEFAULT_RULE_THRESHOLDS.isValid),
-        autoRun: thresholdOf(thresholds.autoRun, DEFAULT_RULE_THRESHOLDS.autoRun),
         projectPick: thresholdOf(thresholds.projectPick, DEFAULT_RULE_THRESHOLDS.projectPick),
       },
       version: Number.isInteger(version) && version > 0 ? version : 1,

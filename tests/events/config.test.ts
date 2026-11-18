@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyConfigPatch, defaultConfig, loadConfig } from '../../src/config.js'
+import { applyConfigPatch, defaultConfig, loadConfig, writeConfig } from '../../src/config.js'
 
 describe('事件配置', () => {
   it('默认配置带事件段，且内置来源都关着', () => {
@@ -10,8 +10,7 @@ describe('事件配置', () => {
     expect(config.events.enabled).toBe(false)
     // GitHub 仓库由面板「添加仓库」创建，默认配置里不留空壳来源。
     expect(config.events.sources.github).toBeUndefined()
-    expect(config.events.decision.prompt.length).toBeGreaterThan(0)
-    expect(config.events.decision.fallbackToPrompt).toBe(false)
+    expect(config.events.decision.provider).toBe('rule')
     expect(config.events.rules).toEqual([])
   })
 
@@ -169,15 +168,15 @@ describe('事件配置', () => {
     expect(config.events.sources['github-1']).toBeUndefined()
   })
 
-  it('配置补丁允许改决策 prompt 与来源字段', () => {
+  it('配置补丁允许改判定方式与来源字段', () => {
     const config = defaultConfig()
     config.events.sources['github-1'] = { enabled: true, kind: 'github', repo: 'a/b', events: [] }
     const result = applyConfigPatch(config, {
-      'events.decision.prompt': '# 新规则',
+      'events.decision.provider': 'llm',
       'events.sources.github-1.enabled': true,
     })
     expect(result.errors).toEqual([])
-    expect(config.events.decision.prompt).toBe('# 新规则')
+    expect(config.events.decision.provider).toBe('llm')
     expect(config.events.sources['github-1']?.enabled).toBe(true)
   })
 
@@ -224,8 +223,6 @@ describe('事件配置', () => {
     const home = mkdtempSync(join(tmpdir(), 'ra-events-'))
     writeFileSync(join(home, 'config.yaml'), [
       'events:',
-      '  decision:',
-      '    fallbackToPrompt: false',
       '  rules:',
       '    - id: rule-ci',
       '      eventType: github.workflow_run.failure',
@@ -233,7 +230,6 @@ describe('事件配置', () => {
       '      workflowPrompt: 分析失败并提交 PR',
       '      thresholds:',
       '        isValid: 0.4',
-      '        autoRun: 0.6',
       '        projectPick: 0.3',
       '',
     ].join('\n'), 'utf8')
@@ -243,24 +239,42 @@ describe('事件配置', () => {
       id: 'rule-ci',
       eventType: 'github.workflow_run.failure',
       workflowPrompt: '分析失败并提交 PR',
-      thresholds: { isValid: 0.4, autoRun: 0.6, projectPick: 0.3 },
+      thresholds: { isValid: 0.4, projectPick: 0.3 },
     })
     expect(config.events.rules[0]?.questions.is_valid.type).toBe('noul')
-    expect(config.events.decision.fallbackToPrompt).toBe(false)
   })
 
-  it('旧配置只写了 decision.prompt 时保留全局兜底行为', () => {
+  it('旧配置里的全局 prompt 被忽略，不再影响判定', () => {
     const home = mkdtempSync(join(tmpdir(), 'ra-events-'))
     writeFileSync(join(home, 'config.yaml'), [
       'events:',
       '  decision:',
       '    provider: llm',
       '    prompt: 旧的全局判定规则',
+      '    fallbackToPrompt: true',
       '',
     ].join('\n'), 'utf8')
     const config = loadConfig(home, {})
-    expect(config.events.decision.fallbackToPrompt).toBe(true)
+    expect(config.events.decision.provider).toBe('llm')
     expect(config.events.rules).toEqual([])
+  })
+
+  it('写回配置时旧版全局 prompt 与兜底开关被丢掉', () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-events-'))
+    writeFileSync(join(home, 'config.yaml'), [
+      'events:',
+      '  decision:',
+      '    provider: llm',
+      '    prompt: 旧的全局判定规则',
+      '    fallbackToPrompt: true',
+      '',
+    ].join('\n'), 'utf8')
+    const config = loadConfig(home, {})
+    writeConfig(home, config)
+    const written = readFileSync(join(home, 'config.yaml'), 'utf8')
+    expect(written).not.toContain('fallbackToPrompt')
+    expect(written).not.toContain('旧的全局判定规则')
+    expect(written).toContain('provider: llm')
   })
 
   it('规则整段写入做 eventType 前缀与重复校验', () => {

@@ -1700,14 +1700,10 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       ),
       decision: () => {
         const decision = config.events.decision
-        const version = Number(store.getCursor('events:decision-prompt-version') ?? '1')
         return {
           provider: decision.provider,
-          prompt: decision.prompt,
-          fallbackToPrompt: decision.fallbackToPrompt === true,
           confidenceThreshold: decision.confidenceThreshold,
           fallback: decision.fallback,
-          version: Number.isFinite(version) && version > 0 ? version : 1,
         }
       },
       rules: () => config.events.rules,
@@ -1752,24 +1748,11 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     },
     onConfigChange: (updated, changed) => {
       logger.info('config:updated', { changed })
-      const promptChanged = changed.includes('events.decision.prompt')
       const rulesChanged = changed.includes('events.rules')
-      const fallbackChanged = changed.includes('events.decision.fallbackToPrompt')
-      // 决策 prompt 改动后版本号 +1：历史判定记录用的版本还能回放。
-      let version: number | undefined
-      if (promptChanged || rulesChanged) {
-        const current = Number(store.getCursor('events:decision-prompt-version') ?? '1')
-        version = Number.isFinite(current) && current > 0 ? current + 1 : 2
-        store.setCursor('events:decision-prompt-version', String(version), new Date().toISOString())
-        logger.info('event:decision-prompt-updated', { version })
-      }
-      // 规则或全局兜底变化后，把之前只收集不判定的事件重新激活。
-      if (rulesChanged || fallbackChanged || (promptChanged && updated.events.decision.fallbackToPrompt)) {
-        const current = Number(store.getCursor('events:decision-prompt-version') ?? '1')
-        const next = version ?? (Number.isFinite(current) && current > 0 ? current : 1)
-        const fallback = updated.events.decision.fallbackToPrompt ? updated.events.decision.prompt : undefined
-        const activated = store.activateUndecidedEvents(ruleEventTypes(updated.events.rules, fallback), new Date().toISOString())
-        logger.info('event:rule-activated', { ruleId: rulesChanged ? 'config' : 'fallback', activated, version: next })
+      // 规则变化后，把之前只收集不判定的事件重新激活。
+      if (rulesChanged) {
+        const activated = store.activateUndecidedEvents(ruleEventTypes(updated.events.rules), new Date().toISOString())
+        logger.info('event:rule-activated', { ruleId: 'config', activated })
       }
       if (changed.some(path => path.startsWith('events.'))) {
         void eventWiring.manager.reloadSources()

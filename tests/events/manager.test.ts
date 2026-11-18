@@ -5,6 +5,7 @@ import { defaultConfig, policyOf, type AppConfig } from '../../src/config.js'
 import { EventDecisionService, ruleDecisionPort } from '../../src/events/decision.js'
 import { EventPipeline } from '../../src/events/pipeline.js'
 import { EventManager } from '../../src/events/manager.js'
+import { compileRuleTemplate } from '../../src/events/rules.js'
 
 const SOURCE = { enabled: true, kind: 'github' as const, repo: 'blankPen/router-agent' }
 
@@ -17,8 +18,8 @@ function setup() {
     events: {
       ...base.events,
       enabled: true,
-      // 这组测试验证的是总开关与来源装配，保留旧 prompt 兜底即等价于已配置规则。
-      decision: { ...base.events.decision, fallbackToPrompt: true },
+      // 这组测试验证的是总开关与来源装配，配一条规则让事件能被判定。
+      rules: [compileRuleTemplate({ id: 'rule-issue', eventType: 'github.issues.opened', intent: '处理 issue' })],
       sources: { github: SOURCE },
     },
   }
@@ -41,7 +42,7 @@ describe('事件管理器', () => {
   it('关掉总开关后，已入队的事件不再判定与派发', async () => {
     const { store, config, pipeline, manager } = setup()
     await manager.start()
-    const event = pipeline.ingest('github', SOURCE, { externalId: 'issue:x#1', title: '崩', body: '崩' })
+    const event = pipeline.ingest('github', SOURCE, { externalId: 'issue:x#1', title: '崩', body: '崩', eventType: 'github.issues.opened' })
 
     config.events.enabled = false
     await manager.reloadSources()
@@ -56,7 +57,7 @@ describe('事件管理器', () => {
   it('总开关开着时事件照常派发', async () => {
     const { store, pipeline, manager } = setup()
     await manager.start()
-    const event = pipeline.ingest('github', SOURCE, { externalId: 'issue:x#2', title: '崩', body: '崩' })
+    const event = pipeline.ingest('github', SOURCE, { externalId: 'issue:x#2', title: '崩', body: '崩', eventType: 'github.issues.opened' })
     await manager.runTick()
     expect(store.getEvent(event.id)?.ticketId).toBeTruthy()
     manager.stop()
@@ -66,7 +67,7 @@ describe('事件管理器', () => {
     const { store, config, pipeline, manager } = setup()
     config.events.enabled = false
     await manager.start()
-    const event = pipeline.ingest('github', SOURCE, { externalId: 'issue:x#3', title: '崩', body: '崩' })
+    const event = pipeline.ingest('github', SOURCE, { externalId: 'issue:x#3', title: '崩', body: '崩', eventType: 'github.issues.opened' })
     await manager.runTick()
     expect(store.getEvent(event.id)?.ticketId).toBeUndefined()
 

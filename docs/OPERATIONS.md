@@ -281,7 +281,7 @@ Router 不做对话，只在必要时说话：
 | `event:duplicate` | Event | `eventId` `sourceId` `externalId` | 同一来源的同一事件重复到达，按 `(来源, externalId)` 幂等忽略；已处理的状态与工单不会被覆盖 |
 | `event:rule-matched` | Event | `eventId` `ruleId` `eventType` `ruleVersion` | 事件命中规则，开始判定 |
 | `event:rule-unmatched` | Event | `eventId` `eventType` | 没有匹配规则；事件保持未判定，不调模型 |
-| `event:rule-activated` | Event | `ruleId` `activated` | 规则或全局兜底变更 / 启动后重新激活的未判定事件数；`ruleId` 为 `config` / `fallback` / `startup` 时表示批量激活 |
+| `event:rule-activated` | Event | `ruleId` `activated` | 规则变更 / 启动后重新激活的未判定事件数；`ruleId` 为 `config` / `startup` 时表示批量激活 |
 | `event:rule-compiled` | API / RuleCompiler | `ruleId` `eventType` | 自然语言提炼规则草稿成功 |
 | `event:rule-compile-failed` | RuleCompiler | `ruleId` `detail` | 提炼失败，返回内置模板并保留用户原文 |
 | `event:jev-failed` | Decision | `eventId` `ruleId` `detail` | Jev 请求或答案解析失败；上层按判定未完成处理 |
@@ -302,7 +302,6 @@ Router 不做对话，只在必要时说话：
 | `event:decision-incomplete` | Event | `eventId` `sourceId` `ruleId` `reason` | 判定没完成（模型失败等）；事件留在队列等下一轮，不派工也不丢 |
 | `event:attempts-exceeded` | Event | `eventId` `sourceId` `attempts` `detail` | 判定连续失败超过上限，已转人工处理，不再重试 |
 | `event:decision-provider-unavailable` | Event | `provider` | 判定用的模型没配好，本轮退回规则判定 |
-| `event:decision-prompt-updated` | Event | `version` | 决策 prompt 被修改，版本号 +1（历史判定可回放） |
 | `event:priority-changed` / `event:ignored` / `event:retry` | Event | `eventId` `priority` / `action` | 面板上手工改优先级 / 忽略 / 重试 |
 | `event:tick-failed` | Event | `detail` | 事件管线一轮处理抛错，不影响下一轮 |
 | `event:plugin-failed` | Event | `sourceId` `detail` | 自定义事件来源插件加载或创建失败，不影响其它来源 |
