@@ -13,6 +13,9 @@ import { logDimensions } from '#core/events.js'
 import { loadRuntimePlugins, type LoadedRuntimePlugins } from '#runtime/plugins/loader.js'
 import { loadChannelPlugins, type LoadedChannelPlugins } from '#channel/plugins/loader.js'
 import { createEventWiring } from '../events/wiring.js'
+import { ruleEventTypes } from '../events/rules.js'
+import { compileEventRule } from '../events/rule-compile.js'
+import { createChatClient } from '#infra/chat.js'
 import { AcpRuntimeAdmin } from '@router-agent/runtime-acp'
 import { readDetectionSnapshot } from '@router-agent/runtime-acp'
 import { WORKER_RUNTIME_IDS, normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
@@ -1701,11 +1704,18 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
         return {
           provider: decision.provider,
           prompt: decision.prompt,
+          fallbackToPrompt: decision.fallbackToPrompt === true,
           confidenceThreshold: decision.confidenceThreshold,
           fallback: decision.fallback,
           version: Number.isFinite(version) && version > 0 ? version : 1,
         }
       },
+      rules: () => config.events.rules,
+      ruleStats: () => eventWiring.manager.countEventRules(),
+      compileRule: input => compileEventRule(input, {
+        client: model ? createChatClient(model) : null,
+        logger,
+      }),
       counts: () => eventWiring.manager.countEvents(),
     },
     ...(feishuChannel?.admin ? { feishuBot: feishuChannel.admin } : {}),
@@ -1740,14 +1750,26 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     onPolicyChange: updated => {
       logger.info('policy:updated', { version: engine.policy().version, acceptMode: updated.policy.acceptMode })
     },
-    onConfigChange: (_updated, changed) => {
+    onConfigChange: (updated, changed) => {
       logger.info('config:updated', { changed })
+      const promptChanged = changed.includes('events.decision.prompt')
+      const rulesChanged = changed.includes('events.rules')
+      const fallbackChanged = changed.includes('events.decision.fallbackToPrompt')
       // 决策 prompt 改动后版本号 +1：历史判定记录用的版本还能回放。
-      if (changed.includes('events.decision.prompt')) {
+      let version: number | undefined
+      if (promptChanged || rulesChanged) {
         const current = Number(store.getCursor('events:decision-prompt-version') ?? '1')
-        const next = Number.isFinite(current) && current > 0 ? current + 1 : 2
-        store.setCursor('events:decision-prompt-version', String(next), new Date().toISOString())
-        logger.info('event:decision-prompt-updated', { version: next })
+        version = Number.isFinite(current) && current > 0 ? current + 1 : 2
+        store.setCursor('events:decision-prompt-version', String(version), new Date().toISOString())
+        logger.info('event:decision-prompt-updated', { version })
+      }
+      // 规则或全局兜底变化后，把之前只收集不判定的事件重新激活。
+      if (rulesChanged || fallbackChanged || (promptChanged && updated.events.decision.fallbackToPrompt)) {
+        const current = Number(store.getCursor('events:decision-prompt-version') ?? '1')
+        const next = version ?? (Number.isFinite(current) && current > 0 ? current : 1)
+        const fallback = updated.events.decision.fallbackToPrompt ? updated.events.decision.prompt : undefined
+        const activated = store.activateUndecidedEvents(ruleEventTypes(updated.events.rules, fallback), new Date().toISOString())
+        logger.info('event:rule-activated', { ruleId: rulesChanged ? 'config' : 'fallback', activated, version: next })
       }
       if (changed.some(path => path.startsWith('events.'))) {
         void eventWiring.manager.reloadSources()

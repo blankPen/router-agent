@@ -15,6 +15,7 @@ import type { CommandRunner } from '#infra/process.js'
 import type { EventAction, EventPipeline } from './pipeline.js'
 import { FeishuEventSource } from './sources/feishu.js'
 import { GithubEventSource } from './sources/github.js'
+import { ruleEventTypes } from './rules.js'
 
 /** 面板展示用的来源视图。 */
 export interface EventSourceView {
@@ -87,6 +88,11 @@ export class EventManager {
     if (this.running) return
     this.running = true
     await this.reloadSources()
+    const activated = this.store.activateUndecidedEvents(
+      ruleEventTypes(this.config().events.rules, this.config().events.decision.fallbackToPrompt ? this.config().events.decision.prompt : undefined),
+      this.clock(),
+    )
+    if (activated > 0) this.logger.info('event:rule-activated', { ruleId: 'startup', activated })
     this.tickTimer = setInterval(() => {
       void this.runTick()
     }, this.tickMs)
@@ -206,6 +212,11 @@ export class EventManager {
     return this.store.countEventsByStatus()
   }
 
+  /** 面板用：按规则聚合事件命中分布。 */
+  countEventRules(): Record<string, Record<string, number>> {
+    return this.store.countEventsByRule()
+  }
+
   /** 面板用：事件操作。 */
   async apply(eventId: string, action: EventAction, options: { priority?: EventPriority; project?: string } = {}) {
     return this.pipeline.apply(eventId, action, options)
@@ -284,6 +295,7 @@ export class EventManager {
         return new GithubEventSource(id, config, {
           runner: this.runner,
           logger: this.logger,
+          clock: this.clock,
           // 游标存在库里：重启后接着上次的增量拉，不重复入队。
           cursor: {
             get: key => this.store.getCursor(key),

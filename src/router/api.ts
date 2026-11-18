@@ -22,6 +22,7 @@ import type { WorkerStateFile } from '#runtime/report-poller.js'
 import type { ResumeHint } from '#runtime/port.js'
 import { isReplyPayload, type ReplyPayload } from '#core/reply.js'
 import type { WorkspaceAdminPort } from '#runtime/workspaces/overview.js'
+import type { EventRule } from '../events/rules.js'
 import { PluginInstallStartError, type PluginPackageAdmin } from './plugin-admin.js'
 import { readLogs } from './log-tail.js'
 import type { LogAssistantQuestion, LogAssistantOverview, LogDiagnosis } from './log-assistant.js'
@@ -97,7 +98,13 @@ export interface EventApiPort {
   /** 面板操作：批准 / 驳回 / 延后 / 忽略 / 重试 / 改优先级。 */
   apply(eventId: string, action: string, options: { priority?: string; project?: string }): Promise<unknown | null>
   /** 当前决策策略与 prompt 版本。 */
-  decision(): { provider: string; prompt: string; confidenceThreshold: number; fallback: string; version: number }
+  decision(): { provider: string; prompt: string; fallbackToPrompt?: boolean; confidenceThreshold: number; fallback: string; version: number }
+  /** 当前规则集。 */
+  rules(): EventRule[]
+  /** 按规则统计事件命中分布（ruleId → status → 条数）。 */
+  ruleStats(): Record<string, Record<string, number>>
+  /** 自然语言提炼规则草稿；不可用时返回模板。 */
+  compileRule(input: { id: string; eventType: string; intent: string; workflowPrompt?: string }): Promise<EventRule>
   /** 按状态统计事件条数（面板统计卡用；不受列表 limit 影响）。 */
   counts(): Record<string, number>
 }
@@ -328,10 +335,82 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         }),
         sources: opts.events.listSources(),
         decision: opts.events.decision(),
+        rules: opts.events.rules(),
+        ruleStats: opts.events.ruleStats(),
         counts: opts.events.counts(),
         // 候选项目：人工批准时用来挑归属项目（事件本身不绑项目）。
         projects: config.projects.map(project => ({ name: project.name, repo: project.repo })),
       })
+    }
+
+    if (path === '/api/events/rules' && req.method === 'GET') {
+      if (!opts.events) return respond(res, 404, { error: 'events-not-supported' })
+      return respond(res, 200, { rules: opts.events.rules(), ruleStats: opts.events.ruleStats() })
+    }
+
+    if (path === '/api/events/rules/compile' && req.method === 'POST') {
+      if (!opts.events) return respond(res, 404, { error: 'events-not-supported' })
+      const body = await readJson(req)
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      const eventType = typeof body.eventType === 'string' ? body.eventType.trim() : ''
+      const intent = typeof body.intent === 'string' ? body.intent.trim() : ''
+      if (!id || !eventType || !intent) {
+        return respond(res, 400, { error: 'rule-input-required', message: 'id / eventType / intent 不能为空' })
+      }
+      const rule = await opts.events.compileRule({
+        id,
+        eventType,
+        intent,
+        ...(typeof body.workflowPrompt === 'string' ? { workflowPrompt: body.workflowPrompt } : {}),
+      })
+      onEvent({ event: 'api:event-rule-compiled', ruleId: rule.id, eventType: rule.eventType })
+      return respond(res, 200, { rule })
+    }
+
+    const eventRulePath = path.match(/^\/api\/events\/rules(?:\/([^/]+))?$/)
+    if (eventRulePath && (req.method === 'POST' || req.method === 'PUT' || req.method === 'DELETE')) {
+      if (!opts.events) return respond(res, 404, { error: 'events-not-supported' })
+      const routeId = eventRulePath[1] ? decodeURIComponent(eventRulePath[1]) : ''
+      let next: unknown[]
+      let savedId = routeId
+      if (req.method === 'DELETE') {
+        if (!routeId) return respond(res, 400, { error: 'rule-id-required' })
+        if (!config.events.rules.some(rule => rule.id === routeId)) return respond(res, 404, { error: 'rule-not-found' })
+        next = config.events.rules.filter(rule => rule.id !== routeId)
+      } else {
+        const body = await readJson(req)
+        const incoming = isRecord(body.rule) ? body.rule : body
+        const id = typeof incoming.id === 'string' && incoming.id.trim() ? incoming.id.trim() : routeId
+        if (!id) return respond(res, 400, { error: 'rule-id-required' })
+        savedId = id
+        const existing = config.events.rules.find(rule => rule.id === id)
+        const candidate = {
+          ...incoming,
+          id,
+          version: existing ? existing.version + 1 : Number(incoming.version) > 0 ? Number(incoming.version) : 1,
+        }
+        next = [...config.events.rules.filter(rule => rule.id !== id), candidate]
+      }
+      const preview = structuredClone(config)
+      const result = applyConfigPatch(preview, { 'events.rules': next })
+      if (result.errors.length > 0) {
+        logger.warn('config:event-rule-rejected', { errors: result.errors })
+        return respond(res, 400, { error: 'invalid-config', errors: result.errors })
+      }
+      if (config.home && result.changed.length > 0) {
+        try {
+          writeConfig(config.home, preview)
+        } catch (error) {
+          logger.error('config:event-rule-write-failed', { home: config.home, message: errorMessage(error) })
+          return respond(res, 500, { error: 'config-write-failed', message: errorMessage(error) })
+        }
+      }
+      applyConfigPatch(config, { 'events.rules': next })
+      await opts.onConfigChange?.(config, result.changed)
+      const rules = opts.events.rules()
+      const saved = savedId ? rules.find(rule => rule.id === savedId) : undefined
+      onEvent({ event: 'api:event-rules', changed: result.changed, count: rules.length })
+      return respond(res, 200, { ok: true, ...(saved ? { rule: saved } : {}), rules })
     }
 
     const eventAction = path.match(/^\/api\/events\/([^/]+)\/action$/)

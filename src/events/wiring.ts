@@ -86,7 +86,7 @@ export function createConfigurableDecisionPort(deps: {
 export function createEventWiring(deps: EventWiringDeps): EventWiring {
   const logger = deps.logger ?? noopLogger
   const decision = new EventDecisionService({
-    decision: deps.config().events.decision,
+    decision: () => deps.config().events.decision,
     rule: ruleDecisionPort,
     model: createConfigurableDecisionPort({
       config: deps.config,

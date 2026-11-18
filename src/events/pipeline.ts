@@ -18,6 +18,7 @@ import { errorMessage, noopLogger, type Logger } from '#infra/logger.js'
 import type { EventEnvelope, EventSource } from '#event/port.js'
 import type { EventDecisionResult, EventDecisionService } from './decision.js'
 import { EVENT_SKILLS, findEventSkill } from './skills.js'
+import { ruleForEvent, type EventRule } from './rules.js'
 
 /** 事件判定最多重试几次；超过就标成失败态等人处理，不再无限重试。 */
 export const MAX_EVENT_ATTEMPTS = 5
@@ -84,6 +85,8 @@ export class EventPipeline {
    */
   ingest(sourceId: string, source: EventSourceConfig, envelope: EventEnvelope): EventRecord {
     const now = this.clock()
+    const eventType = envelope.eventType ?? ''
+    const rule = this.ruleOfEvent(this.config(), eventType)
     const event: EventRecord = {
       id: this.ids('evt'),
       sourceId,
@@ -93,19 +96,24 @@ export class EventPipeline {
       body: envelope.body,
       ...(envelope.url ? { url: envelope.url } : {}),
       ...(envelope.raw === undefined ? {} : { raw: envelope.raw }),
+      ...(envelope.context ? { context: envelope.context } : {}),
       receivedAt: envelope.receivedAt ?? now,
-      status: 'pending',
+      status: rule ? 'pending' : 'undecided',
       execution: 'none',
       // 订阅是纯粹的：入队时不预设优先级与类型，判定阶段再定。
       priority: 'P3',
-      eventType: envelope.eventType ?? '',
+      eventType,
+      ...(rule ? { ruleId: rule.id } : {}),
       needsReview: false,
+      ...(!rule ? { reason: '未匹配到决策规则' } : {}),
       updatedAt: now,
       attempts: 0,
     }
     const inserted = this.store.insertEvent(event)
     if (!inserted) {
-      const existing = this.store.listEvents({ sourceId, limit: 500 }).find(item => item.externalId === envelope.externalId)
+      // 重复事件按 (来源, externalId) 判定：来源保证同一事件的 externalId 稳定，
+      // 命中即说明这条已经入过队，直接返回原记录，不改写它的内容与状态。
+      const existing = this.store.getEventByExternalId(sourceId, envelope.externalId)
       if (existing) {
         this.logger.info('event:duplicate', { eventId: existing.id, sourceId, externalId: envelope.externalId })
         return existing
@@ -117,7 +125,12 @@ export class EventPipeline {
       sourceKind: event.sourceKind,
       externalId: event.externalId,
       title: preview(event.title, 120),
+      status: event.status,
+      ruleId: event.ruleId,
     })
+    if (!rule) {
+      this.logger.info('event:rule-unmatched', { eventId: event.id, eventType, sourceId })
+    }
     return event
   }
 
@@ -201,9 +214,30 @@ export class EventPipeline {
   async process(event: EventRecord): Promise<EventDecisionOutcome | null> {
     const config = this.config()
     const source = config.events.sources[event.sourceId] ?? { enabled: false }
+    const rule = this.ruleOfEvent(config, event.eventType)
+    if (!rule) {
+      const undecided: EventRecord = {
+        ...event,
+        status: 'undecided',
+        execution: 'none',
+        reason: '未匹配到决策规则',
+        decidedAt: undefined,
+        updatedAt: this.clock(),
+      }
+      this.store.updateEvent(undecided)
+      this.logger.info('event:rule-unmatched', { eventId: event.id, eventType: event.eventType, sourceId: event.sourceId })
+      return null
+    }
+    this.logger.info('event:rule-matched', {
+      eventId: event.id,
+      ruleId: rule.id,
+      eventType: event.eventType,
+      ruleVersion: rule.version,
+    })
     const result = await this.decision.decide({
       event,
       source,
+      rule,
       projects: this.projectsOf(config),
       skills: EVENT_SKILLS,
       decision: config.events.decision,
@@ -226,6 +260,8 @@ export class EventPipeline {
       confidence: verdict.confidence,
       promptVersion: result.promptVersion,
       basis: result.basis,
+      ruleId: rule.id,
+      ruleVersion: rule.version,
       decidedAt: this.clock(),
       updatedAt: this.clock(),
       lastError: undefined,
@@ -254,6 +290,7 @@ export class EventPipeline {
         this.logger.error('event:attempts-exceeded', {
           eventId: event.id,
           sourceId: event.sourceId,
+          ruleId: rule.id,
           attempts: event.attempts,
           message: preview(verdict.reason, 120),
         })
@@ -265,6 +302,7 @@ export class EventPipeline {
       this.logger.warn('event:decision-incomplete', {
         eventId: event.id,
         sourceId: event.sourceId,
+        ruleId: rule.id,
         reason: preview(verdict.reason, 120),
       })
       return { event: waiting, verdict, basis: result.basis, promptVersion: result.promptVersion }
@@ -433,8 +471,9 @@ export class EventPipeline {
     }
     const globalLimit = policy.dailyEventLimit
     if (globalLimit > 0) {
-      const total = this.store.countEventsSince(null, startOfDay(this.clock()))
-      if (total > globalLimit) {
+      const total = this.store.countDispatchedEventsSince(null, startOfDay(this.clock()))
+      // 已开出的工单数达到上限就顺延：配额管的是「今天最多自动执行多少条」。
+      if (total >= globalLimit) {
         return { allowed: false, reason: `今日全局配额 ${globalLimit} 条已用完，顺延等待` }
       }
     }
@@ -442,8 +481,8 @@ export class EventPipeline {
     const sourceLimit = policy.perSourceDailyLimit
     if (sourceLimit > 0) {
       const since = startOfDay(this.clock())
-      const count = this.store.countEventsSince(event.sourceId, since)
-      if (count > sourceLimit) {
+      const count = this.store.countDispatchedEventsSince(event.sourceId, since)
+      if (count >= sourceLimit) {
         return { allowed: false, reason: `来源 ${event.sourceId} 今日已达配额 ${sourceLimit} 条，顺延等待` }
       }
     }
@@ -474,13 +513,15 @@ export class EventPipeline {
   /** 授权范围：写清允许做什么、不允许做什么，Worker 照着做。 */
   private scopeOf(event: EventRecord, verdict: EventVerdict): string {
     const skill = verdict.skill ? findEventSkill(verdict.skill) : undefined
+    const rule = this.ruleOfEvent(this.config(), event.eventType, event.ruleId)
     const lines = [
       `处理事件「${event.title}」（${verdict.eventType} / ${verdict.priority}）。`,
       `归属项目：${verdict.project || '（未指定）'}。`,
       skill ? `处理方式：${skill.name}（${skill.id}）——${skill.hint}。` : '处理方式：先补齐信息，再出方案。',
+      rule?.workflowPrompt ? `执行流程：${rule.workflowPrompt}` : '',
       `授权范围：只处理本事件范围内的事；不改本仓库以外的代码；不碰生产环境与对外发布。`,
     ]
-    return lines.join('\n')
+    return lines.filter(Boolean).join('\n')
   }
 
   /** 传给 Worker 的原始请求：事件正文 + 判定结论。 */
@@ -500,6 +541,16 @@ export class EventPipeline {
   /** 候选项目清单：按当前默认运行时取。 */
   private projectsOf(config: AppConfig): ProjectConfig[] {
     return config.runtime.default === 'orca' ? config.projects : (config.runtime.projects?.[config.runtime.default] ?? [])
+  }
+
+  /** 按事件类型取规则；ruleId 优先，规则被删后回落到当前类型匹配。 */
+  private ruleOfEvent(config: AppConfig, eventType: string, ruleId?: string): EventRule | undefined {
+    const byId = ruleId ? config.events.rules.find(rule => rule.id === ruleId) : undefined
+    return byId ?? ruleForEvent(
+      config.events.rules,
+      eventType,
+      config.events.decision.fallbackToPrompt ? config.events.decision.prompt : undefined,
+    )
   }
 
   /** 决策 prompt 版本号：每次改 prompt 递增，历史判定可回放。 */

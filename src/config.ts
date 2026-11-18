@@ -16,6 +16,7 @@ import { noopLogger, errorMessage, type Logger } from '#infra/logger.js'
 import type { PluginEntry } from '#infra/plugin-loader.js'
 import { EVENT_PRIORITIES, normalizeEventPriority, type EventPriority } from '#core/event.js'
 import { GITHUB_EVENT_TYPES, isGithubEventType } from '#core/github-events.js'
+import { validateEventRules, type EventRule } from './events/rules.js'
 
 const runtimePackage: Record<string, string> = { ...DEFAULT_RUNTIME_PLUGINS }
 const channelPackage = (id: string): string | undefined => DEFAULT_CHANNEL_PLUGINS[id]
@@ -302,7 +303,10 @@ export interface EventSourceConfig {
 /** 事件决策策略：判定依据（自然语言 prompt）与护栏。 */
 export interface EventDecisionConfig {
   provider: 'jev' | 'llm' | 'rule'
+  /** 旧版全局 prompt；新装机器默认不参与判定。 */
   prompt: string
+  /** 没有匹配规则时，是否把旧 prompt 当作全局兜底规则。 */
+  fallbackToPrompt?: boolean
   confidenceThreshold: number
   fallback: 'review' | 'pending'
 }
@@ -323,6 +327,8 @@ export interface EventPolicyConfig {
 export interface EventsSettings {
   enabled: boolean
   sources: Record<string, EventSourceConfig>
+  /** 按 eventType 索引的决策规则；规则存在本身即表示该类事件需要判定。 */
+  rules: EventRule[]
   decision: EventDecisionConfig
   policy: EventPolicyConfig
 }
@@ -566,9 +572,11 @@ export function defaultConfig(): AppConfig {
       decision: {
         provider: 'rule',
         prompt: DEFAULT_EVENT_DECISION_PROMPT,
+        fallbackToPrompt: false,
         confidenceThreshold: 0.6,
         fallback: 'review',
       },
+      rules: [],
       policy: {
         peak: { start: '09:00', end: '20:00', priorities: ['P0', 'P1'] },
         offPeak: { start: '20:00', end: '09:00', priorities: ['P2', 'P3'] },
@@ -873,7 +881,7 @@ runtime: {
       ...(Object.keys(runtimePlugins).length > 0 ? { plugins: runtimePlugins } : {}),
     },
     ...(Object.keys(channelPlugins).length > 0 ? { channels: channelPlugins } : {}),
-    events: parseEvents(doc.events, base.events),
+    events: parseEvents(doc.events, base.events, logger),
     server: {
       port: Number.isFinite(port) && port >= 0 && port < 65536 ? port : base.server.port,
       host,
@@ -891,7 +899,7 @@ runtime: {
 const REMOVED_EVENT_SOURCE_KINDS = new Set(['http', 'schedule'])
 
 /** 解析事件总线配置；逐项兜底，缺省值来自 defaultConfig。 */
-function parseEvents(value: unknown, base: EventsSettings): EventsSettings {
+function parseEvents(value: unknown, base: EventsSettings, logger: Logger = noopLogger): EventsSettings {
   if (!isRecord(value)) return base
   const sources: Record<string, EventSourceConfig> = { ...base.sources }
   const rawSources = isRecord(value.sources) ? value.sources : {}
@@ -921,14 +929,30 @@ function parseEvents(value: unknown, base: EventsSettings): EventsSettings {
   }
   const decisionDoc = isRecord(value.decision) ? value.decision : {}
   const policyDoc = isRecord(value.policy) ? value.policy : {}
+  let rules = base.rules
+  if (Array.isArray(value.rules)) {
+    const parsed = validateEventRules(value.rules)
+    if (parsed.error) {
+      logger.warn('config:event-rules-invalid', { message: parsed.error })
+    } else {
+      rules = parsed.value
+    }
+  }
   return {
     enabled: booleanOr(value.enabled, base.enabled),
     sources,
+    rules,
     decision: {
       provider: decisionDoc.provider === 'jev' || decisionDoc.provider === 'llm' || decisionDoc.provider === 'rule'
         ? decisionDoc.provider
         : base.decision.provider,
       prompt: typeof decisionDoc.prompt === 'string' && decisionDoc.prompt.trim() ? decisionDoc.prompt : base.decision.prompt,
+      // 老配置只写了 prompt：保留原来的全局判定行为；新配置写回时会显式落 false。
+      fallbackToPrompt: typeof decisionDoc.fallbackToPrompt === 'boolean'
+        ? decisionDoc.fallbackToPrompt
+        : typeof decisionDoc.prompt === 'string' && decisionDoc.prompt.trim()
+          ? true
+          : base.decision.fallbackToPrompt,
       confidenceThreshold: positiveNumberOr(decisionDoc.confidenceThreshold, base.decision.confidenceThreshold, 0, 1),
       fallback: decisionDoc.fallback === 'pending' ? 'pending' : base.decision.fallback,
     },
@@ -1480,6 +1504,7 @@ export function writeConfig(home: string, config: AppConfig): void {
     events: {
       enabled: config.events.enabled,
       sources: config.events.sources,
+      rules: config.events.rules,
       decision: config.events.decision,
       policy: config.events.policy,
     },
@@ -2037,6 +2062,7 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
   'events.enabled': boolValue(),
   'events.decision.provider': enumValue(['jev', 'llm', 'rule']),
   'events.decision.prompt': stringValue,
+  'events.decision.fallbackToPrompt': boolValue(),
   'events.decision.confidenceThreshold': numberValue(0, 1),
   'events.decision.fallback': enumValue(['review', 'pending']),
   'events.policy.peak.start': stringValue,
@@ -2052,7 +2078,7 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
 }
 
 /** 整段替换的复杂字段（项目、群、白名单这类不适合逐项点路径编辑的配置）。 */
-const LIST_PATHS = ['projects', 'feishu.chats'] as const
+const LIST_PATHS = ['projects', 'feishu.chats', 'events.rules'] as const
 
 /** 本地仓库绝对路径：接受 `/abs` 与 `path:/abs`，不接受 Orca 的 name:/id: 选择器。 */
 export function isLocalRepoPath(repo: string): boolean {
@@ -2241,6 +2267,10 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
     if ((LIST_PATHS as readonly string[]).includes(path)) {
       if (path === 'projects') {
         const result = validateProjects(value)
+        if (result.error) errors.push({ path, message: result.error })
+        else accepted.push({ path, value: result.value })
+      } else if (path === 'events.rules') {
+        const result = validateEventRules(value)
         if (result.error) errors.push({ path, message: result.error })
         else accepted.push({ path, value: result.value })
       } else {
