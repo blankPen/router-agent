@@ -112,4 +112,78 @@ describe('createChatClient', () => {
     const client = createChatClient(model, { fetchImpl })
     await expect(client.complete([{ role: 'user', content: '问题' }])).rejects.toThrow(/chat:empty-response/)
   })
+
+  it('Anthropic 兼容：设置思考预算时把 thinking 参数带上', async () => {
+    const { fetchImpl, calls } = fakeFetch(() => jsonResponse({ content: [{ type: 'text', text: '脚本' }] }))
+    const client = createChatClient(
+      { ...model, baseUrl: 'https://gw.example.com', api: 'anthropic-messages' },
+      { fetchImpl, thinkingBudgetTokens: 1024 },
+    )
+    await client.complete([{ role: 'user', content: '问题' }])
+
+    const body = JSON.parse(String(calls[0]?.init.body))
+    expect(body.thinking).toEqual({ type: 'enabled', budget_tokens: 1024 })
+  })
+
+  it('没有设置思考预算时请求体不带 thinking', async () => {
+    const { fetchImpl, calls } = fakeFetch(() => jsonResponse({ content: [{ type: 'text', text: '脚本' }] }))
+    const client = createChatClient(
+      { ...model, baseUrl: 'https://gw.example.com', api: 'anthropic-messages' },
+      { fetchImpl },
+    )
+    await client.complete([{ role: 'user', content: '问题' }])
+
+    const body = JSON.parse(String(calls[0]?.init.body))
+    expect(body.thinking).toBeUndefined()
+  })
+
+  it('正文为空且被 max_tokens 截断时错误里带上截断原因', async () => {
+    const { fetchImpl } = fakeFetch(() => jsonResponse({
+      content: [{ type: 'thinking', thinking: '还在想' }],
+      stop_reason: 'max_tokens',
+    }))
+    const client = createChatClient(
+      { ...model, baseUrl: 'https://gw.example.com', api: 'anthropic-messages' },
+      { fetchImpl },
+    )
+    await expect(client.complete([{ role: 'user', content: '问题' }])).rejects.toThrow(/chat:empty-response:max_tokens/)
+  })
+
+  it('单次调用可以覆盖输出额度与思考预算', async () => {
+    const { fetchImpl, calls } = fakeFetch(() => jsonResponse({ content: [{ type: 'text', text: '脚本' }] }))
+    const client = createChatClient(
+      { ...model, baseUrl: 'https://gw.example.com', api: 'anthropic-messages' },
+      { fetchImpl },
+    )
+    await client.complete([{ role: 'user', content: '问题' }], { maxTokens: 8000, thinkingBudgetTokens: 1024 })
+
+    const body = JSON.parse(String(calls[0]?.init.body))
+    expect(body.max_tokens).toBe(8000)
+    expect(body.thinking).toEqual({ type: 'enabled', budget_tokens: 1024 })
+  })
+
+  it('单次调用可以覆盖超时时间', async () => {
+    let aborted = false
+    const fetchImpl = (async (_url: string, init?: RequestInit) => {
+      await new Promise((_, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          aborted = true
+          const error = new Error('aborted')
+          error.name = 'AbortError'
+          reject(error)
+        })
+      })
+      return new Response('{}')
+    }) as unknown as typeof fetch
+    const client = createChatClient(
+      { ...model, baseUrl: 'https://gw.example.com', api: 'anthropic-messages' },
+      { fetchImpl, timeoutMs: 60_000 },
+    )
+
+    await expect(client.complete(
+      [{ role: 'user', content: '问题' }],
+      { timeoutMs: 20 },
+    )).rejects.toThrow(/chat:timeout\(20ms\)/)
+    expect(aborted).toBe(true)
+  })
 })

@@ -8,6 +8,7 @@
  * 具体怎么创建工作区由 runtime 自己决定（和工单派工一致）。
  */
 import { writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Automation, AutomationRunOutputs } from '#core/automation.js'
 import { preview } from '#core/events.js'
@@ -19,12 +20,27 @@ import type { RuntimeRunInput, RuntimeRunOutcome } from './executor.js'
 /** 轮询间隔（毫秒）：查一次会话状态要调 CLI，太密没意义。 */
 const POLL_INTERVAL_MS = 2_000
 
+/**
+ * agent 报告完成用的文件名（写在工作目录里）。
+ *
+ * 用文件而不是 `ra automation finish` 命令：agent 跑的是用户机器上已安装的
+ * ra，版本未必有那条命令；文件永远在。
+ */
+const RESULT_FILE = '.automation-result'
+
 /** 执行桥需要的宿主能力。 */
 export interface AutomationRunnerDeps {
   /** 状态与工单目录根。 */
   home: string
   /** 产出收集：执行期间新建的工单 / 事件。 */
   collectOutputs: (automation: Automation, since: string) => AutomationRunOutputs
+  /**
+   * agent 改过脚本时回调：把改后的正文写回任务定义。
+   *
+   * agent 会顺手修跑不起来的脚本；改动发生在 runtime 的工作目录里，
+   * 不写回的话下一轮又跑那份旧的坏脚本。
+   */
+  onScriptChanged?: (automation: Automation, script: string) => void
   logger: {
     info(event: string, fields?: Record<string, unknown>): void
     warn(event: string, fields?: Record<string, unknown>): void
@@ -32,6 +48,8 @@ export interface AutomationRunnerDeps {
   }
   /** 时钟；测试可注入固定时间。 */
   now?: () => number
+  /** 轮询等待；测试可注入空等待，免掉真实的两秒间隔。 */
+  sleep?: (ms: number) => Promise<void>
 }
 
 /** 自动化的内部工单号：让 runtime 的会话目录、状态文件都有地方落。 */
@@ -94,6 +112,7 @@ export async function runThroughRuntime(
   let handle = ''
   // runtime 决定的工作目录：它在被选项目上开 worktree，自动化不写到项目外。
   let workdir = ''
+  input.onPhase?.('starting-runtime')
   try {
     const started = await runtime.start({
       ticket,
@@ -179,8 +198,22 @@ export async function runThroughRuntime(
       }
     }
   }
+  // 上一轮遗留的完成信号要先清掉：否则这一轮一开工就被判成「已完成」。
   try {
-    const outcome = await waitForCompletion(runtime, ref, deadline, now, deps, automation)
+    rmSync(join(workdir, RESULT_FILE), { force: true })
+  } catch (error) {
+    deps.logger.warn('automation:result-clean-failed', {
+      automationId: automation.id,
+      workdir,
+      message: errorMessage(error),
+    })
+  }
+  try {
+    input.onPhase?.('running')
+    const outcome = await waitForCompletion(runtime, ref, deadline, now, deps, automation, workdir, deps.sleep ?? sleep)
+    input.onPhase?.('collecting')
+    // agent 可能顺手修了跑不起来的脚本：改动要写回任务定义，下一轮才有意义。
+    if (input.script) collectScriptChange(automation, input.script, workdir, deps)
     const outputs = deps.collectOutputs(automation, new Date(startedAt).toISOString())
     if (outcome.status === 'success') {
       deps.logger.info('automation:runtime-finished', {
@@ -202,7 +235,75 @@ export async function runThroughRuntime(
   } finally {
     // 结束会话：自动化是无人值守的，不能留一个常驻 worker 吃并发额度。
     await stopQuietly(runtime, ref, automation, deps)
+    await removeWorkspaceQuietly(runtime, ref, automation, deps)
   }
+}
+
+/** 回收工作区；失败只记 warn，不覆盖真正的执行结论。 */
+async function removeWorkspaceQuietly(
+  runtime: WorkerRuntime,
+  ref: { handle: string; ticketId: string; workdir: string },
+  automation: Automation,
+  deps: AutomationRunnerDeps,
+): Promise<void> {
+  // 运行时不支持回收就跳过：不是每个 runtime 都能回收工作区。
+  if (!runtime.removeWorkspace) return
+  try {
+    // 自动化自己放进 worktree 的文件会让工作区变脏，provider 拒绝删。
+    // 这两个文件的内容已经分别落在任务定义与执行记录里，删掉不丢信息。
+    for (const name of ['automation.sh', RESULT_FILE]) {
+      try {
+        rmSync(join(ref.workdir, name), { force: true })
+      } catch {
+        // 删不掉就让 provider 自己拒绝：强删可能误伤 agent 的改动。
+      }
+    }
+    await runtime.removeWorkspace({ ticketId: ref.ticketId, workdir: ref.workdir, repo: automation.repo })
+    deps.logger.info('automation:workspace-removed', {
+      automationId: automation.id,
+      workdir: ref.workdir,
+    })
+  } catch (error) {
+    // 回收失败不影响执行结论：工作区留着也比把执行记录写成失败强。
+    deps.logger.warn('automation:workspace-remove-failed', {
+      automationId: automation.id,
+      workdir: ref.workdir,
+      message: errorMessage(error),
+    })
+  }
+}
+
+/**
+ * 读回工作目录里的脚本，和任务定义里的比一下。
+ *
+ * 变了才回调：agent 常常会「读一遍但没改」，不该每次都写回配置。
+ */
+function collectScriptChange(
+  automation: Automation,
+  original: string,
+  workdir: string,
+  deps: AutomationRunnerDeps,
+): void {
+  if (!deps.onScriptChanged) return
+  const path = join(workdir, 'automation.sh')
+  let current: string
+  try {
+    current = readFileSync(path, 'utf8')
+  } catch (error) {
+    // 读不到不是问题：脚本可能没落盘，用原定义继续跑。
+    deps.logger.warn('automation:script-readback-failed', {
+      automationId: automation.id,
+      path,
+      message: errorMessage(error),
+    })
+    return
+  }
+  if (current.trim() === original.trim()) return
+  deps.logger.info('automation:script-updated-by-agent', {
+    automationId: automation.id,
+    chars: current.length,
+  })
+  deps.onScriptChanged(automation, current)
 }
 
 /** 停会话；失败只记 warn，不覆盖真正的执行结论。 */
@@ -231,9 +332,20 @@ async function waitForCompletion(
   now: () => number,
   deps: AutomationRunnerDeps,
   automation: Automation,
+  workdir: string,
+  wait: (ms: number) => Promise<void>,
 ): Promise<Omit<RuntimeRunOutcome, 'outputs'>> {
   while (now() < deadline) {
-    await sleep(POLL_INTERVAL_MS)
+    await wait(POLL_INTERVAL_MS)
+    // agent 主动报告完成：立即收尾，不再等 runtime 会话自己退出。
+    const reported = readResult(workdir)
+    if (reported !== null) {
+      const summary = reported
+      return {
+        status: 'success',
+        summary: summary || `自动化 ${automation.name} 已完成`,
+      }
+    }
     let status
     try {
       status = await runtime.status?.(ref)
@@ -272,6 +384,23 @@ async function waitForCompletion(
     status: 'timeout',
     summary: `自动化 ${automation.name} 执行超时`,
     error: 'timeout',
+  }
+}
+
+/**
+ * 读 agent 写的完成信号文件。
+ *
+ * 文件不存在说明 agent 还在干；存在则内容就是本次执行的摘要。
+ * 内容为空也算完成：agent 可能只想说「做完了」。
+ */
+function readResult(dir: string): string | null {
+  const path = join(dir, RESULT_FILE)
+  if (!existsSync(path)) return null
+  try {
+    return readFileSync(path, 'utf8').trim()
+  } catch {
+    // 读不到就当没写：继续等，超时兜底。
+    return null
   }
 }
 

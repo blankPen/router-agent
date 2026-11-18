@@ -8,7 +8,7 @@
  */
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import type { Automation, AutomationDraft, AutomationRun, AutomationRunOutputs, AutomationTool } from '#core/automation.js'
+import type { Automation, AutomationDraft, AutomationRun, AutomationRunOutputs, AutomationRunPhase, AutomationTool } from '#core/automation.js'
 import { nextRunAt, validateSchedule } from '#core/automation-schedule.js'
 import { errorMessage, noopLogger, type Logger } from '#infra/logger.js'
 import type { ChatClient } from '#infra/chat.js'
@@ -19,9 +19,16 @@ import { BuiltinAutomationTools, scopedTools } from './tools.js'
 import { AutomationRateLimiter } from './tools.js'
 import { createAutomationExecutors, type AutomationExecutorRegistry } from './executor.js'
 import { runThroughRuntime } from './runner.js'
-import { executeAutomation, initAutomationStates, tickAutomations, type AutomationSchedulerDeps } from './scheduler.js'
+import { executeRun, initAutomationStates, startRun, tickAutomations, type AutomationSchedulerDeps } from './scheduler.js'
 import { extractJsonObject } from '../router/model-config.js'
 import type { RuntimeRegistry } from '#runtime/registry.js'
+
+/** 去掉模型常见的 markdown 代码围栏：脚本正文不该带 ```bash 这种壳。 */
+function stripCodeFence(text: string): string {
+  const trimmed = text.trim()
+  const fenced = /^```[^\n]*\n([\s\S]*?)\n?```$/.exec(trimmed)
+  return (fenced ? fenced[1] ?? '' : trimmed).trim()
+}
 
 /** 自动化服务需要的宿主能力。 */
 export interface AutomationServiceDeps {
@@ -43,6 +50,15 @@ export interface AutomationServiceDeps {
 
 /** 调度轮询间隔（毫秒）。 */
 const AUTOMATION_TICK_MS = 30_000
+
+/** 脚本生成的输出额度：脚本比一句话长得多，默认 2000 不够写。 */
+const SCRIPT_GENERATION_MAX_TOKENS = 8_000
+
+/** 脚本生成的思考预算：推理模型的思考也占输出额度，必须给正文留出空间。 */
+const SCRIPT_GENERATION_THINKING_BUDGET = 1_024
+
+/** 脚本生成的硬超时：推理模型写脚本常常要一分多钟。 */
+const SCRIPT_GENERATION_TIMEOUT_MS = 180_000
 
 /** 面板用的自动化视图。 */
 export interface AutomationView {
@@ -78,6 +94,8 @@ export interface AutomationRunView {
   status: AutomationRun['status']
   summary: string
   error?: string
+  /** 执行中的当前阶段；结束后为空。 */
+  phase?: AutomationRun['phase']
   outputs: AutomationRunOutputs
   manual: boolean
 }
@@ -133,10 +151,11 @@ export class AutomationService {
     })
     this.executors = createAutomationExecutors({
       runtimes: this.runtimes,
-      generateScript: automation => this.generateScript(automation),
       runViaRuntime: async input => runThroughRuntime(input, {
         home: this.config().home,
         collectOutputs: (automation, since) => this.collectOutputs(automation, since),
+        // agent 顺手修好的脚本写回任务定义，下一轮跑的是修好的那份。
+        onScriptChanged: (automation, script) => this.saveTaskScript?.(automation.id, script),
         logger: this.logger,
         now: this.now,
       }),
@@ -204,9 +223,32 @@ export class AutomationService {
       status: run.status,
       summary: run.summary,
       ...(run.error ? { error: run.error } : {}),
+      ...(run.phase ? { phase: run.phase } : {}),
       outputs: run.outputs,
       manual: run.manual,
     }))
+  }
+
+  /** 单条执行记录；面板轮询它来看执行进度。 */
+  run(id: string): AutomationRunView | null {
+    const found = this.store.getAutomationRun(id)
+    if (!found) return null
+    const names = new Map(this.tasks().map(task => [task.id, task.name]))
+    return {
+      id: found.id,
+      automationId: found.automationId,
+      automationName: names.get(found.automationId) ?? found.automationId,
+      scheduledAt: found.scheduledAt,
+      startedAt: found.startedAt,
+      ...(found.finishedAt ? { finishedAt: found.finishedAt } : {}),
+      ...(found.durationMs !== undefined ? { durationMs: found.durationMs } : {}),
+      status: found.status,
+      summary: found.summary,
+      ...(found.error ? { error: found.error } : {}),
+      ...(found.phase ? { phase: found.phase } : {}),
+      outputs: found.outputs,
+      manual: found.manual,
+    }
   }
 
   /** 待确认的对话式草稿。 */
@@ -256,6 +298,20 @@ export class AutomationService {
   }
 
   /**
+   * 收尾上一轮没跑完的执行记录。
+   *
+   * 服务重启时，上一轮正在跑的自动化已经没人接手了；
+   * 记录一直挂在「执行中」会让人以为它还在跑。
+   */
+  closeStaleRuns(): void {
+    const count = this.store.closeStaleAutomationRuns(
+      'interrupted',
+      '服务重启，上一轮执行被中断',
+    )
+    if (count > 0) this.logger.warn('automation:runs-interrupted', { count })
+  }
+
+  /**
    * 跑一轮调度。
    *
    * 每轮先补齐新任务的下次触发时间：面板刚建的任务不用等重启就能排上期。
@@ -281,8 +337,29 @@ export class AutomationService {
     const task = this.find(id)
     if (!task) return null
     this.logger.info('automation:manual-trigger', { automationId: id, name: task.name })
-    const run = await executeAutomation(task, new Date(this.now()).toISOString(), this.schedulerDeps(), true)
-    return run
+    // 手动触发不等执行结束：先落一条 running 记录就返回，面板靠轮询看进度。
+    // 一次执行可能跑满 10 分钟，同步等会把 HTTP 请求挂在那里。
+    const started = startRun(task, new Date(this.now()).toISOString(), this.schedulerDeps(), true)
+    void this.runToEnd(task, started)
+    return started
+  }
+
+  /**
+ * 把一次执行跑完并收尾记录。
+   *
+ * 手动触发在后台走这条路径：执行出错只记日志，不让未处理的 rejection 掀翻服务。
+   */
+  private async runToEnd(task: Automation, run: AutomationRun): Promise<AutomationRun> {
+    try {
+      return await executeRun(task, run, this.schedulerDeps())
+    } catch (error) {
+      this.logger.error('automation:run-crashed', {
+        automationId: task.id,
+        runId: run.id,
+        message: errorMessage(error),
+      })
+      return run
+    }
   }
 
   /** 调度器依赖。 */
@@ -297,9 +374,25 @@ export class AutomationService {
       nextRunId: () => `run_${crypto.randomUUID()}`,
       toolsFor: task => this.toolsFor(task),
       workdirFor: task => this.workdirFor(task),
+      reportPhase: (run, phase) => this.reportPhase(run, phase),
       logger: this.logger,
       now: this.now,
     }
+  }
+
+  /**
+   * 把执行中的阶段写回执行记录。
+   *
+ * 面板据此显示「跑到哪一步了」：只在阶段真的变了才写库，
+   * 免得轮询阶段把数据库写爆。
+   */
+  private reportPhase(run: AutomationRun, phase: AutomationRunPhase): void {
+    if (run.phase === phase) return
+    const next: AutomationRun = { ...run, phase }
+    run.phase = phase
+    // 只写 phase 列：摘要可能已经被 agent 的完成信号写过了。
+    this.store.updateAutomationRunPhase(next.id, phase)
+    this.logger.info('automation:run-phase', { automationId: run.automationId, runId: run.id, phase })
   }
 
   /** 绑定到任务的项目范围的工具集。 */
@@ -399,6 +492,22 @@ export class AutomationService {
   // ---------- 脚本生成 ----------
 
   /**
+   * 为某个任务生成脚本正文（面板「生成脚本」按钮）。
+   *
+   * 生成后直接写回任务定义：脚本从此固定下来，人工可以在面板继续改。
+   * 定时执行跑的就是这份脚本，不会每次重新生成。
+   */
+  async generateScriptFor(id: string): Promise<string | null> {
+    const task = this.find(id)
+    if (!task) return null
+    if (task.type !== 'script') {
+      this.logger.warn('automation:script-generate-rejected', { automationId: id, reason: 'not-script-type' })
+      return null
+    }
+    return this.generateScript(task)
+  }
+
+  /**
    * 由模型生成脚本。
    *
    * 只生成脚本本身，不掺凭据：需要凭据的动作留给工具去取。
@@ -423,8 +532,14 @@ export class AutomationService {
           role: 'user',
           content: `任务名：${task.name}\n目标：${task.prompt}\n项目：${task.project}\n仓库：${task.repo}`,
         },
-      ])
-      const text = turn.content.trim()
+      ], {
+        // 推理模型会先把输出额度花在思考上：不设思考预算就可能一个字的正文都吐不出来。
+        maxTokens: SCRIPT_GENERATION_MAX_TOKENS,
+        thinkingBudgetTokens: SCRIPT_GENERATION_THINKING_BUDGET,
+        // 写脚本比写一句话慢得多：默认 60s 不够，推理模型常常要一分多钟。
+        timeoutMs: SCRIPT_GENERATION_TIMEOUT_MS,
+      })
+      const text = stripCodeFence(turn.content)
       if (!text) return null
       this.logger.info('automation:script-generated', { automationId: task.id, chars: text.length })
       // 关键增量：脚本写回任务定义，下次执行直接复用，面板也能查看 / 人工编辑。

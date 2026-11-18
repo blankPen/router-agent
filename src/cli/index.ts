@@ -571,7 +571,12 @@ async function cmdAutomation(
   }
 }
 
-/** 手动触发一次自动化：走服务端口，保证与调度器共用同一套执行管线。 */
+/**
+ * 手动触发一次自动化：走服务端口，保证与调度器共用同一套执行管线。
+ *
+ * 触发是异步的（接口立即返回 running 记录），这里轮询到结束再打印结果，
+ * 让命令行用户看到和面板一样的结论。
+ */
 async function triggerAutomation(config: AppConfig, id: string, output: CliIo): Promise<number> {
   try {
     const res = await fetch(`http://127.0.0.1:${config.server.port}/api/automations/trigger`, {
@@ -579,17 +584,45 @@ async function triggerAutomation(config: AppConfig, id: string, output: CliIo): 
       headers: { 'Content-Type': 'application/json', ...tokenHeader(config) },
       body: JSON.stringify({ id }),
     })
-    const data = await res.json().catch(() => null) as { run?: { status?: string; summary?: string }; error?: string } | null
+    const data = await res.json().catch(() => null) as { run?: { id?: string; status?: string; summary?: string }; error?: string } | null
     if (!res.ok) {
       output.stderr(`触发失败：${data?.error ?? `HTTP ${res.status}`}`)
       return 1
     }
-    output.stdout(`${data?.run?.status ?? 'unknown'}\t${data?.run?.summary ?? ''}`)
+    const runId = data?.run?.id
+    if (!runId) {
+      output.stdout(`${data?.run?.status ?? 'unknown'}\t${data?.run?.summary ?? ''}`)
+      return 0
+    }
+    const finished = await waitAutomationRun(config, runId, output)
+    output.stdout(`${finished.status}\t${finished.summary}`)
     return 0
   } catch (error) {
     output.stderr(`服务不可达：${error instanceof Error ? error.message : String(error)}`)
     return 1
   }
+}
+
+/** 轮询一条执行记录直到结束；超时按未知状态收尾，不无限等。 */
+async function waitAutomationRun(
+  config: AppConfig,
+  runId: string,
+  output: CliIo,
+): Promise<{ status: string; summary: string }> {
+  const deadline = Date.now() + 15 * 60_000
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 3_000))
+    const res = await fetch(`http://127.0.0.1:${config.server.port}/api/automations/runs/${encodeURIComponent(runId)}`, {
+      headers: tokenHeader(config),
+    })
+    const data = await res.json().catch(() => null) as { run?: { status?: string; summary?: string } } | null
+    const status = data?.run?.status ?? 'unknown'
+    if (status !== 'running') {
+      return { status, summary: data?.run?.summary ?? '' }
+    }
+  }
+  output.stderr('等待执行结束超时；执行仍在后台进行，可稍后用 ra automation runs 查看。')
+  return { status: 'unknown', summary: '' }
 }
 
 /** 调用自动化内置工具：走服务端口，范围与限流由服务层强制。 */
@@ -1859,6 +1892,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     return eventWiring.pipeline.ingest(sourceId, { enabled: true, kind: 'feishu' }, envelope).id
   }
   automationService.initStates()
+  automationService.closeStaleRuns()
   automationService.start()
 
   const webRoot = fileURLToPath(new URL('../web', import.meta.url))
@@ -1950,9 +1984,11 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     automation: {
       listTasks: () => automationService.list(),
       listRuns: automationId => automationService.runs(automationId ? { automationId } : {}),
+      getRun: id => automationService.run(id),
       listDrafts: () => automationService.listDrafts(),
       dismissDraft: id => automationService.dismissDraft(id),
       trigger: id => automationService.trigger(id),
+      generateScript: id => automationService.generateScriptFor(id),
       draft: async text => automationService.draftFromText(text),
       invokeTool: (automationId, name, args) => automationService.invokeTool(automationId, name, args),
     },

@@ -34,6 +34,7 @@ import type {
   AutomationDraft,
   AutomationRun,
   AutomationRunOutputs,
+  AutomationRunPhase,
   AutomationRunStatus,
   AutomationState,
 } from '#core/automation.js'
@@ -500,6 +501,7 @@ CREATE TABLE IF NOT EXISTS automation_runs (
   status        TEXT NOT NULL,
   summary       TEXT NOT NULL DEFAULT '',
   error         TEXT,
+  phase         TEXT,
   outputs       TEXT NOT NULL DEFAULT '{}',
   manual        INTEGER NOT NULL DEFAULT 0
 );
@@ -737,6 +739,11 @@ export class Store {
         CREATE INDEX IF NOT EXISTS idx_chat_sessions_owner ON chat_sessions (chat_id, actor_id, status);
         CREATE INDEX IF NOT EXISTS idx_chat_sessions_status ON chat_sessions (status, reset_at);
       `)
+    }
+    // 执行记录的阶段列：让人在面板上看出这次执行卡在哪一步。
+    const runColumns = this.db.prepare('PRAGMA table_info(automation_runs)').all() as Row[]
+    if (runColumns.length > 0 && !runColumns.some(column => column.name === 'phase')) {
+      this.db.exec('ALTER TABLE automation_runs ADD COLUMN phase TEXT')
     }
   }
 
@@ -1053,8 +1060,8 @@ export class Store {
   /** 写入一条执行记录。 */
   insertAutomationRun(run: AutomationRun): void {
     this.db.prepare(`INSERT INTO automation_runs
-      (id, automation_id, scheduled_at, started_at, finished_at, duration_ms, status, summary, error, outputs, manual)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      (id, automation_id, scheduled_at, started_at, finished_at, duration_ms, status, summary, error, phase, outputs, manual)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(
         run.id,
         run.automationId,
@@ -1065,24 +1072,31 @@ export class Store {
         run.status,
         run.summary,
         run.error ?? null,
+        run.phase ?? null,
         JSON.stringify(run.outputs),
         run.manual ? 1 : 0,
       )
   }
 
-  /** 更新执行记录的结束状态。 */
+  /** 更新执行记录：结束状态或执行中的阶段。 */
   updateAutomationRun(run: AutomationRun): void {
     this.db.prepare(`UPDATE automation_runs SET finished_at = ?, duration_ms = ?, status = ?, summary = ?,
-      error = ?, outputs = ? WHERE id = ?`)
+      error = ?, phase = ?, outputs = ? WHERE id = ?`)
       .run(
         run.finishedAt ?? null,
         run.durationMs ?? null,
         run.status,
         run.summary,
         run.error ?? null,
+        run.phase ?? null,
         JSON.stringify(run.outputs),
         run.id,
       )
+  }
+
+  /** 只更新执行中的阶段；不动摘要与状态（阶段频繁变，别把别的字段覆盖掉）。 */
+  updateAutomationRunPhase(id: string, phase: AutomationRunPhase): void {
+    this.db.prepare('UPDATE automation_runs SET phase = ? WHERE id = ?').run(phase, id)
   }
 
   /** 执行记录列表；可按任务过滤，按开始时间倒序。 */
@@ -1098,6 +1112,24 @@ export class Store {
   getAutomationRun(id: string): AutomationRun | null {
     const row = this.db.prepare('SELECT * FROM automation_runs WHERE id = ?').get(id) as Row | undefined
     return row ? automationRunFromRow(row) : null
+  }
+
+  /**
+   * 把还挂在「执行中」的旧记录收尾。
+   *
+   * 服务重启后，上一轮正在跑的自动化已经没人接手了：
+   * 记录一直挂在「执行中」会让人以为它还在跑。
+   */
+  closeStaleAutomationRuns(reason: string, summary: string): number {
+    const rows = this.db.prepare("SELECT id, started_at FROM automation_runs WHERE status = 'running'").all() as Row[]
+    for (const row of rows) {
+      const startedAt = String(row.started_at ?? '')
+      const durationMs = startedAt ? Math.max(0, Date.now() - Date.parse(startedAt)) : 0
+      this.db.prepare(`UPDATE automation_runs SET finished_at = ?, duration_ms = ?, status = ?, summary = ?,
+        error = ?, phase = NULL WHERE id = ?`)
+        .run(new Date().toISOString(), durationMs, 'failed', summary, reason, String(row.id))
+    }
+    return rows.length
   }
 
   /** 写入一条待确认草稿。 */
@@ -2172,6 +2204,7 @@ function automationRunFromRow(row: Row): AutomationRun {
     status: String(row.status) as AutomationRunStatus,
     summary: String(row.summary ?? ''),
     ...(row.error ? { error: String(row.error) } : {}),
+    ...(row.phase ? { phase: String(row.phase) as AutomationRunPhase } : {}),
     outputs: row.outputs ? JSON.parse(String(row.outputs)) as AutomationRunOutputs : { ticketIds: [], eventIds: [] },
     manual: Number(row.manual) === 1,
   }

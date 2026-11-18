@@ -59,12 +59,27 @@ export interface ChatClientOptions {
   timeoutMs?: number
   /** 输出 token 上限，默认 2000。 */
   maxTokens?: number
+  /**
+   * 思考预算（Anthropic 兼容接口的 thinking.budget_tokens）。
+   *
+   * 推理模型会把 output 额度先花在思考上：不设预算时思考可能吃满全部额度，
+   * 正文一个字都吐不出来（表现为 chat:empty-response）。
+   */
+  thinkingBudgetTokens?: number
   /** 测试注入点。 */
   fetchImpl?: typeof fetch
 }
 
 export interface ChatClient {
-  complete(messages: ChatMessage[], opts?: { tools?: ChatToolSpec[] }): Promise<ChatTurn>
+  complete(messages: ChatMessage[], opts?: {
+    tools?: ChatToolSpec[]
+    /** 本次调用的输出额度；缺省用客户端默认值。 */
+    maxTokens?: number
+    /** 本次调用的思考预算（Anthropic 兼容接口）。 */
+    thinkingBudgetTokens?: number
+    /** 本次调用的硬超时（毫秒）；缺省用客户端默认值。 */
+    timeoutMs?: number
+  }): Promise<ChatTurn>
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000
@@ -75,13 +90,25 @@ export function createChatClient(model: ChatModelConfig, opts: ChatClientOptions
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch
   const timeoutMs = opts.timeoutMs && opts.timeoutMs > 0 ? opts.timeoutMs : DEFAULT_TIMEOUT_MS
   const maxTokens = opts.maxTokens && opts.maxTokens > 0 ? opts.maxTokens : DEFAULT_MAX_TOKENS
+  const thinkingBudgetTokens = opts.thinkingBudgetTokens
   const api: ChatApi = model.api === 'anthropic-messages' ? 'anthropic-messages' : 'openai-completions'
   const url = api === 'anthropic-messages' ? anthropicMessagesUrl(model.baseUrl) : chatCompletionsUrl(model.baseUrl)
 
   return {
-    async complete(messages: ChatMessage[], completeOpts: { tools?: ChatToolSpec[] } = {}): Promise<ChatTurn> {
+    async complete(
+      messages: ChatMessage[],
+      completeOpts: {
+        tools?: ChatToolSpec[]
+        maxTokens?: number
+        thinkingBudgetTokens?: number
+        timeoutMs?: number
+      } = {},
+    ): Promise<ChatTurn> {
+      const callMaxTokens = completeOpts.maxTokens && completeOpts.maxTokens > 0 ? completeOpts.maxTokens : maxTokens
+      const callThinking = completeOpts.thinkingBudgetTokens ?? thinkingBudgetTokens
+      const callTimeout = completeOpts.timeoutMs && completeOpts.timeoutMs > 0 ? completeOpts.timeoutMs : timeoutMs
       const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), timeoutMs)
+      const timer = setTimeout(() => controller.abort(), callTimeout)
       let response: Response
       try {
         response = await fetchImpl(url, {
@@ -90,11 +117,11 @@ export function createChatClient(model: ChatModelConfig, opts: ChatClientOptions
             'Content-Type': 'application/json',
             ...authHeaders(model, api),
           },
-          body: JSON.stringify(requestBody(model, api, messages, maxTokens, completeOpts.tools)),
+          body: JSON.stringify(requestBody(model, api, messages, callMaxTokens, completeOpts.tools, callThinking)),
           signal: controller.signal,
         })
       } catch (error) {
-        if (isAbortError(error)) throw new Error(`chat:timeout(${timeoutMs}ms)`)
+        if (isAbortError(error)) throw new Error(`chat:timeout(${callTimeout}ms)`)
         throw new Error(`chat:request-failed: ${errorText(error)}`)
       } finally {
         clearTimeout(timer)
@@ -114,7 +141,11 @@ export function createChatClient(model: ChatModelConfig, opts: ChatClientOptions
 
       const turn = parseChatTurn(payload, api)
       // 既没有文字也没有工具调用，说明模型没给出可用的东西，直接报错让上层降级。
-      if (!turn.content && turn.toolCalls.length === 0) throw new Error('chat:empty-response')
+      if (!turn.content && turn.toolCalls.length === 0) {
+        // 截断是最常见的空响应原因：额度被思考或长输出吃光，正文还没轮到。
+        const stopReason = String((payload as Record<string, unknown> | null)?.stop_reason ?? '')
+        throw new Error(stopReason ? `chat:empty-response:${stopReason}` : 'chat:empty-response')
+      }
       return turn
     },
   }
@@ -153,6 +184,7 @@ function requestBody(
   messages: ChatMessage[],
   maxTokens: number,
   tools?: ChatToolSpec[],
+  thinkingBudgetTokens?: number,
 ): Record<string, unknown> {
   const temperature = model.temperature ?? 0.2
   if (api === 'anthropic-messages') {
@@ -163,6 +195,9 @@ function requestBody(
       max_tokens: maxTokens,
       temperature,
       ...(system ? { system } : {}),
+      ...(thinkingBudgetTokens && thinkingBudgetTokens > 0
+        ? { thinking: { type: 'enabled', budget_tokens: thinkingBudgetTokens } }
+        : {}),
       ...(tools && tools.length > 0 ? { tools: tools.map(anthropicTool) } : {}),
       messages: rest.map(anthropicMessage),
     }

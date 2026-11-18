@@ -3,6 +3,8 @@ import {
   blankDraft,
   draftOf,
   outputsText,
+  RUN_PHASE_LABEL,
+  phaseText,
   scheduleText,
   validateDraft,
   type AutomationTask,
@@ -74,5 +76,17 @@ describe('自动化面板模型', () => {
     expect(scheduleText({ kind: 'weekly', weekday: 1, time: '09:00' })).toBe('每周一 09:00')
     expect(outputsText({ ticketIds: ['tk-1'], eventIds: ['evt-1'] })).toBe('工单 tk-1；事件 evt-1')
     expect(outputsText({ ticketIds: [], eventIds: [] })).toBe('无产出')
+  })
+
+  it('执行阶段有中文文案，未知阶段回退成阶段名', () => {
+    expect(phaseText('generating-script')).toBe('正在生成脚本')
+    expect(phaseText('running')).toBe('正在执行')
+    expect(phaseText('unknown-phase')).toBe('unknown-phase')
+  })
+
+  it('每个已知阶段都有中文名', () => {
+    for (const phase of Object.keys(RUN_PHASE_LABEL)) {
+      expect(RUN_PHASE_LABEL[phase]).toBeTruthy()
+    }
   })
 })
