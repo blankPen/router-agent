@@ -164,6 +164,18 @@ describe('matchSymptoms', () => {
   })
 })
 
+describe('服务自身故障不该被当成配置问题', () => {
+  it('存储层报错时给出缺陷类结论与上报入口，而不是让人去改接单方式', () => {
+    const hits = matchSymptoms([
+      entry('2026-11-18T05:50:55.150Z', 'error', 'loop:trigger-failed', { detail: 'database is not open' }),
+    ])
+    const next = nextStepsFor(hits, '')
+    // 存储层崩了是系统缺陷：只给「改配置」入口会把用户引到错误的方向。
+    expect(next.some(step => step.kind === 'issue')).toBe(true)
+    expect(next.some(step => step.kind === 'config')).toBe(false)
+  })
+})
+
 describe('ensureEvidence', () => {
   it('把结论里引用但证据里没有的事件补进来', () => {
     const entries = [

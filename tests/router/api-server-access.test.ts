@@ -96,6 +96,40 @@ describe('面板对外访问', () => {
     await server.close()
   })
 
+  it('同一个来源反复被拒时不刷屏，只在首次记一条日志', async () => {
+    const config = defaultConfig()
+    config.server.host = '0.0.0.0'
+    config.server.token = 'lan-secret-token'
+    const logs: Array<{ message: string; extra?: Record<string, unknown> }> = []
+    const server = await makeServer(config, logs)
+
+    for (let i = 0; i < 20; i += 1) {
+      const denied = await call(server, 'GET', '/api/status')
+      expect(denied.status).toBe(401)
+    }
+
+    // 20 次拒绝只记一条：面板开放时浏览器轮询会被全部拒绝，逐条记会把真实错误淹没。
+    expect(logs.filter(log => log.message === 'api:access-denied')).toHaveLength(1)
+    await server.close()
+  })
+
+  it('不同路径各自记一条，换路径不会一直刷', async () => {
+    const config = defaultConfig()
+    config.server.host = '0.0.0.0'
+    config.server.token = 'lan-secret-token'
+    const logs: Array<{ message: string; extra?: Record<string, unknown> }> = []
+    const server = await makeServer(config, logs)
+
+    await call(server, 'GET', '/api/status')
+    await call(server, 'GET', '/api/tickets')
+    await call(server, 'GET', '/api/status')
+
+    const denied = logs.filter(log => log.message === 'api:access-denied')
+    expect(denied).toHaveLength(2)
+    expect(denied.map(log => log.extra?.path)).toEqual(['/api/status', '/api/tickets'])
+    await server.close()
+  })
+
   it('配了令牌后，带正确请求头的请求正常通过', async () => {
     const config = defaultConfig()
     config.server.host = '0.0.0.0'
