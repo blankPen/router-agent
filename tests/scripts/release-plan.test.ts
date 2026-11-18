@@ -3,6 +3,7 @@ import {
   BOT_ACTOR,
   CHANNEL_DIST_TAGS,
   SKIP_KEYWORD,
+  createPublishedChecker,
   isShippableChange,
   parseReleaseTag,
   parseVersion,
@@ -175,6 +176,22 @@ describe('预发布版本号自动计算', () => {
       published('0.3.40', '0.3.41-beta.1'),
     )
     expect(plan.releaseVersion).toBe('0.3.41-beta.2')
+  })
+
+  it('组件包已可见而根包未可见时，仍跳过已被占用的预发布版本', () => {
+    const versions = new Map([
+      ['@router-agent/core', ['0.3.42-beta.1', '0.3.42-beta.2', '0.3.42-beta.3', '0.3.42-beta.4']],
+      ['router-agent', ['0.3.42-beta.1', '0.3.42-beta.2', '0.3.42-beta.3']],
+    ])
+    const isPublished = createPublishedChecker(
+      ['@router-agent/core', 'router-agent'],
+      name => versions.get(name) ?? [],
+    )
+    const plan = planRelease(
+      { ...base, branch: 'beta' as const, version: '0.3.41', beforeVersion: '0.3.41', latestStable: '0.3.41' },
+      isPublished,
+    )
+    expect(plan.releaseVersion).toBe('0.3.42-beta.5')
   })
 
   it('beta 与 alpha 不会产出相同的版本', () => {

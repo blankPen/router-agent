@@ -206,6 +206,11 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
   const localProviders = opts.localProviders ?? {
     discover: () => discoverLocalProviders({ home: homedir() }),
   }
+  // 被拒的来源按「路径 + 来源」记一次：面板开放时浏览器轮询会被反复拒绝，
+  // 逐条打日志会把真正的错误淹没（AGENTS.md 高频路径降噪）。
+  // 用「方法 + 路径」做键而不是原样记路径：路径由客户端决定，无界增长会变成内存问题。
+  const deniedSeen = new Set<string>()
+  const DENIED_SEEN_LIMIT = 200
 
   const server = createServer((req, res) => {
     handle(req, res).catch(error => {
@@ -227,12 +232,22 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
     // 不按来源 IP 放行本机：内网穿透的流量也是从 127.0.0.1 进来的，放行等于没有鉴权。
     // 静态资源不拦：面板外壳本身不含敏感信息，数据一律走 API。
     if (path.startsWith('/api/') && !isAuthorized(req, config.server.token)) {
-      logger.warn('api:access-denied', {
-        method: req.method,
-        path,
-        remote: req.socket.remoteAddress ?? '',
-        host: String(req.headers.host ?? ''),
-      })
+      const remote = req.socket.remoteAddress ?? ''
+      const key = `${req.method} ${path}`
+      if (!deniedSeen.has(key)) {
+        // 只保留最近的若干条：恶意客户端可以不断换路径，不能让它把内存撑爆。
+        if (deniedSeen.size >= DENIED_SEEN_LIMIT) {
+          const oldest = deniedSeen.values().next().value
+          if (oldest !== undefined) deniedSeen.delete(oldest)
+        }
+        deniedSeen.add(key)
+        logger.warn('api:access-denied', {
+          method: req.method,
+          path,
+          remote,
+          host: String(req.headers.host ?? ''),
+        })
+      }
       return respond(res, 401, { error: 'token-required', message: '面板已开放访问，请带 x-ra-token 请求头' })
     }
 

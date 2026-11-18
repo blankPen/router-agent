@@ -6,6 +6,9 @@ import { Store } from '../src/store/db.js'
 import { Engine } from '../src/core/engine.js'
 import { RouterService, outboxTargetOf } from '../src/service.js'
 import { defaultConfig, policyOf, type AppConfig, chatEntry } from '../src/config.js'
+import { EventKickoff } from '../src/events/kickoff.js'
+import { ChannelRegistry } from '#channel/registry.js'
+import type { ChannelAdapter, OutboundMessage, SendReceipt } from '#channel/port.js'
 import { } from '#core/policy.js'
 import type {
   WorkerRuntime,
@@ -146,6 +149,48 @@ class FakeSender {
   }
 }
 
+/** 事件开工测试用的通道：私聊与话题回复都只记录，不发真实网络请求。 */
+class FakeKickoffChannel implements ChannelAdapter {
+  readonly id = 'feishu'
+  readonly kind = 'feishu'
+  readonly capabilities = {
+    threadReply: true,
+    ack: false,
+    richText: true,
+    documents: false,
+    directory: false,
+    attachmentsIn: false,
+    attachmentsOut: false,
+    idempotency: true,
+    maxTextLength: 3500,
+    directMessage: true,
+  }
+  directs: { userId: string; text: string }[] = []
+  replies: { threadRef?: string; text: string }[] = []
+
+  normalize(): { dropped: string } {
+    return { dropped: 'test' }
+  }
+
+  async send(message: OutboundMessage): Promise<SendReceipt> {
+    if (message.direct) {
+      this.directs.push({ userId: message.targetId, text: message.text })
+      return { messageId: 'om_dm', chatId: 'oc_p2p' }
+    }
+    this.replies.push({
+      ...(message.threadRef ? { threadRef: message.threadRef } : {}),
+      text: message.text,
+    })
+    if (message.threadRef === 'om_dm') return { messageId: 'om_thread', chatId: 'oc_p2p' }
+    return { messageId: 'om_progress', chatId: message.targetId }
+  }
+
+  async resolveMessageThread(messageId: string): Promise<{ threadId: string; rootId: string; chatId: string } | null> {
+    if (messageId !== 'om_thread') return null
+    return { threadId: 'omt_topic', rootId: 'om_thread', chatId: 'oc_p2p' }
+  }
+}
+
 function makeTrigger(over: Partial<Trigger> = {}): Trigger {
   return {
     id: 't1',
@@ -243,6 +288,88 @@ describe('RouterService 编排', () => {
 
     expect(outboxTargetOf(eventTicket, 'oc_admin')).toEqual({ channelId: 'oc_admin', threadId: '' })
     expect(outboxTargetOf({ ...eventTicket, chatId: '' }, '')).toBeNull()
+  })
+
+  it('事件工单派工前私聊通知并建话题，话题内消息可投给 worker', async () => {
+    config.events = {
+      ...defaultConfig().events,
+      sources: { github: { enabled: true, kind: 'github', repo: 'acme/web', owner: 'pz@example.com' } },
+    }
+    engine.ingest({
+      id: 'trg_event_evt1',
+      source: 'event:github',
+      externalId: 'issue:1',
+      threadId: 'event:github:issue:1',
+      chatId: 'oc_dev',
+      chatName: 'github',
+      actorId: 'event:github',
+      actorName: '事件来源 github',
+      isBot: true,
+      text: 'CI 失败',
+      addressed: 'none',
+      receivedAt: '2026-11-06T09:59:00.000Z',
+      disposition: 'pending',
+    })
+    const ticket = engine.decide({
+      triggerId: 'trg_event_evt1',
+      decision: 'accept',
+      strength: 'inferred',
+      reason: '测试事件开单',
+      title: '修复 CI',
+      scope: '只修构建脚本',
+      request: '事件标题：CI 失败\n事件正文：修复构建',
+      rules: ['event-decision'],
+      repo: 'acme/web',
+      branch: 'main',
+    }).ticket!
+    const channel = new FakeKickoffChannel()
+    const channels = new ChannelRegistry()
+    channels.register(channel)
+    const kickoff = new EventKickoff({
+      store,
+      config: () => config,
+      channels,
+      clock: () => '2026-11-06T10:00:10.000Z',
+      logger: {
+        info: () => {},
+        warn: () => {},
+        error: () => {},
+      },
+      resolveOwner: async () => ({ openId: 'ou_pz', name: 'PZ' }),
+    })
+    service = new RouterService({
+      config, store, engine, runtime, decisionEngine: new AcceptEngine(), prTracker,
+      clock: { now: () => '2026-11-06T10:00:10.000Z' },
+      agentLoopOptions: { batchWindowMs: 0 },
+      kickoff,
+    })
+
+    await service.runOnce()
+
+    expect(channel.directs).toHaveLength(1)
+    expect(channel.directs[0]!.text).toContain(ticket.id)
+    expect(store.getTicket(ticket.id)!.threadId).toBe('feishu:oc_p2p:om_thread')
+    expect(runtime.starts).toHaveLength(1)
+
+    engine.ingest({
+      id: 'trg_topic_1',
+      source: 'feishu',
+      externalId: 'om_topic_user',
+      threadId: 'feishu:oc_p2p:om_topic_user',
+      threadKeys: ['omt_topic', 'om_thread', 'om_topic_user'],
+      chatId: 'oc_p2p',
+      chatName: 'PZ',
+      actorId: 'ou_pz',
+      actorName: 'PZ',
+      isBot: false,
+      text: '话题里追加消息',
+      addressed: 'direct',
+      receivedAt: '2026-11-06T09:59:30.000Z',
+      disposition: 'pending',
+    })
+    await service.runOnce()
+
+    expect(runtime.delivered.map(item => item.text)).toContain('话题里追加消息')
   })
 
   it('飞书工单仍用话题消息回复', () => {

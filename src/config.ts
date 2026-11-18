@@ -298,6 +298,13 @@ export interface EventSourceConfig {
   repo?: string
   /** GitHub 来源：订阅的事件类型（`类别.动作`）；留空表示全部。 */
   events?: string[]
+  /**
+   * 事件接收人：飞书邮箱或 `ou_` 开头的 open_id。
+   *
+   * 事件开工时先私聊通知这个人，并以该私聊消息为根建话题；
+   * 留空或解析不到人时退化为群通知，不中断派工。
+   */
+  owner?: string
   /** 轮询间隔（毫秒）。 */
   intervalMs?: number
 }
@@ -1053,6 +1060,7 @@ function parseEvents(value: unknown, base: EventsSettings, logger: Logger = noop
       ...(isRecord(raw.options) ? { options: raw.options } : {}),
       ...(typeof raw.repo === 'string' ? { repo: raw.repo } : {}),
       ...(Array.isArray(raw.events) ? { events: stringArray(raw.events, []) } : {}),
+      ...(typeof raw.owner === 'string' ? { owner: raw.owner } : {}),
       ...(typeof raw.intervalMs === 'number' ? { intervalMs: raw.intervalMs } : {}),
     }
     // GitHub 来源没写事件类型 = 订阅全部类型；写了的只认目录里的类型。
@@ -2029,12 +2037,13 @@ function numberValue(min: number, max: number): Validator {
 }
 
 /** 事件来源可编辑的字段与取值校验。 */
-const EVENT_SOURCE_FIELDS: Record<string, 'text' | 'number' | 'boolean' | 'list' | 'priority' | 'githubEvents'> = {
+const EVENT_SOURCE_FIELDS: Record<string, 'text' | 'number' | 'boolean' | 'list' | 'priority' | 'githubEvents' | 'sourceOwner'> = {
   enabled: 'boolean',
   kind: 'text',
   plugin: 'text',
   repo: 'text',
   events: 'githubEvents',
+  owner: 'sourceOwner',
   intervalMs: 'number',
 }
 
@@ -2058,6 +2067,12 @@ function validateEventSourceField(key: string, value: unknown): string | null {
         if (!isGithubEventType(item)) return `不是可订阅的 GitHub 事件类型：${String(item)}`
       }
       return null
+    case 'sourceOwner': {
+      if (typeof value !== 'string') return '事件接收人需要字符串'
+      const owner = value.trim()
+      if (owner && !owner.includes('@') && !owner.startsWith('ou_')) return '事件接收人应为邮箱或 ou_ 开头的 open_id'
+      return null
+    }
     case 'priority':
       return EVENT_PRIORITIES.includes(String(value).toUpperCase() as EventPriority) ? null : `优先级只能是 ${EVENT_PRIORITIES.join(' / ')}`
     default:
@@ -2081,6 +2096,11 @@ function validateEventSourceEntry(value: unknown): string | null {
   if (!Array.isArray(events)) return '需要字符串数组'
   for (const item of events) {
     if (!isGithubEventType(item)) return `不是可订阅的 GitHub 事件类型：${String(item)}`
+  }
+  if (value.owner !== undefined) {
+    if (typeof value.owner !== 'string') return '事件接收人需要字符串'
+    const owner = value.owner.trim()
+    if (owner && !owner.includes('@') && !owner.startsWith('ou_')) return '事件接收人应为邮箱或 ou_ 开头的 open_id'
   }
   return null
 }

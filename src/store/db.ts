@@ -895,6 +895,12 @@ export class Store {
     return rows.map(eventFromRow).sort((a, b) => compareEventPriority(a.priority, b.priority) || b.receivedAt.localeCompare(a.receivedAt))
   }
 
+  /** 按工单反查触发它的事件；事件开工通知用事件上下文补接收人线索。 */
+  getEventByTicketId(ticketId: string): EventRecord | null {
+    const row = this.db.prepare('SELECT * FROM events WHERE ticket_id = ? ORDER BY received_at DESC LIMIT 1').get(ticketId) as Row | undefined
+    return row ? eventFromRow(row) : null
+  }
+
   updateEvent(event: EventRecord): void {
     this.db.prepare(`UPDATE events SET title = ?, body = ?, url = ?, status = ?, execution = ?, priority = ?, event_type = ?,
       project = ?, repo = ?, branch = ?, skill = ?, needs_review = ?, reason = ?, confidence = ?, basis = ?, rule_id = ?,
@@ -1263,6 +1269,46 @@ export class Store {
   updateTicket(t: Ticket): void {
     this.db.prepare(`UPDATE tickets SET title = ?, stage = ?, repo = ?, branch = ?, attachments = ?, pr_number = ?, pr_url = ?, pr_state = ?, updated_at = ?, closed_at = ? WHERE id = ?`)
       .run(t.title, t.stage, t.repo, t.branch, JSON.stringify(t.attachments ?? []), t.prNumber, t.prUrl, t.prState, t.updatedAt, t.closedAt ?? null, t.id)
+  }
+
+  /**
+   * 把事件工单从原来的事件线程迁到真实的私聊话题。
+   *
+   * 工单来源仍是 `event:*`（判定与审计不变），只换会话落点：
+   * 话题、群、授权人、线程别名与订阅一起改写，后续出站才不会再回落到通知群。
+   */
+  bindTicketThread(input: {
+    ticketId: string
+    threadId: string
+    chatId: string
+    channelId: string
+    threadSource: SourceKind
+    actorId: string
+    actorName: string
+    aliases: string[]
+    createdAt: string
+  }): void {
+    const ticket = this.getTicket(input.ticketId)
+    if (!ticket) return
+    const rootId = input.threadId.split(':').at(-1) || input.threadId
+    this.upsertThread({
+      id: input.threadId,
+      source: input.threadSource,
+      channelId: input.channelId,
+      rootId,
+      chatId: input.chatId,
+      createdAt: input.createdAt,
+    })
+    for (const alias of input.aliases) {
+      this.registerThreadAlias({ source: input.threadSource, alias, threadId: input.threadId, createdAt: input.createdAt })
+    }
+    this.db.prepare('UPDATE tickets SET thread_id = ?, chat_id = ?, channel_id = ?, updated_at = ? WHERE id = ?')
+      .run(input.threadId, input.chatId, input.channelId, input.createdAt, input.ticketId)
+    this.db.prepare('UPDATE mandates SET chat_id = ?, thread_id = ?, actor_id = ?, actor_name = ? WHERE ticket_id = ?')
+      .run(input.chatId, input.threadId, input.actorId, input.actorName, input.ticketId)
+    if (ticket.threadId !== input.threadId) this.unsubscribe(ticket.threadId, input.ticketId)
+    this.subscribe({ threadId: input.threadId, ticketId: input.ticketId, contextOnly: false, createdAt: input.createdAt })
+    this.originCache.delete(input.ticketId)
   }
 
   getTicket(id: string): Ticket | null {

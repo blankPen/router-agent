@@ -14,6 +14,7 @@ import { loadRuntimePlugins, type LoadedRuntimePlugins } from '#runtime/plugins/
 import { loadChannelPlugins, type LoadedChannelPlugins } from '#channel/plugins/loader.js'
 import { createEventWiring } from '../events/wiring.js'
 import { AutomationService, type AutomationServiceDeps } from '../automation/service.js'
+import { EventKickoff } from '../events/kickoff.js'
 import { ruleEventTypes } from '../events/rules.js'
 import { compileEventRule } from '../events/rule-compile.js'
 import { createChatClient } from '#infra/chat.js'
@@ -29,7 +30,7 @@ import { ChannelRegistry } from '#channel/registry.js'
 import { ChannelRouter } from '#channel/router.js'
 import { DEFAULT_CHANNEL_ID } from '#channel/port.js'
 import { ChatDirectory } from '@router-agent/channel-feishu'
-import { resolveRuntimeIdentity, detailText, type IdentityCache, type IdentityStatusView, type RuntimeIdentity } from '@router-agent/channel-feishu'
+import { IdentityResolver, resolveRuntimeIdentity, detailText, type IdentityCache, type IdentityStatusView, type RuntimeIdentity } from '@router-agent/channel-feishu'
 import { createLarkRunner, larkEnv } from '@router-agent/channel-feishu'
 import { parseMessageThreadIds, type MessageAdmission, type UnaddressedAdmission } from '@router-agent/channel-feishu'
 import { createVisionTranscriber, type ImageTranscriber } from '#infra/vision.js'
@@ -1311,9 +1312,20 @@ function printPanelUrls(urls: string[], output: CliIo): void {
 /** 服务就绪探测与浏览器打开：给服务 10 秒，避免刚启动时开出 404 白页。 */
 const PANEL_READY_TIMEOUT_MS = 10_000
 
-async function panelReady(url: string): Promise<boolean> {
+/**
+ * 探测面板是否已就绪。
+ *
+ * 地址栏里带的是 `?token=…`，而 `new URL('api/status', url)` 拼出来的新 URL
+ * 不保留查询参数——面板开放访问时服务端要求 x-ra-token，
+ * 探测请求漏带令牌必然被 401 拒掉，`ra start` 只会一直说「面板暂未就绪」。
+ */
+export async function panelReady(url: string): Promise<boolean> {
   try {
-    const res = await fetch(new URL('api/status', url), { signal: AbortSignal.timeout(1_000) })
+    const token = new URL(url).searchParams.get('token') ?? ''
+    const res = await fetch(new URL('api/status', url), {
+      headers: token ? { 'x-ra-token': token } : {},
+      signal: AbortSignal.timeout(1_000),
+    })
     return res.ok
   } catch {
     return false
@@ -1679,6 +1691,24 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   const feishuChannel = channels.get('feishu') as ReturnType<typeof createFeishuChannel> | undefined
   if (!feishuChannel) logger.warn('channel:feishu-missing', { detail: '飞书通道未加载；检查 channels.feishu 插件入口' })
   const outbox = new ChannelRouter(channels, logger)
+  // 事件工单开工前私聊用户并建话题：接收人来自事件来源的 owner（邮箱 / ou_）。
+  const kickoffOwnerResolver = new IdentityResolver({
+    lark: larkRunner,
+    appId: config.feishu.appId,
+    cache: identityCacheOf(store),
+    logger,
+  })
+  const eventKickoff = new EventKickoff({
+    store,
+    config: () => config,
+    channels,
+    logger,
+    resolveOwner: async entry => {
+      const resolved = await kickoffOwnerResolver.resolveEntries([entry])
+      const found = resolved.entries.find(item => item.openId)
+      return found ? { openId: found.openId, ...(found.name ? { name: found.name } : {}) } : null
+    },
+  })
 
   const clearReaction = async (messageId: string): Promise<void> => {
     const saved = store.getReaction(messageId)
@@ -1757,6 +1787,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       effects,
       sender: outbox,
       channels,
+      kickoff: eventKickoff,
       decisionEngine,
       ...(intakeEngine ? { intakeEngine } : {}),
       ...(decisionAgent ? { decisionAgent } : {}),
