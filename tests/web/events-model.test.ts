@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { approvePayload, needsProjectForApprove, projectOptions } from '../../src/web/client/events-model.js'
 
-describe('事件面板操作', () => {
+describe('收件箱操作', () => {
   it('没有判定出项目的待审核事件，批准前要先选项目', () => {
     expect(needsProjectForApprove({ status: 'review' })).toBe(true)
     expect(needsProjectForApprove({ status: 'review', project: 'router-agent' })).toBe(false)

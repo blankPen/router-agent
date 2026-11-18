@@ -192,6 +192,12 @@ describe('配置路径收集', () => {
     expect(blockPaths(block)).toEqual(['feishu.chats'])
   })
 
+  it('决策规则整段被追踪：改规则后能进保存补丁', () => {
+    const events = CONFIG_GROUPS.find(group => group.id === 'events')!
+    const paths = events.blocks.flatMap(blockPaths)
+    expect(paths).toContain('events.rules')
+  })
+
   it('注入探测结果后运行时下拉用真实选项', () => {
     const groups = groupsFor([{ id: 'orca', label: 'Orca', hint: '', status: 'ready' }])
     const runtime = groups.find(group => group.id === 'runtime')!.blocks

@@ -1613,7 +1613,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
         `事件待审核：${event.title}`,
         `优先级：${event.priority}`,
         event.reason ? `判定理由：${event.reason}` : '',
-        '到面板「事件」页批准 / 驳回 / 延后。',
+        '到面板「收件箱」页批准 / 驳回 / 延后。',
       ].filter(Boolean).join('\n')
       store.enqueueOutbox({
         id: `ob_event_review_${event.id}`,

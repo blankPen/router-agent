@@ -368,6 +368,8 @@ export const CONFIG_GROUPS: ConfigGroup[] = [
         description: '按事件类型各自配置判定问题、执行流程与护栏。规则存在本身就是该类事件的判定开关。',
         render: 'events-rules',
         fields: [],
+        // 规则整段由弹窗编辑，字段列表是空的；不声明这条路径，保存时就不会把规则写进补丁。
+        paths: ['events.rules'],
         effectLabel: '保存后立即生效',
       },
       {

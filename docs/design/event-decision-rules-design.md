@@ -134,7 +134,7 @@ const questions: Record<string, JevQuestion> = {
 |---|---|---|
 | 配置 → 事件总线 → 决策策略 | 一个 `provider` 下拉 + 一段 `prompt` textarea + 阈值 + 兜底 | `src/web/client/fields.ts:366-401` |
 | 配置 → 事件总线 → 事件来源 | 来源卡片 + GitHub 仓库订阅弹窗 | `src/web/client/events-config.tsx` |
-| 事件面板 | 只做查看与审核，**不显示也不改判定配置** | `src/web/client/events-panel.tsx` |
+| 收件箱（事件面板） | 只做查看与审核，**不显示也不改判定配置** | `src/web/client/events-panel.tsx` |
 | API | `GET /api/events` 返回 `decision: { provider, prompt, confidenceThreshold, fallback, version }` | `src/router/api.ts:100,330` |
 
 **面板上目前完全没有「按事件类型配规则」的入口** —— 用户的需求 1 明确要求新增。
@@ -757,9 +757,9 @@ events:
 
 **「解析」按钮的失败处理**：提炼失败时**保留用户原文**，不阻断保存 —— 用户可以纯手工填解析结果。提炼只是辅助，不是必经之路。
 
-### 5.3 事件面板：新增「未判定」筛选与提示
+### 5.3 收件箱（事件面板）：新增「未判定」筛选与提示
 
-现状事件面板有 4 个状态筛选（`src/web/client/events-panel.tsx:44`）：待审核 / 待处理 / 已完成 / 无效。
+现状收件箱（事件面板）有 4 个状态筛选（`src/web/client/events-panel.tsx:44`）：待审核 / 待处理 / 已完成 / 无效。
 
 **改造后加一项：**
 
@@ -961,7 +961,7 @@ P0 单独就有价值：**不配任何规则，事件也能正确地「只收集
 |---|---|---|
 | 12 | 配置页「决策规则」区块 + 列表 + 编辑弹窗 | `src/web/client/event-rules.tsx`（新增）、`fields.ts`、`app.tsx` |
 | 13 | 自然语言 → 规则草稿的提炼接口与 UI | `src/events/rule-compile.ts`（新增）、`src/router/api.ts` |
-| 14 | 事件面板「未判定」筛选与原因展示 | `src/web/client/events-panel.tsx` |
+| 14 | 收件箱「未判定」筛选与原因展示 | `src/web/client/events-panel.tsx` |
 | 15 | 规则命中分布可观测 | `src/router/api.ts`、`src/web/client/events-panel.tsx` |
 
 ### 8.4 测试要求（按 `AGENTS.md` 的 TDD 要求）
@@ -1051,6 +1051,6 @@ P0 单独就有价值：**不配任何规则，事件也能正确地「只收集
 | 候选 skill 闭集 | `src/events/skills.ts:17` |
 | 面板决策策略字段 | `src/web/client/fields.ts:366` |
 | 面板事件来源区 | `src/web/client/events-config.tsx` |
-| 面板事件页 | `src/web/client/events-panel.tsx` |
+| 面板收件箱页（事件队列） | `src/web/client/events-panel.tsx` |
 | API 事件端点 | `src/router/api.ts:316` |
 | 配置变更回调（版本号） | `src/cli/index.ts:1746` |
