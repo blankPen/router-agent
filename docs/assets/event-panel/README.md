@@ -76,3 +76,6 @@
 | `event-rules/config-rules-after.png` | 改造后：新增「决策规则」分组，规则按 `eventType` 精确匹配 |
 | `event-rules/events-before.png` | 改造前：事件页没有「未判定」这一档 |
 | `event-rules/events-after.png` | 改造后：未判定事件只收集，不调模型、不派工 |
+
+「添加决策规则」弹窗的样式重做截图见
+[event-rules/README.md](event-rules/README.md) 第六节。

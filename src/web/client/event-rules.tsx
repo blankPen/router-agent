@@ -38,17 +38,20 @@ export function EventRulesConfig({ draft, setField, onNotice }: {
   const firstType = eventTypes[0]?.options[0]?.value ?? 'github.issues.opened'
   const [editing, setEditing] = useState<EventRule | null>(null)
   const [isNew, setIsNew] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
 
   const openAdd = () => {
     const id = nextRuleId(firstType)
     const rule = blankRule(id, firstType)
     setEditing(rule)
     setIsNew(true)
+    setSaveError(null)
   }
 
   const openEdit = (rule: EventRule) => {
     setEditing(structuredClone(rule))
     setIsNew(false)
+    setSaveError(null)
   }
 
   const save = () => {
@@ -59,9 +62,11 @@ export function EventRulesConfig({ draft, setField, onNotice }: {
       workflowPrompt: editing.workflowPrompt.trim() || editing.intent.trim(),
     })
     if (checked.error) {
+      setSaveError(checked.error)
       onNotice?.({ kind: 'error', text: checked.error })
       return
     }
+    setSaveError(null)
     setField('events.rules', upsertRule(rules, checked.value))
     onNotice?.({ kind: 'ok', text: `规则「${checked.value.id}」已写入草稿，点保存配置后生效。` })
     setEditing(null)
@@ -117,6 +122,8 @@ export function EventRulesConfig({ draft, setField, onNotice }: {
         <RuleEditor
           rule={editing}
           groups={eventTypes}
+          title={isNew ? '添加决策规则' : '编辑决策规则'}
+          error={saveError}
           onChange={setEditing}
           onClose={() => setEditing(null)}
           onSave={save}
@@ -127,9 +134,12 @@ export function EventRulesConfig({ draft, setField, onNotice }: {
   )
 }
 
-function RuleEditor({ rule, groups, onChange, onClose, onSave, onNotice }: {
+/** 规则编辑弹窗；导出以便测试断言「保存失败时错误就在弹窗里」。 */
+export function RuleEditor({ rule, groups, title, error, onChange, onClose, onSave, onNotice }: {
   rule: EventRule
   groups: ReturnType<typeof eventTypeOptions>
+  title: string
+  error: string | null
   onChange: (rule: EventRule) => void
   onClose: () => void
   onSave: () => void
@@ -177,161 +187,221 @@ function RuleEditor({ rule, groups, onChange, onClose, onSave, onNotice }: {
   return (
     <div className="modal-layer">
       <button className="modal-backdrop" aria-label="关闭" onClick={onClose} />
-      <div className="modal modal-wide" role="dialog" aria-modal="true" aria-label="决策规则">
-        <header className="modal-head">
+      <div className="modal modal-wide rule-modal" role="dialog" aria-modal="true" aria-label={title}>
+        <header className="modal-head rule-modal-head">
           <div>
-            <h2>决策规则</h2>
-            <p>{rule.eventType} · v{rule.version}</p>
+            <h2>{title}</h2>
+            <p className="rule-modal-sub">
+              <span className="mono">{rule.eventType}</span>
+              <span className="rule-modal-dot">·</span>
+              <span>v{rule.version}</span>
+            </p>
           </div>
-          <button className="icon-btn" aria-label="关闭" onClick={onClose}><Icon name="close" /></button>
+          <button className="icon-btn" title="关闭" aria-label="关闭" onClick={onClose}>
+            <Icon name="close" size={14} />
+          </button>
         </header>
-        <div className="modal-body">
-          <label className="modal-field">
-            <span>事件类型</span>
-            <select
-              value={rule.eventType}
-              onChange={event => onChange({ ...rule, eventType: event.target.value })}
-            >
-              {groups.map(group => (
-                <optgroup key={group.group} label={group.group}>
-                  {group.options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
-                </optgroup>
-              ))}
-            </select>
-          </label>
-
-          <label className="modal-field">
-            <span>你的意图</span>
-            <textarea
-              rows={4}
-              value={rule.intent}
-              placeholder="例如：所有 GitHub Action 失败都处理并自动执行；先分析报错原因，再修复并提交 PR"
-              onChange={event => onChange({ ...rule, intent: event.target.value })}
-            />
-            <p className="modal-hint">规则保存的是判定方法；这段原文只用于生成草稿和回看。</p>
-          </label>
-          <div className="source-card-actions">
-            <button className="btn tiny" onClick={() => void compile()} disabled={compiling}>
-              <Icon name="zap" size={12} />{compiling ? '解析中…' : '解析成判定规则'}
-            </button>
-          </div>
-
-          <label className="modal-field">
-            <span>有效性判定（is_valid / noul）</span>
-            <textarea
-              rows={3}
-              value={rule.questions.is_valid.instructions}
-              onChange={event => setQuestion('is_valid', { instructions: event.target.value })}
-            />
-          </label>
-          <label className="modal-field">
-            <span>自动执行判定（autorun / choice）</span>
-            <textarea
-              rows={2}
-              value={rule.questions.autorun.instructions}
-              onChange={event => setQuestion('autorun', { instructions: event.target.value })}
-            />
-          </label>
-          <div className="settings-rows">
+        <div className="modal-body rule-modal-body">
+          <section className="rule-section">
+            <header className="rule-section-head">
+              <h3><span className="rule-step">1</span>规则范围</h3>
+              <p>这条规则只对选中的事件类型生效；同一个事件类型只允许一条规则。</p>
+            </header>
             <label className="modal-field">
-              <span>auto 选项说明</span>
+              <span>事件类型</span>
+              <span className="select-wrap">
+                <select
+                  value={rule.eventType}
+                  onChange={event => onChange({ ...rule, eventType: event.target.value })}
+                >
+                  {groups.map(group => (
+                    <optgroup key={group.group} label={group.group}>
+                      {group.options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+                    </optgroup>
+                  ))}
+                </select>
+                <Icon name="chevron" size={12} className="select-chevron" />
+              </span>
+            </label>
+          </section>
+
+          <section className="rule-section">
+            <header className="rule-section-head">
+              <h3><span className="rule-step">2</span>你的意图</h3>
+              <p>规则保存的是判定方法；这段原文只用来生成草稿和回看。</p>
+            </header>
+            <label className="modal-field">
+              <span className="rule-field-label">用一句话说清这类事件要怎么处理</span>
               <textarea
+                className="rule-textarea"
+                rows={3}
+                value={rule.intent}
+                placeholder="例如：所有 GitHub Action 失败都处理并自动执行；先分析报错原因，再修复并提交 PR"
+                onChange={event => onChange({ ...rule, intent: event.target.value })}
+              />
+            </label>
+            <div className="rule-section-actions">
+              <button className="btn" onClick={() => void compile()} disabled={compiling}>
+                <Icon name="zap" size={13} />{compiling ? '解析中…' : '解析成判定规则'}
+              </button>
+              <span className="rule-hint">解析会按上面的原文补全下面的四问与执行流程，结果仍可手改。</span>
+            </div>
+          </section>
+
+          <section className="rule-section">
+            <header className="rule-section-head">
+              <h3><span className="rule-step">3</span>四个判定问题</h3>
+              <p>问题本身固定，写的是判定标准。回答越具体，判定越准。</p>
+            </header>
+            <label className="modal-field">
+              <span className="rule-field-label">有效性判定<span className="rule-field-key">is_valid / noul</span></span>
+              <textarea
+                className="rule-textarea"
+                rows={3}
+                value={rule.questions.is_valid.instructions}
+                onChange={event => setQuestion('is_valid', { instructions: event.target.value })}
+              />
+              <p className="modal-hint">低于阈值的判为无效，只留记录，不派工。</p>
+            </label>
+            <label className="modal-field">
+              <span className="rule-field-label">自动执行判定<span className="rule-field-key">autorun / choice</span></span>
+              <textarea
+                className="rule-textarea"
                 rows={2}
-                value={String(autoCriteria.auto ?? '')}
-                onChange={event => setQuestion('autorun', {
-                  criteria: { ...autoCriteria, auto: event.target.value, review: String(autoCriteria.review ?? '') },
+                value={rule.questions.autorun.instructions}
+                onChange={event => setQuestion('autorun', { instructions: event.target.value })}
+              />
+            </label>
+            <div className="rule-criteria-grid">
+              <label className="modal-field">
+                <span className="rule-field-label">auto 选项说明<span className="rule-field-key">可自动执行</span></span>
+                <textarea
+                  className="rule-textarea"
+                  rows={2}
+                  value={String(autoCriteria.auto ?? '')}
+                  onChange={event => setQuestion('autorun', {
+                    criteria: { ...autoCriteria, auto: event.target.value, review: String(autoCriteria.review ?? '') },
+                  })}
+                />
+              </label>
+              <label className="modal-field">
+                <span className="rule-field-label">review 选项说明<span className="rule-field-key">需人工确认</span></span>
+                <textarea
+                  className="rule-textarea"
+                  rows={2}
+                  value={String(autoCriteria.review ?? '')}
+                  onChange={event => setQuestion('autorun', {
+                    criteria: { auto: String(autoCriteria.auto ?? ''), review: event.target.value },
+                  })}
+                />
+              </label>
+            </div>
+            <label className="modal-field">
+              <span className="rule-field-label">优先级判定<span className="rule-field-key">priority / score</span></span>
+              <span className="rule-sublabel">判定说明<span className="rule-field-key">这一问怎么打分</span></span>
+              <textarea
+                className="rule-textarea"
+                rows={2}
+                value={rule.questions.priority.instructions}
+                onChange={event => setQuestion('priority', { instructions: event.target.value })}
+              />
+              <span className="rule-sublabel">档位<span className="rule-field-key">一行一个，从低到高</span></span>
+              <textarea
+                className="rule-textarea rule-textarea-criteria"
+                rows={4}
+                value={priorityCriteria}
+                onChange={event => setQuestion('priority', {
+                  criteria: event.target.value.split('\n').map(item => item.trim()).filter(Boolean),
                 })}
               />
             </label>
             <label className="modal-field">
-              <span>review 选项说明</span>
+              <span className="rule-field-label">项目归属判定<span className="rule-field-key">project / choice</span></span>
               <textarea
+                className="rule-textarea"
                 rows={2}
-                value={String(autoCriteria.review ?? '')}
-                onChange={event => setQuestion('autorun', {
-                  criteria: { auto: String(autoCriteria.auto ?? ''), review: event.target.value },
+                value={rule.questions.project.instructions}
+                onChange={event => setQuestion('project', { instructions: event.target.value })}
+              />
+              <p className="modal-hint">候选项目在判定时按当前项目清单注入，规则里不固化仓库。</p>
+            </label>
+          </section>
+
+          <section className="rule-section">
+            <header className="rule-section-head">
+              <h3><span className="rule-step">4</span>执行流程</h3>
+              <p>这段话会拼给 Worker，作为它动手时的授权范围。</p>
+            </header>
+            <label className="modal-field">
+              <span className="rule-field-label">拼给 Worker 的流程</span>
+              <textarea
+                className="rule-textarea"
+                rows={4}
+                value={rule.workflowPrompt}
+                placeholder="根据事件上下文分析原因、执行修复并提交 PR"
+                onChange={event => onChange({ ...rule, workflowPrompt: event.target.value })}
+              />
+              <p className="modal-hint">这里只能描述做事流程；宿主的安全护栏始终保留，不能被覆盖。</p>
+            </label>
+          </section>
+
+          <section className="rule-section">
+            <header className="rule-section-head">
+              <h3><span className="rule-step">5</span>阈值与护栏</h3>
+              <p>阈值决定判定多严；风险标签命中即强制人审并提到 P0。</p>
+            </header>
+            <div className="rule-threshold-grid">
+              <label className="modal-field">
+                <span className="rule-field-label">有效性阈值<span className="rule-field-key">isValid</span></span>
+                <input
+                  type="number" min={0} max={1} step={0.05}
+                  value={rule.thresholds.isValid}
+                  onChange={event => onChange({ ...rule, thresholds: { ...rule.thresholds, isValid: Number(event.target.value) } })}
+                />
+                <p className="modal-hint">有效性得分低于它就不派工。</p>
+              </label>
+              <label className="modal-field">
+                <span className="rule-field-label">项目归属阈值<span className="rule-field-key">projectPick</span></span>
+                <input
+                  type="number" min={0} max={1} step={0.05}
+                  value={rule.thresholds.projectPick}
+                  onChange={event => onChange({ ...rule, thresholds: { ...rule.thresholds, projectPick: Number(event.target.value) } })}
+                />
+                <p className="modal-hint">判不出归属项目时的兜底置信度。</p>
+              </label>
+              <label className="modal-field">
+                <span className="rule-field-label">自动执行阈值<span className="rule-field-key">autoRun</span></span>
+                <input
+                  type="number" min={0} max={1} step={0.05}
+                  value={rule.thresholds.autoRun}
+                  onChange={event => onChange({ ...rule, thresholds: { ...rule.thresholds, autoRun: Number(event.target.value) } })}
+                />
+                <p className="modal-hint">自动执行判定的把握下限。</p>
+              </label>
+            </div>
+            <label className="modal-field">
+              <span className="rule-field-label">强制人审的风险标签<span className="rule-field-key">逗号分隔</span></span>
+              <input
+                value={rule.guardrails.riskLabels.join(', ')}
+                onChange={event => onChange({
+                  ...rule,
+                  guardrails: {
+                    ...rule.guardrails,
+                    riskLabels: event.target.value.split(',').map(item => item.trim().toLowerCase()).filter(Boolean),
+                  },
                 })}
               />
+              <p className="modal-hint">事件带上这些标签时一律转人工，不自动执行。</p>
             </label>
-          </div>
-          <label className="modal-field">
-            <span>优先级判定（priority / score）</span>
-            <textarea
-              rows={2}
-              value={rule.questions.priority.instructions}
-              onChange={event => setQuestion('priority', { instructions: event.target.value })}
-            />
-            <textarea
-              rows={4}
-              value={priorityCriteria}
-              onChange={event => setQuestion('priority', {
-                criteria: event.target.value.split('\n').map(item => item.trim()).filter(Boolean),
-              })}
-            />
-            <p className="modal-hint">一行一个档位，从低到高。</p>
-          </label>
-          <label className="modal-field">
-            <span>项目归属判定（project / choice）</span>
-            <textarea
-              rows={2}
-              value={rule.questions.project.instructions}
-              onChange={event => setQuestion('project', { instructions: event.target.value })}
-            />
-            <p className="modal-hint">候选项目在判定时按当前项目清单注入，规则里不固化仓库。</p>
-          </label>
-
-          <label className="modal-field">
-            <span>执行流程（拼给 Worker）</span>
-            <textarea
-              rows={4}
-              value={rule.workflowPrompt}
-              placeholder="根据事件上下文分析原因、执行修复并提交 PR"
-              onChange={event => onChange({ ...rule, workflowPrompt: event.target.value })}
-            />
-            <p className="modal-hint">这里只能描述做事流程；宿主的安全护栏始终保留，不能被覆盖。</p>
-          </label>
-
-          <div className="settings-rows">
-            <label className="modal-field">
-              <span>is_valid 阈值</span>
-              <input
-                type="number" min={0} max={1} step={0.05}
-                value={rule.thresholds.isValid}
-                onChange={event => onChange({ ...rule, thresholds: { ...rule.thresholds, isValid: Number(event.target.value) } })}
-              />
-            </label>
-            <label className="modal-field">
-              <span>autoRun 阈值</span>
-              <input
-                type="number" min={0} max={1} step={0.05}
-                value={rule.thresholds.autoRun}
-                onChange={event => onChange({ ...rule, thresholds: { ...rule.thresholds, autoRun: Number(event.target.value) } })}
-              />
-            </label>
-            <label className="modal-field">
-              <span>projectPick 阈值</span>
-              <input
-                type="number" min={0} max={1} step={0.05}
-                value={rule.thresholds.projectPick}
-                onChange={event => onChange({ ...rule, thresholds: { ...rule.thresholds, projectPick: Number(event.target.value) } })}
-              />
-            </label>
-          </div>
-          <label className="modal-field">
-            <span>强制人审的风险标签</span>
-            <input
-              value={rule.guardrails.riskLabels.join(', ')}
-              onChange={event => onChange({
-                ...rule,
-                guardrails: {
-                  ...rule.guardrails,
-                  riskLabels: event.target.value.split(',').map(item => item.trim().toLowerCase()).filter(Boolean),
-                },
-              })}
-            />
-          </label>
+          </section>
         </div>
-        <footer className="modal-foot">
+        <footer className="modal-foot rule-modal-foot">
+          {error && (
+            <p className="rule-modal-error" role="alert">
+              <Icon name="alert" size={13} />
+              <span>{error}</span>
+            </p>
+          )}
           <button className="btn ghost" onClick={onClose}>取消</button>
           <button className="btn primary" onClick={onSave}>保存规则</button>
         </footer>
