@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Store } from '../../src/store/db.js'
 import { Engine } from '../../src/core/engine.js'
-import { defaultConfig, policyOf, type AppConfig } from '../../src/config.js'
+import { chatEntry, defaultConfig, policyOf, type AppConfig } from '../../src/config.js'
 import { EventDecisionService, ruleDecisionPort, type EventDecisionPort } from '../../src/events/decision.js'
 import { EventPipeline, MAX_EVENT_ATTEMPTS, windowOf } from '../../src/events/pipeline.js'
 import { EVENT_SKILLS } from '../../src/events/skills.js'
@@ -87,6 +87,44 @@ describe('事件管线', () => {
     expect(ticket?.repo).toBe('/Users/me/router-agent')
     expect(ticket?.branch).toBe('main')
     expect(ticket?.request).toContain('崩溃')
+  })
+
+  it('事件工单使用审核群作为通知目标，不把事件 threadId 当飞书消息 ID', async () => {
+    const { store, pipeline, config } = setup()
+    config.events.policy.reviewChatId = 'oc_review'
+
+    const event = pipeline.ingest('github', SOURCE, { externalId: 'issue:a#2', title: '测试失败', body: 'CI 挂了', eventType: 'github.issues.opened' })
+    await pipeline.process(event)
+
+    const stored = store.getEvent(event.id)!
+    const ticket = store.getTicket(stored.ticketId!)!
+    expect(ticket.chatId).toBe('oc_review')
+    expect(ticket.threadId).toBe('event:github:issue:a#2')
+  })
+
+  it('审核群留空时事件通知落到默认管理员群', async () => {
+    const { store, pipeline, config } = setup()
+    config.feishu.chats = [chatEntry('oc_admin', { scope: 'admins' })]
+
+    const event = pipeline.ingest('github', SOURCE, { externalId: 'issue:a#3', title: '测试失败', body: 'CI 挂了', eventType: 'github.issues.opened' })
+    await pipeline.process(event)
+
+    const stored = store.getEvent(event.id)!
+    expect(store.getTicket(stored.ticketId!)?.chatId).toBe('oc_admin')
+  })
+
+  it('没有审核群 / 管理员群时按仓库匹配通知群', async () => {
+    const { store, pipeline, config } = setup()
+    config.feishu.chats = [
+      chatEntry('oc_trove', { repo: 'trove' }),
+      chatEntry('oc_router', { repo: 'router-agent' }),
+    ]
+
+    const event = pipeline.ingest('github', SOURCE, { externalId: 'issue:a#4', title: '测试失败', body: 'CI 挂了', eventType: 'github.issues.opened' })
+    await pipeline.process(event)
+
+    const stored = store.getEvent(event.id)!
+    expect(store.getTicket(stored.ticketId!)?.chatId).toBe('oc_router')
   })
 
   it('判定不清时进待审核队列，不开单', async () => {

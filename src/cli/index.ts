@@ -46,6 +46,7 @@ import { createDecisionAgent, createDecisionEngine, createIntakeEngine } from '.
 import type { DecisionAudit } from '../router/decision-engine.js'
 import type { WorkerStateFile } from '#runtime/report-poller.js'
 import { RouterService, type Logger } from '../service.js'
+import { logLevelOf } from '../router/log-levels.js'
 import { EffectsProcessor } from '../core/effects.js'
 import { createApiServer, emptyIdentityStatus, type IdentityPort } from '../router/api.js'
 import { PluginPackageAdmin } from '../router/plugin-admin.js'
@@ -1291,7 +1292,10 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     .catch(error => logger.warn('runtime:detect-failed', { message: error instanceof Error ? error.message : String(error) }))
   const sink = (event: { event: string; [key: string]: unknown }): void => {
     const { event: name, ...extra } = event
-    logger.info(name, extra)
+    const level = logLevelOf(name)
+    if (level === 'warn') logger.warn(name, extra)
+    else if (level === 'error') logger.error(name, extra)
+    else logger.info(name, extra)
   }
   logger.info('serve:starting', {
     home,
@@ -1833,7 +1837,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     output.stdout(`Web 配置服务运行中：${panelUrlList(home, config)[0]}（LLM 未配置，Router 未启动）`)
   }
 
-  const stopRuntime = (): void => {
+  const stopRuntime = async (): Promise<void> => {
     channels.stopAll()
     eventWiring.manager.stop()
     if (chatTimer) clearInterval(chatTimer)
@@ -1843,7 +1847,8 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       clearTimeout(updateRestartTimer)
       updateRestartTimer = null
     }
-    service?.stop()
+    // 必须等在途周期收尾再关库：在途周期还在读写 store，先关库会报 "database is not open"。
+    await service?.stop()
     store.close()
   }
 
@@ -1855,7 +1860,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
 
   requestRestart = async (): Promise<void> => {
     logger.info('serve:restarting', { pid: process.pid })
-    stopRuntime()
+    await stopRuntime()
     // 先让出端口，再拉起新进程，否则会撞 EADDRINUSE。
     await api.close()
     releaseHost()
@@ -1880,15 +1885,16 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     }
   }
 
-  const shutdown = (): void => {
+  const shutdown = async (): Promise<void> => {
     logger.info('serve:stopping', {})
-    stopRuntime()
-    void api.close()
+    // 退出前等在途周期收尾并关库，否则在途周期会撞上已关闭的 DB。
+    await stopRuntime()
+    await api.close()
     releaseHost()
     process.exit(0)
   }
-  process.on('SIGTERM', shutdown)
-  process.on('SIGINT', shutdown)
+  process.on('SIGTERM', () => { void shutdown() })
+  process.on('SIGINT', () => { void shutdown() })
   return new Promise<number>(() => {
     // 常驻直到收到信号
   })

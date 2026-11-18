@@ -426,6 +426,48 @@ describe('运行时机制', () => {
     expect(runtime.delivered.length).toBe(before)
   })
 
+  it('nudge 后终端又有新输出时重新计时，不按旧 nudge 时间误标 stale', async () => {
+    const { ticketId, handle, assignmentId } = await launchOne()
+    service.onWorkerState({
+      ticketId, assignmentId, turn: 1, state: 'progress', summary: '做到一半', prNumber: 0, prUrl: '',
+      ackedInputs: [], updatedAt: new Date(now).toISOString(),
+    })
+    runtime.handles.set(handle, { lastOutputAt: new Date(now - 10 * 60_000).toISOString() })
+
+    await service.checkIdle(now)
+    expect(runtime.delivered.filter(item => item.text === 'status?')).toHaveLength(1)
+
+    // 唤醒之后 worker 又输出过一次；旧实现不会刷新 nudgedAt，最后按旧时间直接标 stale。
+    runtime.handles.set(handle, { lastOutputAt: new Date(now + 60_000).toISOString() })
+    await service.checkIdle(now + 60_000)
+    await service.checkIdle(now + 301_000)
+
+    expect(store.getAttention(ticketId)?.question ?? '').not.toContain('无响应')
+    expect(logs.some(item => item.message === 'idle:stale')).toBe(false)
+    expect(runtime.delivered.filter(item => item.text === 'status?')).toHaveLength(2)
+  })
+
+  it('主动巡检读到会话有新内容时也重置 stale 计时', async () => {
+    const { ticketId, handle, assignmentId } = await launchOne()
+    service.onWorkerState({
+      ticketId, assignmentId, turn: 1, state: 'progress', summary: '做到一半', prNumber: 0, prUrl: '',
+      ackedInputs: [], updatedAt: new Date(now).toISOString(),
+    })
+    runtime.handles.set(handle, { lastOutputAt: new Date(now - 10 * 60_000).toISOString() })
+    await service.checkIdle(now)
+
+    runtime.sessionEvents = [{ at: new Date(now + 10 * 60_000).toISOString(), kind: 'text', text: '正在补测试' }]
+    runtime.sessionAt = new Date(now + 10 * 60_000).toISOString()
+    runtime.handles.set(handle, { lastOutputAt: new Date(now + 10 * 60_000).toISOString() })
+    await service.probeProgress(now + 11 * 60_000)
+    expect(store.listOutbox(200).some(item => item.text.includes('进展巡检'))).toBe(true)
+
+    await service.checkIdle(now + 17 * 60_000)
+    expect(store.getAttention(ticketId)?.question ?? '').not.toContain('无响应')
+    expect(logs.some(item => item.message === 'idle:stale')).toBe(false)
+    expect(runtime.delivered.filter(item => item.text === 'status?')).toHaveLength(2)
+  })
+
   it('worker 长时间不报进展时，Router 主动读终端并同步到话题', async () => {
     const { ticketId, handle } = await launchOne()
     runtime.screen = ['⏺ 正在修改登录超时配置', '⎿ pnpm test 进行中', '✻ Cascading… (30s)']

@@ -44,7 +44,7 @@
     "build:web": "node scripts/build-web.mjs",
     "build": "tsc -p tsconfig.build.json && node scripts/build-web.mjs && node scripts/flatten-dist.mjs && node scripts/build-packages.mjs",
     "check": "pnpm typecheck && pnpm test",
-    "start": "node dist/cli/main.js start"
+    "start": "node dist/cli/main.js stop && node dist/cli/main.js start"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

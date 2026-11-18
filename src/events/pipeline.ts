@@ -8,6 +8,7 @@
  * 事件本身不绑定项目：归属项目与执行方式由决策模型一次判定产出。
  */
 import type { AppConfig, EventSourceConfig, ProjectConfig } from '../config.js'
+import { eventNotifyChat } from '../config.js'
 import type { Engine } from '../core/engine.js'
 import type { Store } from '../store/db.js'
 import type { EventPriority, EventRecord, EventVerdict } from '#core/event.js'
@@ -492,7 +493,7 @@ export class EventPipeline {
       source: `event:${event.sourceId}`,
       externalId: event.externalId,
       threadId: `event:${event.sourceId}:${event.externalId}`,
-      chatId: '',
+      chatId: eventNotifyChat(this.config(), verdict.repo),
       chatName: event.sourceId,
       actorId: `event:${event.sourceId}`,
       actorName: `事件来源 ${event.sourceId}`,

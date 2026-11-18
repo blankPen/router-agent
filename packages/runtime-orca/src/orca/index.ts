@@ -118,6 +118,12 @@ export function formatCommandFailure(detail: OrcaCommandFailure): string {
  */
 const AGENT_PROMPT_BLOCKED_CODE = 'agent_prompt_blocked'
 
+/**
+ * `terminal list` 偶发漏掉刚创建的终端时，连续缺失多少次才判 lost。
+ * 一次缺失就判 lost 会把仍在运行的 worker 误杀（tk-79：11-16 一批工单同时 lost）。
+ */
+const TERMINAL_MISSING_CHECKS = 3
+
 /** 判断失败是否来自「Agent 停在交互式提示上」。 */
 export function isAgentPromptBlocked(error: unknown): boolean {
   return error instanceof OrcaCommandError && error.detail.orcaCode === AGENT_PROMPT_BLOCKED_CODE
@@ -242,6 +248,8 @@ export class OrcaRuntime implements WorkerRuntime {
   private env: NodeJS.ProcessEnv
   /** 停在交互式提示上的终端：handle -> 原因；发成功一次就清掉。 */
   private blocked = new Map<string, string>()
+  /** terminal list 连续查不到终端的次数：handle -> count，命中一次就清零。 */
+  private missingChecks = new Map<string, number>()
 
   constructor(opts: OrcaRuntimeOptions) {
     this.runner = opts.runner
@@ -347,6 +355,7 @@ export class OrcaRuntime implements WorkerRuntime {
 
   async stop(ref: WorkerRef | string, reason: string): Promise<void> {
     void reason
+    this.missingChecks.delete(this.handleOf(ref))
     await this.run(terminalClose(this.handleOf(ref)))
   }
 
@@ -370,7 +379,16 @@ export class OrcaRuntime implements WorkerRuntime {
     } catch {
       return null
     }
-    if (!info) return { alive: false, phase: 'lost', acceptingInput: false, detail: { source: 'orca' } }
+    if (!info) {
+      const misses = (this.missingChecks.get(handle) ?? 0) + 1
+      this.missingChecks.set(handle, misses)
+      // 查询失败按 unknown 处理；只有连续多次确认查不到才判 lost。
+      if (misses < TERMINAL_MISSING_CHECKS) {
+        return { alive: false, phase: 'unknown', acceptingInput: false, detail: { source: 'orca', missingChecks: misses } }
+      }
+      return { alive: false, phase: 'lost', acceptingInput: false, detail: { source: 'orca', missingChecks: misses } }
+    }
+    this.missingChecks.delete(handle)
     if (!info.connected) {
       return { alive: false, phase: 'lost', acceptingInput: false, detail: { source: 'orca', connected: false, orphaned: info.orphaned } }
     }
