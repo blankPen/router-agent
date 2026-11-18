@@ -37,9 +37,15 @@ class FakeSender implements FeishuSenderLike {
   calls: { method: string; target: string; content: string; key: string }[] = []
   async reply(messageId: string, text: string, key: string) {
     this.calls.push({ method: 'reply', target: messageId, content: text, key })
+    return { messageId: 'om_reply', chatId: 'oc_dev' }
   }
   async send(chatId: string, text: string, key: string) {
     this.calls.push({ method: 'send', target: chatId, content: text, key })
+    return { messageId: 'om_sent', chatId }
+  }
+  async sendDirect(userId: string, text: string, key: string) {
+    this.calls.push({ method: 'sendDirect', target: userId, content: text, key })
+    return { messageId: 'om_dm', chatId: 'oc_p2p' }
   }
   async sendCard(chatId: string, markdown: string, key: string) {
     this.calls.push({ method: 'sendCard', target: chatId, content: markdown, key })
@@ -126,6 +132,34 @@ describe('飞书通道适配器', () => {
     const { channel: ch, sender } = channel()
     await ch.send({ channelId: 'feishu', targetId: 'oc_dev', text: '- A\n- B', format: 'markdown', idempotencyKey: 'k' })
     expect(sender.calls[0]?.method).toBe('sendCard')
+  })
+
+  it('format=plain 的多行通知按纯文本发送，并带回执', async () => {
+    const { channel: ch, sender } = channel()
+    const receipt = await ch.send({
+      channelId: 'feishu',
+      targetId: 'oc_dev',
+      threadRef: 'om_root',
+      text: '事件已开工\n任务内容：修复构建',
+      format: 'plain',
+      idempotencyKey: 'k',
+    })
+    expect(sender.calls[0]).toMatchObject({ method: 'reply', target: 'om_root' })
+    expect(receipt.messageId).toBe('om_reply')
+  })
+
+  it('direct=true 时按 user_id 私聊发送', async () => {
+    const { channel: ch, sender } = channel()
+    const receipt = await ch.send({
+      channelId: 'feishu',
+      targetId: 'ou_pz',
+      text: '事件已开工',
+      format: 'plain',
+      idempotencyKey: 'k',
+      direct: true,
+    })
+    expect(sender.calls[0]).toMatchObject({ method: 'sendDirect', target: 'ou_pz' })
+    expect(receipt).toEqual({ messageId: 'om_dm', chatId: 'oc_p2p', degradedTo: 'plain' })
   })
 
   it('回执走配置里的 emoji，关闭时不调用', async () => {

@@ -42,7 +42,12 @@ export interface ChannelCapabilities {
 /** 出站消息的中立形态；具体渲染由通道适配器负责。 */
 export interface OutboundMessage {
   channelId: string
+  /**
+   * 发送目标：默认是会话 ID；`direct=true` 时按通道内的用户 ID 解析（私聊）。
+   */
   targetId: string
+  /** targetId 是用户 ID（如飞书 open_id），而不是会话 ID。 */
+  direct?: boolean
   /** 希望回复到的话题根；为空时发到 targetId。 */
   threadRef?: string
   text: string
@@ -56,6 +61,10 @@ export interface OutboundMessage {
 
 export interface SendReceipt {
   messageId?: string
+  /** 消息实际落在哪个会话；私聊发送时用于把后续通知绑定到该会话。 */
+  chatId?: string
+  /** 消息所在话题 ID；通道能拿到时返回。 */
+  threadId?: string
   /** 实际发生的降级，便于日志与排障。 */
   degradedTo?: 'plain' | 'rich' | 'document'
 }
@@ -131,6 +140,12 @@ export interface ChannelAdapter {
   enrich?(trigger: Trigger): Promise<Trigger>
 
   send(message: OutboundMessage): Promise<SendReceipt>
+
+  /**
+   * 查询一条消息所在的话题与会话；用于把新话题绑定到工单。
+   * 通道不支持时返回 null，内核按消息根 ID 兜底。
+   */
+  resolveMessageThread?(messageId: string): Promise<{ threadId: string; rootId: string; chatId: string } | null>
 
   /** 启动卡片按钮回调消费；不支持时由内核走序号回复。 */
   startCardActions?(sink: (action: CardAction) => void, opts?: { onError?: (error: Error) => void }): Promise<void> | void

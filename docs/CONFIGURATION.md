@@ -341,6 +341,7 @@ events:
       enabled: true
       kind: github
       repo: blankPen/router-agent    # owner/repo；一个仓库一条订阅
+      owner: pz@example.com          # 事件开工时先私聊通知谁；邮箱或 ou_ 开头的 open_id
       events:                        # 监听哪些事件；不填表示全部
         - issues.opened
         - issues.commented
@@ -417,7 +418,9 @@ events:
 
 面板「配置 → 事件总线 → 事件来源」里点 GitHub 卡片的「设置」，在弹窗里填 `owner/repo` 就新增一条订阅；**可以加多个仓库，每个仓库单独选监听内容**。
 
-一条订阅只有仓库与监听内容两样东西，没有别的参数：归属项目、优先级、配额都由决策阶段判定，不在订阅里写。
+一条订阅除了仓库、监听内容，还可以在 `config.yaml` 的 `events.sources.<id>.owner` 填事件接收人（飞书邮箱或 `ou_` 开头的 open_id）。事件被判为自动执行后，Router 会在派工真正开始前先私聊这个人：「事件已开工 + 工单号 + 任务内容」，并以这条私聊消息为根建话题，把工单的进展、失败通知与后续输入都绑到该话题；用户可以直接在话题里追加需求或中止。
+
+`owner` 留空、解析不到人、关闭 `feishu.directMessages` 或私聊发送失败时，都会退化为现有群通知并记 `event:kickoff-fallback` / `event:kickoff-failed` 日志，不会中断派工。归属项目、优先级、配额仍由决策阶段判定，不在订阅里写。
 
 **可订阅的事件类型**（`类别.动作`）：
 

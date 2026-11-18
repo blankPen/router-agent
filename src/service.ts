@@ -109,6 +109,8 @@ export interface RouterServiceOptions {
   staleAfterMs?: number
   /** 注入触发源（服务层由通道适配器接入）。 */
   onTrigger?: (trigger: Trigger) => void
+  /** 事件工单开工前的私聊通知与会话绑定；不传时保持原有群通知路径。 */
+  kickoff?: { start(ticket: Ticket): Promise<unknown> }
   /** Claude Code 会话记录目录；默认 ~/.claude/projects，测试可注入。 */
   claudeProjectsDir?: string
 }
@@ -551,6 +553,7 @@ export class RouterService {
   private git: CommandRunner
   private sender: OutboundSender
   private readonly channels?: ChannelRegistry
+  private readonly kickoff?: { start(ticket: Ticket): Promise<unknown> }
   /** 卡片回调事件流没启动成功的通道；auto 模式下选择题退化为序号回复。 */
   private readonly cardActionsUnavailable = new Set<string>()
   /** tick 与卡片回调共用一条投递队列，避免同一 Input 被并发投递两次。 */
@@ -669,6 +672,7 @@ export class RouterService {
     })
     this.sender = opts.sender ?? { send: async () => {} }
     this.channels = opts.channels
+    this.kickoff = opts.kickoff
     this.effects = opts.effects ?? new EffectsProcessor({
       store: opts.store,
       sender: this.sender,
@@ -1209,6 +1213,20 @@ export class RouterService {
   }
 
   private async launch(ticket: Ticket): Promise<Assignment> {
+    // 事件工单在真正派工前先私聊用户并把工单绑到话题；失败只降级通知，不能挡住派工。
+    if (this.kickoff && ticket.source.startsWith('event:')) {
+      try {
+        await this.kickoff.start(ticket)
+        ticket = this.store.getTicket(ticket.id) ?? ticket
+      } catch (error) {
+        this.logger.warn('event:kickoff-failed', {
+          ticketId: ticket.id,
+          sourceId: ticket.source.slice('event:'.length),
+          stage: 'launch',
+          detail: errorMessage(error).slice(0, 300),
+        })
+      }
+    }
     // 旧工单沿用创建时的运行时；新工单用默认运行时。
     const latest = this.store.latestAssignment(ticket.id)
     const runtimeId = latest?.runtimeId && this.runtimes.has(latest.runtimeId)
