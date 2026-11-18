@@ -29,6 +29,14 @@ import { compareEventPriority, normalizeEventPriority, normalizeEventStatus } fr
 import type { Policy } from '#core/policy.js'
 import type { ReplyBlock } from '#core/reply.js'
 import { normalizeStage, stageAliases } from '#core/stage.js'
+import type {
+  Automation,
+  AutomationDraft,
+  AutomationRun,
+  AutomationRunOutputs,
+  AutomationRunStatus,
+  AutomationState,
+} from '#core/automation.js'
 
 /** sessionKey 迁移记录 ID；与手工执行的 SQL 文件保持一致。 */
 export const SESSION_KEY_MIGRATION_ID = '2026-11-session-key-channel'
@@ -480,6 +488,42 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_status ON events (status, received_at);
 CREATE INDEX IF NOT EXISTS idx_events_priority ON events (priority, received_at);
+
+-- 自动化执行记录：每次触发的耗时、状态、结果摘要与产出。
+CREATE TABLE IF NOT EXISTS automation_runs (
+  id            TEXT PRIMARY KEY,
+  automation_id TEXT NOT NULL,
+  scheduled_at  TEXT NOT NULL,
+  started_at    TEXT NOT NULL,
+  finished_at   TEXT,
+  duration_ms   INTEGER,
+  status        TEXT NOT NULL,
+  summary       TEXT NOT NULL DEFAULT '',
+  error         TEXT,
+  outputs       TEXT NOT NULL DEFAULT '{}',
+  manual        INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_automation_runs_task ON automation_runs (automation_id, started_at);
+
+-- 自动化调度状态：任务定义在配置文件里，运行状态（下次触发 / 上次结果）在这里。
+CREATE TABLE IF NOT EXISTS automation_states (
+  task_id      TEXT PRIMARY KEY,
+  next_run_at  TEXT,
+  last_run_at  TEXT,
+  last_status  TEXT
+);
+
+-- 对话式创建的待确认草稿：面板确认前不写进正式任务配置。
+CREATE TABLE IF NOT EXISTS automation_drafts (
+  id          TEXT PRIMARY KEY,
+  source      TEXT NOT NULL DEFAULT '',
+  requester   TEXT NOT NULL DEFAULT '',
+  text        TEXT NOT NULL,
+  draft       TEXT NOT NULL,
+  status      TEXT NOT NULL DEFAULT 'pending',
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_automation_drafts_status ON automation_drafts (status, created_at);
 
 -- 身份别名缓存：邮箱 / open_id 解析成 open_id 的结果。
 -- 键里必须带 app_id：open_id 是「应用 × 用户」维度的，换个应用同一个人的 open_id 就变了，
@@ -965,6 +1009,118 @@ export class Store {
       "SELECT * FROM events WHERE status = 'pending' AND decided_at IS NOT NULL AND ticket_id IS NULL ORDER BY received_at LIMIT ?",
     ).all(limit) as Row[])
     return rows.map(eventFromRow)
+  }
+
+  // ---------- 自动化 ----------
+
+  /** 写入自动化调度状态。 */
+  upsertAutomationState(state: AutomationState): void {
+    this.db.prepare(`INSERT INTO automation_states (task_id, next_run_at, last_run_at, last_status)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(task_id) DO UPDATE SET
+        next_run_at = excluded.next_run_at, last_run_at = excluded.last_run_at, last_status = excluded.last_status`)
+      .run(state.taskId, state.nextRunAt ?? null, state.lastRunAt ?? null, state.lastStatus ?? null)
+  }
+
+  getAutomationState(taskId: string): AutomationState | null {
+    const row = this.db.prepare('SELECT * FROM automation_states WHERE task_id = ?').get(taskId) as Row | undefined
+    if (!row) return null
+    return {
+      taskId: String(row.task_id),
+      ...(row.next_run_at ? { nextRunAt: String(row.next_run_at) } : {}),
+      ...(row.last_run_at ? { lastRunAt: String(row.last_run_at) } : {}),
+      ...(row.last_status ? { lastStatus: String(row.last_status) as AutomationRunStatus } : {}),
+    }
+  }
+
+  /** 列出全部自动化调度状态。 */
+  listAutomationStates(): AutomationState[] {
+    const rows = (this.db.prepare('SELECT * FROM automation_states').all() as Row[])
+    return rows.map(row => ({
+      taskId: String(row.task_id),
+      ...(row.next_run_at ? { nextRunAt: String(row.next_run_at) } : {}),
+      ...(row.last_run_at ? { lastRunAt: String(row.last_run_at) } : {}),
+      ...(row.last_status ? { lastStatus: String(row.last_status) as AutomationRunStatus } : {}),
+    }))
+  }
+
+  /** 写入一条执行记录。 */
+  insertAutomationRun(run: AutomationRun): void {
+    this.db.prepare(`INSERT INTO automation_runs
+      (id, automation_id, scheduled_at, started_at, finished_at, duration_ms, status, summary, error, outputs, manual)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(
+        run.id,
+        run.automationId,
+        run.scheduledAt,
+        run.startedAt,
+        run.finishedAt ?? null,
+        run.durationMs ?? null,
+        run.status,
+        run.summary,
+        run.error ?? null,
+        JSON.stringify(run.outputs),
+        run.manual ? 1 : 0,
+      )
+  }
+
+  /** 更新执行记录的结束状态。 */
+  updateAutomationRun(run: AutomationRun): void {
+    this.db.prepare(`UPDATE automation_runs SET finished_at = ?, duration_ms = ?, status = ?, summary = ?,
+      error = ?, outputs = ? WHERE id = ?`)
+      .run(
+        run.finishedAt ?? null,
+        run.durationMs ?? null,
+        run.status,
+        run.summary,
+        run.error ?? null,
+        JSON.stringify(run.outputs),
+        run.id,
+      )
+  }
+
+  /** 执行记录列表；可按任务过滤，按开始时间倒序。 */
+  listAutomationRuns(filter: { automationId?: string; limit?: number } = {}): AutomationRun[] {
+    const where = filter.automationId ? 'WHERE automation_id = ?' : ''
+    const params = filter.automationId ? [filter.automationId] : []
+    const rows = (this.db.prepare(
+      `SELECT * FROM automation_runs ${where} ORDER BY started_at DESC LIMIT ?`,
+    ).all(...params, filter.limit ?? 200) as Row[])
+    return rows.map(automationRunFromRow)
+  }
+
+  getAutomationRun(id: string): AutomationRun | null {
+    const row = this.db.prepare('SELECT * FROM automation_runs WHERE id = ?').get(id) as Row | undefined
+    return row ? automationRunFromRow(row) : null
+  }
+
+  /** 写入一条待确认草稿。 */
+  insertAutomationDraft(draft: AutomationDraft): void {
+    this.db.prepare(`INSERT INTO automation_drafts (id, source, requester, text, draft, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(
+        draft.id,
+        draft.source,
+        draft.requester,
+        draft.text,
+        JSON.stringify(draft.draft),
+        draft.status,
+        draft.createdAt,
+      )
+  }
+
+  /** 列出待确认草稿；默认只给 `pending`。 */
+  listAutomationDrafts(status?: AutomationDraft['status']): AutomationDraft[] {
+    const rows = (status
+      ? this.db.prepare('SELECT * FROM automation_drafts WHERE status = ? ORDER BY created_at DESC').all(status)
+      : this.db.prepare('SELECT * FROM automation_drafts ORDER BY created_at DESC').all()) as Row[]
+    return rows.map(automationDraftFromRow)
+  }
+
+  /** 标记草稿已忽略 / 已转为正式任务。 */
+  setAutomationDraftStatus(id: string, status: AutomationDraft['status']): boolean {
+    const result = this.db.prepare('UPDATE automation_drafts SET status = ? WHERE id = ?').run(status, id)
+    return result.changes > 0
   }
 
   // ---------- Thread alias ----------
@@ -1956,6 +2112,34 @@ function eventFromRow(row: Row): EventRecord {
     updatedAt: String(row.updated_at),
     attempts: Number(row.attempts ?? 0),
     ...(row.last_error ? { lastError: String(row.last_error) } : {}),
+  }
+}
+
+function automationRunFromRow(row: Row): AutomationRun {
+  return {
+    id: String(row.id),
+    automationId: String(row.automation_id),
+    scheduledAt: String(row.scheduled_at),
+    startedAt: String(row.started_at),
+    ...(row.finished_at ? { finishedAt: String(row.finished_at) } : {}),
+    ...(row.duration_ms !== null && row.duration_ms !== undefined ? { durationMs: Number(row.duration_ms) } : {}),
+    status: String(row.status) as AutomationRunStatus,
+    summary: String(row.summary ?? ''),
+    ...(row.error ? { error: String(row.error) } : {}),
+    outputs: row.outputs ? JSON.parse(String(row.outputs)) as AutomationRunOutputs : { ticketIds: [], eventIds: [] },
+    manual: Number(row.manual) === 1,
+  }
+}
+
+function automationDraftFromRow(row: Row): AutomationDraft {
+  return {
+    id: String(row.id),
+    source: String(row.source ?? ''),
+    requester: String(row.requester ?? ''),
+    text: String(row.text ?? ''),
+    draft: JSON.parse(String(row.draft)) as Automation,
+    status: String(row.status) as AutomationDraft['status'],
+    createdAt: String(row.created_at),
   }
 }
 

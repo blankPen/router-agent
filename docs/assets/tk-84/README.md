@@ -1,8 +1,27 @@
-# 日志体系改造 · 界面 Before / After
+# tk-84 界面 Before / After
+
+## 自动化页（本单）
+
+同一场景（面板「收件箱」页展示左侧菜单）、同一视口（1440×900）、同一主题（浅色）。基线是起始分支 `beta` 的 `de3c88e`，改动版是本分支。
+
+| 截图 | 说明 |
+|-|-|
+| `automation/before-nav.png` | 改造前：左侧菜单只有「收件箱 → 工单」，没有自动化入口 |
+| `automation/after-nav.png` | 改造后：「自动化」插在「收件箱」与「工单」之间，其余菜单顺序不变 |
+| `automation/after-automation.png` | 改造后：自动化页「任务」Tab，含来自飞书的待确认草稿与正式任务卡片 |
+| `automation/after-automation-modal.png` | 改造后：「新建自动化」弹窗，沿用「添加决策规则」的分段、间距与字段层级 |
+| `automation/after-automation-draft.png` | 改造后：草稿进入同一个编辑弹窗，保存后才写正式任务 |
+| `automation/after-automation-runs.png` | 改造后：「执行记录」Tab，展示状态、耗时、结果摘要与产出跳转信息 |
+| `automation/after-automation-dark.png` | 改造后：同页深色主题，确认新增样式复用既有 token |
+
+截图取自真实构建产物（`pnpm build`）与本地临时 home（`/tmp/ra-tk-84-home`，端口 3199），
+示例任务与执行记录只用于展示布局，不含真实用户数据与凭据。
+
+## 日志体系改造（历史截图）
 
 同一场景（面板「日志」页读同一条日志文件）、同一视口（1440×900）、同一主题（浅色 / 深色各一组）。
 
-基线版本是 `origin/main`（e4cdee0，含 tk-12 的排查助手重构），改动版本是本分支。
+基线版本是 `origin/main`（e4cdee0，含 tk-12 的排查助手重构），改动版本是该分支。
 
 | 截图 | 说明 |
 |-|-|

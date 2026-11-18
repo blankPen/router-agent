@@ -16,6 +16,8 @@ import { noopLogger, errorMessage, type Logger } from '#infra/logger.js'
 import type { PluginEntry } from '#infra/plugin-loader.js'
 import { EVENT_PRIORITIES, normalizeEventPriority, type EventPriority } from '#core/event.js'
 import { GITHUB_EVENT_TYPES, isGithubEventType } from '#core/github-events.js'
+import { type AutomationSchedule } from '#core/automation.js'
+import { validateSchedule } from '#core/automation-schedule.js'
 import { validateEventRules, type EventRule } from './events/rules.js'
 
 const runtimePackage: Record<string, string> = { ...DEFAULT_RUNTIME_PLUGINS }
@@ -330,6 +332,43 @@ export interface EventsSettings {
   policy: EventPolicyConfig
 }
 
+/** 自动化配置：任务定义与执行护栏。 */
+export interface AutomationSettings {
+  enabled: boolean
+  /** 任务清单；id 唯一。 */
+  tasks: AutomationTaskConfig[]
+  /** 单次执行的硬超时（毫秒）。 */
+  timeoutMs: number
+  /** 失败重试次数。 */
+  maxRetries: number
+}
+
+/** 一条自动化任务（落配置文件，与 events 配置同级）。 */
+export interface AutomationTaskConfig {
+  id: string
+  name: string
+  description: string
+  type: 'ai' | 'script'
+  /** AI 自动化：提示词；脚本自动化：要达成的目标描述。 */
+  prompt: string
+  /** 脚本自动化：AI 生成的脚本正文，持久化保存，可在面板查看与人工编辑。 */
+  script?: string
+  schedule: AutomationSchedule
+  /** 执行 runtime；留空表示跟随默认 runtime。 */
+  runtimeId: string
+  /** 目标项目名（对应 projects[].name）。 */
+  project: string
+  /** 目标项目仓库路径；与 project 一起存，面板不用猜。 */
+  repo: string
+  /** 起始分支；留空表示跟随项目默认分支。 */
+  branch: string
+  enabled: boolean
+  /** 创建者标识；当前全局共用，保留字段便于将来区分来源。 */
+  createdBy: string
+  createdAt: string
+  updatedAt: string
+}
+
 export interface AppConfig {
   home: string
   projects: ProjectConfig[]
@@ -364,6 +403,8 @@ export interface AppConfig {
   channels?: Record<string, PluginEntry>
   /** 事件总线：来源订阅、决策策略与管线策略。 */
   events: EventsSettings
+  /** 自动化：定时触发的任务定义与执行护栏。 */
+  automation: AutomationSettings
   server: {
     port: number
     /** 监听地址；默认 127.0.0.1（只本机可访问），改成 0.0.0.0 即开放局域网访问。 */
@@ -577,6 +618,13 @@ export function defaultConfig(): AppConfig {
         reviewNotify: true,
         reviewChatId: '',
       },
+    },
+    automation: {
+      enabled: true,
+      tasks: [],
+      // 单次自动化执行的硬超时与重试次数。
+      timeoutMs: 10 * 60_000,
+      maxRetries: 1,
     },
     server: { port: 3083, host: DEFAULT_SERVER_HOST, token: '' },
   }
@@ -874,6 +922,7 @@ runtime: {
     },
     ...(Object.keys(channelPlugins).length > 0 ? { channels: channelPlugins } : {}),
     events: parseEvents(doc.events, base.events, logger),
+    automation: parseAutomation(doc.automation, base.automation, logger),
     server: {
       port: Number.isFinite(port) && port >= 0 && port < 65536 ? port : base.server.port,
       host,
@@ -889,6 +938,103 @@ runtime: {
 
 /** 已下线的内置事件来源种类；旧配置里的这些条目直接丢掉。 */
 const REMOVED_EVENT_SOURCE_KINDS = new Set(['http', 'schedule'])
+
+/** 解析自动化配置；任务逐条兜底，非法条目丢掉并留日志。 */
+function parseAutomation(value: unknown, base: AutomationSettings, logger: Logger = noopLogger): AutomationSettings {
+  if (!isRecord(value)) return base
+  const tasks: AutomationTaskConfig[] = []
+  const seen = new Set<string>()
+  for (const raw of Array.isArray(value.tasks) ? value.tasks : []) {
+    const result = validateAutomationTask(raw)
+    if (result.error) {
+      logger.warn('config:automation-invalid', { message: result.error })
+      continue
+    }
+    if (seen.has(result.value.id)) {
+      logger.warn('config:automation-invalid', { message: `自动化任务 id 重复：${result.value.id}` })
+      continue
+    }
+    seen.add(result.value.id)
+    tasks.push(result.value)
+  }
+  return {
+    enabled: booleanOr(value.enabled, base.enabled),
+    tasks,
+    timeoutMs: positiveIntOr(value.timeoutMs, base.timeoutMs, 1_000, 24 * 60 * 60_000),
+    maxRetries: positiveIntOr(value.maxRetries, base.maxRetries, 0, 5),
+  }
+}
+
+/** 校验一条自动化任务；缺省字段按最小可运行形态补齐。 */
+export function validateAutomationTask(value: unknown): { error: string | null; value: AutomationTaskConfig } {
+  const empty: AutomationTaskConfig = {
+    id: '',
+    name: '',
+    description: '',
+    type: 'ai',
+    prompt: '',
+    schedule: { kind: 'daily', at: '09:00' },
+    runtimeId: '',
+    project: '',
+    repo: '',
+    branch: '',
+    enabled: true,
+    createdBy: '',
+    createdAt: '',
+    updatedAt: '',
+  }
+  if (!isRecord(value)) return { error: '自动化任务不是对象', value: empty }
+  const id = stringOr(value.id, '').trim()
+  if (!id) return { error: '自动化任务缺少 id', value: empty }
+  const name = stringOr(value.name, '').trim()
+  if (!name) return { error: `自动化任务 ${id} 缺少名称`, value: empty }
+  const type = value.type === 'script' ? 'script' : 'ai'
+  const prompt = stringOr(value.prompt, '').trim()
+  if (!prompt) return { error: `自动化任务 ${id} 缺少提示词`, value: empty }
+  const schedule = isRecord(value.schedule) ? value.schedule as unknown as AutomationSchedule : { kind: 'daily' as const, at: '09:00' }
+  const scheduleError = validateSchedule(schedule)
+  if (scheduleError) return { error: `自动化任务 ${id} 的触发计划不合法：${scheduleError}`, value: empty }
+  const project = stringOr(value.project, '').trim()
+  const repo = stringOr(value.repo, '').trim()
+  if (!project) return { error: `自动化任务 ${id} 没有选择目标项目`, value: empty }
+  if (!repo) return { error: `自动化任务 ${id} 缺少目标项目仓库路径`, value: empty }
+  const now = new Date().toISOString()
+  return {
+    error: null,
+    value: {
+      id,
+      name,
+      description: stringOr(value.description, '').trim(),
+      type,
+      prompt,
+      ...(type === 'script' && stringOr(value.script, '').trim() ? { script: stringOr(value.script, '').trim() } : {}),
+      schedule,
+      runtimeId: stringOr(value.runtimeId, '').trim(),
+      project,
+      repo,
+      branch: stringOr(value.branch, '').trim(),
+      enabled: booleanOr(value.enabled, true),
+      createdBy: stringOr(value.createdBy, '').trim(),
+      createdAt: stringOr(value.createdAt, '') || now,
+      updatedAt: stringOr(value.updatedAt, '') || now,
+    },
+  }
+}
+
+/** 校验整段自动化任务清单。 */
+export function validateAutomationTasks(value: unknown): { error: string | null; value: AutomationTaskConfig[] } {
+  if (!Array.isArray(value)) return { error: '需要自动化任务数组', value: [] }
+  const tasks: AutomationTaskConfig[] = []
+  const ids = new Set<string>()
+  for (const [index, raw] of value.entries()) {
+    const result = validateAutomationTask(raw)
+    if (result.error) return { error: `第 ${index + 1} 条自动化任务有问题：${result.error}`, value: [] }
+    if (ids.has(result.value.id)) return { error: `自动化任务 id 重复：${result.value.id}`, value: [] }
+    ids.add(result.value.id)
+    tasks.push(result.value)
+  }
+  return { error: null, value: tasks }
+}
 
 /** 解析事件总线配置；逐项兜底，缺省值来自 defaultConfig。 */
 function parseEvents(value: unknown, base: EventsSettings, logger: Logger = noopLogger): EventsSettings {
@@ -1493,6 +1639,12 @@ export function writeConfig(home: string, config: AppConfig): void {
       decision: config.events.decision,
       policy: config.events.policy,
     },
+    automation: {
+      enabled: config.automation.enabled,
+      tasks: config.automation.tasks,
+      timeoutMs: config.automation.timeoutMs,
+      maxRetries: config.automation.maxRetries,
+    },
     projects: config.projects,
     server: {
       port: config.server.port,
@@ -1533,7 +1685,7 @@ export interface ConfigPatchResult {
  * 群级 `allowed` 仍挂在 `feishu.chats` 下（同一条目里还有 mode / repo 等必须重启的字段），
  * 所以仍然按需要重启处理。
  */
-export const HOT_CONFIG_PREFIXES = ['policy.', 'feishu.allowed', 'events.'] as const
+export const HOT_CONFIG_PREFIXES = ['policy.', 'feishu.allowed', 'events.', 'automation.'] as const
 
 function clone<T>(value: T): T {
   return structuredClone(value)
@@ -2061,7 +2213,7 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
 }
 
 /** 整段替换的复杂字段（项目、群、白名单这类不适合逐项点路径编辑的配置）。 */
-const LIST_PATHS = ['projects', 'feishu.chats', 'events.rules'] as const
+const LIST_PATHS = ['projects', 'feishu.chats', 'events.rules', 'automation.tasks'] as const
 
 /** 本地仓库绝对路径：接受 `/abs` 与 `path:/abs`，不接受 Orca 的 name:/id: 选择器。 */
 export function isLocalRepoPath(repo: string): boolean {
@@ -2256,6 +2408,10 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
         const result = validateEventRules(value)
         if (result.error) errors.push({ path, message: result.error })
         else accepted.push({ path, value: result.value })
+      } else if (path === 'automation.tasks') {
+        const result = validateAutomationTasks(value)
+        if (result.error) errors.push({ path, message: result.error })
+        else accepted.push({ path, value: result.value })
       } else {
         const result = validateChats(value)
         if (result.error) errors.push({ path, message: result.error })
@@ -2296,6 +2452,7 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
     if (JSON.stringify(before) === JSON.stringify(value)) continue
     if (path === 'projects') config.projects = value as ProjectConfig[]
     else if (path === 'feishu.chats') config.feishu.chats = value as ChatSettings[]
+    else if (path === 'automation.tasks') config.automation.tasks = value as AutomationTaskConfig[]
     else if (path.startsWith('runtime.projects.')) {
       setProjectsForRuntime(config, path.slice('runtime.projects.'.length), value as ProjectConfig[])
     } else if (path.startsWith('runtime.options.')) {

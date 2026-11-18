@@ -13,6 +13,7 @@ import { logDimensions } from '#core/events.js'
 import { loadRuntimePlugins, type LoadedRuntimePlugins } from '#runtime/plugins/loader.js'
 import { loadChannelPlugins, type LoadedChannelPlugins } from '#channel/plugins/loader.js'
 import { createEventWiring } from '../events/wiring.js'
+import { AutomationService, type AutomationServiceDeps } from '../automation/service.js'
 import { ruleEventTypes } from '../events/rules.js'
 import { compileEventRule } from '../events/rule-compile.js'
 import { createChatClient } from '#infra/chat.js'
@@ -289,6 +290,16 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
       setCode(await cmdDoc(homeOf(opts, output), opts, output))
     })
 
+  withHome(program.command('automation [action]')
+    .description('自动化：list / runs / trigger / tool（tool 供自动化任务里的 agent 调用内置工具）')
+    .option('--id <id>', '自动化任务 id（trigger / tool 必填）')
+    .option('--name <name>', '工具名（tool 必填）')
+    .option('--args <json>', '工具入参 JSON（tool 可选，默认 {}）')
+    .option('--json', '以 JSON 输出')
+    .action(async (action: string | undefined, opts: { home?: string; id?: string; name?: string; args?: string; json?: boolean }) => {
+      setCode(await cmdAutomation(homeOf(opts, output), action ?? 'list', opts, output))
+    }))
+
   withHome(program.command('migrate [action]')
     .description('数据迁移：migrate sessions | threads --dry-run | --apply | --verify（人工手动执行）')
     .option('--dry-run', '只读检查，不写库（默认行为）')
@@ -472,6 +483,139 @@ async function cmdDoc(_home: string, opts: { title: string; content?: string }, 
 
 function collect(value: string, previous: string[]): string[] {
   return [...previous, value]
+}
+
+/**
+ * `ra automation`：自动化任务的命令行入口。
+ *
+ * list / runs / trigger 走本地状态库；tool 走服务端口，
+ * 让自动化任务里的 agent 能调用内置工具（查工单、建工单、查事件、写事件）。
+ */
+async function cmdAutomation(
+  home: string,
+  action: string,
+  opts: { id?: string; name?: string; args?: string; json?: boolean },
+  output: CliIo,
+): Promise<number> {
+  const config = loadConfig(home)
+  const store = openStore(home)
+  try {
+    switch (action) {
+      case 'list': {
+        const tasks = config.automation.tasks
+        if (opts.json) {
+          output.stdout(JSON.stringify(tasks, null, 2))
+          return 0
+        }
+        if (tasks.length === 0) {
+          output.stdout('暂无自动化任务')
+          return 0
+        }
+        output.stdout('ID\t类型\t启用\t计划\t项目\t名称')
+        for (const task of tasks) {
+          output.stdout(`${task.id}\t${task.type}\t${task.enabled ? '是' : '否'}\t${task.schedule.kind}\t${task.project}\t${task.name}`)
+        }
+        return 0
+      }
+      case 'runs': {
+        const runs = store.listAutomationRuns(opts.id ? { automationId: opts.id } : {})
+        if (opts.json) {
+          output.stdout(JSON.stringify(runs, null, 2))
+          return 0
+        }
+        if (runs.length === 0) {
+          output.stdout('暂无执行记录')
+          return 0
+        }
+        output.stdout('ID\t任务\t状态\t耗时\t结果')
+        for (const run of runs) {
+          output.stdout(`${run.id}\t${run.automationId}\t${run.status}\t${run.durationMs ?? '-'}\t${run.summary.slice(0, 80)}`)
+        }
+        return 0
+      }
+      case 'trigger': {
+        if (!opts.id) {
+          output.stderr('用法：ra automation trigger --id <任务 id>')
+          return 2
+        }
+        return triggerAutomation(config, opts.id, output)
+      }
+      case 'tool': {
+        if (!opts.id || !opts.name) {
+          output.stderr('用法：ra automation tool --id <任务 id> --name <工具名> [--args <json>]')
+          return 2
+        }
+        let args: Record<string, unknown> = {}
+        if (opts.args) {
+          try {
+            const parsed = JSON.parse(opts.args)
+            if (parsed && typeof parsed === 'object') args = parsed as Record<string, unknown>
+            else {
+              output.stderr('--args 必须是 JSON 对象')
+              return 2
+            }
+          } catch {
+            output.stderr('--args 不是合法 JSON')
+            return 2
+          }
+        }
+        return invokeAutomationTool(config, opts.id, opts.name, args, output)
+      }
+      default:
+        output.stderr(`未知操作 automation ${action}；可用：list / runs / trigger / tool`)
+        return 2
+    }
+  } finally {
+    store.close()
+  }
+}
+
+/** 手动触发一次自动化：走服务端口，保证与调度器共用同一套执行管线。 */
+async function triggerAutomation(config: AppConfig, id: string, output: CliIo): Promise<number> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${config.server.port}/api/automations/trigger`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...tokenHeader(config) },
+      body: JSON.stringify({ id }),
+    })
+    const data = await res.json().catch(() => null) as { run?: { status?: string; summary?: string }; error?: string } | null
+    if (!res.ok) {
+      output.stderr(`触发失败：${data?.error ?? `HTTP ${res.status}`}`)
+      return 1
+    }
+    output.stdout(`${data?.run?.status ?? 'unknown'}\t${data?.run?.summary ?? ''}`)
+    return 0
+  } catch (error) {
+    output.stderr(`服务不可达：${error instanceof Error ? error.message : String(error)}`)
+    return 1
+  }
+}
+
+/** 调用自动化内置工具：走服务端口，范围与限流由服务层强制。 */
+async function invokeAutomationTool(
+  config: AppConfig,
+  automationId: string,
+  name: string,
+  args: Record<string, unknown>,
+  output: CliIo,
+): Promise<number> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${config.server.port}/api/automations/tools`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...tokenHeader(config) },
+      body: JSON.stringify({ automationId, name, args }),
+    })
+    const data = await res.json().catch(() => null) as { result?: unknown; error?: string; hint?: string } | null
+    if (!res.ok) {
+      output.stderr(data?.hint ? `${data.error}：${data.hint}` : (data?.error ?? `HTTP ${res.status}`))
+      return 1
+    }
+    output.stdout(JSON.stringify(data?.result ?? null, null, 2))
+    return 0
+  } catch (error) {
+    output.stderr(`服务不可达：${error instanceof Error ? error.message : String(error)}`)
+    return 1
+  }
 }
 
 async function cmdSimulate(
@@ -1572,6 +1716,34 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     handlers: {},
     onEvent: sink,
   })
+  // 自动化：定时触发的任务。调度器内嵌在服务进程内，随服务起停。
+  // 事件总线在下面才装配，这里用延迟引用拿它的入队能力。
+  let ingestAutomationEvent: AutomationServiceDeps['ingestEvent']
+  const automationService = new AutomationService({
+    config: () => config,
+    store,
+    engine,
+    runtimes,
+    logger,
+    chat: model ? createChatClient(model) : null,
+    // 自动化写入的事件进收件箱，走现有事件判定链路。
+    ingestEvent: input => ingestAutomationEvent?.(input) ?? null,
+    // 生成的脚本写回任务定义并落盘，避免每次执行都重新生成。
+    saveTaskScript: (taskId, script) => {
+      const task = config.automation.tasks.find(item => item.id === taskId)
+      if (!task) return
+      task.script = script
+      task.updatedAt = new Date().toISOString()
+      try {
+        writeConfig(config.home, config)
+        logger.info('automation:script-persisted', { automationId: taskId, chars: script.length })
+      } catch (error) {
+        // 落盘失败不回滚内存里的脚本：本次执行仍可用，下次保存配置时会一起写回。
+        logger.error('automation:script-persist-failed', { automationId: taskId, message: errorMessage(error) })
+      }
+    },
+  })
+
   const service = decisionEngine
     ? new RouterService({
       config,
@@ -1592,6 +1764,15 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       ...(identity?.approverOpenIdsByChat ? { intakeApprovers: identity.approverOpenIdsByChat } : {}),
       orca: orcaRunner,
       onDecisionAudit,
+      // 飞书里的自然语言 → 待确认草稿；确认后才写 automation.tasks。
+      automationDraft: async trigger => {
+        const result = await automationService.captureDraft(
+          trigger.text,
+          `feishu:${trigger.chatId}`,
+          trigger.actorId,
+        )
+        return result?.reply ?? null
+      },
     })
     : null
 
@@ -1631,6 +1812,23 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       void service?.launchPending()
     },
   })
+  // 事件总线就位后补上自动化的入队能力。
+  ingestAutomationEvent = input => {
+    // 来源 id 用自动化任务 id：执行记录据此把产出对回任务。
+    const sourceId = `automation:${input.automationId}`
+    const envelope = {
+      externalId: `${sourceId}:${input.eventType}:${crypto.randomUUID()}`,
+      eventType: input.eventType,
+      title: input.title,
+      body: input.body,
+      receivedAt: new Date().toISOString(),
+      // 事件判定前就带上项目范围，自动化的工具查询据此过滤，不会看到无关项目的事件。
+      context: { repo: input.repo, project: input.project },
+    }
+    return eventWiring.pipeline.ingest(sourceId, { enabled: true, kind: 'feishu' }, envelope).id
+  }
+  automationService.initStates()
+  automationService.start()
 
   const webRoot = fileURLToPath(new URL('../web', import.meta.url))
   // 日志页的智能排查助手：复用研判模型，没配模型时自动降级为规则式排查。
@@ -1717,6 +1915,15 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
         logger,
       }),
       counts: () => eventWiring.manager.countEvents(),
+    },
+    automation: {
+      listTasks: () => automationService.list(),
+      listRuns: automationId => automationService.runs(automationId ? { automationId } : {}),
+      listDrafts: () => automationService.listDrafts(),
+      dismissDraft: id => automationService.dismissDraft(id),
+      trigger: id => automationService.trigger(id),
+      draft: async text => automationService.draftFromText(text),
+      invokeTool: (automationId, name, args) => automationService.invokeTool(automationId, name, args),
     },
     ...(feishuChannel?.admin ? { feishuBot: feishuChannel.admin } : {}),
     channels,
@@ -1840,6 +2047,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   const stopRuntime = async (): Promise<void> => {
     channels.stopAll()
     eventWiring.manager.stop()
+    await automationService.stop()
     if (chatTimer) clearInterval(chatTimer)
     clearInterval(updateTimer)
     if (updateRestartTimer) {

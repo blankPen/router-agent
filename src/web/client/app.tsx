@@ -70,6 +70,7 @@ import { RuntimeCards, type RuntimeNotice } from './runtime-cards.js'
 import { FeishuBotPanel } from './feishu-panel.js'
 import { LogAssistantFab } from './log-assistant.js'
 import { EventsView } from './events-panel.js'
+import { AutomationView } from './automation-panel.js'
 import { EventSourcesConfig } from './events-config.js'
 import { EventRulesConfig } from './event-rules.js'
 import { eventSourceFields, eventSourcePathsIn, type SourceMeta } from './event-sources.js'
@@ -547,6 +548,7 @@ function App(): JSX.Element {
         )}
         {tab === 'tickets' && <TicketsView />}
         {tab === 'events' && <EventsView />}
+        {tab === 'automation' && <AutomationView />}
         {tab === 'logs' && <LogsView />}
         {tab === 'config' && (
           <ConfigView
@@ -652,7 +654,10 @@ function PageHead({ title, subtitle, actions }: {
 
 function TicketsView(): JSX.Element {
   const [tickets, setTickets] = useState<Ticket[]>([])
-  const [selected, setSelected] = useState<string | null>(null)
+  const [selected, setSelected] = useState<string | null>(() => {
+    const match = /^#tickets\/([^/?#]+)/.exec(window.location.hash)
+    return match ? decodeURIComponent(match[1]!) : null
+  })
   const [detail, setDetail] = useState<TicketDetail | null>(null)
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [lastSync, setLastSync] = useState<Date | null>(null)
@@ -699,6 +704,9 @@ function TicketsView(): JSX.Element {
     setSelected(null)
     setDetail(null)
     setDetailError(null)
+    if (window.location.hash.startsWith('#tickets/')) {
+      history.replaceState(null, '', '#tickets')
+    }
   }, [])
 
   useEffect(() => {

@@ -19,12 +19,15 @@ export interface NavItem {
  * 侧栏菜单。
  *
  * 「收件箱」放在「工单」上方：先看要处理的事件，再看已派出去的工单。
+ * 「自动化」紧跟「收件箱」：两者都是「外部事件进来 → Router 处理」，
+ * 放在一起比夹在工单与配置之间更好找。
  * 其余项相对顺序保持不变。
  */
 export function navItems(openTickets: number): NavItem[] {
   return [
     { tab: 'setup', label: '初始化', icon: 'zap' },
     { tab: 'events', label: '收件箱', icon: 'radio' },
+    { tab: 'automation', label: '自动化', icon: 'clock' },
     { tab: 'tickets', label: '工单', icon: 'inbox', count: openTickets },
     { tab: 'config', label: '配置', icon: 'sliders' },
     { tab: 'sources', label: '来源', icon: 'radio' },

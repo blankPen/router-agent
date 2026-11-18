@@ -5,6 +5,7 @@ describe('面板页签 hash', () => {
   it('识别已知页签', () => {
     expect(tabFromHash('#setup')).toBe('setup')
     expect(tabFromHash('#logs')).toBe('logs')
+    expect(tabFromHash('#tickets/tk-42')).toBe('tickets')
     expect(tabFromHash('tickets')).toBe('tickets')
   })
 
