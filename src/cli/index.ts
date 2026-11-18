@@ -13,6 +13,7 @@ import { logDimensions } from '#core/events.js'
 import { loadRuntimePlugins, type LoadedRuntimePlugins } from '#runtime/plugins/loader.js'
 import { loadChannelPlugins, type LoadedChannelPlugins } from '#channel/plugins/loader.js'
 import { createEventWiring } from '../events/wiring.js'
+import { EventKickoff } from '../events/kickoff.js'
 import { ruleEventTypes } from '../events/rules.js'
 import { compileEventRule } from '../events/rule-compile.js'
 import { createChatClient } from '#infra/chat.js'
@@ -28,7 +29,7 @@ import { ChannelRegistry } from '#channel/registry.js'
 import { ChannelRouter } from '#channel/router.js'
 import { DEFAULT_CHANNEL_ID } from '#channel/port.js'
 import { ChatDirectory } from '@router-agent/channel-feishu'
-import { resolveRuntimeIdentity, detailText, type IdentityCache, type IdentityStatusView, type RuntimeIdentity } from '@router-agent/channel-feishu'
+import { IdentityResolver, resolveRuntimeIdentity, detailText, type IdentityCache, type IdentityStatusView, type RuntimeIdentity } from '@router-agent/channel-feishu'
 import { createLarkRunner, larkEnv } from '@router-agent/channel-feishu'
 import { parseMessageThreadIds, type MessageAdmission, type UnaddressedAdmission } from '@router-agent/channel-feishu'
 import { createVisionTranscriber, type ImageTranscriber } from '#infra/vision.js'
@@ -1535,6 +1536,24 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   const feishuChannel = channels.get('feishu') as ReturnType<typeof createFeishuChannel> | undefined
   if (!feishuChannel) logger.warn('channel:feishu-missing', { detail: '飞书通道未加载；检查 channels.feishu 插件入口' })
   const outbox = new ChannelRouter(channels, logger)
+  // 事件工单开工前私聊用户并建话题：接收人来自事件来源的 owner（邮箱 / ou_）。
+  const kickoffOwnerResolver = new IdentityResolver({
+    lark: larkRunner,
+    appId: config.feishu.appId,
+    cache: identityCacheOf(store),
+    logger,
+  })
+  const eventKickoff = new EventKickoff({
+    store,
+    config: () => config,
+    channels,
+    logger,
+    resolveOwner: async entry => {
+      const resolved = await kickoffOwnerResolver.resolveEntries([entry])
+      const found = resolved.entries.find(item => item.openId)
+      return found ? { openId: found.openId, ...(found.name ? { name: found.name } : {}) } : null
+    },
+  })
 
   const clearReaction = async (messageId: string): Promise<void> => {
     const saved = store.getReaction(messageId)
@@ -1585,6 +1604,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       effects,
       sender: outbox,
       channels,
+      kickoff: eventKickoff,
       decisionEngine,
       ...(intakeEngine ? { intakeEngine } : {}),
       ...(decisionAgent ? { decisionAgent } : {}),
