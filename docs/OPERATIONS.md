@@ -263,7 +263,7 @@ Router 不做对话，只在必要时说话：
 | `api:event-rule-compiled` | HTTP API | `ruleId` `eventType` | 面板请求规则提炼完成 |
 | `api:event-rules` | HTTP API | `changed` `count` | 规则单条保存 / 删除成功 |
 | `api:listening` | CLI | `port` `host` | HTTP API 已监听 |
-| `api:access-denied` | HTTP API | `method` `path` `remote` `host` | 开放监听后请求没带访问令牌，被 401 拒绝 |
+| `api:access-denied` | HTTP API | `method` `path` `remote` `host` | 开放监听后请求没带访问令牌，被 401 拒绝；同一「方法 + 路径 + 来源」只记一次，避免轮询刷屏 |
 | `api:access-token-missing` | HTTP API | `host` | 对外监听却没有访问令牌，服务拒绝启动 |
 | `server:token-generated` | CLI | `host` | 开放监听但没配令牌，启动时自动生成并写回配置 |
 | `api:report` | HTTP API | `ticketId` `state` `turn` | HTTP 通道收到的 worker 上报 |

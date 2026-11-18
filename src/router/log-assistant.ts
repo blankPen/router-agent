@@ -277,7 +277,7 @@ const SYMPTOMS: Array<{
     section: 'admission',
     fixLabel: '去改「接单方式」',
     events: [
-      'decision:engine-failed', 'loop:trigger-failed', 'chat:reply-failed',
+      'decision:engine-failed', 'chat:reply-failed',
     ],
     keywords: ['工单', '派工', '没开始', '没建', '没派'],
     steps: [
@@ -323,6 +323,7 @@ const SYMPTOMS: Array<{
       'api:request-failed', 'config:parse-failed', 'session:migration-required',
       'session:migration-incomplete', 'feishu:consumer-start-failed', 'update:upgrade-failed',
       'update:service-stop-failed', 'config:invalid-security-override',
+      'loop:trigger-failed', 'loop:error',
     ],
     keywords: ['服务', '启动不了', '报错', '500', '打不开', '崩溃'],
     steps: [
@@ -334,6 +335,7 @@ const SYMPTOMS: Array<{
       'session:migration-required 表示还有没迁移的历史 sessionKey，服务会拒绝启动，按提示执行迁移。',
       'config:parse-failed 会让服务带着默认配置启动，先修 config.yaml 的 YAML 语法。',
       'feishu:consumer-start-failed 是飞书事件消费者没起来，机器人会完全收不到消息。',
+      'loop:trigger-failed 是单条消息处理时抛了未预期异常，detail 里有真实原因。',
     ],
   },
   {

@@ -1167,9 +1167,20 @@ function printPanelUrls(urls: string[], output: CliIo): void {
 /** 服务就绪探测与浏览器打开：给服务 10 秒，避免刚启动时开出 404 白页。 */
 const PANEL_READY_TIMEOUT_MS = 10_000
 
-async function panelReady(url: string): Promise<boolean> {
+/**
+ * 探测面板是否已就绪。
+ *
+ * 地址栏里带的是 `?token=…`，而 `new URL('api/status', url)` 拼出来的新 URL
+ * 不保留查询参数——面板开放访问时服务端要求 x-ra-token，
+ * 探测请求漏带令牌必然被 401 拒掉，`ra start` 只会一直说「面板暂未就绪」。
+ */
+export async function panelReady(url: string): Promise<boolean> {
   try {
-    const res = await fetch(new URL('api/status', url), { signal: AbortSignal.timeout(1_000) })
+    const token = new URL(url).searchParams.get('token') ?? ''
+    const res = await fetch(new URL('api/status', url), {
+      headers: token ? { 'x-ra-token': token } : {},
+      signal: AbortSignal.timeout(1_000),
+    })
     return res.ok
   } catch {
     return false
