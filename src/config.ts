@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -14,6 +14,9 @@ import { DEFAULT_RUNTIME_PLUGINS } from '#runtime/plugins/loader.js'
 import { DEFAULT_CHANNEL_PLUGINS } from '#channel/plugins/loader.js'
 import { noopLogger, errorMessage, type Logger } from '#infra/logger.js'
 import type { PluginEntry } from '#infra/plugin-loader.js'
+import { EVENT_PRIORITIES, normalizeEventPriority, type EventPriority } from '#core/event.js'
+import { GITHUB_EVENT_TYPES, isGithubEventType } from '#core/github-events.js'
+import { validateEventRules, type EventRule } from './events/rules.js'
 
 const runtimePackage: Record<string, string> = { ...DEFAULT_RUNTIME_PLUGINS }
 const channelPackage = (id: string): string | undefined => DEFAULT_CHANNEL_PLUGINS[id]
@@ -252,6 +255,9 @@ export interface WorkspaceSettings {
 export const LLM_APIS = ['openai-completions', 'anthropic-messages'] as const
 export type LlmApi = typeof LLM_APIS[number]
 
+/** 面板默认监听地址：只允许本机访问。 */
+export const DEFAULT_SERVER_HOST = '127.0.0.1'
+
 export interface LlmSettings {
   baseUrl?: string
   apiKey?: string
@@ -275,6 +281,56 @@ export interface DecisionSettings {
   provider: 'jev' | 'llm'
   /** Jev 连接信息；apiKey / model 缺省从 TYPESAFE_API_KEY / TYPESAFE_MODEL 读取。 */
   jev: { apiKey: string; model: string; baseUrl?: string }
+}
+
+/** 事件来源的订阅配置：一个来源 id 一份。 */
+export interface EventSourceConfig {
+  enabled: boolean
+  /** 内置来源种类；自定义插件来源留空。 */
+  kind?: 'github' | 'feishu'
+  /** 自定义来源插件入口：npm 包名或本地路径。 */
+  plugin?: string
+  /** 插件自己声明的字段取值。 */
+  options?: Record<string, unknown>
+  /** GitHub 来源：仓库（owner/repo）。 */
+  repo?: string
+  /** GitHub 来源：订阅的事件类型（`类别.动作`）；留空表示全部。 */
+  events?: string[]
+  /** 轮询间隔（毫秒）。 */
+  intervalMs?: number
+}
+
+/** 事件决策策略：判定依据（自然语言 prompt）与护栏。 */
+export interface EventDecisionConfig {
+  provider: 'jev' | 'llm' | 'rule'
+  /** 旧版全局 prompt；新装机器默认不参与判定。 */
+  prompt: string
+  /** 没有匹配规则时，是否把旧 prompt 当作全局兜底规则。 */
+  fallbackToPrompt?: boolean
+  confidenceThreshold: number
+  fallback: 'review' | 'pending'
+}
+
+/** 事件管线策略：高低峰时段、预算、审核通知。 */
+export interface EventPolicyConfig {
+  peak: { start: string; end: string; priorities: EventPriority[] }
+  offPeak: { start: string; end: string; priorities: EventPriority[] }
+  /** 全局每日自动执行事件条数上限；0 表示不限。 */
+  dailyEventLimit: number
+  /** 单来源每日事件条数上限；0 表示不限。 */
+  perSourceDailyLimit: number
+  reviewNotify: boolean
+  reviewChatId: string
+}
+
+/** 事件总线配置：来源订阅 + 决策策略 + 管线策略。 */
+export interface EventsSettings {
+  enabled: boolean
+  sources: Record<string, EventSourceConfig>
+  /** 按 eventType 索引的决策规则；规则存在本身即表示该类事件需要判定。 */
+  rules: EventRule[]
+  decision: EventDecisionConfig
+  policy: EventPolicyConfig
 }
 
 export interface AppConfig {
@@ -309,7 +365,15 @@ export interface AppConfig {
   }
   /** 通道插件入口；id 可覆盖内置飞书包，也可以新增自定义 channel。 */
   channels?: Record<string, PluginEntry>
-  server: { port: number }
+  /** 事件总线：来源订阅、决策策略与管线策略。 */
+  events: EventsSettings
+  server: {
+    port: number
+    /** 监听地址；默认 127.0.0.1（只本机可访问），改成 0.0.0.0 即开放局域网访问。 */
+    host: string
+    /** 访问令牌；host 不是本机地址时必填，非本机请求必须带 `x-ra-token`。 */
+    token: string
+  }
   llm?: LlmSettings
   decision: DecisionSettings
 }
@@ -364,6 +428,34 @@ export function setChannelPlugin(config: AppConfig, id: string, value: PluginEnt
   config.channels = Object.keys(channels).length > 0 ? channels : undefined
 }
 
+/**
+ * 写入或删除事件来源插件入口。
+ *
+ * 入口本身就是一个来源条目：装了 npm 包就等于新增一个来源，
+ * 默认启用；传空串表示移除该条目。
+ */
+export function setEventSourcePlugin(config: AppConfig, id: string, value: string): void {
+  const sources = { ...config.events.sources }
+  if (!value) {
+    delete sources[id]
+  } else {
+    sources[id] = { ...(sources[id] ?? {}), enabled: sources[id]?.enabled ?? true, plugin: value }
+    delete sources[id]!.kind
+  }
+  config.events.sources = sources
+}
+
+/** 写入或删除一整条事件来源条目（面板新增/修改仓库订阅）。 */
+export function setEventSourceEntry(config: AppConfig, id: string, value: unknown): void {
+  const sources = { ...config.events.sources }
+  if (value === null || value === undefined || value === '') {
+    delete sources[id]
+  } else {
+    sources[id] = value as EventSourceConfig
+  }
+  config.events.sources = sources
+}
+
 /** 当前配置里可用的 runtime id：SDK 内置 + 用户声明的插件 id + 插件声明的多实例 id。 */
 export function isKnownRuntimeId(config: AppConfig, id: string): boolean {
   const value = normalizeRuntimeId(id)
@@ -376,6 +468,25 @@ export function isKnownRuntimeId(config: AppConfig, id: string): boolean {
 export function memberHandledChats(config: AppConfig): string[] {
   return config.feishu.chats.filter(chat => chat.scope !== 'admins').map(chat => chat.chat)
 }
+
+/** 默认决策 prompt：写清「哪类事件归哪个项目、走哪种处理方式、什么算急、拿不准怎么办」。 */
+export const DEFAULT_EVENT_DECISION_PROMPT = `# 项目归属
+- 事件来自哪个 GitHub 仓库，就归该仓库对应的项目
+- 标题或正文提到某个项目名，就归那个项目
+- 提到客服、退款、投诉，归 customer-service 项目
+- 提到部署、监控、告警，归 ops 项目
+
+# 处理方式
+- bug 类事件用 bug-triage：先复现再出根因，不要直接改代码
+- 需求或咨询类事件用 clarify-intake：信息不足先补齐，别急着执行
+- 通知、播报类事件只记录不执行
+
+# 优先级
+- 线上告警、生产故障：P0，立即执行
+- 明确的 bug：P1
+- 需求、咨询：P2
+- 其它：P3
+- 明显与项目无关的噪声：P4`
 
 export function defaultConfig(): AppConfig {
   return {
@@ -453,7 +564,29 @@ export function defaultConfig(): AppConfig {
     worker: { tools: { ...DEFAULT_WORKER_TOOLS }, evidence: { ui: 'warn' }, skill: { mode: 'path' } },
     reply: { ask: { mode: 'auto', allow: 'anyone', timeoutMs: 30 * 60_000 } },
     runtime: { default: 'orca' },
-    server: { port: 3083 },
+    events: {
+      enabled: false,
+      sources: {
+        feishu: { enabled: false, kind: 'feishu' },
+      },
+      decision: {
+        provider: 'rule',
+        prompt: DEFAULT_EVENT_DECISION_PROMPT,
+        fallbackToPrompt: false,
+        confidenceThreshold: 0.6,
+        fallback: 'review',
+      },
+      rules: [],
+      policy: {
+        peak: { start: '09:00', end: '20:00', priorities: ['P0', 'P1'] },
+        offPeak: { start: '20:00', end: '09:00', priorities: ['P2', 'P3'] },
+        dailyEventLimit: 200,
+        perSourceDailyLimit: 50,
+        reviewNotify: true,
+        reviewChatId: '',
+      },
+    },
+    server: { port: 3083, host: DEFAULT_SERVER_HOST, token: '' },
   }
 }
 
@@ -569,6 +702,11 @@ projects: []
 
 server:
   port: 3083
+  # 监听地址：默认 127.0.0.1 只本机可访问；改成 0.0.0.0 即开放局域网与内网穿透访问。
+  host: 127.0.0.1
+  # 访问令牌：host 不是回环地址时必填（没配会在启动时自动生成并写回本文件）。
+  # 面板的每个 API 请求都要带 x-ra-token；令牌只写不回显。
+  # token: ""
 
 # 模型配置必填：baseUrl / model / apiKey 三项缺一不可，未配置时服务启动会直接报错；
 # 也可以在 Web 面板「初始化 · LLM Provider」里填写，或从 Claude Code / CCSwitch / Pi / OpenCode / Magpie 的本地配置导入
@@ -636,6 +774,8 @@ export function loadConfig(home: string = defaultHome(), env: NodeJS.ProcessEnv 
 
   const acceptMode = pickAcceptMode(doc.policy?.acceptMode, base.policy.acceptMode)
   const port = Number(doc.server?.port)
+  const host = normalizeServerHost(doc.server?.host)
+  const token = typeof doc.server?.token === 'string' ? doc.server.token.trim() : ''
   const progressDoc = doc.progress ?? {}
   const progressSyncMs = Number(progressDoc.syncMs)
   const progressProbeMs = Number(progressDoc.probeMs)
@@ -741,13 +881,103 @@ runtime: {
       ...(Object.keys(runtimePlugins).length > 0 ? { plugins: runtimePlugins } : {}),
     },
     ...(Object.keys(channelPlugins).length > 0 ? { channels: channelPlugins } : {}),
-    server: { port: Number.isFinite(port) && port >= 0 && port < 65536 ? port : base.server.port },
+    events: parseEvents(doc.events, base.events, logger),
+    server: {
+      port: Number.isFinite(port) && port >= 0 && port < 65536 ? port : base.server.port,
+      host,
+      token,
+    },
     ...(isRecord(doc.llm) ? { llm: parseLlm(doc.llm) } : {}),
     decision: parseDecision(doc.decision, env),
   }
   // 群绑定分支始终跟随项目清单，避免 YAML 里残留的自定义分支与面板显示不一致。
   alignChatBranches(config)
   return config
+}
+
+/** 已下线的内置事件来源种类；旧配置里的这些条目直接丢掉。 */
+const REMOVED_EVENT_SOURCE_KINDS = new Set(['http', 'schedule'])
+
+/** 解析事件总线配置；逐项兜底，缺省值来自 defaultConfig。 */
+function parseEvents(value: unknown, base: EventsSettings, logger: Logger = noopLogger): EventsSettings {
+  if (!isRecord(value)) return base
+  const sources: Record<string, EventSourceConfig> = { ...base.sources }
+  const rawSources = isRecord(value.sources) ? value.sources : {}
+  for (const [id, raw] of Object.entries(rawSources)) {
+    if (!isRecord(raw)) continue
+    // 已下线的来源种类（http / schedule）：直接丢掉，不留成面板里的幽灵来源。
+    if (REMOVED_EVENT_SOURCE_KINDS.has(String(raw.kind ?? ''))) continue
+    const fallback = base.sources[id] ?? { enabled: false }
+    sources[id] = {
+      enabled: booleanOr(raw.enabled, fallback.enabled),
+      ...(raw.kind ? { kind: raw.kind as EventSourceConfig['kind'] } : fallback.kind ? { kind: fallback.kind } : {}),
+      ...(typeof raw.plugin === 'string' ? { plugin: raw.plugin } : {}),
+      ...(isRecord(raw.options) ? { options: raw.options } : {}),
+      ...(typeof raw.repo === 'string' ? { repo: raw.repo } : {}),
+      ...(Array.isArray(raw.events) ? { events: stringArray(raw.events, []) } : {}),
+      ...(typeof raw.intervalMs === 'number' ? { intervalMs: raw.intervalMs } : {}),
+    }
+    // GitHub 来源没写事件类型 = 订阅全部类型；写了的只认目录里的类型。
+    if (sources[id]!.kind === 'github') {
+      const picked = Array.isArray(raw.events) ? stringArray(raw.events, []) : []
+      sources[id]!.events = picked.length > 0
+        ? picked.filter(isGithubEventType)
+        : GITHUB_EVENT_TYPES.map(type => type.id)
+      // 旧配置里的空壳 GitHub 来源（没填仓库）不留着：仓库由面板「添加仓库」创建。
+      if (!sources[id]!.repo?.trim()) delete sources[id]
+    }
+  }
+  const decisionDoc = isRecord(value.decision) ? value.decision : {}
+  const policyDoc = isRecord(value.policy) ? value.policy : {}
+  let rules = base.rules
+  if (Array.isArray(value.rules)) {
+    const parsed = validateEventRules(value.rules)
+    if (parsed.error) {
+      logger.warn('config:event-rules-invalid', { message: parsed.error })
+    } else {
+      rules = parsed.value
+    }
+  }
+  return {
+    enabled: booleanOr(value.enabled, base.enabled),
+    sources,
+    rules,
+    decision: {
+      provider: decisionDoc.provider === 'jev' || decisionDoc.provider === 'llm' || decisionDoc.provider === 'rule'
+        ? decisionDoc.provider
+        : base.decision.provider,
+      prompt: typeof decisionDoc.prompt === 'string' && decisionDoc.prompt.trim() ? decisionDoc.prompt : base.decision.prompt,
+      // 老配置只写了 prompt：保留原来的全局判定行为；新配置写回时会显式落 false。
+      fallbackToPrompt: typeof decisionDoc.fallbackToPrompt === 'boolean'
+        ? decisionDoc.fallbackToPrompt
+        : typeof decisionDoc.prompt === 'string' && decisionDoc.prompt.trim()
+          ? true
+          : base.decision.fallbackToPrompt,
+      confidenceThreshold: positiveNumberOr(decisionDoc.confidenceThreshold, base.decision.confidenceThreshold, 0, 1),
+      fallback: decisionDoc.fallback === 'pending' ? 'pending' : base.decision.fallback,
+    },
+    policy: {
+      peak: parseWindow(policyDoc.peak, base.policy.peak),
+      offPeak: parseWindow(policyDoc.offPeak, base.policy.offPeak),
+      dailyEventLimit: positiveIntOr(policyDoc.dailyEventLimit, base.policy.dailyEventLimit, 0, 1_000_000),
+      perSourceDailyLimit: positiveIntOr(policyDoc.perSourceDailyLimit, base.policy.perSourceDailyLimit, 0, 1_000_000),
+      reviewNotify: booleanOr(policyDoc.reviewNotify, base.policy.reviewNotify),
+      reviewChatId: typeof policyDoc.reviewChatId === 'string' ? policyDoc.reviewChatId : base.policy.reviewChatId,
+    },
+  }
+}
+
+/** 解析时间窗：HH:mm 起止 + 允许自动执行的优先级。 */
+function parseWindow(value: unknown, base: { start: string; end: string; priorities: EventPriority[] }): { start: string; end: string; priorities: EventPriority[] } {
+  if (!isRecord(value)) return base
+  const priorities = Array.isArray(value.priorities)
+    ? value.priorities.map(item => normalizeEventPriority(item)).filter(item => EVENT_PRIORITIES.includes(item))
+    : base.priorities
+  return {
+    start: typeof value.start === 'string' ? value.start : base.start,
+    end: typeof value.end === 'string' ? value.end : base.end,
+    priorities: priorities.length > 0 ? priorities : base.priorities,
+  }
 }
 
 /**
@@ -1271,8 +1501,19 @@ export function writeConfig(home: string, config: AppConfig): void {
         : {}),
     },
     ...(config.channels && Object.keys(config.channels).length > 0 ? { channels: config.channels } : {}),
+    events: {
+      enabled: config.events.enabled,
+      sources: config.events.sources,
+      rules: config.events.rules,
+      decision: config.events.decision,
+      policy: config.events.policy,
+    },
     projects: config.projects,
-    server: { port: config.server.port },
+    server: {
+      port: config.server.port,
+      host: config.server.host,
+      ...(config.server.token ? { token: config.server.token } : {}),
+    },
   }
   if (config.llm) doc.llm = config.llm
   const header = [
@@ -1307,7 +1548,7 @@ export interface ConfigPatchResult {
  * 群级 `allowed` 仍挂在 `feishu.chats` 下（同一条目里还有 mode / repo 等必须重启的字段），
  * 所以仍然按需要重启处理。
  */
-export const HOT_CONFIG_PREFIXES = ['policy.', 'feishu.allowed'] as const
+export const HOT_CONFIG_PREFIXES = ['policy.', 'feishu.allowed', 'events.'] as const
 
 function clone<T>(value: T): T {
   return structuredClone(value)
@@ -1343,6 +1584,13 @@ export function publicConfig(config: AppConfig): Record<string, unknown> {
     apiKeySet: Boolean(jev.apiKey),
   }
 
+  // 访问令牌明文不下发；tokenSet 只用来告诉面板「已经配过」。
+  const serverDoc = doc.server as Record<string, unknown> | undefined
+  if (serverDoc && typeof serverDoc === 'object') {
+    serverDoc.tokenSet = Boolean(serverDoc.token)
+    delete serverDoc.token
+  }
+
   // ACP 适配器的 env 可能包含 API key：只下发 key 名，不下发明文。
   const options = runtime?.options
   if (runtime && options && typeof options === 'object' && !Array.isArray(options)) {
@@ -1368,7 +1616,7 @@ export function publicConfig(config: AppConfig): Record<string, unknown> {
 /** 面板插件页需要的元数据；不包含任何密钥或实现细节。 */
 export interface PluginConfigView {
   id: string
-  kind: 'runtime' | 'channel'
+  kind: 'runtime' | 'channel' | 'event'
   name?: string
   label?: string
   hint?: string
@@ -1413,7 +1661,7 @@ interface LoadedChannelMeta {
 export function publicPlugins(config: AppConfig, loaded?: {
   runtimes?: LoadedPluginMeta[]
   channels?: LoadedChannelMeta[]
-  failures?: Array<{ kind: 'runtime' | 'channel'; id: string; specifier: string; message: string }>
+  failures?: Array<{ kind: 'runtime' | 'channel' | 'event'; id: string; specifier: string; message: string }>
 }): PluginConfigView[] {
   const failures = loaded?.failures ?? []
   // createAll() 的实例 id（如 ACP 的 acp-claude）不是独立插件：面板只列插件本身，
@@ -1531,6 +1779,40 @@ interface Validator {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 
+/**
+ * 监听地址归一化：只接受 IPv4 字面量或主机名，非法值回退到默认的 127.0.0.1。
+ *
+ * 校验放在配置层，服务端 listen 时不用再猜用户写了什么。
+ */
+export function normalizeServerHost(value: unknown): string {
+  if (typeof value !== 'string') return DEFAULT_SERVER_HOST
+  const host = value.trim()
+  if (!host) return DEFAULT_SERVER_HOST
+  // IPv4 字面量：四段 0-255。
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
+    return host.split('.').every(part => Number(part) <= 255) ? host : DEFAULT_SERVER_HOST
+  }
+  // 主机名：字母数字、点、横线，不允许路径与端口。
+  if (/^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$/.test(host)) return host
+  return DEFAULT_SERVER_HOST
+}
+
+/**
+ * 判断监听地址是不是「只本机」。
+ *
+ * 只有回环地址（127.0.0.0/8、::1）算本机；0.0.0.0 与其它 IP 都算对外开放。
+ */
+export function isLoopbackHost(host: string): boolean {
+  const value = host.trim().toLowerCase()
+  if (value === '::1' || value === 'localhost') return true
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(value)
+}
+
+/** 面板访问令牌：32 位十六进制随机串。 */
+export function generateServerToken(): string {
+  return randomBytes(16).toString('hex')
+}
+
 const stringValue: Validator = {
   check: value => (typeof value === 'string' ? null : '需要字符串'),
 }
@@ -1596,6 +1878,88 @@ function validatePluginEntry(value: unknown): PluginEntry | null {
 }
 
 type PluginKind = 'runtime' | 'channel'
+
+/** 小数校验（0~1 置信度这类）。 */
+function numberValue(min: number, max: number): Validator {
+  return {
+    check: value => {
+      const number = Number(value)
+      if (!Number.isFinite(number)) return '需要数字'
+      if (number < min || number > max) return `需要在 ${min} ~ ${max} 之间`
+      return null
+    },
+  }
+}
+
+/** 事件来源可编辑的字段与取值校验。 */
+const EVENT_SOURCE_FIELDS: Record<string, 'text' | 'number' | 'boolean' | 'list' | 'priority' | 'githubEvents'> = {
+  enabled: 'boolean',
+  kind: 'text',
+  plugin: 'text',
+  repo: 'text',
+  events: 'githubEvents',
+  intervalMs: 'number',
+}
+
+/** 校验单个事件来源字段；字段名不认识就拒绝，避免面板写错键名。 */
+function validateEventSourceField(key: string, value: unknown): string | null {
+  const kind = EVENT_SOURCE_FIELDS[key]
+  if (!kind) return `不是可编辑的事件来源字段：${key}`
+  switch (kind) {
+    case 'boolean':
+      return typeof value === 'boolean' ? null : '需要布尔值'
+    case 'number': {
+      const number = Number(value)
+      if (!Number.isFinite(number) || number < 0) return '需要非负数字'
+      return null
+    }
+    case 'list':
+      return Array.isArray(value) ? null : '需要字符串数组'
+    case 'githubEvents':
+      if (!Array.isArray(value)) return '需要字符串数组'
+      for (const item of value) {
+        if (!isGithubEventType(item)) return `不是可订阅的 GitHub 事件类型：${String(item)}`
+      }
+      return null
+    case 'priority':
+      return EVENT_PRIORITIES.includes(String(value).toUpperCase() as EventPriority) ? null : `优先级只能是 ${EVENT_PRIORITIES.join(' / ')}`
+    default:
+      return typeof value === 'string' ? null : '需要字符串'
+  }
+}
+
+/**
+ * 校验整条事件来源条目（面板新增/修改仓库订阅时整体写入）。
+ *
+ * 只认 GitHub 来源需要的字段：仓库地址、启用开关与事件类型。
+ */
+function validateEventSourceEntry(value: unknown): string | null {
+  if (!isRecord(value)) return '事件来源必须是对象'
+  if (value.kind !== 'github') return '只支持 GitHub 来源的整体配置'
+  if (typeof value.enabled !== 'boolean') return '需要布尔值'
+  const repo = typeof value.repo === 'string' ? value.repo.trim() : ''
+  if (!repo) return '需要填写仓库地址（owner/repo）'
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return '仓库地址格式应为 owner/repo'
+  const events = value.events ?? []
+  if (!Array.isArray(events)) return '需要字符串数组'
+  for (const item of events) {
+    if (!isGithubEventType(item)) return `不是可订阅的 GitHub 事件类型：${String(item)}`
+  }
+  return null
+}
+
+/** 优先级列表校验：只接受 P0 ~ P4。 */
+function priorityListValue(): Validator {
+  return {
+    check: value => {
+      if (!Array.isArray(value)) return '需要优先级数组'
+      for (const item of value) {
+        if (!EVENT_PRIORITIES.includes(String(item).toUpperCase() as EventPriority)) return `优先级只能是 ${EVENT_PRIORITIES.join(' / ')}`
+      }
+      return null
+    },
+  }
+}
 
 function boolValue(): Validator {
   return { check: value => (typeof value === 'boolean' ? null : '需要 true / false') }
@@ -1677,6 +2041,16 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
 
   'worker.evidence.ui': enumValue(UI_EVIDENCE_MODES),
   'server.port': intValue(1, 65_535),
+  'server.host': {
+    check: value => {
+      if (typeof value !== 'string') return '需要字符串'
+      return normalizeServerHost(value) === value.trim() ? null : '不是合法的监听地址（IPv4 或主机名）'
+    },
+  },
+  // 令牌允许空串：留空表示不启用鉴权（只在本机监听时才安全）。
+  'server.token': {
+    check: value => (typeof value === 'string' ? null : '需要字符串'),
+  },
 
   'llm.baseUrl': stringValue,
   'llm.model': stringValue,
@@ -1684,10 +2058,27 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
   'llm.api': enumValue(LLM_APIS),
   'llm.authHeader': boolValue(),
   'llm.contextWindow': intValue(1_000, 10_000_000),
+
+  'events.enabled': boolValue(),
+  'events.decision.provider': enumValue(['jev', 'llm', 'rule']),
+  'events.decision.prompt': stringValue,
+  'events.decision.fallbackToPrompt': boolValue(),
+  'events.decision.confidenceThreshold': numberValue(0, 1),
+  'events.decision.fallback': enumValue(['review', 'pending']),
+  'events.policy.peak.start': stringValue,
+  'events.policy.peak.end': stringValue,
+  'events.policy.peak.priorities': priorityListValue(),
+  'events.policy.offPeak.start': stringValue,
+  'events.policy.offPeak.end': stringValue,
+  'events.policy.offPeak.priorities': priorityListValue(),
+  'events.policy.dailyEventLimit': intValue(0, 1_000_000),
+  'events.policy.perSourceDailyLimit': intValue(0, 1_000_000),
+  'events.policy.reviewNotify': boolValue(),
+  'events.policy.reviewChatId': stringValue,
 }
 
 /** 整段替换的复杂字段（项目、群、白名单这类不适合逐项点路径编辑的配置）。 */
-const LIST_PATHS = ['projects', 'feishu.chats'] as const
+const LIST_PATHS = ['projects', 'feishu.chats', 'events.rules'] as const
 
 /** 本地仓库绝对路径：接受 `/abs` 与 `path:/abs`，不接受 Orca 的 name:/id: 选择器。 */
 export function isLocalRepoPath(repo: string): boolean {
@@ -1831,9 +2222,55 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
       }
       continue
     }
+    // 事件来源的逐项配置：events.sources.<id>.<key>
+    const eventSourcePath = /^events\.sources\.([^.]+)\.(.+)$/.exec(path)
+    if (eventSourcePath) {
+      const sourceId = eventSourcePath[1]!
+      const key = eventSourcePath[2]!
+      const source = config.events.sources[sourceId]
+      // 来源还不存在时，只允许「先装插件再启用」这一条路径：新来源由 plugin 入口创建；
+      // enabled 必须与同一个补丁里的 plugin 入口成对出现，单独的 enabled 仍按未知来源拒绝。
+      const pluginDeclared = `events.sources.${sourceId}.plugin` in patch
+      if (!source
+        && key !== 'plugin'
+        && !(key === 'enabled' && pluginDeclared)
+        && !key.startsWith('options.')) {
+        errors.push({ path, message: `未知事件来源：${sourceId}` })
+        continue
+      }
+      // 插件自己声明的选项：只认标量，键名由插件决定，服务端不猜类型。
+      if (key.startsWith('options.')) {
+        const ok = typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
+        if (!ok) errors.push({ path, message: '插件选项只接受字符串、数字或布尔值' })
+        else accepted.push({ path, value })
+        continue
+      }
+      const message = validateEventSourceField(key, value)
+      if (message) errors.push({ path, message })
+      else accepted.push({ path, value })
+      continue
+    }
+    // 事件来源的整条配置：events.sources.<id>
+    const eventSourceWhole = /^events\.sources\.([^.]+)$/.exec(path)
+    if (eventSourceWhole) {
+      const sourceId = eventSourceWhole[1]!
+      // 空值表示删除这条来源。
+      if (value === null || value === '') {
+        accepted.push({ path, value: null })
+        continue
+      }
+      const message = validateEventSourceEntry(value)
+      if (message) errors.push({ path, message })
+      else accepted.push({ path, value })
+      continue
+    }
     if ((LIST_PATHS as readonly string[]).includes(path)) {
       if (path === 'projects') {
         const result = validateProjects(value)
+        if (result.error) errors.push({ path, message: result.error })
+        else accepted.push({ path, value: result.value })
+      } else if (path === 'events.rules') {
+        const result = validateEventRules(value)
         if (result.error) errors.push({ path, message: result.error })
         else accepted.push({ path, value: result.value })
       } else {
@@ -1841,6 +2278,12 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
         if (result.error) errors.push({ path, message: result.error })
         else accepted.push({ path, value: result.value })
       }
+      continue
+    }
+    // 令牌明文不下发给面板：回传空串表示「保持已配置的令牌」，与 llm.apiKey 同义。
+    if (path === 'server.token' && typeof value === 'string' && !value.trim()) {
+      if (config.server.token) continue
+      errors.push({ path, message: '访问令牌不能为空' })
       continue
     }
     const validator = path === 'runtime.default' ? runtimeIdValueFor(config, declared) : CONFIG_VALIDATORS[path]
@@ -1879,6 +2322,12 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
       setRuntimePlugin(config, path.slice('runtime.plugins.'.length), value as PluginEntry | '')
     } else if (path.startsWith('channels.')) {
       setChannelPlugin(config, path.slice('channels.'.length), value as PluginEntry | '')
+    } else if (/^events\.sources\.[^.]+\.plugin$/.test(path)) {
+      const sourceId = path.split('.')[2]!
+      setEventSourcePlugin(config, sourceId, String(value))
+    } else if (/^events\.sources\.[^.]+$/.test(path)) {
+      const sourceId = path.split('.')[2]!
+      setEventSourceEntry(config, sourceId, value)
     } else setPath(config as unknown as Record<string, unknown>, path, value)
     changed.push(path)
   }
@@ -2196,6 +2645,15 @@ export function setConfigValue(config: AppConfig, path: string, raw: string): bo
       config.server.port = v
       return true
     }
+    case 'server.host': {
+      const host = normalizeServerHost(value)
+      if (host !== value) return false
+      config.server.host = host
+      return true
+    }
+    case 'server.token':
+      config.server.token = value
+      return true
     case 'runtime.default': {
       const id = normalizeRuntimeId(value)
       if (!isKnownRuntimeId(config, id)) return false

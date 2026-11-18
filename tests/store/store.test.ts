@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { Store } from '../../src/store/db.js'
 import type { Assignment, Input, Intake, Report, Ticket, Trigger } from '#core/model.js'
 import { type Policy } from '#core/policy.js'
+import type { EventRecord } from '#core/event.js'
 
 function store(): Store {
   return new Store(':memory:')
@@ -700,5 +701,72 @@ describe('身份别名缓存', () => {
     rmSync(path, { force: true })
     rmSync(`${path}-wal`, { force: true })
     rmSync(`${path}-shm`, { force: true })
+  })
+})
+
+describe('事件队列', () => {
+  function event(over: Partial<EventRecord> = {}): EventRecord {
+    return {
+      id: 'evt_1',
+      sourceId: 'github',
+      sourceKind: 'github',
+      externalId: 'issue:a#1',
+      title: '登录偶发失败',
+      body: '偶发 500',
+      receivedAt: '2026-11-13T10:00:00.000Z',
+      status: 'pending',
+      execution: 'none',
+      priority: 'P2',
+      eventType: 'issue',
+      needsReview: false,
+      updatedAt: '2026-11-13T10:00:00.000Z',
+      attempts: 0,
+      ...over,
+    }
+  }
+
+  it('按状态统计条数，不受列表 limit 影响', () => {
+    const db = store()
+    for (let i = 0; i < 250; i += 1) {
+      db.insertEvent(event({ id: `evt_${i}`, externalId: `x#${i}` }))
+    }
+    db.insertEvent(event({ id: 'evt_done', externalId: 'x#done', status: 'done' }))
+    const counts = db.countEventsByStatus()
+    expect(counts.pending).toBe(250)
+    expect(counts.done).toBe(1)
+    expect(db.listEvents()).toHaveLength(200)
+    db.close()
+  })
+
+  it('按规则统计命中分布，未命中规则的事件不计入', () => {
+    const db = store()
+    db.insertEvent(event({ id: 'evt_a', externalId: 'x#a', ruleId: 'rule-a', status: 'pending' }))
+    db.insertEvent(event({ id: 'evt_b', externalId: 'x#b', ruleId: 'rule-a', status: 'review' }))
+    db.insertEvent(event({ id: 'evt_c', externalId: 'x#c', ruleId: 'rule-b', status: 'invalid' }))
+    db.insertEvent(event({ id: 'evt_d', externalId: 'x#d', status: 'undecided' }))
+    expect(db.countEventsByRule()).toEqual({
+      'rule-a': { pending: 1, review: 1, done: 0, invalid: 0 },
+      'rule-b': { pending: 0, review: 0, done: 0, invalid: 1 },
+    })
+    db.close()
+  })
+
+  it('已判定的事件不会再被当成待判定领取', () => {
+    const db = store()
+    db.insertEvent(event({ id: 'evt_new' }))
+    db.insertEvent(event({ id: 'evt_decided', externalId: 'x#2', decidedAt: '2026-11-13T10:00:00.000Z' }))
+    const claimed = db.claimPendingEvents()
+    expect(claimed.map(item => item.id)).toEqual(['evt_new'])
+    expect(claimed[0]?.attempts).toBe(1)
+    db.close()
+  })
+
+  it('判定过但没派出去的事件会被单独取出来重试', () => {
+    const db = store()
+    db.insertEvent(event({ id: 'evt_deferred', externalId: 'x#3', decidedAt: '2026-11-13T10:00:00.000Z', execution: 'deferred' }))
+    db.insertEvent(event({ id: 'evt_dispatched', externalId: 'x#4', decidedAt: '2026-11-13T10:00:00.000Z', ticketId: 'tk_1' }))
+    const waiting = db.listDecidedUndispatched()
+    expect(waiting.map(item => item.id)).toEqual(['evt_deferred'])
+    db.close()
   })
 })

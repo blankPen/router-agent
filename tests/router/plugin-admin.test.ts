@@ -16,7 +16,7 @@ function home(): string {
 }
 
 /** 模拟 npm install：写到 --prefix 下的 node_modules。 */
-function fakeNpm(options: { wait?: Promise<void>; kind?: 'runtime' | 'channel' } = {}): NpmRunner {
+function fakeNpm(options: { wait?: Promise<void>; kind?: 'runtime' | 'channel' | 'event' } = {}): NpmRunner {
   return async (args, opts) => {
     if (options.wait) await options.wait
     const prefixIndex = args.indexOf('--prefix')
@@ -191,6 +191,17 @@ describe('插件包安装任务', () => {
     expect(finished?.status).toBe('ok')
     // 完成以后可以再次启动。
     expect(() => admin.startInstall('runtime', 'my-runtime')).not.toThrow()
+  })
+
+  it('event 插件走同一套安装逻辑', async () => {
+    const dir = home()
+    const config = defaultConfig()
+    config.events.sources['demo-source'] = { enabled: true, plugin: 'demo-event-source' }
+    const admin = new PluginPackageAdmin({ home: dir, config, env: {}, runNpm: fakeNpm({ kind: 'event' }) })
+    const job = admin.startInstall('event', 'demo-source')
+    const finished = await waitJob(admin, job.id)
+    expect(finished?.status).toBe('ok')
+    expect(finished?.declaredId).toBe('x')
   })
 
   it('channel 插件走同一套安装逻辑', async () => {

@@ -12,6 +12,10 @@ import { admitsByScope, effectiveAdmins, scopeOf, shouldAcknowledge } from '#cor
 import { logDimensions } from '#core/events.js'
 import { loadRuntimePlugins, type LoadedRuntimePlugins } from '#runtime/plugins/loader.js'
 import { loadChannelPlugins, type LoadedChannelPlugins } from '#channel/plugins/loader.js'
+import { createEventWiring } from '../events/wiring.js'
+import { ruleEventTypes } from '../events/rules.js'
+import { compileEventRule } from '../events/rule-compile.js'
+import { createChatClient } from '#infra/chat.js'
 import { AcpRuntimeAdmin } from '@router-agent/runtime-acp'
 import { readDetectionSnapshot } from '@router-agent/runtime-acp'
 import { WORKER_RUNTIME_IDS, normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
@@ -22,6 +26,7 @@ import { createFeishuChannel, createFeishuDocumenter } from '@router-agent/chann
 import { ChannelIngress } from '#channel/ingress.js'
 import { ChannelRegistry } from '#channel/registry.js'
 import { ChannelRouter } from '#channel/router.js'
+import { DEFAULT_CHANNEL_ID } from '#channel/port.js'
 import { ChatDirectory } from '@router-agent/channel-feishu'
 import { resolveRuntimeIdentity, detailText, type IdentityCache, type IdentityStatusView, type RuntimeIdentity } from '@router-agent/channel-feishu'
 import { createLarkRunner, larkEnv } from '@router-agent/channel-feishu'
@@ -49,6 +54,7 @@ import { scanLocalProjects } from '../router/project-scan.js'
 import { createLogAssistant } from '../router/log-assistant.js'
 import { createDiagnosisTools } from '../router/diagnosis-tools.js'
 import { createIssueReporter } from '../router/issue-report.js'
+import { ensureServerToken, panelUrlList, tokenHeader } from './panel-url.js'
 
 // 版本号以 package.json 为唯一来源（见 src/update/index.ts），`ra -v` 与更新检查共用同一个值。
 export const VERSION: string = PACKAGE_VERSION
@@ -441,7 +447,7 @@ async function cmdReply(home: string, opts: ReplyOptions & { port?: string }, ou
     ? (title: string, markdown: string) => createFeishuDocumenter({ runner: output.lark ?? createLarkRunner() }).createDocument(title, markdown)
     : undefined
   return runReply(
-    { home, port, stdout: output.stdout, stderr: output.stderr, ...(createDocument ? { createDocument } : {}) },
+    { home, port, stdout: output.stdout, stderr: output.stderr, ...(config.server.token ? { token: config.server.token } : {}), ...(createDocument ? { createDocument } : {}) },
     opts,
   )
 }
@@ -824,7 +830,7 @@ async function cmdTicketStop(home: string, ticketId: string, output: CliIo): Pro
   try {
     const res = await fetch(`http://127.0.0.1:${config.server.port}/api/tickets/${ticketId}/stop`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...tokenHeader(config) },
       body: JSON.stringify({ reason: 'ra ticket --stop' }),
     })
     if (res.ok) {
@@ -907,6 +913,9 @@ function cmdConfig(home: string, output: CliIo): number {
   return 0
 }
 
+/** 回显时需要打码的配置项：密钥类字段不进 shell 历史 / 日志。 */
+const SECRET_CONFIG_KEYS = new Set(['llm.apiKey', 'decision.jev.apiKey', 'server.token'])
+
 function cmdConfigSet(home: string, key: string, value: string, output: CliIo): number {
   ensureHome(home)
   const path = join(home, 'config.yaml')
@@ -918,7 +927,7 @@ function cmdConfigSet(home: string, key: string, value: string, output: CliIo): 
   }
   writeConfig(home, config)
   // 密钥类字段不回显明文，避免进 shell 历史 / 日志。
-  output.stdout(key === 'llm.apiKey' ? `${key} = ******` : `${key} = ${value}`)
+  output.stdout(SECRET_CONFIG_KEYS.has(key) ? `${key} = ******` : `${key} = ${value}`)
   output.stdout(`已写入 ${path}`)
   return 0
 }
@@ -1094,7 +1103,7 @@ async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
 
 function cmdWeb(home: string, output: CliIo): number {
   const config = loadConfig(home)
-  const url = `http://127.0.0.1:${config.server.port}/`
+  const url = panelUrlList(home, config)[0]!
   output.stdout(`Web 面板: ${url}`)
   openPanel(url, output)
   return 0
@@ -1104,12 +1113,13 @@ async function cmdStart(home: string, opts: { foreground?: boolean; open?: boole
   ensureHome(home)
   const config = loadConfig(home, output.env as NodeJS.ProcessEnv)
   // 直接落到「初始化」页：ra start 之后要配的运行时 / 项目 / 飞书 / 群都在这里。
-  const panelUrl = `http://127.0.0.1:${config.server.port}/#setup`
+  const panelUrls = panelUrlList(home, config, '#setup')
+  const panelUrl = panelUrls[0]!
   const shouldOpen = opts.open !== false
   const pid = readPid(home)
   if (pid && alive(pid)) {
     output.stdout(`服务已在运行 (pid ${pid})`)
-    output.stdout(`Web 面板: ${panelUrl}`)
+    printPanelUrls(panelUrls, output)
     if (shouldOpen) await openPanelWhenReady(panelUrl, output)
     return 0
   }
@@ -1143,9 +1153,14 @@ async function cmdStart(home: string, opts: { foreground?: boolean; open?: boole
   writeFileSync(join(home, 'router-agent.pid'), String(child.pid ?? ''), 'utf8')
   output.stdout(`Router 服务已启动 (pid ${child.pid})`)
   output.stdout(`日志: ${join(home, 'logs', 'router-agent.log')}`)
-  output.stdout(`Web 面板: ${panelUrl}`)
+  printPanelUrls(panelUrls, output)
   if (shouldOpen) await openPanelWhenReady(panelUrl, output)
   return 0
+}
+
+/** 打印面板地址；对外开放时把局域网地址一并列出。 */
+function printPanelUrls(urls: string[], output: CliIo): void {
+  for (const url of urls) output.stdout(`Web 面板: ${url}`)
 }
 
 /** 服务就绪探测与浏览器打开：给服务 10 秒，避免刚启动时开出 404 白页。 */
@@ -1213,6 +1228,13 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   const logger = createLogger(home, output)
   const config = loadConfig(home, process.env, { logger })
   ensureHome(home)
+  // 对外开放却没有令牌：生成一个并落盘。
+  // 令牌必须持久化——每次启动换一个的话，已经发出去的地址会突然失效。
+  const tokenBefore = config.server.token
+  ensureServerToken(home, config)
+  if (!tokenBefore && config.server.token) {
+    logger.info('server:token-generated', { host: config.server.host })
+  }
   // 运行时探测在后台跑：先读缓存，API 立即可用，探测完成后刷新。
   const runtimeAdmin = new AcpRuntimeAdmin({ home, env: process.env, config })
   // 插件 npm 包安装任务：面板「安装依赖」与 CLI 共用同一套安装逻辑。
@@ -1569,6 +1591,43 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     })
     : null
 
+  // 事件总线：多来源事件 → 队列 → 决策 → 分级派发。
+  // 事件链路与飞书消息链路只在「派工 → Worker」处汇合：事件判定后合成工单，
+  // 之后完全沿用现有派工与 Worker 流程。
+  const eventWiring = createEventWiring({
+    config: () => config,
+    store,
+    engine,
+    logger,
+    runner: ghRunner,
+    model: () => model,
+    onReview: event => {
+      if (!config.events.policy.reviewNotify) return
+      const chatId = config.events.policy.reviewChatId.trim()
+      if (!chatId) return
+      const text = [
+        `事件待审核：${event.title}`,
+        `优先级：${event.priority}`,
+        event.reason ? `判定理由：${event.reason}` : '',
+        '到面板「事件」页批准 / 驳回 / 延后。',
+      ].filter(Boolean).join('\n')
+      store.enqueueOutbox({
+        id: `ob_event_review_${event.id}`,
+        key: `event:review:${event.id}`,
+        channelKind: DEFAULT_CHANNEL_ID,
+        channelId: chatId,
+        threadId: '',
+        text,
+        now: new Date().toISOString(),
+      })
+      logger.info('event:review-notified', { eventId: event.id, chatId })
+    },
+    onDispatched: () => {
+      // 事件开出的工单同样要尽快派出去，不用等下一个秒级 tick。
+      void service?.launchPending()
+    },
+  })
+
   const webRoot = fileURLToPath(new URL('../web', import.meta.url))
   // 日志页的智能排查助手：复用研判模型，没配模型时自动降级为规则式排查。
   // 助手还能读本机装的 router-agent 代码与当前配置，用来判断「是不是 ra 的 bug」。
@@ -1628,6 +1687,37 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       failures: [...runtimePlugins.failures, ...channelPlugins.failures],
     },
     update: updateService,
+    events: {
+      listEvents: filter => eventWiring.manager.listEvents(filter),
+      listSources: () => eventWiring.manager.listSources(),
+      apply: (eventId, action, options) => eventWiring.manager.apply(
+        eventId,
+        action as Parameters<typeof eventWiring.manager.apply>[1],
+        {
+          ...(options.priority ? { priority: options.priority as never } : {}),
+          ...(options.project ? { project: options.project } : {}),
+        },
+      ),
+      decision: () => {
+        const decision = config.events.decision
+        const version = Number(store.getCursor('events:decision-prompt-version') ?? '1')
+        return {
+          provider: decision.provider,
+          prompt: decision.prompt,
+          fallbackToPrompt: decision.fallbackToPrompt === true,
+          confidenceThreshold: decision.confidenceThreshold,
+          fallback: decision.fallback,
+          version: Number.isFinite(version) && version > 0 ? version : 1,
+        }
+      },
+      rules: () => config.events.rules,
+      ruleStats: () => eventWiring.manager.countEventRules(),
+      compileRule: input => compileEventRule(input, {
+        client: model ? createChatClient(model) : null,
+        logger,
+      }),
+      counts: () => eventWiring.manager.countEvents(),
+    },
     ...(feishuChannel?.admin ? { feishuBot: feishuChannel.admin } : {}),
     channels,
     identity: identityPort,
@@ -1660,11 +1750,33 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     onPolicyChange: updated => {
       logger.info('policy:updated', { version: engine.policy().version, acceptMode: updated.policy.acceptMode })
     },
-    onConfigChange: (_updated, changed) => {
+    onConfigChange: (updated, changed) => {
       logger.info('config:updated', { changed })
+      const promptChanged = changed.includes('events.decision.prompt')
+      const rulesChanged = changed.includes('events.rules')
+      const fallbackChanged = changed.includes('events.decision.fallbackToPrompt')
+      // 决策 prompt 改动后版本号 +1：历史判定记录用的版本还能回放。
+      let version: number | undefined
+      if (promptChanged || rulesChanged) {
+        const current = Number(store.getCursor('events:decision-prompt-version') ?? '1')
+        version = Number.isFinite(current) && current > 0 ? current + 1 : 2
+        store.setCursor('events:decision-prompt-version', String(version), new Date().toISOString())
+        logger.info('event:decision-prompt-updated', { version })
+      }
+      // 规则或全局兜底变化后，把之前只收集不判定的事件重新激活。
+      if (rulesChanged || fallbackChanged || (promptChanged && updated.events.decision.fallbackToPrompt)) {
+        const current = Number(store.getCursor('events:decision-prompt-version') ?? '1')
+        const next = version ?? (Number.isFinite(current) && current > 0 ? current : 1)
+        const fallback = updated.events.decision.fallbackToPrompt ? updated.events.decision.prompt : undefined
+        const activated = store.activateUndecidedEvents(ruleEventTypes(updated.events.rules, fallback), new Date().toISOString())
+        logger.info('event:rule-activated', { ruleId: rulesChanged ? 'config' : 'fallback', activated, version: next })
+      }
+      if (changed.some(path => path.startsWith('events.'))) {
+        void eventWiring.manager.reloadSources()
+      }
     },
   })
-  logger.info('api:listening', { port: config.server.port })
+  logger.info('api:listening', { port: config.server.port, host: config.server.host })
   // 首查走后台，失败只进日志；之后每 6 小时刷新一次，面板读到的是缓存结果。
   void updateService.check(true)
   const updateTimer = setInterval(() => { void updateService.check(true) }, 6 * 60 * 60 * 1_000)
@@ -1725,16 +1837,22 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   }
   const chatTimer = service ? setInterval(refreshChats, 600_000) : null
   chatTimer?.unref()
+  // 总开关关着也要起管理器：面板随时可能打开它，起晚了判定管线不会跟着启动。
+  await eventWiring.manager.start()
+  if (config.events.enabled) {
+    output.stdout(`事件总线已启动（${Object.keys(config.events.sources).filter(id => config.events.sources[id]?.enabled).length} 个来源已启用）。`)
+  }
   if (service) {
     refreshChats()
     await service.start()
-    output.stdout(`Router 服务运行中：http://127.0.0.1:${config.server.port}/`)
+    output.stdout(`Router 服务运行中：${panelUrlList(home, config)[0]}`)
   } else {
-    output.stdout(`Web 配置服务运行中：http://127.0.0.1:${config.server.port}/（LLM 未配置，Router 未启动）`)
+    output.stdout(`Web 配置服务运行中：${panelUrlList(home, config)[0]}（LLM 未配置，Router 未启动）`)
   }
 
   const stopRuntime = (): void => {
     channels.stopAll()
+    eventWiring.manager.stop()
     if (chatTimer) clearInterval(chatTimer)
     clearInterval(updateTimer)
     if (updateRestartTimer) {

@@ -247,17 +247,65 @@ Router 不做对话，只在必要时说话：
 | `session:transcript-failed` / `session:reset-failed` | Agent Loop | `key` `detail` | 会话转录 / `/new` 重置失败，不影响当轮回复 |
 | `config:created` | Config | `path` | 首次启动写入了默认 `config.yaml` |
 | `config:parse-failed` | Config | `path` `detail` | YAML 解析失败，已降级为默认配置启动 |
+| `config:event-rules-invalid` | Config | `detail` | `events.rules` 校验失败，已忽略该段规则并保留空规则集 |
 | `config:legacy-backend` | Config | `path` | 旧版 `backend` 段已兼容映射到 `runtime` |
 | `config:intake-migrated` | Config | `chats` `enabled` `maxQuestions` | 旧版全局 `intake:` 段已迁移到群级配置（`chats` 是被迁移的群） |
 | `config:invalid-security-override` | Config | `runtime` `keys` | `runtime.options` 试图覆盖安全参数，启动被拒绝 |
 | `config:updated` | CLI | `changed` | 面板保存配置落盘成功并生效 |
 | `policy:updated` | CLI | `version` `acceptMode` | 面板保存后策略版本变化 |
 | `config:patch-rejected` / `config:write-failed` | HTTP API | `errors` / `detail` | 面板保存的配置校验失败或落盘失败 |
+| `config:event-rule-rejected` / `config:event-rule-write-failed` | HTTP API | `errors` / `home` `detail` | 单条规则保存校验失败 / 落盘失败 |
 | `api:config` | HTTP API | `changed` `policyChanged` `restartRequired` `identityEffective` | 配置保存成功、是否需要重启、允许名单是否已即时生效 |
-| `api:listening` | CLI | `port` | HTTP API 已监听 |
+| `api:event-rule-compiled` | HTTP API | `ruleId` `eventType` | 面板请求规则提炼完成 |
+| `api:event-rules` | HTTP API | `changed` `count` | 规则单条保存 / 删除成功 |
+| `api:listening` | CLI | `port` `host` | HTTP API 已监听 |
+| `api:access-denied` | HTTP API | `method` `path` `remote` `host` | 开放监听后请求没带访问令牌，被 401 拒绝 |
+| `api:access-token-missing` | HTTP API | `host` | 对外监听却没有访问令牌，服务拒绝启动 |
+| `server:token-generated` | CLI | `host` | 开放监听但没配令牌，启动时自动生成并写回配置 |
 | `api:report` | HTTP API | `ticketId` `state` `turn` | HTTP 通道收到的 worker 上报 |
 | `api:spec` | HTTP API | `spec` `action` | 人格 / 规范文本保存或重置 |
 | `api:workspace-cleanup` | HTTP API | `requested` `runtimeId` `removed` `skipped` | 面板批量清理工作区成功 |
+| `event:manager-started` / `event:manager-stopped` | Event | `sources` | 事件总线启停；`sources` 是已装配的来源数 |
+| `event:manager-disabled` | Event | — | 事件总开关关着，来源不会装配 |
+| `event:sources-loaded` / `event:source-registered` | Event | `count` / `sourceId` `kind` | 来源装配完成 / 单个来源注册成功 |
+| `event:source-poll-failed` | Event | `sourceId` `detail` | 拉取事件失败；下次轮询继续重试，事件不丢 |
+| `event:github-poll-failed` | Event | `sourceId` `repo` `detail` | GitHub 来源调 `gh` 失败（未登录 / 仓库不存在 / 限流）；本次不拉取，下次轮询再试 |
+| `event:github-baseline` | Event | `sourceId` `cursorKey` `maxId` | 首次订阅建立基线：只记当前水位，存量历史不入队；`maxId` 只按命中订阅的事件计算，不被 id 空间不同的仓库级事件顶偏 |
+| `event:github-window-skipped` | Event | `sourceId` `cursorKey` `skipped` `since` | 增量拉取时跳过早于 3 天窗口的事件：游标照常推进，窗口外的事件不入队 |
+| `event:source-not-configured` | Event | `sourceId` `kind` | 来源没配关键字段（如 GitHub 没填仓库），本次不拉取 |
+| `event:source-unsupported` | Event | `sourceId` `kind` | 来源种类不认识，未装配 |
+| `event:source-placeholder` | Event | `sourceId` `kind` | 占位来源（飞书消息订阅本期只留开关） |
+| `event:source-duplicate` | Event | `sourceId` | 同名来源重复注册，先注册的继续跑（插件重载不覆盖正在跑的来源） |
+| `event:source-stop-failed` | Event | `sourceId` `detail` | 停来源抛错；不影响其它来源 |
+| `event:ingested` | Event | `eventId` `sourceId` `sourceKind` `externalId` `title` `status` `ruleId` | 事件进入队列；`status` 为 `pending`（命中规则）或 `undecided`（只收集） |
+| `event:duplicate` | Event | `eventId` `sourceId` `externalId` | 同一来源的同一事件重复到达，按 `(来源, externalId)` 幂等忽略；已处理的状态与工单不会被覆盖 |
+| `event:rule-matched` | Event | `eventId` `ruleId` `eventType` `ruleVersion` | 事件命中规则，开始判定 |
+| `event:rule-unmatched` | Event | `eventId` `eventType` | 没有匹配规则；事件保持未判定，不调模型 |
+| `event:rule-activated` | Event | `ruleId` `activated` | 规则或全局兜底变更 / 启动后重新激活的未判定事件数；`ruleId` 为 `config` / `fallback` / `startup` 时表示批量激活 |
+| `event:rule-compiled` | API / RuleCompiler | `ruleId` `eventType` | 自然语言提炼规则草稿成功 |
+| `event:rule-compile-failed` | RuleCompiler | `ruleId` `detail` | 提炼失败，返回内置模板并保留用户原文 |
+| `event:jev-failed` | Decision | `eventId` `ruleId` `detail` | Jev 请求或答案解析失败；上层按判定未完成处理 |
+| `event:invalid` | Event | `eventId` `sourceId` `reason` | 事件被判为无效（P4），只留记录不再处理 |
+| `event:review-queued` | Event | `eventId` `sourceId` `priority` `reason` | 事件需要人审，已进待审核队列 |
+| `event:review-notified` | Event | `eventId` `chatId` | 待审核事件已推送给管理员 |
+| `event:deferred` | Event | `eventId` `sourceId` `reason` | 时间窗或配额不允许，顺延等待（不丢事件） |
+| `event:dispatched` | Event | `eventId` `sourceId` `ticketId` `priority` `project` `skill` | 事件已开单，交给现有 Worker 链路执行 |
+| `event:already-dispatched` | Event | `eventId` `ticketId` | 同一事件重复处理，但工单已开过；不重复开单 |
+| `event:dispatch-failed` | Event | `eventId` `detail` | 事件开单失败，已转人工处理 |
+| `event:process-failed` | Event | `eventId` `sourceId` `detail` | 判定或派发过程抛错，事件标成失败态等人处理 |
+| `event:completed` | Event | `eventId` `ticketId` | 事件对应工单已完成，结论已回写来源 |
+| `event:writeback-failed` / `event:writeback-skipped` | Event | `eventId` `sourceId` `detail` | 结论回写来源失败 / 来源没有回写能力（只落库） |
+| `event:writeback-unsupported` | Event | `sourceId` `externalId` | 来源不支持回写（没配回调地址 / 取不到 issue 号），结论只落库 |
+| `event:decision-failed` | Event | `eventId` `provider` `detail` | 判定模型调用失败，已降级为待审核（事件不丢） |
+| `event:decision-no-output` | Event | `eventId` `provider` | 模型没给出可用结论，按兜底处理 |
+| `event:decision-unparsable` | Event | `eventId` | 模型返回的内容解析不出 JSON 结论，按兜底处理 |
+| `event:decision-incomplete` | Event | `eventId` `sourceId` `ruleId` `reason` | 判定没完成（模型失败等）；事件留在队列等下一轮，不派工也不丢 |
+| `event:attempts-exceeded` | Event | `eventId` `sourceId` `attempts` `detail` | 判定连续失败超过上限，已转人工处理，不再重试 |
+| `event:decision-provider-unavailable` | Event | `provider` | 判定用的模型没配好，本轮退回规则判定 |
+| `event:decision-prompt-updated` | Event | `version` | 决策 prompt 被修改，版本号 +1（历史判定可回放） |
+| `event:priority-changed` / `event:ignored` / `event:retry` | Event | `eventId` `priority` / `action` | 面板上手工改优先级 / 忽略 / 重试 |
+| `event:tick-failed` | Event | `detail` | 事件管线一轮处理抛错，不影响下一轮 |
+| `event:plugin-failed` | Event | `sourceId` `detail` | 自定义事件来源插件加载或创建失败，不影响其它来源 |
 | `api:workspace-cleanup-failed` | HTTP API | `requested` `runtimeId` `detail` | 面板批量清理工作区失败 |
 | `api:channels` | HTTP API | `count` | 面板读取已注册的消息通道（渠道配置的渠道列表来源） |
 | `api:request-failed` | HTTP API | `method` `path` `detail` | 请求级未预期异常（客户端会收到 500） |

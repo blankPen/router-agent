@@ -31,7 +31,7 @@ export interface PluginMeta {
   default?: boolean
 }
 
-export type PluginKind = 'runtime' | 'channel'
+export type PluginKind = 'runtime' | 'channel' | 'event'
 
 /** node:module 的 resolve/import 抽象；测试可注入。 */
 export interface PluginModuleLoader {
