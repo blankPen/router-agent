@@ -35,9 +35,10 @@ Router 不做对话，只在必要时说话：
 
 ## Web 面板
 
-`ra start` 自动打开、`ra web` 也可随时打开的面板分六块：
+`ra start` 自动打开、`ra web` 也可随时打开的面板分七块：
 
 - **初始化**：只放启动必需的五件事——LLM Provider、运行时、项目、渠道接入、监控群，顶部有完成度清单；LLM Provider 的 Base URL / 模型 / API Key 三项必填（密钥只写入 `config.yaml`，保存后不回显），可选 OpenAI / Anthropic 两种接口协议，并支持从 Claude Code、CCSwitch、Pi、OpenCode、Magpie 的本地 Provider 配置一键导入；渠道那一步走渠道注册表：先选渠道（当前内置飞书），再填它的接入项（应用凭据 / 机器人与授权 / 群与绑定 + 接收私聊），App Secret 与授权也直接在本页完成（固定 `~/.router-agent-lark` profile）。新增渠道只需补一份描述与表单，初始化页不用改。逐项说明见 [README · 快速开始](../README.md#快速开始)；运行时的卡片检测与安装引导见 [RUNTIME.md](RUNTIME.md)。
+- **自动化**：定时任务的入口，默认放在「收件箱」下方、「工单」上方。页面两个 Tab：「自动化任务」可新建 / 编辑 / 启停 / 删除 / 手动执行一次，脚本自动化还能查看与人工编辑已持久化的脚本；「执行记录」列出每次触发的状态、耗时、结果摘要与产出（新建工单 / 事件）。飞书里的自然语言会先整理成「待确认草稿」，在面板确认保存前不写入正式任务。详见 [AUTOMATION.md](AUTOMATION.md)。
 - **收件箱**：事件队列的入口（原来叫「事件」，排在「工单」上面）：所有来源的事件先进同一个队列，判定后分级派发——能自动做的直接开单，需要人决定的在这里批准 / 驳回 / 延后；顶部按「未判定 / 待审核 / 待处理 / 已完成 / 无效」分档计数，表格列出优先级、事件类型、判定理由与操作按钮。来源订阅与判定策略属于配置，去「配置 → 事件总线」里改。
 - **工单**：按阶段分组 + 计数、关键字搜索（标题 / 工单号 / 仓库 / PR）、自动刷新开关与手动刷新；详情页有阶段、派工、PR、授权范围、上报时间线（含完整回复与 `humanAction`）、投递记录，可直接投递 follow-up 或停止工单。**人工停止工单会立即回收对应的 workspace**（先停 worker，再删 worktree）；而闲置超时、PR 合并等**自动关单只停 worker，workspace 会保留一段时间（默认 24 小时）后由定时任务回收**，也可以随时在「清理工作区」里手动回收。页头还有「清理工作区」入口：按 Worker 运行时分组列出仍在磁盘上的工单工作区，可勾选多个工单批量清理。清理动作按工单各自的运行时执行——Orca 关闭 worktree 并删除目录，Claude Code 删除 `claude agents` 视图与 worktree 目录，ACP 直接删除 worktree 目录；在办工单与有未提交改动的目录会被跳过，并在结果里说明原因。
 - **日志**：直接看 `~/.router-agent/logs/router-agent.log`，默认 2 秒增量拉取（只读游标之后的新字节，不重复读整个文件），可开「实时刷新」。日志页是一张**表**：一行一条事件，列依次是「时间 / 级别 / 类别 / 事件 / 群 / 发起人 / 运行时 / 工单 / 详情」——群名、发起人（用户还是机器人）、运行时、消息还是事件都不用再从原始字段里猜。点事件名展开该行，能看到这条事件的全部字段与原始值。筛选按「级别 + 类别 + 域 + 动作 + 群 + 发起人 + 运行时 + 工单 + 追踪 ID + 关键字」多维取交集，每个维度都带命中条数；复制当前结果；停在底部时自动跟随新日志，往上翻后不再打断，点「最新」回到底部。文件不存在或还没写入时给出空状态提示。
@@ -268,6 +269,23 @@ Router 不做对话，只在必要时说话：
 | `server:token-generated` | CLI | `host` | 开放监听但没配令牌，启动时自动生成并写回配置 |
 | `api:report` | HTTP API | `ticketId` `state` `turn` | HTTP 通道收到的 worker 上报 |
 | `api:spec` | HTTP API | `spec` `action` | 人格 / 规范文本保存或重置 |
+| `automation:scheduler-started` / `automation:scheduler-stopped` | Automation | `tasks` | 调度器随服务启停；`tasks` 是当前任务数 |
+| `automation:manual-trigger` | Automation | `automationId` `name` | 面板 / CLI 手动触发一次 |
+| `automation:execute-start` | Automation | `automationId` `type` `runtime` `project` `timeoutMs` | 一次执行开始：类型、运行时与目标项目 |
+| `automation:script-generating` / `automation:script-generated` / `automation:script-generate-failed` / `automation:script-generate-unavailable` | Automation | `automationId` `chars` / `reason` / `detail` | 脚本自动化的生成过程；没配模型时降级并留原因 |
+| `automation:script-persisted` / `automation:script-persist-failed` | Automation | `automationId` `chars` / `detail` | 生成的脚本写回任务定义成功 / 落盘失败 |
+| `automation:script-empty` / `automation:script-missing` / `automation:script-write-failed` | Automation | `automationId` `scriptPath` / `detail` | 脚本为空、任务没有脚本正文或落盘失败 |
+| `automation:script-staged` / `automation:script-stage-failed` | Automation | `automationId` `scriptPath` / `workdir` `detail` | 落盘脚本已复制到 runtime 的 worktree / 复制失败 |
+| `automation:runtime-started` / `automation:runtime-start-failed` / `automation:runtime-workdir-missing` | Automation | `automationId` `runtime` `handle` `workdir` / `detail` | runtime 会话已启动 / 启动失败 / 没有返回工作目录 |
+| `automation:runtime-finished` / `automation:runtime-failed` / `automation:runtime-stop-failed` | Automation | `automationId` `runtime` `durationMs` `ticketIds` `eventIds` / `detail` | 执行结束、失败或停会话失败 |
+| `automation:status-failed` / `automation:output-failed` | Automation | `automationId` `runtime` `detail` | 轮询 runtime 状态或读尾部输出失败；执行继续，失败原因留在日志 |
+| `automation:missed` | Automation | `automationId` `scheduledAt` `delayMs` | 服务未运行导致过期，记为 missed 且不补跑 |
+| `automation:retry` | Automation | `automationId` `attempt` `status` | 失败后按 `maxRetries` 重试 |
+| `automation:run-finished` | Automation | `automationId` `status` `durationMs` `ticketIds` `eventIds` | 执行记录收尾；面板「执行记录」的数据来源 |
+| `automation:executor-missing` / `automation:schedule-invalid` / `automation:execute-failed` | Automation | `automationId` `type` / `detail` | 执行器缺失、计划非法或执行抛错 |
+| `automation:tool-invoked` / `automation:tool-rejected` / `automation:tool-failed` | Automation | `automationId` `tool` `error` `detail` | 内置工具调用成功 / 被范围或限流拒绝 / handler 抛错 |
+| `automation:draft-created` / `automation:draft-uncertain` / `automation:draft-unavailable` / `automation:draft-failed` / `automation:draft-dismissed` | Automation | `draftId` `automationId` `source` `detail` | 对话式草稿的创建、回问、降级与忽略 |
+| `config:automation-invalid` | Config | `detail` | `automation.tasks` 中某条任务校验失败，已忽略该条 |
 | `api:workspace-cleanup` | HTTP API | `requested` `runtimeId` `removed` `skipped` | 面板批量清理工作区成功 |
 | `event:manager-started` / `event:manager-stopped` | Event | `sources` | 事件总线启停；`sources` 是已装配的来源数 |
 | `event:manager-disabled` | Event | — | 事件总开关关着，来源不会装配 |

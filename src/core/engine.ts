@@ -1,4 +1,5 @@
 import type { Store } from '../store/db.js'
+import { createHash } from 'node:crypto'
 import { attachmentsOf, withAttachmentManifest } from './attachments.js'
 import { negotiateAcceptance, type Policy, type Acceptance } from '#core/policy.js'
 import { computeStage } from '#core/stage.js'
@@ -242,6 +243,53 @@ export class Engine {
       text: preview(trigger.text, 120),
     })
     return { decision: record, acceptance, ticket, mandate }
+  }
+
+  /**
+   * 写入一条合成的 Trigger（自动化任务、事件等非消息来源）。
+   *
+ * 合成 Trigger 走同一条入库路径：线程解析、去重、审计口径都与消息一致，
+ * 这样自动化创建工单时不需要另开一套建单逻辑。
+   */
+  ingestSyntheticTrigger(input: {
+    source: string
+    title: string
+    text: string
+    chatId: string
+    chatName: string
+    actorId: string
+    actorName: string
+  }): string {
+    const now = this.clock.now()
+    // externalId 由内容哈希派生：同一份合成请求重复提交不会重复开单。
+    const digest = createHash('sha256')
+      .update(`${input.source} ${input.chatId} ${input.title} ${input.text}`)
+      .digest('hex')
+      .slice(0, 16)
+    const trigger: Trigger = {
+      id: this.ids.next('trg'),
+      source: input.source,
+      externalId: digest,
+      threadId: `${input.source}:${input.chatId}`,
+      chatId: input.chatId,
+      chatName: input.chatName,
+      actorId: input.actorId,
+      actorName: input.actorName,
+      isBot: true,
+      text: `${input.title}\n${input.text}`.trim(),
+      addressed: 'none',
+      receivedAt: now,
+      disposition: 'pending',
+    }
+    this.ingest(trigger)
+    this.onEvent({
+      event: 'trigger:ingested',
+      triggerId: trigger.id,
+      ...messageContext(trigger),
+      source: trigger.source,
+      text: preview(trigger.text, 120),
+    })
+    return trigger.id
   }
 
   startAssignment(ticketId: string, opts: { runtimeId: string; handle: string; workdir: string }): Assignment {

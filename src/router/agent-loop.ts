@@ -14,6 +14,7 @@ import { isSmallTalk as smallTalkRule } from '#core/admission.js'
 import { toolScopeFor } from '#core/tool-scope.js'
 import type { SessionKeyParts } from './session-registry.js'
 import { modelFailureMessage } from './model-failure.js'
+import { looksLikeAutomationIntent } from '../automation/intent.js'
 import type {
   DecisionAudit,
   DecisionEngine,
@@ -66,6 +67,11 @@ export interface AgentLoopOptions {
     /** 决策层（确定性准入 + Jev/LLM 分类）；传入后替代普通成员路径的 LLM 初筛。 */
     decisionAgent?: DecisionAgent
   }
+  /**
+   * 对话式创建自动化：命中意图时回一段确认话（已整理成草稿 / 需要补充信息），
+   * 返回 null 表示不接管，消息继续走原链路。
+   */
+  automationDraft?: (trigger: Trigger) => Promise<string | null>
 }
 
 export interface ClarifyInfo {
@@ -184,6 +190,7 @@ export class AgentLoop {
   private onAudit?: (audit: DecisionAudit) => void
   private logger: Logger
   private intake?: IntakeCoordinator
+  private automationDraft?: (trigger: Trigger) => Promise<string | null>
 
   constructor(opts: AgentLoopOptions) {
     this.engine = opts.engine
@@ -204,6 +211,7 @@ export class AgentLoop {
     this.decisionEngine = opts.decisionEngine
     this.onAudit = opts.onAudit
     this.logger = opts.logger ?? noopLogger
+    this.automationDraft = opts.automationDraft
     this.intake = opts.intake
       ? new IntakeCoordinator({
           store: this.store,
@@ -290,6 +298,25 @@ export class AgentLoop {
       }
 
       const verdict = gate(trigger, this.engine.policy())
+      // 对话式创建自动化：只接管明确的「定时 / 监听」类意图，草稿待面板确认。
+      // 未寻址的消息与准入拒绝的消息不接管，避免把闲聊或越权请求当成建任务。
+      if (
+        this.automationDraft
+        && verdict.action !== 'ignore'
+        && !trigger.isBot
+        && this.shouldReply(trigger)
+        && looksLikeAutomationIntent(trigger.text)
+      ) {
+        const reply = await this.automationDraft(trigger)
+        if (reply) {
+          this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'inferred', reason: 'automation:draft' })
+          this.reply(trigger, reply, `automation:draft:${trigger.id}`)
+          await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}\nRouter：${reply}`)
+          result.replied += 1
+          return
+        }
+      }
+
       // 角色分流：管理员直进 Router；普通成员一律先过决策层，由决策层决定要不要跟进。
       // 群级白名单（含「配了但一个都没解析出来」）是硬边界，不允许普通成员路径绕过。
       // 没装需求会话链路（没有决策层与分析 Agent）时保持旧行为：普通成员的消息照旧走研判，

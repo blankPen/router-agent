@@ -14,9 +14,15 @@ describe('侧栏菜单', () => {
     expect(tabs.indexOf('events')).toBeLessThan(tabs.indexOf('tickets'))
   })
 
+  it('「自动化」排在「收件箱」之下、「工单」之上', () => {
+    const tabs = navItems(0).map(item => item.tab)
+    expect(tabs.indexOf('events')).toBeLessThan(tabs.indexOf('automation'))
+    expect(tabs.indexOf('automation')).toBeLessThan(tabs.indexOf('tickets'))
+  })
+
   it('其余菜单项相对顺序保持不变', () => {
     const tabs = navItems(0).map(item => item.tab)
-    expect(tabs).toEqual(['setup', 'events', 'tickets', 'config', 'sources', 'logs'])
+    expect(tabs).toEqual(['setup', 'events', 'automation', 'tickets', 'config', 'sources', 'logs'])
   })
 
   it('在办工单数只挂在「工单」上', () => {

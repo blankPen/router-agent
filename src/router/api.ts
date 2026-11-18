@@ -5,7 +5,7 @@ import { homedir } from 'node:os'
 import { extname, join, normalize, resolve } from 'node:path'
 import type { Store } from '../store/db.js'
 import type { Engine } from '../core/engine.js'
-import { applyConfigPatch, HOT_CONFIG_PREFIXES, isKnownRuntimeId, isLoopbackHost, policyOf, publicConfig, publicDefaults, publicPlugins, requiresRestart, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
+import { applyConfigPatch, HOT_CONFIG_PREFIXES, isKnownRuntimeId, isLoopbackHost, policyOf, projectsForRuntime, publicConfig, publicDefaults, publicPlugins, requiresRestart, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
 import { InstallStartError, type AcpRuntimeAdmin } from '@router-agent/runtime-acp'
 import { normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
 import { ReportRejectedError } from '#runtime/evidence-gate.js'
@@ -109,6 +109,30 @@ export interface EventApiPort {
   counts(): Record<string, number>
 }
 
+/** 自动化的面板能力；缺省时自动化相关端点返回 404。 */
+export interface AutomationApiPort {
+  /** 任务列表（含调度状态）。 */
+  listTasks(): unknown[]
+  /** 执行记录列表。 */
+  listRuns(automationId?: string): unknown[]
+  /** 待确认的对话式草稿。 */
+  listDrafts(): unknown[]
+  /** 忽略一条待确认草稿。 */
+  dismissDraft(id: string): boolean
+  /** 手动触发一次；返回执行记录。 */
+  trigger(id: string): Promise<unknown | null>
+  /** 从自然语言生成任务草稿（对话式创建入口用）。 */
+  draft(text: string): Promise<unknown | null>
+  /** 调用自动化内置工具；范围与限流在服务层强制。 */
+  invokeTool(automationId: string, name: string, args: Record<string, unknown>): Promise<{
+    ok: boolean
+    status: number
+    error: string
+    hint?: string
+    result?: unknown
+  }>
+}
+
 export interface ApiServerOptions {
   engine: Engine
   store: Store
@@ -138,6 +162,8 @@ export interface ApiServerOptions {
   channels?: ChannelRegistry
   /** 事件总线；缺省时事件相关端点返回 404。 */
   events?: EventApiPort
+  /** 自动化；缺省时自动化相关端点返回 404。 */
+  automation?: AutomationApiPort
   /** 面板「日志」页读取的日志文件；缺省时用 `<home>/logs/router-agent.log`。 */
   logPath?: string
   /** 项目登记：目录选择、Git 探测、clone 与 Orca 仓库登记；缺省时端点返回 404。 */
@@ -361,6 +387,67 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
     if (path === '/api/events/rules' && req.method === 'GET') {
       if (!opts.events) return respond(res, 404, { error: 'events-not-supported' })
       return respond(res, 200, { rules: opts.events.rules(), ruleStats: opts.events.ruleStats() })
+    }
+
+    // 自动化：任务列表、执行记录与手动触发。
+    if (path === '/api/automations' && req.method === 'GET') {
+      if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
+      return respond(res, 200, {
+        tasks: opts.automation.listTasks(),
+        runs: opts.automation.listRuns(url.searchParams.get('automationId') ?? undefined),
+        drafts: opts.automation.listDrafts(),
+      })
+    }
+
+    if (path === '/api/automations/runs' && req.method === 'GET') {
+      if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
+      return respond(res, 200, { runs: opts.automation.listRuns(url.searchParams.get('automationId') ?? undefined) })
+    }
+
+    if (path === '/api/automations/trigger' && req.method === 'POST') {
+      if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
+      const body = await readJson(req)
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      if (!id) return respond(res, 400, { error: 'id-required', message: '自动化任务 id 不能为空' })
+      const run = await opts.automation.trigger(id)
+      if (!run) return respond(res, 404, { error: 'automation-not-found' })
+      return respond(res, 201, { run })
+    }
+
+    if (path === '/api/automations/draft' && req.method === 'POST') {
+      if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
+      const body = await readJson(req)
+      const text = typeof body.text === 'string' ? body.text.trim() : ''
+      if (!text) return respond(res, 400, { error: 'text-required', message: '请先描述要创建的自动化' })
+      const draft = await opts.automation.draft(text)
+      // 识别不确定时不自动落库：返回 null 让面板提示用户补充说明。
+      if (!draft) return respond(res, 200, { draft: null, message: '没能确定要创建的自动化，请补充说明。' })
+      return respond(res, 200, { draft })
+    }
+
+    if (path === '/api/automations/drafts/dismiss' && req.method === 'POST') {
+      if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
+      const body = await readJson(req)
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      if (!id) return respond(res, 400, { error: 'id-required', message: '草稿 id 不能为空' })
+      const changed = opts.automation.dismissDraft(id)
+      if (!changed) return respond(res, 404, { error: 'draft-not-found' })
+      return respond(res, 200, { ok: true })
+    }
+
+    // 自动化工具调用：runtime 里的 agent 通过它操作工单与事件。
+    // 范围与鉴权在服务层强制（工具只允许操作本任务所属项目的数据）。
+    if (path === '/api/automations/tools' && req.method === 'POST') {
+      if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
+      const body = await readJson(req)
+      const id = typeof body.automationId === 'string' ? body.automationId.trim() : ''
+      const name = typeof body.name === 'string' ? body.name.trim() : ''
+      if (!id) return respond(res, 400, { error: 'automationId-required', message: '自动化任务 id 不能为空' })
+      if (!name) return respond(res, 400, { error: 'name-required', message: '工具名不能为空' })
+      const args = isRecord(body.args) ? body.args : {}
+      const outcome = await opts.automation.invokeTool(id, name, args)
+      if (!outcome.ok) return respond(res, outcome.status, { error: outcome.error, ...(outcome.hint ? { hint: outcome.hint } : {}) })
+      return respond(res, 200, { result: outcome.result })
     }
 
     if (path === '/api/events/rules/compile' && req.method === 'POST') {
@@ -1199,6 +1286,12 @@ function configPayload(
     plugins: publicPlugins(config, plugins),
     detecting: runtimeAdmin?.isDetecting() ?? false,
     identity: identity?.snapshot() ?? emptyIdentityStatus(),
+    // 项目清单：自动化面板要选目标项目，不必再让前端解析配置草稿。
+    projects: projectsForRuntime(config).map(project => ({
+      name: project.name,
+      repo: project.repo,
+      defaultBranch: project.defaultBranch,
+    })),
     // 哪些配置路径保存后立即生效：面板按它给配置项标「立即生效 / 重启生效」。
     hotPaths: [...HOT_CONFIG_PREFIXES],
   }

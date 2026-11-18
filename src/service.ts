@@ -113,6 +113,8 @@ export interface RouterServiceOptions {
   kickoff?: { start(ticket: Ticket): Promise<unknown> }
   /** Claude Code 会话记录目录；默认 ~/.claude/projects，测试可注入。 */
   claudeProjectsDir?: string
+  /** 对话式创建自动化：生成草稿并回一段确认话；返回 null 表示不接管。 */
+  automationDraft?: (trigger: Trigger) => Promise<string | null>
 }
 
 /** 进展游标的起点标记：表示「从派工这一刻开始」，之前没有需要同步的报告。 */
@@ -661,6 +663,7 @@ export class RouterService {
             },
           }
         : {}),
+      ...(opts.automationDraft ? { automationDraft: opts.automationDraft } : {}),
     })
     this.poller = opts.poller ?? new ReportPoller({
       workersDir: join(opts.config.home, 'workers'),

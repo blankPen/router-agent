@@ -6,13 +6,14 @@
  * `events` 是事件队列页签的标识，界面上叫「收件箱」；标识与 hash 不动，
  * 免得已有的链接与深链失效。
  */
-export const TABS = ['setup', 'tickets', 'events', 'logs', 'config', 'sources'] as const
+export const TABS = ['setup', 'tickets', 'events', 'automation', 'logs', 'config', 'sources'] as const
 
 export type Tab = typeof TABS[number]
 
 /** 从 hash 解析页签；不认识的值返回 null，由调用方回退默认页。 */
 export function tabFromHash(hash: string): Tab | null {
-  const value = hash.replace(/^#/, '').trim()
+  // 允许 `#tickets/tk-42` 这类深链：首段是页签，后面是页面自己的定位参数。
+  const value = hash.replace(/^#/, '').split(/[/?]/)[0]!.trim()
   return (TABS as readonly string[]).includes(value) ? value as Tab : null
 }
 
