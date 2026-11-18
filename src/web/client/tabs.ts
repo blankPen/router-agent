@@ -2,6 +2,9 @@
  * 面板页签与 URL hash 的映射。
  *
  * `ra start` 会把浏览器打开到 `#setup`，刷新页面时也靠 hash 保持当前页签。
+ *
+ * `events` 是事件队列页签的标识，界面上叫「收件箱」；标识与 hash 不动，
+ * 免得已有的链接与深链失效。
  */
 export const TABS = ['setup', 'tickets', 'events', 'logs', 'config', 'sources'] as const
 

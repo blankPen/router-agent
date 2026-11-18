@@ -1,8 +1,8 @@
 /**
- * 事件面板：只做两件事——把事件看清楚、把决定做出来。
+ * 收件箱（事件队列）：只做两件事——把事件看清楚、把决定做出来。
  *
  * 来源订阅与判定策略属于配置，去「配置 → 事件总线」里改；
- * 这里保留队列、筛选与人工审核。
+ * 这里保留队列、筛选与人工审核。页签标识仍是 `events`，深链不变。
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { getJson, sendJson } from './api.js'
@@ -69,7 +69,7 @@ const STATUS_TEXT: Record<string, string> = {
   failed: '执行失败',
 }
 
-/** 事件面板。 */
+/** 收件箱。 */
 export function EventsView(): JSX.Element {
   const [events, setEvents] = useState<EventRow[]>([])
   const [projects, setProjects] = useState<ProjectOption[]>([])
@@ -152,7 +152,7 @@ export function EventsView(): JSX.Element {
     <>
       <div className="page-head">
         <div>
-          <h1>事件</h1>
+          <h1>收件箱</h1>
           <p>所有来源的事件先进同一个队列，判定后分级派发：能自动做的直接开单，需要人决定的在这里处理。</p>
         </div>
         <div className="page-actions">

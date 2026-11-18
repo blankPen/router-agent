@@ -80,6 +80,7 @@ import {
   runtimeStatusLabel,
 } from './runtime-model.js'
 import { hashForTab, tabFromHash, type Tab } from './tabs.js'
+import { navItems } from './nav.js'
 import { captureTokenFromUrl } from './access-token.js'
 import { THEME_MODE_LABEL, nextThemeMode, useThemeMode, type ThemeMode } from './theme.js'
 import {
@@ -494,32 +495,13 @@ function App(): JSX.Element {
         </div>
 
         <nav className="side-nav" ref={navRef}>
-          <button className={`nav-tab ${tab === 'setup' ? 'active' : ''}`} onClick={() => switchTab('setup')}>
-            <Icon name="zap" />
-            <span>初始化</span>
-          </button>
-          <button className={`nav-tab ${tab === 'tickets' ? 'active' : ''}`} onClick={() => switchTab('tickets')}>
-            <Icon name="inbox" />
-            <span>工单</span>
-            {status && status.tickets.open > 0 && <span className="nav-count">{status.tickets.open}</span>}
-          </button>
-          <button className={`nav-tab ${tab === 'events' ? 'active' : ''}`} onClick={() => switchTab('events')}>
-            <Icon name="radio" />
-            <span>事件</span>
-          </button>
-          <button className={`nav-tab ${tab === 'config' ? 'active' : ''}`} onClick={() => switchTab('config')}>
-            <Icon name="sliders" />
-            <span>配置</span>
-          </button>
-          <button className={`nav-tab ${tab === 'sources' ? 'active' : ''}`} onClick={() => switchTab('sources')}>
-            <Icon name="radio" />
-            <span>来源</span>
-          </button>
-          {/* 日志是排障时的末位入口，放在菜单最后，日常操作优先。 */}
-          <button className={`nav-tab ${tab === 'logs' ? 'active' : ''}`} onClick={() => switchTab('logs')}>
-            <Icon name="file-text" />
-            <span>日志</span>
-          </button>
+          {navItems(status?.tickets.open ?? 0).map(item => (
+            <button key={item.tab} className={`nav-tab ${tab === item.tab ? 'active' : ''}`} onClick={() => switchTab(item.tab)}>
+              <Icon name={item.icon} />
+              <span>{item.label}</span>
+              {item.count !== undefined && item.count > 0 && <span className="nav-count">{item.count}</span>}
+            </button>
+          ))}
         </nav>
 
         <div className="sidebar-bottom">
