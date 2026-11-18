@@ -10,10 +10,12 @@ import { Icon } from './icons.js'
 import {
   blankRule,
   eventTypeOptions,
-  nextRuleId,
+  nextRuleEventType,
+  preparedRule,
   removeRule,
   ruleSummary,
   saveRuleDraft,
+  uniqueRuleId,
   upsertRule,
 } from './event-rules-model.js'
 import type { EventRule } from '../../events/rules.js'
@@ -35,14 +37,13 @@ export function EventRulesConfig({ draft, setField, onNotice }: {
     return Array.isArray(value) ? value as EventRule[] : []
   }, [draft])
   const eventTypes = useMemo(() => eventTypeOptions(draft), [draft])
-  const firstType = eventTypes[0]?.options[0]?.value ?? 'github.issues.opened'
   const [editing, setEditing] = useState<EventRule | null>(null)
   const [isNew, setIsNew] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
 
   const openAdd = () => {
-    const id = nextRuleId(firstType)
-    const rule = blankRule(id, firstType)
+    const eventType = nextRuleEventType(eventTypes, rules)
+    const rule = blankRule(uniqueRuleId(eventType, rules), eventType)
     setEditing(rule)
     setIsNew(true)
     setSaveError(null)
@@ -66,9 +67,15 @@ export function EventRulesConfig({ draft, setField, onNotice }: {
       onNotice?.({ kind: 'error', text: checked.error })
       return
     }
+    const prepared = preparedRule(rules, checked.value, isNew)
+    if (prepared.error) {
+      setSaveError(prepared.error)
+      onNotice?.({ kind: 'error', text: prepared.error })
+      return
+    }
     setSaveError(null)
-    setField('events.rules', upsertRule(rules, checked.value))
-    onNotice?.({ kind: 'ok', text: `规则「${checked.value.id}」已写入草稿，点保存配置后生效。` })
+    setField('events.rules', upsertRule(rules, prepared.value))
+    onNotice?.({ kind: 'ok', text: `规则「${prepared.value.id}」已写入草稿，点保存配置后生效。` })
     setEditing(null)
   }
 

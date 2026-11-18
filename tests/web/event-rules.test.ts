@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 import {
   blankRule,
   eventTypeOptions,
+  nextRuleEventType,
   nextRuleId,
+  preparedRule,
   removeRule,
   ruleSummary,
   saveRuleDraft,
@@ -29,6 +31,39 @@ describe('事件规则面板纯函数', () => {
 
   it('id 由事件类型生成且可读', () => {
     expect(nextRuleId('github.workflow_run.failure')).toBe('rule-github-workflow-run-failure')
+  })
+
+  it('添加第二条规则不会覆盖第一条', () => {
+    const first = blankRule('rule-github-issues-opened', 'github.issues.opened')
+    const second = blankRule('rule-github-issues-opened', 'github.workflow_run.failure')
+    const list = upsertRule([first], preparedRule([first], second, true).value)
+    expect(list.map(rule => rule.id)).toEqual(['rule-github-issues-opened', 'rule-github-workflow-run-failure'])
+    expect(list.map(rule => rule.eventType)).toEqual(['github.issues.opened', 'github.workflow_run.failure'])
+  })
+
+  it('新规则 id 与已有规则冲突时自动加序号', () => {
+    const existing = blankRule('rule-github-workflow-run-failure', 'github.issues.opened')
+    const next = preparedRule([existing], blankRule('rule-github-workflow-run-failure', 'github.workflow_run.failure'), true).value
+    expect(next.id).toBe('rule-github-workflow-run-failure-2')
+  })
+
+  it('同一事件类型不能再加一条规则，且不替换已有规则', () => {
+    const first = blankRule('rule-a', 'github.issues.opened')
+    const result = preparedRule([first], blankRule('rule-b', 'github.issues.opened'), true)
+    expect(result.error).toContain('只能有一条规则')
+    expect(result.value.id).toBe('rule-b')
+  })
+
+  it('新建规则的默认事件类型避开已配置的类型', () => {
+    const groups = [{
+      group: 'GitHub',
+      options: [
+        { value: 'github.issues.opened', label: 'Issue 打开', group: 'GitHub' },
+        { value: 'github.workflow_run.failure', label: 'Action 失败', group: 'GitHub' },
+      ],
+    }]
+    const configured = [blankRule('rule-a', 'github.issues.opened')]
+    expect(nextRuleEventType(groups, configured)).toBe('github.workflow_run.failure')
   })
 
   it('事件类型选项包含带前缀的 GitHub 目录与自定义来源', () => {

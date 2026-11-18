@@ -31,6 +31,32 @@ export function upsertRule(rules: readonly EventRule[], next: EventRule): EventR
   return [...rules.filter(rule => rule.id !== next.id), next]
 }
 
+/** 新规则 id：由事件类型生成，和已有规则重名时加序号。 */
+export function uniqueRuleId(eventType: string, rules: readonly EventRule[]): string {
+  const base = nextRuleId(eventType)
+  if (!rules.some(rule => rule.id === base)) return base
+  let index = 2
+  while (rules.some(rule => rule.id === `${base}-${index}`)) index += 1
+  return `${base}-${index}`
+}
+
+/**
+ * 落草稿前的最终形态：新规则的 id 跟着选中的事件类型走，并避开已有 id；
+ * 编辑时保持原 id，历史判定与日志仍能回链到同一条规则。
+ * 一个事件类型只允许一条规则，冲突时返回错误而不是把已有规则替换掉。
+ */
+export function preparedRule(rules: readonly EventRule[], next: EventRule, isNew: boolean): { error: string | null; value: EventRule } {
+  const others = isNew ? rules : rules.filter(rule => rule.id !== next.id)
+  const conflict = others.find(rule => rule.eventType === next.eventType)
+  if (conflict) {
+    return {
+      error: `事件类型「${next.eventType}」已经有规则「${conflict.id}」；一个事件类型只能有一条规则。`,
+      value: next,
+    }
+  }
+  return { error: null, value: isNew ? { ...next, id: uniqueRuleId(next.eventType, rules) } : next }
+}
+
 export function removeRule(rules: readonly EventRule[], id: string): EventRule[] {
   return rules.filter(rule => rule.id !== id)
 }
@@ -79,6 +105,19 @@ export function eventTypeOptions(draft: ConfigDoc | null): Array<{ group: string
 /** 已配置规则的 eventType；供下拉去重。 */
 export function configuredEventTypes(rules: readonly EventRule[]): Set<string> {
   return new Set(rules.map(rule => rule.eventType))
+}
+
+/** 新建规则时优先选还没配过规则的事件类型，避免一打开就撞「类型重复」。 */
+export function nextRuleEventType(
+  groups: Array<{ group: string; options: EventTypeOption[] }>,
+  rules: readonly EventRule[],
+): string {
+  const used = configuredEventTypes(rules)
+  for (const group of groups) {
+    const option = group.options.find(item => !used.has(item.value))
+    if (option) return option.value
+  }
+  return groups[0]?.options[0]?.value ?? 'github.issues.opened'
 }
 
 /** 新增时生成一个稳定、可读的 id。 */
