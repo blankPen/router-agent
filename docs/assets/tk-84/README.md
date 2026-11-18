@@ -8,18 +8,23 @@
 |-|-|
 | `automation/before-nav.png` | 改造前：左侧菜单只有「收件箱 → 工单」，没有自动化入口 |
 | `automation/after-nav.png` | 改造后：「自动化」插在「收件箱」与「工单」之间，其余菜单顺序不变 |
+| `automation/before-automation-tasks.png` | 修复前：脚本自动化卡片看不出有没有脚本，也没有「生成脚本」入口 |
 | `automation/after-automation.png` | 改造后：自动化页「任务」Tab。任务卡片显式说明脚本状态（「脚本已就绪（168 行），定时执行跑的就是这份」），操作按钮换行不撑破卡片 |
 | `automation/after-automation-modal.png` | 改造后：「新建自动化」弹窗，沿用「添加决策规则」的分段、间距与字段层级 |
 | `automation/after-automation-draft.png` | 改造后：草稿进入同一个编辑弹窗，保存后才写正式任务 |
+| `automation/before-runs.png` | 修复前：「执行记录」Tab 没有阶段列、没有「查看日志」入口，长摘要不截断 |
 | `automation/after-automation-runs.png` | 改造后：「执行记录」Tab。执行中显示实时阶段（正在启动运行时 / 正在执行 / 正在收集产出）、结果摘要按行截断、每行带「查看日志」深链；服务重启中断的记录标为「失败」而不是永远挂在「执行中」 |
 | `automation/after-automation-dark.png` | 改造后：同页深色主题，确认新增样式复用既有 token |
 
-截图取自真实构建产物（`pnpm build`）与本地临时 home（`/tmp/ra-tk-84-home`，端口 3199），
+截图取自真实构建产物（`pnpm build`）与本地临时 home（`/tmp/ra-tk84-fix`，端口 3197），
 示例任务与执行记录只用于展示布局，不含真实用户数据与凭据。
 
 「执行记录」那张来自真实执行：手动触发 → runtime 在目标项目的 worktree 里跑脚本 →
 agent 写 `.automation-result` → 收尾，全程 23 秒。中间几行是更早的排查记录（含服务重启被中断的），
 用来展示状态与阶段列的真实形态。
+
+`before-runs.png` / `before-automation-tasks.png` 取自本单修复前的构建（`16013de`），
+同一场景、同一视口、同一主题，用来比「有没有阶段列 / 脚本状态 / 日志入口」这类差别。
 
 ## 日志体系改造（历史截图）
 
