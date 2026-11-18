@@ -1509,6 +1509,12 @@ export class RouterService {
           this.store.expireInput(ticket.id, input.id)
           this.deliveryAttempts.delete(input.id)
           this.engine.setAttention(ticket.id, `输入 ${input.id} 已重投 ${MAX_DELIVERY_ATTEMPTS} 次仍未成功，请人工确认`)
+          this.notify(
+            ticket,
+            `工单「${ticket.title}」里有一条补充要求已重试 ${MAX_DELIVERY_ATTEMPTS} 次仍未送达 worker，已转人工处理。`
+            + `请在本话题确认 worker 会话是否还在，或直接补充一条新的要求。`,
+            `deliver-giveup:${ticket.id}:${input.id}`,
+          )
           this.logger.warn('input:redeliver-giveup', { ticketId: ticket.id, inputId: input.id, attempt: MAX_DELIVERY_ATTEMPTS })
           continue
         }
@@ -1582,6 +1588,15 @@ export class RouterService {
           if (await this.workerGone(assignment)) {
             this.handleLostWorker(ticket, 'input-deliver-failed')
             break
+          }
+          // 第一次失败就让用户知道：后面还有退避重试，不能静默等到 5 次才转人工。
+          if (attempt === 1) {
+            this.notify(
+              ticket,
+              `工单「${ticket.title}」里有一条补充要求暂时没送到 worker（第 1 次尝试失败）。`
+              + `Router 会自动重试；连续失败会转人工，并在本话题通知你。`,
+              `deliver-failed:${ticket.id}:${input.id}`,
+            )
           }
           this.logger.warn('input:deliver-failed', {
             ticketId: ticket.id,
@@ -2348,10 +2363,13 @@ export class RouterService {
       return
     }
     // 上报有 HTTP 与 state.json 两条通道；重启后 poller 会重读旧文件，
-    // 用「上报时间早于最后一条已入库报告」把它挡掉，避免旧内容被重复投递。
+    // 旧内容要挡掉，避免重复投递。
+    // 去重键是 turn 优先、时间戳兜底：worker 写 state.json 与通过 HTTP 上报是两条独立路径，
+    // 两条通道的时间戳本来就可能对不上，只看时间戳会把更新的回合误杀（tk-85 评审 S-05）。
+    // 同一回合内多次上报是允许的（追问可能分几次回答），靠时间戳区分。
     const latestReport = this.store.latestReport(ticket.id)
-    const incomingAt = Date.parse(state.updatedAt)
-    if (latestReport && Number.isFinite(incomingAt) && Date.parse(latestReport.at) > incomingAt) {
+    const incomingTurn = Number(state.turn)
+    if (latestReport && this.isStaleReport(latestReport, incomingTurn, state.updatedAt)) {
       this.logger.info('report:stale-ignored', { ticketId: ticket.id, incoming: state.updatedAt, latest: latestReport.at })
       return
     }
@@ -2421,6 +2439,24 @@ export class RouterService {
     if (state.state === 'blocked' && !reply) {
       this.notify(ticket, `工单「${ticket.title}」卡住了：${state.humanAction ?? state.summary}`, `blocked:${ticket.id}:${reportKey}`)
     }
+  }
+
+  /**
+   * 判断这条上报是不是已经被收过了。
+   *
+   * 回合数比库里最新的小 → 一定是旧的。
+   * 回合数一样 → 靠上报时间判断：worker 同一回合可能分几次回答，
+   * 时间戳更晚的才算新的。
+   * 回合数更大 → 一定比库里新，不能因为时间戳对不上就丢掉（tk-85 评审 S-05）。
+   */
+  private isStaleReport(latest: { turn: number; at: string }, incomingTurn: number, incomingAt: string): boolean {
+    if (!Number.isFinite(incomingTurn)) return false
+    if (incomingTurn < latest.turn) return true
+    if (incomingTurn > latest.turn) return false
+    const incoming = Date.parse(incomingAt)
+    const stored = Date.parse(latest.at)
+    if (!Number.isFinite(incoming) || !Number.isFinite(stored)) return false
+    return stored > incoming
   }
 
   // ---------- 工单进展定时同步 ----------
@@ -2701,6 +2737,13 @@ let repo = ticket.repo
       const updated = this.engine.updatePr(ticket.id, { number: info.number, url: info.url || ticket.prUrl, state: info.state })
       if (before !== info.state) this.log('pr:state', ticket.id, { from: before, to: info.state })
 
+      // PR 有新进展说明工单还在往前走：解除陈旧的待答问题，别让它一直钉在 blocked。
+      // 之前 stale / zombie 两条转人工路径都只写 attention 不清除，工单从此不会自愈（tk-85 评审 S-10）。
+      if (before !== info.state && this.store.getAttention(ticket.id)) {
+        this.engine.clearAttention(ticket.id)
+        this.log('attention:cleared', ticket.id, { reason: 'pr-progress', from: before, to: info.state })
+      }
+
       // PR 终态不等于会话结束：合并或关闭后话题照常开着，用户追问还能接着推进。
       // 只有巡查判定长期无进展、或用户主动关闭时才会结束会话。
       if (before !== info.state && (info.state === 'merged' || info.state === 'closed') && updated.stage !== 'done') {
@@ -2722,6 +2765,12 @@ let repo = ticket.repo
     const now = this.clock.now()
     if (this.store.getCursor(key) !== null) return
     this.store.setCursor(key, now, now)
+    this.notify(
+      ticket,
+      `工单「${ticket.title}」的 PR #${prNumber} 状态查询没有结果，Router 暂时无法确认它是否已合并。`
+      + `会继续重试；如果一直查不到，请人工检查 PR 链接或仓库访问权限。`,
+      key,
+    )
     this.logger.warn('pr:track-failed', {
       ticketId: ticket.id,
       prNumber,

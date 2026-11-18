@@ -87,6 +87,8 @@ export interface AssessResult {
   outcome: 'accept' | 'ignore' | 'unavailable' | 'clarify' | 'clarify-requirement'
   ticket?: Ticket
   clarify?: ClarifyInfo
+  /** 研判给出的理由：用于 router:action 留痕，说明为什么选了这个动作。 */
+  reason?: string
   /** 研判过程中已经生成好的用户答复（查询 / 清理类工具），直接发送，不再多调一次回复模型。 */
   reply?: string
   /**
@@ -357,7 +359,7 @@ export class AgentLoop {
         return
       }
       if (verdict.action === 'reply-only') {
-        this.routerAction(trigger, 'reply', { reason: verdict.reason })
+        this.routerAction(trigger, 'reply', { stage: 'gate', reason: verdict.reason })
         await this.replyOnly(trigger, verdict.reason)
         result.replied += 1
         return
@@ -365,7 +367,7 @@ export class AgentLoop {
       if (verdict.action === 'explicit') {
         if (isSmallTalk(trigger.text)) {
           // 明显寒暄不必再花一次研判，直接让模型组织一句礼貌回复。
-          this.routerAction(trigger, 'reply', { reason: 'explicit:small-talk' })
+          this.routerAction(trigger, 'reply', { stage: 'gate', reason: 'explicit:small-talk' })
           await this.converse(trigger, '这条消息是寒暄或试探，没有具体工作请求')
           this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'explicit', reason: 'explicit:small-talk' })
           result.replied += 1
@@ -390,6 +392,7 @@ export class AgentLoop {
     // 路由层判定可以开单但派工信息不全：动作仍是 open_ticket，先向用户补齐 repo / branch。
     this.routerAction(trigger, 'open_ticket', {
       stage: 'clarify',
+      reason: 'dispatch:clarify',
       missing: info.missing,
       ...(info.rejectedRepo ? { rejectedRepo: info.rejectedRepo } : {}),
     })
@@ -432,14 +435,18 @@ export class AgentLoop {
       // 派工信息已经凑齐并开单，草稿使命结束。
       this.store.clearDispatchDraft(trigger.chatId, trigger.actorId)
       result.accepted.push(assessed.ticket)
-      this.routerAction(trigger, 'open_ticket', { ticketId: assessed.ticket.id })
+      this.routerAction(trigger, 'open_ticket', {
+        stage: assessed.ticket.stage,
+        reason: assessed.reason ?? 'assess:accept',
+        ticketId: assessed.ticket.id,
+      })
       // 只发一条：话题开场同时承担开单确认，后续 worker 进展都挂在这条原消息下。
       this.reply(trigger, THREAD_INTRO(assessed.ticket.title, assessed.ticket.id), `thread:${assessed.ticket.id}`, { thread: true })
       return
     }
     if (assessed.outcome === 'clarify-requirement') {
       // 管理员的需求太模糊或太复杂：先讨论几轮再开单。
-      this.routerAction(trigger, 'analysis', { reason: 'router:clarify-requirement' })
+      this.routerAction(trigger, 'analysis', { stage: 'assess', reason: 'router:clarify-requirement' })
       // 先把这条消息落定：否则下一轮 tick 会重新研判它，澄清会话的进展由会话自己接管。
       this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength, reason: 'router:clarify-requirement' })
       const started = this.intake
@@ -482,8 +489,8 @@ export class AgentLoop {
     }
     result.ignored += 1
     // 查询 / 清理类工具已在研判阶段生成答复：动作是 ticket_tool；否则是 ignore。
-    if (assessed.reply) this.routerAction(trigger, 'ticket_tool')
-    else this.routerAction(trigger, 'ignore')
+    if (assessed.reply) this.routerAction(trigger, 'ticket_tool', { stage: 'assess', reason: assessed.reason ?? 'assess:ticket-tool' })
+    else this.routerAction(trigger, 'ignore', { stage: 'assess', reason: assessed.reason ?? 'assess:ignore' })
     // 全量接收的会话（mode: all）里，不接单也要正常回一句，只是不开单。
     if (this.shouldReply(trigger)) {
       // 查询 / 清理类工具已经在研判阶段生成好答复时直接用，避免重复调用模型。
@@ -683,8 +690,8 @@ export class AgentLoop {
       rules: proposal.rules,
     })
     return outcome.decision.decision === 'accept' && outcome.ticket
-      ? { outcome: 'accept', ticket: outcome.ticket }
-      : { outcome: 'ignore' }
+      ? { outcome: 'accept', ticket: outcome.ticket, reason: proposal.reason }
+      : { outcome: 'ignore', reason: proposal.reason }
   }
 
   private markUnavailable(trigger: Trigger, reason: string, source: 'engine' | 'model' = 'engine'): AssessResult {

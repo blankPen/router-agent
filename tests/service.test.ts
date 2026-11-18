@@ -594,6 +594,43 @@ describe('RouterService 编排', () => {
     expect(store.getTicket(ticket.id)?.prNumber).toBe(12)
   })
 
+  it('state.json 时间戳比库里最新报告旧时，仍按 turn 判断要不要接收', async () => {
+    engine.ingest(makeTrigger())
+    await service.runOnce()
+    const ticket = store.listTickets()[0]!
+    const assignment = store.latestAssignment(ticket.id)!
+
+    // 第一轮已经入库。
+    service.onWorkerState({
+      ticketId: ticket.id,
+      assignmentId: assignment.id,
+      turn: 1,
+      state: 'progress',
+      summary: '第一轮',
+      prNumber: 0,
+      prUrl: '',
+      ackedInputs: [],
+      updatedAt: '2026-11-06T09:00:00.000Z',
+    })
+
+    // 第二轮通过 HTTP 通道先入库，但 state.json 里仍是第一轮的时间戳。
+    // 用时间戳去重会误杀这条真实上报（tk-85 评审 S-05）。
+    service.onWorkerState({
+      ticketId: ticket.id,
+      assignmentId: assignment.id,
+      turn: 2,
+      state: 'ready',
+      summary: '第二轮完成',
+      prNumber: 0,
+      prUrl: '',
+      ackedInputs: [],
+      updatedAt: '2026-11-06T09:00:00.000Z',
+    })
+
+    expect(store.listReports(ticket.id).map(item => item.turn)).toEqual([2, 1])
+    expect(logs.some(log => log.message === 'report:stale-ignored')).toBe(false)
+  })
+
   it('PR 合并后工单保持开放，worker 继续跑', async () => {
     engine.ingest(makeTrigger())
     await service.runOnce()
@@ -686,6 +723,26 @@ describe('RouterService 编排', () => {
     expect(store.getTicket(ticket.id)?.stage).toBe('review')
   })
 
+  it('PR 有新进展时解除陈旧的待答问题，工单不再停在已阻塞', async () => {
+    engine.ingest(makeTrigger())
+    await service.runOnce()
+    const ticket = store.listTickets()[0]!
+    const assignment = store.latestAssignment(ticket.id)!
+    service.onWorkerState({
+      ticketId: ticket.id, assignmentId: assignment.id, turn: 1, state: 'ready', summary: 'PR 已开',
+      prNumber: 15, prUrl: 'u15', ackedInputs: [], updatedAt: '2026-11-06T10:01:00.000Z',
+    })
+    // worker 失联后留下待答问题：工单被钉在 blocked。
+    engine.setAttention(ticket.id, 'worker 无响应：长时间没有新的 state.json 上报')
+    expect(store.getTicket(ticket.id)?.stage).toBe('blocked')
+
+    prTracker.states.set(15, 'merged')
+    await service.trackPullRequests()
+
+    expect(store.getAttention(ticket.id)).toBeNull()
+    expect(store.getTicket(ticket.id)?.stage).toBe('review')
+  })
+
   it('PR 跟踪带上 PR 链接与 workdir，避免项目名无法映射成 owner/name', async () => {
     engine.ingest(makeTrigger())
     await service.runOnce()
@@ -720,6 +777,8 @@ describe('RouterService 编排', () => {
     const misses = logs.filter(log => log.message === 'pr:track-failed')
     expect(misses).toHaveLength(1)
     expect(misses[0]?.extra).toMatchObject({ ticketId: ticket.id, prNumber: 99, repo: 'acme/web' })
+    const notices = store.listOutbox(50).filter(item => item.text.includes('PR #99 状态查询没有结果'))
+    expect(notices).toHaveLength(1)
   })
 
   it('worker 上报 blocked 时通知发起人并登记待答问题', async () => {

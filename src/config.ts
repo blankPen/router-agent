@@ -325,6 +325,8 @@ export interface EventPolicyConfig {
   dailyEventLimit: number
   /** 单来源每日事件条数上限；0 表示不限。 */
   perSourceDailyLimit: number
+  /** 在办工单数上限；0 表示不限。超过时事件顺延排队，不开出新工单。 */
+  maxOpenTickets: number
   reviewNotify: boolean
   reviewChatId: string
 }
@@ -622,6 +624,7 @@ export function defaultConfig(): AppConfig {
         offPeak: { start: '20:00', end: '09:00', priorities: ['P2', 'P3'] },
         dailyEventLimit: 200,
         perSourceDailyLimit: 50,
+        maxOpenTickets: 20,
         reviewNotify: true,
         reviewChatId: '',
       },
@@ -1100,6 +1103,7 @@ function parseEvents(value: unknown, base: EventsSettings, logger: Logger = noop
       offPeak: parseWindow(policyDoc.offPeak, base.policy.offPeak),
       dailyEventLimit: positiveIntOr(policyDoc.dailyEventLimit, base.policy.dailyEventLimit, 0, 1_000_000),
       perSourceDailyLimit: positiveIntOr(policyDoc.perSourceDailyLimit, base.policy.perSourceDailyLimit, 0, 1_000_000),
+      maxOpenTickets: positiveIntOr(policyDoc.maxOpenTickets, base.policy.maxOpenTickets, 0, 1_000_000),
       reviewNotify: booleanOr(policyDoc.reviewNotify, base.policy.reviewNotify),
       reviewChatId: typeof policyDoc.reviewChatId === 'string' ? policyDoc.reviewChatId : base.policy.reviewChatId,
     },
@@ -2228,6 +2232,7 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
   'events.policy.offPeak.priorities': priorityListValue(),
   'events.policy.dailyEventLimit': intValue(0, 1_000_000),
   'events.policy.perSourceDailyLimit': intValue(0, 1_000_000),
+  'events.policy.maxOpenTickets': intValue(0, 1_000_000),
   'events.policy.reviewNotify': boolValue(),
   'events.policy.reviewChatId': stringValue,
 }

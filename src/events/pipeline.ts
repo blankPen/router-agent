@@ -482,6 +482,15 @@ export class EventPipeline {
         return { allowed: false, reason: `来源 ${event.sourceId} 今日已达配额 ${sourceLimit} 条，顺延等待` }
       }
     }
+    // 在办工单数闸门：开单与派工是两件事，派工受 maxWorkers 约束，开单没有。
+    // 一批 GitHub 事件能在一分钟内开出几十张工单，把工单表、通知与 worktree 一起打爆。
+    const openLimit = policy.maxOpenTickets
+    if (openLimit > 0) {
+      const open = this.store.countOpenTickets()
+      if (open >= openLimit) {
+        return { allowed: false, reason: `在办工单已达上限 ${openLimit} 张，顺延等待` }
+      }
+    }
     return { allowed: true, reason: '' }
   }
 
