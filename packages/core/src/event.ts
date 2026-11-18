@@ -11,8 +11,8 @@ export type EventPriority = 'P0' | 'P1' | 'P2' | 'P3' | 'P4'
 /** 优先级从高到低，数字越小越优先。 */
 export const EVENT_PRIORITIES: readonly EventPriority[] = ['P0', 'P1', 'P2', 'P3', 'P4']
 
-/** 队列里的业务状态。待审核是四类业务状态之一。 */
-export type EventStatus = 'pending' | 'review' | 'done' | 'invalid'
+/** 队列里的业务状态。未判定表示没有匹配的决策规则，只收集、不调模型。 */
+export type EventStatus = 'undecided' | 'pending' | 'review' | 'done' | 'invalid'
 
 /** 执行态：与业务状态并行记录，用来表达「为什么还没做完」。 */
 export type EventExecution = 'none' | 'deferred' | 'retry' | 'failed'
@@ -26,7 +26,9 @@ export function normalizeEventPriority(value: unknown): EventPriority {
 /** 归一化业务状态。 */
 export function normalizeEventStatus(value: unknown): EventStatus {
   const text = String(value ?? '').trim()
-  return text === 'pending' || text === 'review' || text === 'done' || text === 'invalid' ? text : 'pending'
+  return text === 'undecided' || text === 'pending' || text === 'review' || text === 'done' || text === 'invalid'
+    ? text
+    : 'pending'
 }
 
 /** 排队顺序：优先级高的先排；同级按到达时间早的先排。 */
@@ -76,6 +78,8 @@ export interface EventRecord {
   url?: string
   /** 来源原始载荷，便于审计与回放。 */
   raw?: unknown
+  /** 来源已知的上下文线索（repo / actor / branch / reviewState …）。 */
+  context?: Record<string, string>
   receivedAt: string
   status: EventStatus
   execution: EventExecution
@@ -99,6 +103,10 @@ export interface EventRecord {
   promptVersion?: number
   /** 判定时命中的规则名或 'model'。 */
   basis?: string
+  /** 判定时命中的规则 id；未判定时为空。 */
+  ruleId?: string
+  /** 判定时命中的规则版本；回放历史判定时用来定位当时那版规则文本。 */
+  ruleVersion?: number
   /** 开出的工单 id。 */
   ticketId?: string
   /** 合成出来的 Trigger id（事件复用现有派工链路时用）。 */

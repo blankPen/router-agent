@@ -5,6 +5,9 @@
  * 避免三处各写一套导致对不上。
  */
 
+/** GitHub 事件的来源前缀：事件类型与幂等键都带它，跨来源一眼能分清。 */
+export const GITHUB_EVENT_PREFIX = 'github'
+
 /** 事件类别：Issue、PR、Action（工作流）。 */
 export type GithubEventKind = 'issues' | 'pull_request' | 'workflow_run'
 
@@ -57,6 +60,16 @@ export function isGithubEventType(value: unknown): boolean {
 /** 事件类型的人话标签；不在目录里就原样返回（不猜）。 */
 export function githubEventLabel(value: string): string {
   return TYPE_BY_ID.get(value)?.label ?? value
+}
+
+/**
+ * 给 GitHub 的事件类型加来源前缀：`issues.opened` → `github.issues.opened`。
+ *
+ * 订阅配置里的类型 id 不带前缀（面板多选、用户已有配置都不受影响），
+ * 只有落到事件队列里的类型才加 —— 不同来源的同名类型才不会混淆。
+ */
+export function withGithubPrefix(eventType: string): string {
+  return `${GITHUB_EVENT_PREFIX}.${eventType}`
 }
 
 /** 按类别分组的事件类型；面板按组渲染多选。 */

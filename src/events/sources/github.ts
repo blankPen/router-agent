@@ -9,17 +9,26 @@
  */
 import type { EventSourceConfig } from '../../config.js'
 import type { EventEnvelope, EventSource } from '#event/port.js'
-import { GITHUB_EVENT_TYPES, githubEventLabel, type GithubEventType } from '#core/github-events.js'
+import { GITHUB_EVENT_PREFIX, GITHUB_EVENT_TYPES, githubEventLabel, withGithubPrefix, type GithubEventType } from '#core/github-events.js'
 import type { CommandRunner } from '#infra/process.js'
 import { errorMessage, noopLogger, type Logger } from '#infra/logger.js'
 
 /** GitHub 事件流与工作流列表最多翻几页；feed 本身最多 300 条。 */
 const MAX_EVENT_PAGES = 3
 
+/** 游标格式版本：水位语义变了就 +1，旧键自然作废、重新建基线。 */
+const CURSOR_VERSION = 'v2'
+
+/** 只处理最近 3 天的事件；更早的存量对派工没有意义。 */
+const SINCE_DAYS = 3
+const DAY_MS = 24 * 60 * 60 * 1000
+
 export interface GithubEventSourceDeps {
   /** 执行 gh 的运行器；测试注入。 */
   runner: CommandRunner
   logger?: Logger
+  /** 当前时间；宿主注入后窗口过滤可复现。 */
+  clock?: () => string
   /** 每次拉多少条；GitHub 的 per_page 上限 100。 */
   limit?: number
   /** 增量游标：记住上次拉到哪儿，下次只取更新的事件。 */
@@ -39,6 +48,7 @@ export class GithubEventSource implements EventSource {
   private config: EventSourceConfig
   private runner: CommandRunner
   private logger: Logger
+  private clock: () => string
   private limit: number
   private cursor?: EventCursor
 
@@ -47,6 +57,7 @@ export class GithubEventSource implements EventSource {
     this.config = config
     this.runner = deps.runner
     this.logger = deps.logger ?? noopLogger
+    this.clock = deps.clock ?? (() => new Date().toISOString())
     this.limit = deps.limit ?? 100
     this.cursor = deps.cursor
   }
@@ -60,12 +71,18 @@ export class GithubEventSource implements EventSource {
     const wanted = subscribedTypes(this.config)
     if (wanted.length === 0) return []
     const wantedIds = wanted.map(type => type.id)
+    const now = Date.parse(this.clock())
+    const sinceMs = (Number.isFinite(now) ? now : Date.now()) - SINCE_DAYS * DAY_MS
 
     const envelopes: EventEnvelope[] = []
     if (wanted.some(type => type.kind !== 'workflow_run')) {
       // 事件流一页装不下的订阅事件：GitHub 的 feed 每页 100 条、最多翻到 300 条，
       // 只拉第 1 页会把排在后面的 Issue / PR 事件整片丢掉。
       const pages: EventEnvelope[] = []
+      const cursorKey = this.cursorKey(repo)
+      const baselining = this.isBaselining(cursorKey)
+      let rawMaxId = 0
+      let complete = true
       for (let page = 1; page <= MAX_EVENT_PAGES; page += 1) {
         const result = await this.runner.run(
           ['api', `repos/${repo}/events?per_page=${this.limit}&page=${page}`],
@@ -78,20 +95,33 @@ export class GithubEventSource implements EventSource {
             repo,
             detail: (result.stderr || result.stdout).slice(0, 200),
           })
+          complete = false
           break
         }
-        const parsed = parseGithubEvents(result.stdout, repo, wantedIds)
+        const stats = pageStats(result.stdout)
         // 结束条件看本页原始条数：本页没有订阅事件不代表后面没有
         // （feed 里混着大量 PushEvent，订阅事件可能排在第 2、3 页）。
-        if (pageEntryCount(result.stdout) === 0) break
-        await this.fillPullRequestDetails(parsed, repo)
+        if (stats.count === 0) break
+        const parsed = parseGithubEvents(result.stdout, repo, wantedIds)
+        // 水位只按命中订阅的事件算：feed 里混着 id 空间不同的仓库级事件
+        // （PushEvent / CreateEvent 的 id 比 Issue/PR 事件大几十亿），
+        // 按整页取最大值会让游标跨空间，之后所有 Issue/PR 事件都被挡在门外。
+        rawMaxId = Math.max(rawMaxId, maxIdOf(parsed))
+        // 基线轮只记水位，不查 PR 详情 —— 这批事件本来就不入队。
+        if (baselining) continue
+        // 只给窗口内的事件补详情，避免恢复订阅时对陈年 PR 批量调 gh。
+        await this.fillPullRequestDetails(recentEvents(parsed, sinceMs), repo)
         pages.push(...parsed)
       }
-      envelopes.push(...this.freshEvents(pages, `github:${repo}`))
+      envelopes.push(...this.freshEvents(pages, cursorKey, rawMaxId, complete, sinceMs))
     }
 
     if (wanted.some(type => type.kind === 'workflow_run')) {
       const pages: EventEnvelope[] = []
+      const cursorKey = `${this.cursorKey(repo)}:runs`
+      const baselining = this.isBaselining(cursorKey)
+      let rawMaxId = 0
+      let complete = true
       for (let page = 1; page <= MAX_EVENT_PAGES; page += 1) {
         const result = await this.runner.run(
           ['api', `repos/${repo}/actions/runs?per_page=${this.limit}&page=${page}`],
@@ -103,13 +133,18 @@ export class GithubEventSource implements EventSource {
             repo,
             detail: (result.stderr || result.stdout).slice(0, 200),
           })
+          complete = false
           break
         }
+        const stats = pageStats(result.stdout)
+        if (stats.count === 0) break
         const parsed = parseGithubRuns(result.stdout, repo, wantedIds)
-        if (pageEntryCount(result.stdout) === 0) break
+        // 工作流的 id 属于独立编号空间，水位同样只按命中订阅的运行推进。
+        rawMaxId = Math.max(rawMaxId, maxIdOf(parsed))
+        if (baselining) continue
         pages.push(...parsed)
       }
-      envelopes.push(...this.freshEvents(pages, `github:${repo}:runs`))
+      envelopes.push(...this.freshEvents(pages, cursorKey, rawMaxId, complete, sinceMs))
     }
     return envelopes
   }
@@ -123,7 +158,7 @@ export class GithubEventSource implements EventSource {
     // 同一个 PR 在一轮里可能有多个事件（新建 + 评论），只查一次详情。
     const cache = new Map<number, { title: string; body: string }>()
     for (const event of events) {
-      if (!event.eventType?.startsWith('pull_request.')) continue
+      if (!event.eventType?.startsWith(`${GITHUB_EVENT_PREFIX}.pull_request.`)) continue
       const number = pullNumberOf(event.externalId)
       if (!number) continue
       let detail = cache.get(number)
@@ -161,19 +196,68 @@ export class GithubEventSource implements EventSource {
   }
 
   /**
+   * 游标键：带来源 id 与仓库。
+   *
+   * 两个订阅同一个仓库时不能共用游标 —— 否则一个订阅拉到的位置会把另一个订阅的
+   * 新事件挡掉。键里必须带来源 id。
+   *
+   * 末尾的版本号用来作废旧游标格式：早期版本按整页取 id 最大值，
+   * 会被 id 空间不同的仓库级事件顶偏，存下来的水位不可信。换个键就是重建基线，
+   * 不需要手工清库。
+   */
+  private cursorKey(repo: string): string {
+    return `github:${this.id}:${repo}:${CURSOR_VERSION}`
+  }
+
+  /** 这个来源还没建过基线（第一次订阅）。 */
+  private isBaselining(cursorKey: string): boolean {
+    return Boolean(this.cursor) && this.cursor!.get(cursorKey) === null
+  }
+
+  /**
    * 丢掉上次已见过的事件，并推进游标。
    *
    * 同一族里的 GitHub 事件 id 严格降序，所以游标记「已处理过的最大 id」。
    * 注意：必须等所有页都拉完后一次性算 —— 同一族里第 1 页的 id 反而比第 2 页大，
    * 每页各算一次会让第 1 页把游标推过头，后面几页的事件全被当成旧事件丢掉。
+   *
+   * 第一次订阅时没有基线：只把当前水位记下来，不入队任何事件。
+   * 否则新订阅一开就会把 GitHub 上积攒的历史全部当成「刚发生的事」灌进队列，
+   * 一夜之间开出几十张工单。
+   *
+   * 时间窗口与游标是两件事：游标记「见过的最新 id」，窗口决定「要不要入队」。
+   * 游标越过窗口外的旧事件，下一次轮询就不会再重复处理它们。
    */
-  private freshEvents(events: EventEnvelope[], cursorKey: string): EventEnvelope[] {
-    if (!this.cursor) return events
-    const since = Number(this.cursor.get(cursorKey) ?? '0')
-    const out = events.filter(event => Number(event.id ?? '0') > since)
-    const newest = out.reduce((max, event) => Math.max(max, Number(event.id ?? '0')), since)
+  private freshEvents(
+    events: EventEnvelope[],
+    cursorKey: string,
+    rawMaxId: number,
+    complete: boolean,
+    sinceMs: number,
+  ): EventEnvelope[] {
+    if (!this.cursor) return recentEvents(events, sinceMs)
+    const stored = this.cursor.get(cursorKey)
+    if (stored === null) {
+      // 拉取不全时不记水位：否则漏掉的那几页会被永久跳过。
+      if (!complete) return []
+      if (rawMaxId > 0) this.cursor.set(cursorKey, String(rawMaxId))
+      this.logger.info('event:github-baseline', { sourceId: this.id, cursorKey, maxId: rawMaxId })
+      return []
+    }
+    const since = Number(stored)
+    const fresh = events.filter(event => Number(event.id ?? '0') > since)
+    const recent = recentEvents(fresh, sinceMs)
+    const newest = fresh.reduce((max, event) => Math.max(max, Number(event.id ?? '0')), since)
     if (newest > since) this.cursor.set(cursorKey, String(newest))
-    return out
+    if (recent.length < fresh.length) {
+      this.logger.info('event:github-window-skipped', {
+        sourceId: this.id,
+        cursorKey,
+        skipped: fresh.length - recent.length,
+        since: new Date(sinceMs).toISOString(),
+      })
+    }
+    return recent
   }
 
   async publish(target: { externalId: string; url?: string }, text: string): Promise<void> {
@@ -207,9 +291,9 @@ export function issueNumberOf(externalId: string): number {
   return match ? Number(match[1]) : 0
 }
 
-/** 从 externalId 里取 PR 序号（PR 的 externalId 以 pull_request 开头）。 */
+/** 从 externalId 里取 PR 序号（PR 的 externalId 以 `github:pull_request:` 开头）。 */
 function pullNumberOf(externalId: string): number {
-  if (!externalId.startsWith('pull_request:')) return 0
+  if (!externalId.startsWith(`${GITHUB_EVENT_PREFIX}:pull_request:`)) return 0
   return issueNumberOf(externalId)
 }
 
@@ -257,9 +341,9 @@ export function parseGithubEvents(stdout: string, repo: string, wanted: string[]
     const url = String(subject.html_url ?? '')
     out.push({
       // 幂等键带上 GitHub 的事件 id：同一个 Issue 的「新建」与「评论」是两条不同事件。
-      externalId: `${eventType.split('.')[0]}:${repo}#${number}:${id}`,
+      externalId: `${GITHUB_EVENT_PREFIX}:${eventType.split('.')[0]}:${repo}#${number}:${id}`,
       title: `${githubEventLabel(eventType)} · ${title}`,
-      eventType,
+      eventType: withGithubPrefix(eventType),
       id,
       body,
       ...(url ? { url } : {}),
@@ -297,9 +381,9 @@ export function parseGithubRuns(stdout: string, repo: string, wanted: string[]):
     // 幂等键带上状态：同一次运行先「触发」后「失败」是两条不同事件。
     const phase = conclusion || status
     out.push({
-      externalId: `workflow_run:${repo}#${id}:${phase}`,
+      externalId: `${GITHUB_EVENT_PREFIX}:workflow_run:${repo}#${id}:${phase}`,
       title: `${githubEventLabel(eventType)} · ${name}`,
-      eventType,
+      eventType: withGithubPrefix(eventType),
       id: String(id),
       body: [
         title ? `触发内容：${title}` : '',
@@ -362,14 +446,39 @@ function subscriptionTypeOf(type: string, action: string, isPull: boolean, merge
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 
-/** 这一页里有多少条原始记录；解析不出来当 0 条（停止翻页）。 */
-function pageEntryCount(stdout: string): number {
+/** 只保留窗口内的事件；缺少时间戳的保留，避免因为字段缺失误丢。 */
+function recentEvents(events: EventEnvelope[], sinceMs: number): EventEnvelope[] {
+  return events.filter(event => {
+    const at = Date.parse(event.receivedAt ?? '')
+    return !Number.isFinite(at) || at >= sinceMs
+  })
+}
+
+/** 一页的原始条数；解析不出来当 0 条（停止翻页）。 */
+function pageStats(stdout: string): { count: number } {
   try {
     const parsed: unknown = JSON.parse(stdout || '[]')
-    if (Array.isArray(parsed)) return parsed.length
-    if (isRecord(parsed) && Array.isArray(parsed.workflow_runs)) return parsed.workflow_runs.length
-    return 0
+    const rows = Array.isArray(parsed)
+      ? parsed
+      : (isRecord(parsed) && Array.isArray(parsed.workflow_runs) ? parsed.workflow_runs : [])
+    return { count: rows.length }
   } catch {
-    return 0
+    return { count: 0 }
   }
+}
+
+/**
+ * 一批事件里的最大 id；没有带 id 的事件时返回 0。
+ *
+ * 只在**已经解析成订阅事件**的条目上算：GitHub 的事件 feed 混着几套互不相关的
+ * id 编号空间（仓库级 PushEvent / CreateEvent 的 id 比 Issue/PR 事件大几十亿），
+ * 跨空间取最大值会把游标推到别的空间，之后所有 Issue/PR 事件都小于游标而被挡掉。
+ */
+function maxIdOf(events: EventEnvelope[]): number {
+  let maxId = 0
+  for (const event of events) {
+    const id = Number(event.id ?? '0')
+    if (Number.isFinite(id) && id > maxId) maxId = id
+  }
+  return maxId
 }

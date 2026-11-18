@@ -10,14 +10,17 @@ import type { EventPriority, EventRecord, EventVerdict } from '#core/event.js'
 import { normalizeEventPriority } from '#core/event.js'
 import { errorMessage, noopLogger, type Logger } from '#infra/logger.js'
 import { DEFAULT_EVENT_SKILL, findEventSkill, type EventSkill } from './skills.js'
+import { DEFAULT_RULE_RISK_LABELS, type EventRule } from './rules.js'
 
 /** 命中这些标签的事件直接转人工：安全、生产、付费、对外发布。 */
-export const RISK_LABELS = ['security', 'prod', 'production', 'incident', 'payment', 'release']
+export const RISK_LABELS = DEFAULT_RULE_RISK_LABELS
 
 /** 决策输入：事件 + 订阅配置 + 候选闭集 + 判定依据。 */
 export interface EventDecisionInput {
   event: EventRecord
   source: EventSourceConfig
+  /** 命中的规则；没有规则时不调用判定服务。 */
+  rule?: EventRule
   /** 候选项目（闭集）：模型只能从中选。 */
   projects: ProjectConfig[]
   /** 候选 skill（闭集）。 */
@@ -56,7 +59,8 @@ export interface EventDecisionResult {
 }
 
 export interface EventDecisionServiceDeps {
-  decision: EventDecisionConfig
+  /** 支持直接给配置或 getter：面板热改 provider / 阈值后立即生效。 */
+  decision: EventDecisionConfig | (() => EventDecisionConfig)
   /** 规则端口：永远先跑。 */
   rule: EventDecisionPort
   /** 模型端口：provider 为 jev / llm 时才用。 */
@@ -66,7 +70,7 @@ export interface EventDecisionServiceDeps {
 
 /** 事件决策服务：规则先判、模型兜底、闭集校验、降级兜底。 */
 export class EventDecisionService {
-  private decision: EventDecisionConfig
+  private decision: EventDecisionConfig | (() => EventDecisionConfig)
   private rule: EventDecisionPort
   private model?: EventDecisionPort
   private logger: Logger
@@ -79,6 +83,7 @@ export class EventDecisionService {
   }
 
   async decide(input: EventDecisionInput): Promise<EventDecisionResult> {
+    const current = this.decisionOf()
     const rule = await this.rule.decide(input)
     let output: EventDecisionOutput = rule ?? {}
     let basis = this.rule.name
@@ -86,7 +91,7 @@ export class EventDecisionService {
     let decided = true
 
     // 规则没把关键项定全时才调模型：省 token，也避免模型在明确事实上乱改。
-    if (this.model && this.decision.provider !== 'rule' && this.needsModel(rule)) {
+    if (this.model && current.provider !== 'rule') {
       try {
         const model = await this.model.decide(input)
         if (model) {
@@ -106,7 +111,7 @@ export class EventDecisionService {
         // 兜底策略 pending 表示事件留在队列里等下一轮重判，而不是转人工。
         output = {
           ...output,
-          needsReview: this.decision.fallback !== 'pending',
+          needsReview: current.fallback !== 'pending',
           reason: `判定模型失败：${errorMessage(error)}`,
         }
         decided = false
@@ -114,28 +119,20 @@ export class EventDecisionService {
       }
     }
 
-    const verdict = this.validate(input, output)
+    const verdict = this.validate(input, output, current)
     verdict.decided = decided
     return { verdict, promptVersion: input.promptVersion, basis }
-  }
-
-  /** 规则已经定全（项目、优先级、类型、处理方式都有）时不必再问模型。 */
-  private needsModel(rule: EventDecisionOutput | null): boolean {
-    if (!rule) return true
-    if (!rule.project) return true
-    if (!rule.priority) return true
-    return false
   }
 
   /**
    * 闭集校验与兜底：项目 / skill 选不中、置信度不够，一律转人工。
    * 这是「prompt 是自然语言，但输出必须可控」的落地点。
    */
-  private validate(input: EventDecisionInput, output: EventDecisionOutput): EventVerdict {
+  private validate(input: EventDecisionInput, output: EventDecisionOutput, decision: EventDecisionConfig): EventVerdict {
     const reasons: string[] = []
     const actionable = output.actionable !== false
     const priority = actionable ? normalizeEventPriority(output.priority) : 'P4'
-    const eventType = (output.eventType ?? '').trim() || 'event'
+    const eventType = this.eventTypeOf(input, output)
 
     let project = this.matchProject(input.projects, output.project ?? '')
     if (output.project && !project) {
@@ -159,13 +156,16 @@ export class EventDecisionService {
 
     const confidence = typeof output.confidence === 'number' && Number.isFinite(output.confidence)
       ? Math.min(1, Math.max(0, output.confidence))
-      : this.decision.provider === 'rule' ? 1 : 0
+      : decision.provider === 'rule' ? 1 : 0
 
     let needsReview = output.needsReview === true
-    if (confidence < this.decision.confidenceThreshold) {
-      reasons.push(`置信度 ${confidence.toFixed(2)} 低于阈值 ${this.decision.confidenceThreshold}`)
+    const threshold = input.rule && input.rule.id !== 'legacy-prompt'
+      ? input.rule.thresholds.isValid
+      : decision.confidenceThreshold
+    if (confidence < threshold) {
+      reasons.push(`置信度 ${confidence.toFixed(2)} 低于阈值 ${threshold}`)
       // 兜底策略：pending 表示留在队列里等下一轮重判，不占用人工。
-      needsReview = this.decision.fallback !== 'pending'
+      needsReview = decision.fallback !== 'pending'
     }
     // 没有归属项目就没法开单（工单必须绑定项目），只能转人工。
     if (actionable && !project) {
@@ -194,6 +194,27 @@ export class EventDecisionService {
     }
   }
 
+  private decisionOf(): EventDecisionConfig {
+    return typeof this.decision === 'function' ? this.decision() : this.decision
+  }
+
+  /**
+   * 事件类型：模型给的是分类，来源前缀由宿主补。
+   *
+   * 前缀是「来自哪个来源」的事实，模型不该也不需要决定：
+   * 模型只补分类部分（bug / question …），宿主按事件原有的前缀拼回去。
+   */
+  private eventTypeOf(input: EventDecisionInput, output: EventDecisionOutput): string {
+    const current = input.event.eventType || defaultTypeOf(input.event.sourceKind)
+    const classified = (output.eventType ?? '').trim()
+    if (!classified) return current
+    // 模型自己带了前缀就照用（它可能知道更细的来源口径）。
+    if (classified.includes('.')) return classified
+    // 前缀按来源种类取，不从原类型里切 —— 原类型可能本身就不带前缀。
+    const prefix = input.event.sourceKind || 'event'
+    return `${prefix}.${classified}`
+  }
+
   /** 在候选项目里按项目名或仓库匹配。 */
   private matchProject(projects: ProjectConfig[], value: string): ProjectConfig | undefined {
     const want = value.trim().toLowerCase()
@@ -210,14 +231,16 @@ export class EventDecisionService {
 /**
  * 模型输出覆盖规则输出，但空值不覆盖。
  *
- * `needsReview` 只允许从「要人审」变成「不要人审」的相反方向：
- * 规则判定要人审时（风险标签命中），模型说了不算 —— 安全护栏不能被模型解开。
+ * `needsReview` 与 `priority` 都是护栏：规则判定要人审、提到 P0 时，
+ * 模型说了不算 —— 安全护栏不能被模型解开或降级。
  */
 function mergeOutput(rule: EventDecisionOutput, model: EventDecisionOutput): EventDecisionOutput {
   const merged: EventDecisionOutput = { ...rule }
   for (const [key, value] of Object.entries(model)) {
     if (value === undefined || value === null || value === '') continue
     if (key === 'needsReview' && rule.needsReview === true) continue
+    // 模型不能把规则强制的 P0 降级：低峰窗口只放行 P2/P3，降级等于绕过闸门。
+    if (key === 'priority' && rule.priority === 'P0' && normalizeEventPriority(value) !== 'P0') continue
     ;(merged as Record<string, unknown>)[key] = value
   }
   return merged
@@ -233,7 +256,8 @@ export const ruleDecisionPort: EventDecisionPort = {
   name: 'rule',
   async decide(input: EventDecisionInput): Promise<EventDecisionOutput | null> {
     const labels = labelsOf(input.event)
-    const risky = labels.some(label => RISK_LABELS.includes(label))
+    const riskLabels = input.rule?.guardrails.riskLabels ?? RISK_LABELS
+    const risky = labels.some(label => riskLabels.includes(label))
     const eventType = input.event.eventType || defaultTypeOf(input.event.sourceKind)
     const output: EventDecisionOutput = {
       actionable: true,
@@ -284,8 +308,13 @@ function labelsOf(event: EventRecord): string[] {
     .filter(Boolean)
 }
 
-/** 按来源种类给一个默认事件类型。 */
+/**
+ * 按来源种类给一个默认事件类型。
+ *
+ * 带来源前缀，与来源自己产出的事件类型保持同一套写法：
+ * 不同来源的事件在队列里一眼能分清。
+ */
 function defaultTypeOf(sourceKind: string): string {
-  if (sourceKind === 'github') return 'issue'
+  if (sourceKind === 'github') return 'github.issue'
   return 'event'
 }
