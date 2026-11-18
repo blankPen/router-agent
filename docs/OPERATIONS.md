@@ -245,6 +245,7 @@ Router 不做对话，只在必要时说话：
 | `tool:denied` | PiDecisionEngine | `triggerId` `tool` `actor` `toolScope` `detail` | 工具层执行时校验拒绝越权调用（普通成员会话无工单 / 状态管理工具） |
 | `chat:reply-failed` | Agent Loop | `triggerId` `chat` `reason` `detail` | 回复模型失败（抛错或返回空内容），已按真实原因回话，不再退回「没看出要做什么」这类统一话术 |
 | `session:transcript-failed` / `session:reset-failed` | Agent Loop | `key` `detail` | 会话转录 / `/new` 重置失败，不影响当轮回复 |
+| `memory:read-failed` | Agent Loop | `triggerId` `chat` `actor` `detail` | 读取回复偏好失败，当轮继续研判或回复 |
 | `config:created` | Config | `path` | 首次启动写入了默认 `config.yaml` |
 | `config:parse-failed` | Config | `path` `detail` | YAML 解析失败，已降级为默认配置启动 |
 | `config:legacy-backend` | Config | `path` | 旧版 `backend` 段已兼容映射到 `runtime` |

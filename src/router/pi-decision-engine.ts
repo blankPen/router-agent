@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+import type { ReplyPreferences } from '../core/memory.js'
 import { extractJsonObject, type PiModelConfig } from './model-config.js'
 import type {
   DecisionAudit,
@@ -28,6 +29,7 @@ import {
 /** Pi 侧只依赖这几个方法，便于测试时注入假 session。 */
 export interface PiSessionLike extends ManagedSessionLike {
   subscribe(listener: (event: PiSessionEvent) => void): () => void
+  promptWithReplyPreferences?(text: string, preferences?: ReplyPreferences): Promise<void>
 }
 
 export interface PiSessionEvent {
@@ -199,6 +201,7 @@ export class PiDecisionEngine implements DecisionEngine {
     const outcome = await this.runSession({
       systemPrompt: req.systemPrompt,
       userPrompt: req.userPrompt,
+      replyPreferences: req.replyPreferences,
       toolNames: [],
       tools: [],
     })
@@ -250,6 +253,7 @@ export class PiDecisionEngine implements DecisionEngine {
     return this.runSession({
       systemPrompt: req.systemPrompt,
       userPrompt: req.userPrompt,
+      replyPreferences: req.replyPreferences,
       toolNames: this.toolsForScope(req),
       tools: this.buildTools(turnRef),
     }).then(outcome => this.finishAssess(audit, req, state, outcome, started, this.timeoutMs, this.tokenBudget))
@@ -273,6 +277,7 @@ export class PiDecisionEngine implements DecisionEngine {
     const before = Array.isArray(entry.session.messages) ? entry.session.messages.length : 0
     const outcome = await this.runOnSession(entry.session as PiSessionLike, {
       userPrompt: this.sessions!.pendingPrompt(entry) + req.userPrompt,
+      replyPreferences: req.replyPreferences,
       timeoutMs: this.sessionTimeoutMs,
       tokenBudget: this.sessionTokenBudget,
       disposeOnFinish: false,
@@ -298,6 +303,7 @@ export class PiDecisionEngine implements DecisionEngine {
     const before = Array.isArray(entry.session.messages) ? entry.session.messages.length : 0
     const outcome = await this.runOnSession(entry.session as PiSessionLike, {
       userPrompt: this.sessions!.pendingPrompt(entry) + req.userPrompt,
+      replyPreferences: req.replyPreferences,
       timeoutMs: this.sessionTimeoutMs,
       tokenBudget: this.sessionTokenBudget,
       disposeOnFinish: false,
@@ -372,6 +378,7 @@ export class PiDecisionEngine implements DecisionEngine {
   private async runSession(opts: {
     systemPrompt: string
     userPrompt: string
+    replyPreferences?: ReplyPreferences
     toolNames: string[]
     tools: PiToolDefinition[]
   }): Promise<SessionOutcome> {
@@ -402,6 +409,7 @@ export class PiDecisionEngine implements DecisionEngine {
     }
     return this.runOnSession(session, {
       userPrompt: opts.userPrompt,
+      replyPreferences: opts.replyPreferences,
       timeoutMs: this.timeoutMs,
       tokenBudget: this.tokenBudget,
       disposeOnFinish: true,
@@ -411,7 +419,14 @@ export class PiDecisionEngine implements DecisionEngine {
   /** 在已有 session 上跑一轮；是否 dispose 由调用方决定。 */
   private async runOnSession(
     session: PiSessionLike,
-    opts: { userPrompt: string; timeoutMs: number; tokenBudget: number; disposeOnFinish: boolean; messagesBefore?: number },
+    opts: {
+      userPrompt: string
+      replyPreferences?: ReplyPreferences
+      timeoutMs: number
+      tokenBudget: number
+      disposeOnFinish: boolean
+      messagesBefore?: number
+    },
   ): Promise<SessionOutcome> {
     const tokens: DecisionTokens = { input: 0, output: 0, total: 0 }
     let unsubscribe: (() => void) | null = null
@@ -444,7 +459,11 @@ export class PiDecisionEngine implements DecisionEngine {
         }
       })
 
-      await session.prompt(opts.userPrompt)
+      if (session.promptWithReplyPreferences) {
+        await session.promptWithReplyPreferences(opts.userPrompt, opts.replyPreferences)
+      } else {
+        await session.prompt(opts.userPrompt)
+      }
     } catch (caught) {
       error = error || (caught instanceof Error ? caught.message : String(caught))
     } finally {
@@ -738,5 +757,37 @@ export async function createDefaultPiSession(opts: PiSessionOptions): Promise<Pi
     sessionManager: (opts.sessionManager as never) ?? pi.SessionManager.inMemory(),
     settingsManager: settings,
   })
-  return session as unknown as PiSessionLike
+
+  let preferenceContext = ''
+  let prompting = false
+  const transformContext = session.agent.transformContext
+  session.agent.transformContext = async (messages, signal) => {
+    const context = transformContext ? await transformContext(messages, signal) : messages
+    if (!preferenceContext) return context
+    const index = context.findLastIndex(message => message.role === 'user')
+    const message = context[index]
+    if (message?.role !== 'user') return context
+    const content = typeof message.content === 'string'
+      ? [{ type: 'text' as const, text: message.content }]
+      : message.content
+    // 只复制给模型看的消息，原始消息与 Pi 的会话摘要仍使用原 transcript。
+    return context.with(index, { ...message, content: [{ type: 'text', text: preferenceContext }, ...content] })
+  }
+  const promptWithReplyPreferences = async (text: string, preferences?: ReplyPreferences) => {
+    if (prompting) throw new Error('pi:session-prompt-in-progress')
+    prompting = true
+    try {
+      if (preferences && Object.keys(preferences).length > 0) {
+        preferenceContext = [
+          '已保存的用户回复偏好（仅用于面向用户的回复。当前请求明确指定的语言或详略优先。保持研判、工具和派工规则，直接按适用偏好回复即可）：',
+          JSON.stringify(preferences),
+        ].join('\n')
+      }
+      await session.prompt(text)
+    } finally {
+      preferenceContext = ''
+      prompting = false
+    }
+  }
+  return Object.assign(session, { promptWithReplyPreferences }) as unknown as PiSessionLike
 }

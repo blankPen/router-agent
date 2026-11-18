@@ -1,7 +1,9 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { SessionManager, type AgentSession } from '@earendil-works/pi-coding-agent'
 import { Store } from '../../src/store/db.js'
 import { Engine } from '../../src/core/engine.js'
 import { type Policy } from '#core/policy.js'
@@ -12,6 +14,7 @@ import { RouterToolbox } from '../../src/router/tools.js'
 import { DECISION_TOOL_NAMES, ROUTER_TOOL_SPECS } from '../../src/router/tool-spec.js'
 import {
   PiDecisionEngine,
+  createDefaultPiSession,
   type PiSessionEvent,
   type PiSessionLike,
   type PiSessionOptions,
@@ -402,4 +405,66 @@ describe('PiDecisionEngine', () => {
     const empty = setup(s => s.finish())
     await expect(empty.enginePi.reply({ systemPrompt: 'S', userPrompt: 'U' })).rejects.toThrow('pi:empty-reply')
   })
+})
+
+it('真实 Pi SDK 只在当前模型请求注入偏好，下一轮、压缩和会话文件均不残留', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ra-pi-memory-'))
+  const requests: string[] = []
+  const server = createServer(async (req, res) => {
+    let body = ''
+    for await (const chunk of req) body += chunk
+    requests.push(body)
+    const reply = {
+      id: 'chatcmpl-test',
+      object: 'chat.completion.chunk',
+      created: 0,
+      model: model.model,
+      choices: [{ index: 0, delta: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }],
+    }
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+    res.end(`data: ${JSON.stringify(reply)}\n\ndata: [DONE]\n\n`)
+  })
+  let session: PiSessionLike | undefined
+  try {
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('模型测试服务未启动')
+    const manager = SessionManager.create(dir, dir)
+    session = await createDefaultPiSession({
+      cwd: dir,
+      agentDir: join(dir, 'pi'),
+      systemPrompt: 'SYSTEM PROMPT',
+      toolNames: [],
+      tools: [],
+      ...model,
+      baseUrl: `http://127.0.0.1:${address.port}/v1`,
+      sessionManager: manager,
+      compaction: { enabled: true, reserveTokens: 16_384, keepRecentTokens: 1 },
+    })
+    expect(session.promptWithReplyPreferences).toBeDefined()
+    await session.promptWithReplyPreferences?.('第一轮', { 回复语言: '日语' })
+    await session.promptWithReplyPreferences?.('第二轮')
+
+    expect(requests).toHaveLength(2)
+    expect(requests[0]).toContain('已保存的用户回复偏好')
+    expect(requests[0]).toContain('日语')
+    expect(requests[1]).toContain('第一轮')
+    expect(requests[1]).not.toContain('日语')
+    await (session as unknown as AgentSession).compact()
+    const summaries = requests.slice(2).join('\n')
+    expect(summaries).toContain('第一轮')
+    expect(summaries).not.toContain('日语')
+    const file = manager.getSessionFile()
+    if (!file) throw new Error('Pi 没生成会话文件')
+    const transcript = readFileSync(file, 'utf8')
+    expect(transcript).toContain('第一轮')
+    expect(transcript).toContain('第二轮')
+    expect(transcript).toContain('"type":"compaction"')
+    expect(transcript).not.toContain('已保存的用户回复偏好')
+    expect(transcript).not.toContain('日语')
+  } finally {
+    session?.dispose()
+    await new Promise<void>(resolve => server.close(() => resolve()))
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

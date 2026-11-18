@@ -156,12 +156,17 @@ export class FeishuChannel implements ChannelAdapter {
 
   async enrich(trigger: Trigger): Promise<Trigger> {
     const quoted = await attachQuotedMessage(trigger, this.runner, { logger: this.logger })
-    return attachImageText(quoted, {
+    const enriched = await attachImageText(quoted, {
       runner: this.runner,
       transcriber: this.transcriber,
       ...(this.opts.imagesRoot ? { imagesRoot: this.opts.imagesRoot } : {}),
       logger: this.logger,
     })
+    if (enriched.text === trigger.text) return enriched
+    return {
+      ...enriched,
+      raw: { ...(enriched.raw as Record<string, unknown> | undefined), originalText: trigger.text },
+    }
   }
 
   async send(message: OutboundMessage): Promise<SendReceipt> {

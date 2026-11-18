@@ -22,6 +22,7 @@ import type {
 import type { Policy } from '#core/policy.js'
 import type { ReplyBlock } from '#core/reply.js'
 import { normalizeStage, stageAliases } from '#core/stage.js'
+import type { MemoryChange, MemoryOwner, ReplyPreferences } from '../core/memory.js'
 
 /** sessionKey 迁移记录 ID；与手工执行的 SQL 文件保持一致。 */
 export const SESSION_KEY_MIGRATION_ID = '2026-11-session-key-channel'
@@ -275,6 +276,20 @@ CREATE TABLE IF NOT EXISTS intakes (
 );
 CREATE INDEX IF NOT EXISTS idx_intakes_thread ON intakes (thread_id, actor_id, status);
 CREATE INDEX IF NOT EXISTS idx_intakes_status ON intakes (status, updated_at);
+
+CREATE TABLE IF NOT EXISTS user_memories (
+  channel_id TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
+  key TEXT NOT NULL,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (channel_id, actor_id, chat_id, key)
+);
+
+CREATE TABLE IF NOT EXISTS user_memory_changes (
+  trigger_id TEXT PRIMARY KEY
+);
 
 -- 会话复用：一个 session_key（群/话题 + 人）对应一个落盘的 Pi session。
 -- 一个 key 会随着 /new 留下多行历史：active 是当前，superseded 等清理，purged 是已删文件。
@@ -596,6 +611,39 @@ export class Store {
 
   close(): void {
     this.db.close()
+  }
+
+  listUserMemories(owner: MemoryOwner, includeCrossChat = false): ReplyPreferences {
+    const rows = this.db.prepare(`
+      SELECT key, value FROM user_memories
+      WHERE channel_id = ? AND actor_id = ? AND chat_id IN (?, ?)
+      ORDER BY chat_id, key
+    `).all(owner.channelId, owner.actorId, owner.chatId, includeCrossChat ? '' : owner.chatId)
+    // 跨群记录的 chat_id 为空，排在群内记录前面。同名偏好以群内记录为准。
+    return Object.fromEntries(rows.map(row => [String(row.key), String(row.value)])) as ReplyPreferences
+  }
+
+  changeUserMemory(owner: MemoryOwner, change: MemoryChange, triggerId: string, now: string): void {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const receipt = this.db.prepare('INSERT INTO user_memory_changes (trigger_id) VALUES (?) ON CONFLICT(trigger_id) DO NOTHING').run(triggerId)
+      if (receipt.changes > 0) {
+        const key = [owner.channelId, owner.actorId, owner.chatId, change.key] as const
+        if (change.value === null) {
+          this.db.prepare('DELETE FROM user_memories WHERE channel_id = ? AND actor_id = ? AND chat_id = ? AND key = ?')
+            .run(...key)
+        } else {
+          this.db.prepare(`
+            INSERT INTO user_memories (channel_id, actor_id, chat_id, key, value, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (channel_id, actor_id, chat_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+          `).run(...key, change.value, now)
+        }
+      }
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
   }
 
   // ---------- 策略 ----------
