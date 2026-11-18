@@ -59,7 +59,7 @@ export interface EventVerdict {
   reason: string
   /** 置信度 0~1；低于阈值一律转人工。 */
   confidence: number
-  /** 判定依据（命中的规则或 prompt 摘要）。 */
+  /** 判定依据（命中的规则或判定模型）。 */
   basis: string
 }
 
@@ -99,8 +99,6 @@ export interface EventRecord {
   reason?: string
   /** 置信度 0~1。 */
   confidence?: number
-  /** 判定时使用的决策 prompt 版本。 */
-  promptVersion?: number
   /** 判定时命中的规则名或 'model'。 */
   basis?: string
   /** 判定时命中的规则 id；未判定时为空。 */

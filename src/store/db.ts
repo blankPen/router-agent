@@ -468,7 +468,6 @@ CREATE TABLE IF NOT EXISTS events (
   needs_review INTEGER NOT NULL DEFAULT 0,
   reason TEXT,
   confidence REAL,
-  prompt_version INTEGER,
   basis TEXT,
   rule_id TEXT,
   ticket_id TEXT,
@@ -559,6 +558,55 @@ export class Store {
     }
     if (!eventColumns.some(column => column.name === 'rule_version')) {
       this.db.exec('ALTER TABLE events ADD COLUMN rule_version INTEGER')
+    }
+    // 旧版全局 prompt 已删除，prompt_version 不再有人写：把这一列从旧库里去掉。
+    if (eventColumns.some(column => column.name === 'prompt_version')) {
+      this.db.exec(`
+        ALTER TABLE events RENAME TO events_legacy;
+        CREATE TABLE events (
+          id TEXT PRIMARY KEY,
+          source_id TEXT NOT NULL,
+          source_kind TEXT NOT NULL,
+          external_id TEXT NOT NULL,
+          title TEXT NOT NULL,
+          body TEXT NOT NULL,
+          url TEXT,
+          raw TEXT,
+          context TEXT,
+          received_at TEXT NOT NULL,
+          status TEXT NOT NULL,
+          execution TEXT NOT NULL DEFAULT 'none',
+          priority TEXT NOT NULL,
+          event_type TEXT NOT NULL DEFAULT '',
+          project TEXT,
+          repo TEXT,
+          branch TEXT,
+          skill TEXT,
+          needs_review INTEGER NOT NULL DEFAULT 0,
+          reason TEXT,
+          confidence REAL,
+          basis TEXT,
+          rule_id TEXT,
+          rule_version INTEGER,
+          ticket_id TEXT,
+          trigger_id TEXT,
+          decided_at TEXT,
+          updated_at TEXT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          last_error TEXT,
+          UNIQUE (source_id, external_id)
+        );
+        INSERT INTO events
+          (id, source_id, source_kind, external_id, title, body, url, raw, context, received_at, status, execution, priority,
+           event_type, project, repo, branch, skill, needs_review, reason, confidence, basis, rule_id, rule_version, ticket_id,
+           trigger_id, decided_at, updated_at, attempts, last_error)
+          SELECT id, source_id, source_kind, external_id, title, body, url, raw, context, received_at, status, execution, priority,
+           event_type, project, repo, branch, skill, needs_review, reason, confidence, basis, rule_id, rule_version, ticket_id,
+           trigger_id, decided_at, updated_at, attempts, last_error FROM events_legacy;
+        DROP TABLE events_legacy;
+        CREATE INDEX IF NOT EXISTS idx_events_status ON events (status, received_at);
+        CREATE INDEX IF NOT EXISTS idx_events_priority ON events (priority, received_at);
+      `)
     }
     const threadColumns = this.db.prepare('PRAGMA table_info(threads)').all() as Row[]
     if (!threadColumns.some(column => column.name === 'channel_id')) {
@@ -727,9 +775,9 @@ export class Store {
   insertEvent(event: EventRecord): boolean {
     const result = this.db.prepare(`INSERT OR IGNORE INTO events
       (id, source_id, source_kind, external_id, title, body, url, raw, context, received_at, status, execution, priority, event_type,
-       project, repo, branch, skill, needs_review, reason, confidence, prompt_version, basis, rule_id, rule_version, ticket_id, trigger_id,
+       project, repo, branch, skill, needs_review, reason, confidence, basis, rule_id, rule_version, ticket_id, trigger_id,
        decided_at, updated_at, attempts, last_error)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(
         event.id,
         event.sourceId,
@@ -752,7 +800,6 @@ export class Store {
         event.needsReview ? 1 : 0,
         event.reason ?? null,
         event.confidence ?? null,
-        event.promptVersion ?? null,
         event.basis ?? null,
         event.ruleId ?? null,
         event.ruleVersion ?? null,
@@ -806,7 +853,7 @@ export class Store {
 
   updateEvent(event: EventRecord): void {
     this.db.prepare(`UPDATE events SET title = ?, body = ?, url = ?, status = ?, execution = ?, priority = ?, event_type = ?,
-      project = ?, repo = ?, branch = ?, skill = ?, needs_review = ?, reason = ?, confidence = ?, prompt_version = ?, basis = ?, rule_id = ?,
+      project = ?, repo = ?, branch = ?, skill = ?, needs_review = ?, reason = ?, confidence = ?, basis = ?, rule_id = ?,
       rule_version = ?, context = ?, ticket_id = ?, trigger_id = ?, decided_at = ?, updated_at = ?, attempts = ?, last_error = ? WHERE id = ?`)
       .run(
         event.title,
@@ -823,7 +870,6 @@ export class Store {
         event.needsReview ? 1 : 0,
         event.reason ?? null,
         event.confidence ?? null,
-        event.promptVersion ?? null,
         event.basis ?? null,
         event.ruleId ?? null,
         event.ruleVersion ?? null,
@@ -898,16 +944,14 @@ export class Store {
   /**
    * 规则变更后重新激活未判定事件。
    *
-   * eventTypes 为空数组表示没有具体规则可激活；null 表示兜底规则覆盖全部类型。
+   * eventTypes 为空数组表示没有具体规则可激活。
    */
-  activateUndecidedEvents(eventTypes: string[] | null = null, at = new Date().toISOString()): number {
-    if (Array.isArray(eventTypes) && eventTypes.length === 0) return 0
-    const where = Array.isArray(eventTypes)
-      ? `status = 'undecided' AND event_type IN (${eventTypes.map(() => '?').join(', ')})`
-      : "status = 'undecided'"
+  activateUndecidedEvents(eventTypes: string[], at = new Date().toISOString()): number {
+    if (eventTypes.length === 0) return 0
     const result = this.db.prepare(
-      `UPDATE events SET status = 'pending', execution = 'none', decided_at = NULL, updated_at = ? WHERE ${where}`,
-    ).run(at, ...(Array.isArray(eventTypes) ? eventTypes : []))
+      `UPDATE events SET status = 'pending', execution = 'none', decided_at = NULL, updated_at = ?
+       WHERE status = 'undecided' AND event_type IN (${eventTypes.map(() => '?').join(', ')})`,
+    ).run(at, ...eventTypes)
     return Number(result.changes)
   }
 
@@ -1903,7 +1947,6 @@ function eventFromRow(row: Row): EventRecord {
     needsReview: Number(row.needs_review) === 1,
     ...(row.reason ? { reason: String(row.reason) } : {}),
     ...(row.confidence !== null && row.confidence !== undefined ? { confidence: Number(row.confidence) } : {}),
-    ...(row.prompt_version !== null && row.prompt_version !== undefined ? { promptVersion: Number(row.prompt_version) } : {}),
     ...(row.basis ? { basis: String(row.basis) } : {}),
     ...(row.rule_id ? { ruleId: String(row.rule_id) } : {}),
     ...(row.rule_version !== null && row.rule_version !== undefined ? { ruleVersion: Number(row.rule_version) } : {}),

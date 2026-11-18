@@ -53,7 +53,7 @@ describe('事件 API', () => {
           applied.push({ eventId, action })
           return { id: eventId, status: 'pending' }
         },
-        decision: () => ({ provider: 'rule', prompt: 'x', confidenceThreshold: 0.6, fallback: 'review', version: 3 }),
+        decision: () => ({ provider: 'rule', confidenceThreshold: 0.6, fallback: 'review' }),
         rules: () => config.events.rules,
         ruleStats: () => ({ 'rule-issue': { pending: 1, review: 2, done: 3, invalid: 4 } }),
         compileRule: async input => compileRuleTemplate({
@@ -69,7 +69,7 @@ describe('事件 API', () => {
       const list = await call(api, 'GET', '/api/events')
       expect(list.status).toBe(200)
       expect(list.json.events).toHaveLength(1)
-      expect(list.json.decision.version).toBe(3)
+      expect(list.json.decision.provider).toBe('rule')
       expect(list.json.rules).toHaveLength(1)
       expect(list.json.ruleStats['rule-issue'].done).toBe(3)
 

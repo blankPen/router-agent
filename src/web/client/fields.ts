@@ -372,8 +372,8 @@ export const CONFIG_GROUPS: ConfigGroup[] = [
       },
       {
         id: 'events-decision',
-        title: '判定方式与全局兜底',
-        description: 'provider 是部署级选择；旧 prompt 只有在显式开启全局兜底时才会作用于未匹配规则的事件。',
+        title: '判定方式与兜底',
+        description: 'provider 是部署级选择；判定依据在每条决策规则里，这里只放全局兜底参数。',
         fields: [
           {
             path: 'events.decision.provider',
@@ -387,24 +387,12 @@ export const CONFIG_GROUPS: ConfigGroup[] = [
             hint: '没有可用模型时自动退回 rule',
           },
           {
-            path: 'events.decision.prompt',
-            label: '旧版全局 prompt',
-            kind: 'textarea',
-            hint: '兼容保留；新规则体系下默认不参与判定，开启下面的兜底开关后才生效',
-          },
-          {
-            path: 'events.decision.fallbackToPrompt',
-            label: '未匹配规则时使用全局 prompt',
-            kind: 'switch',
-            hint: '老配置兼容开关；新装机器保持关闭，未匹配事件留在「未判定」队列，不调模型',
-          },
-          {
             path: 'events.decision.confidenceThreshold',
             label: '置信度阈值',
             kind: 'number',
             min: 0,
             max: 1,
-            hint: '低于阈值不硬跑，转人工审核',
+            hint: '规则没写阈值时用这个；低于阈值不硬跑，转人工审核',
           },
           {
             path: 'events.decision.fallback',

@@ -17,7 +17,7 @@ import { preview } from '#core/events.js'
 import { errorMessage, noopLogger, type Logger } from '#infra/logger.js'
 import type { EventEnvelope, EventSource } from '#event/port.js'
 import type { EventDecisionResult, EventDecisionService } from './decision.js'
-import { EVENT_SKILLS, findEventSkill } from './skills.js'
+import { findEventSkill } from './skills.js'
 import { ruleForEvent, type EventRule } from './rules.js'
 
 /** 事件判定最多重试几次；超过就标成失败态等人处理，不再无限重试。 */
@@ -28,7 +28,6 @@ export interface EventDecisionOutcome {
   event: EventRecord
   verdict: EventVerdict
   basis: string
-  promptVersion: number
 }
 
 export interface EventPipelineDeps {
@@ -180,14 +179,14 @@ export class EventPipeline {
     if (!gate.allowed) {
       const deferred = { ...event, execution: 'deferred' as const, reason: gate.reason, updatedAt: this.clock() }
       this.store.updateEvent(deferred)
-      return { event: deferred, verdict, basis: event.basis ?? 'event-decision', promptVersion: event.promptVersion ?? 0 }
+      return { event: deferred, verdict, basis: event.basis ?? 'event-decision' }
     }
     const dispatched = await this.dispatch(deferred0(event), verdict)
     if (!dispatched) {
       const failed = { ...event, status: 'review' as const, needsReview: true, reason: '开单失败，转人工处理', updatedAt: this.clock() }
       this.store.updateEvent(failed)
       await this.onReview?.(failed, verdict)
-      return { event: failed, verdict, basis: event.basis ?? 'event-decision', promptVersion: event.promptVersion ?? 0 }
+      return { event: failed, verdict, basis: event.basis ?? 'event-decision' }
     }
     return dispatched
   }
@@ -239,10 +238,7 @@ export class EventPipeline {
       source,
       rule,
       projects: this.projectsOf(config),
-      skills: EVENT_SKILLS,
       decision: config.events.decision,
-      prompt: config.events.decision.prompt,
-      promptVersion: this.promptVersion(),
     })
     const verdict = result.verdict
     const decided: EventRecord = {
@@ -258,7 +254,6 @@ export class EventPipeline {
       needsReview: verdict.needsReview,
       reason: verdict.reason,
       confidence: verdict.confidence,
-      promptVersion: result.promptVersion,
       basis: result.basis,
       ruleId: rule.id,
       ruleVersion: rule.version,
@@ -270,7 +265,7 @@ export class EventPipeline {
     if (!verdict.actionable) {
       this.store.updateEvent(decided)
       this.logger.info('event:invalid', { eventId: event.id, sourceId: event.sourceId, reason: preview(verdict.reason, 120) })
-      return { event: decided, verdict, basis: result.basis, promptVersion: result.promptVersion }
+      return { event: decided, verdict, basis: result.basis }
     }
 
     // 判定没完成（模型失败等）：事件留在队列里等下一轮，不能派工也不能丢。
@@ -295,7 +290,7 @@ export class EventPipeline {
           message: preview(verdict.reason, 120),
         })
         await this.onReview?.(failed, verdict)
-        return { event: failed, verdict, basis: result.basis, promptVersion: result.promptVersion }
+        return { event: failed, verdict, basis: result.basis }
       }
       const waiting = { ...decided, status: 'pending' as const, execution: 'retry' as const, decidedAt: undefined, updatedAt: this.clock() }
       this.store.updateEvent(waiting)
@@ -305,7 +300,7 @@ export class EventPipeline {
         ruleId: rule.id,
         reason: preview(verdict.reason, 120),
       })
-      return { event: waiting, verdict, basis: result.basis, promptVersion: result.promptVersion }
+      return { event: waiting, verdict, basis: result.basis }
     }
 
     // 需要人审：不派工，进待审核队列。
@@ -319,7 +314,7 @@ export class EventPipeline {
         reason: preview(verdict.reason, 120),
       })
       await this.onReview?.(reviewed, verdict)
-      return { event: reviewed, verdict, basis: result.basis, promptVersion: result.promptVersion }
+      return { event: reviewed, verdict, basis: result.basis }
     }
 
     // 时间窗与预算：不允许自动执行时顺延，不丢事件。
@@ -328,7 +323,7 @@ export class EventPipeline {
       const deferred = { ...decided, execution: 'deferred' as const, reason: gate.reason }
       this.store.updateEvent(deferred)
       this.logger.info('event:deferred', { eventId: event.id, sourceId: event.sourceId, reason: gate.reason })
-      return { event: deferred, verdict, basis: result.basis, promptVersion: result.promptVersion }
+      return { event: deferred, verdict, basis: result.basis }
     }
 
     const dispatched = await this.dispatch(deferred0(decided), verdict)
@@ -336,7 +331,7 @@ export class EventPipeline {
       const failed = { ...decided, status: 'review' as const, needsReview: true, reason: '开单失败，转人工处理' }
       this.store.updateEvent(failed)
       await this.onReview?.(failed, verdict)
-      return { event: failed, verdict, basis: result.basis, promptVersion: result.promptVersion }
+      return { event: failed, verdict, basis: result.basis }
     }
     return dispatched
   }
@@ -352,7 +347,7 @@ export class EventPipeline {
       const existing = this.store.listEvents({ sourceId: event.sourceId, limit: 500 }).find(item => item.triggerId === trigger.id)
       if (existing?.ticketId) {
         this.logger.info('event:already-dispatched', { eventId: event.id, ticketId: existing.ticketId })
-        return { event: existing, verdict, basis: 'already-dispatched', promptVersion: event.promptVersion ?? 0 }
+        return { event: existing, verdict, basis: 'already-dispatched' }
       }
     }
     try {
@@ -360,7 +355,7 @@ export class EventPipeline {
         triggerId: trigger.id,
         decision: 'accept',
         strength: 'inferred',
-        reason: `事件判定：${verdict.priority} / ${verdict.eventType} / ${verdict.skill || '通用处理'} / ${verdict.reason || '按决策 prompt 判定'}`,
+        reason: `事件判定：${verdict.priority} / ${verdict.eventType} / ${verdict.skill || '通用处理'} / ${verdict.reason || '按决策规则判定'}`,
         title: event.title,
         scope: this.scopeOf(event, verdict),
         request: this.requestOf(event, verdict),
@@ -388,7 +383,7 @@ export class EventPipeline {
         skill: verdict.skill,
       })
       await this.onDispatched?.(dispatched, outcome.ticket)
-      return { event: dispatched, verdict, basis: event.basis ?? 'event-decision', promptVersion: event.promptVersion ?? 0 }
+      return { event: dispatched, verdict, basis: event.basis ?? 'event-decision' }
     } catch (error) {
       this.logger.error('event:dispatch-failed', { eventId: event.id, message: errorMessage(error) })
       return null
@@ -546,18 +541,7 @@ export class EventPipeline {
   /** 按事件类型取规则；ruleId 优先，规则被删后回落到当前类型匹配。 */
   private ruleOfEvent(config: AppConfig, eventType: string, ruleId?: string): EventRule | undefined {
     const byId = ruleId ? config.events.rules.find(rule => rule.id === ruleId) : undefined
-    return byId ?? ruleForEvent(
-      config.events.rules,
-      eventType,
-      config.events.decision.fallbackToPrompt ? config.events.decision.prompt : undefined,
-    )
-  }
-
-  /** 决策 prompt 版本号：每次改 prompt 递增，历史判定可回放。 */
-  private promptVersion(): number {
-    const key = 'events:decision-prompt-version'
-    const current = Number(this.store.getCursor(key) ?? '0')
-    return Number.isFinite(current) && current > 0 ? current : 1
+    return byId ?? ruleForEvent(config.events.rules, eventType)
   }
 
   /** 判定失败：标成失败态，保留记录等人处理。 */

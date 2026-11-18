@@ -3,7 +3,7 @@
  *
  * 这一层是**闭集**：决策模型只能从清单里点名字，不能凭空造一个 skill。
  * skill 本身不在面板上配置 —— 执行环境默认在 worker 里，
- * 这里只声明「有哪些处理方式、各自是干什么的」，供决策 prompt 引用。
+ * 这里只声明「有哪些处理方式、各自是干什么的」，供决策规则与判定提示词引用。
  */
 
 export interface EventSkill {
@@ -31,7 +31,7 @@ export function findEventSkill(id: string): EventSkill | undefined {
   return EVENT_SKILLS.find(skill => skill.id === want)
 }
 
-/** skill 清单的中文说明文本，供决策 prompt 使用。 */
+/** skill 清单的中文说明文本，供判定提示词使用。 */
 export function skillCatalogText(skills: readonly EventSkill[] = EVENT_SKILLS): string {
   return skills.map(skill => `- ${skill.id}（${skill.name}）：${skill.hint}`).join('\n')
 }

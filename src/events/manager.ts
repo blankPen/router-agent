@@ -89,7 +89,7 @@ export class EventManager {
     this.running = true
     await this.reloadSources()
     const activated = this.store.activateUndecidedEvents(
-      ruleEventTypes(this.config().events.rules, this.config().events.decision.fallbackToPrompt ? this.config().events.decision.prompt : undefined),
+      ruleEventTypes(this.config().events.rules),
       this.clock(),
     )
     if (activated > 0) this.logger.info('event:rule-activated', { ruleId: 'startup', activated })

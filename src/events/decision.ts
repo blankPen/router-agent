@@ -2,18 +2,15 @@
  * 事件决策：一次判定产出「要不要做 / 优先级 / 类型 / 归属项目 / 执行方式 / 要不要人审」。
  *
  * 判定顺序：规则先判、模型兜底。
- * 规则能定案的不调模型；模型只在灰区调一次，判定依据是面板上可配置的决策 prompt。
+ * 规则能定案的不调模型；模型只在灰区调一次，判定依据是命中的那条规则。
  * 模型输出必须落在闭集内（项目清单、skill 清单），选不中就降级转人工，不凭空造。
  */
 import type { EventDecisionConfig, EventSourceConfig, ProjectConfig } from '../config.js'
 import type { EventPriority, EventRecord, EventVerdict } from '#core/event.js'
 import { normalizeEventPriority } from '#core/event.js'
 import { errorMessage, noopLogger, type Logger } from '#infra/logger.js'
-import { DEFAULT_EVENT_SKILL, findEventSkill, type EventSkill } from './skills.js'
+import { DEFAULT_EVENT_SKILL, findEventSkill } from './skills.js'
 import { DEFAULT_RULE_RISK_LABELS, type EventRule } from './rules.js'
-
-/** 命中这些标签的事件直接转人工：安全、生产、付费、对外发布。 */
-export const RISK_LABELS = DEFAULT_RULE_RISK_LABELS
 
 /** 决策输入：事件 + 订阅配置 + 候选闭集 + 判定依据。 */
 export interface EventDecisionInput {
@@ -23,13 +20,7 @@ export interface EventDecisionInput {
   rule?: EventRule
   /** 候选项目（闭集）：模型只能从中选。 */
   projects: ProjectConfig[]
-  /** 候选 skill（闭集）。 */
-  skills: readonly EventSkill[]
   decision: EventDecisionConfig
-  /** 当前决策 prompt 正文。 */
-  prompt: string
-  /** prompt 版本号，随判定结果一起回填。 */
-  promptVersion: number
 }
 
 /** 决策端口的输出；字段缺省表示「这一项模型没给」。 */
@@ -53,7 +44,6 @@ export interface EventDecisionPort {
 /** 判定结论 + 审计信息。 */
 export interface EventDecisionResult {
   verdict: EventVerdict
-  promptVersion: number
   /** 判定依据：命中的规则名或模型名。 */
   basis: string
 }
@@ -121,12 +111,12 @@ export class EventDecisionService {
 
     const verdict = this.validate(input, output, current)
     verdict.decided = decided
-    return { verdict, promptVersion: input.promptVersion, basis }
+    return { verdict, basis }
   }
 
   /**
    * 闭集校验与兜底：项目 / skill 选不中、置信度不够，一律转人工。
-   * 这是「prompt 是自然语言，但输出必须可控」的落地点。
+   * 这是「判定依据是自然语言，但输出必须可控」的落地点。
    */
   private validate(input: EventDecisionInput, output: EventDecisionOutput, decision: EventDecisionConfig): EventVerdict {
     const reasons: string[] = []
@@ -159,7 +149,7 @@ export class EventDecisionService {
       : decision.provider === 'rule' ? 1 : 0
 
     let needsReview = output.needsReview === true
-    const threshold = input.rule && input.rule.id !== 'legacy-prompt'
+    const threshold = input.rule
       ? input.rule.thresholds.isValid
       : decision.confidenceThreshold
     if (confidence < threshold) {
@@ -256,13 +246,14 @@ export const ruleDecisionPort: EventDecisionPort = {
   name: 'rule',
   async decide(input: EventDecisionInput): Promise<EventDecisionOutput | null> {
     const labels = labelsOf(input.event)
-    const riskLabels = input.rule?.guardrails.riskLabels ?? RISK_LABELS
+    // 命中风险标签的事件直接转人工：安全、生产、付费、对外发布。
+    const riskLabels = input.rule?.guardrails.riskLabels ?? DEFAULT_RULE_RISK_LABELS
     const risky = labels.some(label => riskLabels.includes(label))
     const eventType = input.event.eventType || defaultTypeOf(input.event.sourceKind)
     const output: EventDecisionOutput = {
       actionable: true,
       // 订阅里不写优先级：规则只认风险标签提 P0，其余按中性档位，
-      // 真正的优先级由决策模型按 prompt 判定。
+      // 真正的优先级由决策模型按规则判定。
       priority: risky ? 'P0' : 'P3',
       eventType,
       ...(risky ? { needsReview: true, reason: '命中风险标签，需要人工确认' } : {}),

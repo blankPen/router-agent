@@ -2,6 +2,9 @@
 
 > 目标：把「事件总线」从**一份全局 prompt 决定一切**，改成**按事件类型各自配置、各自判定**。
 > 本方案已落地实现；代码、配置、面板、测试与运维文档同步更新。
+> **后续变更**：方案里 4.2 节的「全局 prompt 降级为兜底」兼容策略已被撤销——
+> `events.decision.prompt` 与 `events.decision.fallbackToPrompt` 已彻底删除，
+> 判定依据只有规则一处，未匹配规则的事件一律保持未判定。
 > 现状基线：`main` @ `48ae6c9`
 > 关联现状文档：[CONFIGURATION.md](../CONFIGURATION.md)（事件总线配置）、[OPERATIONS.md](../OPERATIONS.md)（日志事件表）
 
