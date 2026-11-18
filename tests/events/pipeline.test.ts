@@ -5,6 +5,7 @@ import { defaultConfig, policyOf, type AppConfig } from '../../src/config.js'
 import { EventDecisionService, ruleDecisionPort, type EventDecisionPort } from '../../src/events/decision.js'
 import { EventPipeline, MAX_EVENT_ATTEMPTS, windowOf } from '../../src/events/pipeline.js'
 import { EVENT_SKILLS } from '../../src/events/skills.js'
+import { compileRuleTemplate } from '../../src/events/rules.js'
 
 function setup(over: Partial<AppConfig> = {}) {
   const store = new Store(':memory:')
@@ -13,6 +14,8 @@ function setup(over: Partial<AppConfig> = {}) {
     projects: [{ name: 'router-agent', repo: '/Users/me/router-agent', defaultBranch: 'main' }],
     events: {
       ...defaultConfig().events,
+      // 这一组旧行为测试等价于老配置：保留全局 prompt 兜底。
+      decision: { ...defaultConfig().events.decision, fallbackToPrompt: true },
       sources: {
         ...defaultConfig().events.sources,
         github: { enabled: true, kind: 'github', repo: 'blankPen/router-agent' },
@@ -55,6 +58,24 @@ describe('事件管线', () => {
     expect(store.listEvents().length).toBe(1)
   })
 
+  it('不同来源的同一 externalId 各算一条', () => {
+    const { store, pipeline } = setup()
+    pipeline.ingest('github', SOURCE, { externalId: 'issue:a#1', title: '崩溃', body: '崩了' })
+    pipeline.ingest('gitlab', SOURCE, { externalId: 'issue:a#1', title: '崩溃', body: '崩了' })
+    expect(store.listEvents().length).toBe(2)
+  })
+
+  it('重复拉取同一事件不会覆盖它已处理的状态', async () => {
+    const { store, pipeline } = setup()
+    const event = pipeline.ingest('github', SOURCE, { externalId: 'issue:a#1', title: '崩溃', body: '崩了' })
+    await pipeline.process(event)
+    const processed = store.getEvent(event.id)!
+    const again = pipeline.ingest('github', SOURCE, { externalId: 'issue:a#1', title: '崩溃', body: '崩了' })
+    expect(again.id).toBe(event.id)
+    expect(store.getEvent(event.id)!.status).toBe(processed.status)
+    expect(store.getEvent(event.id)!.ticketId).toBe(processed.ticketId)
+  })
+
   it('判定通过且项目明确时直接开单，事件挂到工单上', async () => {
     const { store, pipeline } = setup()
     const event = pipeline.ingest('github', SOURCE, { externalId: 'issue:a#2', title: '崩溃', body: '崩了' })
@@ -72,6 +93,7 @@ describe('事件管线', () => {
     const { store, pipeline } = setup({
       events: {
         ...defaultConfig().events,
+        decision: { ...defaultConfig().events.decision, fallbackToPrompt: true },
         sources: { github: { ...SOURCE, repo: 'someone/other' } },
       },
     })
@@ -87,6 +109,7 @@ describe('事件管线', () => {
     const { store, pipeline } = setup({
       events: {
         ...defaultConfig().events,
+        decision: { ...defaultConfig().events.decision, fallbackToPrompt: true },
         sources: { github: { ...SOURCE, repo: 'someone/other' } },
       },
     })
@@ -114,6 +137,29 @@ describe('事件管线', () => {
     expect(store.getEvent(first.id)?.ticketId).toBeTruthy()
     expect(store.getEvent(second.id)?.execution).toBe('deferred')
     expect(store.getEvent(second.id)?.ticketId).toBeUndefined()
+  })
+
+  it('配额按今天开出的工单算，不按事件在 GitHub 上发生的时间算', async () => {
+    const { store, pipeline, config } = setup()
+    config.events.policy.perSourceDailyLimit = 1
+    // 这条事件在 GitHub 上是十天前发生的，但今天才判定：算今天的配额。
+    const first = pipeline.ingest('github', SOURCE, {
+      externalId: 'issue:a#70',
+      title: '崩溃',
+      body: '崩了',
+      receivedAt: '2026-11-03T10:00:00.000Z',
+    })
+    await pipeline.process(first)
+    const second = pipeline.ingest('github', SOURCE, {
+      externalId: 'issue:a#71',
+      title: '崩溃',
+      body: '崩了',
+      receivedAt: '2026-11-02T10:00:00.000Z',
+    })
+    await pipeline.process(second)
+    expect(store.getEvent(first.id)?.ticketId).toBeTruthy()
+    // 第二条同样算今天：配额已满，顺延。
+    expect(store.getEvent(second.id)?.execution).toBe('deferred')
   })
 
   it('高优事件不受时间窗限制，低优事件在高峰顺延', async () => {
@@ -228,5 +274,170 @@ describe('事件管线', () => {
     expect(modelCalls).toBeLessThanOrEqual(MAX_EVENT_ATTEMPTS)
     expect(stored.execution).toBe('failed')
     expect(stored.lastError).toContain('模型超时')
+  })
+
+  it('没有匹配规则的事件保持未判定，不被领取也不调模型', async () => {
+    let modelCalls = 0
+    const model: EventDecisionPort = {
+      name: 'llm',
+      decide: async () => {
+        modelCalls += 1
+        return { actionable: true, priority: 'P2' as const, project: 'router-agent', confidence: 0.9 }
+      },
+    }
+    const { store, config } = setup({
+      events: {
+        ...defaultConfig().events,
+        decision: { ...defaultConfig().events.decision, provider: 'llm', fallbackToPrompt: false },
+        sources: { github: SOURCE },
+        rules: [],
+      },
+    })
+    const service = new EventDecisionService({ decision: config.events.decision, rule: ruleDecisionPort, model })
+    const pipeline = new EventPipeline({
+      store,
+      engine: new Engine({ store, policy: policyOf(config), ids: { next: p => `${p}_1` } }),
+      config: () => config,
+      clock: () => new Date(2026, 10, 13, 22, 0, 0).toISOString(),
+      ids: prefix => `${prefix}_1`,
+      decision: service,
+    })
+    const event = pipeline.ingest('github', SOURCE, {
+      externalId: 'issue:a#20',
+      title: '普通通知',
+      body: '没有规则',
+      eventType: 'github.issues.opened',
+    })
+    await pipeline.tick()
+    const stored = store.getEvent(event.id)!
+    expect(stored.status).toBe('undecided')
+    expect(stored.reason).toBe('未匹配到决策规则')
+    expect(modelCalls).toBe(0)
+  })
+
+  it('规则按 eventType 精确匹配，不会串到其它类型', async () => {
+    const rule = compileRuleTemplate({ id: 'rule-issue', eventType: 'github.issues.opened', intent: '处理 issue' })
+    const { store, config } = setup({
+      events: {
+        ...defaultConfig().events,
+        decision: { ...defaultConfig().events.decision, fallbackToPrompt: false },
+        sources: { github: SOURCE },
+        rules: [rule],
+      },
+    })
+    const pipeline = new EventPipeline({
+      store,
+      engine: new Engine({ store, policy: policyOf(config), ids: { next: p => `${p}_1` } }),
+      config: () => config,
+      clock: () => new Date(2026, 10, 13, 22, 0, 0).toISOString(),
+      ids: prefix => `${prefix}_1`,
+      decision: new EventDecisionService({ decision: config.events.decision, rule: ruleDecisionPort }),
+    })
+    const event = pipeline.ingest('github', SOURCE, {
+      externalId: 'pr:a#1',
+      title: 'PR 通知',
+      body: '',
+      eventType: 'github.pull_request.opened',
+    })
+    expect(store.getEvent(event.id)?.status).toBe('undecided')
+    expect(store.getEventByExternalId('github', 'pr:a#1')?.ruleId).toBeUndefined()
+  })
+
+  it('来源 context 入库，并在判定 state 里保留', () => {
+    const { store, pipeline } = setup()
+    const event = pipeline.ingest('github', SOURCE, {
+      externalId: 'pr:a#2',
+      title: 'PR 失败',
+      body: '',
+      eventType: 'github.workflow_run.failure',
+      context: { repo: 'blankPen/router-agent', branch: 'main', actor: 'alice' },
+    })
+    expect(store.getEvent(event.id)?.context).toEqual({
+      repo: 'blankPen/router-agent',
+      branch: 'main',
+      actor: 'alice',
+    })
+  })
+
+  it('规则变更后重新激活未判定事件并开始派发', async () => {
+    const { store, pipeline, config } = setup({
+      events: {
+        ...defaultConfig().events,
+        decision: { ...defaultConfig().events.decision, fallbackToPrompt: false },
+        sources: { github: SOURCE },
+        rules: [],
+      },
+    })
+    const event = pipeline.ingest('github', SOURCE, {
+      externalId: 'issue:a#21',
+      title: '崩溃',
+      body: '崩了',
+      eventType: 'github.issues.opened',
+    })
+    expect(store.getEvent(event.id)?.status).toBe('undecided')
+    config.events.rules = [compileRuleTemplate({ id: 'rule-issue', eventType: 'github.issues.opened', intent: '处理 issue' })]
+    const activated = store.activateUndecidedEvents(['github.issues.opened'], new Date(2026, 10, 13, 22, 0, 0).toISOString())
+    expect(activated).toBe(1)
+    await pipeline.tick()
+    expect(store.getEvent(event.id)?.ticketId).toBeTruthy()
+  })
+
+  it('规则的 workflowPrompt 进入 Worker scope，宿主护栏保留', async () => {
+    const rule = compileRuleTemplate({
+      id: 'rule-ci',
+      eventType: 'github.workflow_run.failure',
+      intent: '修复 CI',
+      workflowPrompt: '先复现失败，再修复并提交 PR。',
+    })
+    const { store, pipeline, config } = setup({
+      events: {
+        ...defaultConfig().events,
+        decision: { ...defaultConfig().events.decision, fallbackToPrompt: false },
+        sources: { github: SOURCE },
+        rules: [rule],
+      },
+    })
+    const event = pipeline.ingest('github', SOURCE, {
+      externalId: 'run:a#1',
+      title: 'CI 失败',
+      body: 'workflow failed',
+      eventType: 'github.workflow_run.failure',
+    })
+    await pipeline.tick()
+    const stored = store.getEvent(event.id)!
+    const ticket = store.getTicket(stored.ticketId!)
+    const mandate = store.getMandate(ticket!.mandateId)!
+    expect(mandate.scope).toContain('执行流程：先复现失败，再修复并提交 PR。')
+    expect(mandate.scope).toContain('授权范围：只处理本事件范围内的事')
+    expect(config.events.rules[0]?.id).toBe(rule.id)
+  })
+
+  it('规则版本与全局 prompt 版本分开记，历史判定能定位到当时那版规则', async () => {
+    const rule = compileRuleTemplate({
+      id: 'rule-issue',
+      eventType: 'github.issues.opened',
+      intent: '处理 issue',
+      version: 3,
+    })
+    const { store, pipeline } = setup({
+      events: {
+        ...defaultConfig().events,
+        decision: { ...defaultConfig().events.decision, fallbackToPrompt: false },
+        sources: { github: SOURCE },
+        rules: [rule],
+      },
+    })
+    const event = pipeline.ingest('github', SOURCE, {
+      externalId: 'issue:a#30',
+      title: '崩溃',
+      body: '崩了',
+      eventType: 'github.issues.opened',
+    })
+    await pipeline.tick()
+    const stored = store.getEvent(event.id)!
+    expect(stored.ruleId).toBe('rule-issue')
+    expect(stored.ruleVersion).toBe(3)
+    // prompt 版本是全局计数器，不能被规则版本顶掉。
+    expect(stored.promptVersion).not.toBe(3)
   })
 })

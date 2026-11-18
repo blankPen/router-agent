@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { EventDecisionService, ruleDecisionPort, type EventDecisionInput, type EventDecisionPort } from '../../src/events/decision.js'
+import { createJevDecisionPort, stateOf } from '../../src/events/decision-model.js'
+import { compileRuleTemplate } from '../../src/events/rules.js'
 import { EVENT_SKILLS } from '../../src/events/skills.js'
 import type { EventRecord } from '#core/event.js'
+import { JevClient } from '#infra/decision/jev-client.js'
 
 const PROJECTS = [
   { name: 'router-agent', repo: '/Users/me/router-agent', defaultBranch: 'main' },
@@ -20,7 +23,7 @@ function eventOf(over: Partial<EventRecord> = {}): EventRecord {
     status: 'pending',
     execution: 'none',
     priority: 'P2',
-    eventType: 'issue',
+    eventType: 'github.issues.opened',
     needsReview: false,
     updatedAt: '2026-11-13T10:00:00.000Z',
     attempts: 0,
@@ -49,8 +52,25 @@ describe('事件决策', () => {
     })
     const result = await service.decide(inputOf())
     expect(result.verdict.priority).toBe('P3')
-    expect(result.verdict.eventType).toBe('issue')
+    expect(result.verdict.eventType).toBe('github.issues.opened')
     expect(result.basis).toBe('rule')
+  })
+
+  it('模型给的事件类型不覆盖来源前缀', async () => {
+    // 模型只该在来源类型之外补充分类，不该把「来自哪个来源」的信息抹掉。
+    const model: EventDecisionPort = {
+      name: 'llm',
+      decide: async () => ({ project: 'router-agent', priority: 'P1', confidence: 0.9, eventType: 'bug' }),
+    }
+    const service = new EventDecisionService({
+      decision: { provider: 'llm', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
+      rule: ruleDecisionPort,
+      model,
+    })
+    const result = await service.decide(inputOf({
+      event: eventOf({ eventType: 'github.issues.opened' }),
+    }))
+    expect(result.verdict.eventType).toBe('github.bug')
   })
 
   it('命中风险标签的事件直接转人工并提到 P0', async () => {
@@ -81,6 +101,24 @@ describe('事件决策', () => {
       source: { enabled: true, kind: 'github', repo: 'blankPen/router-agent' },
     }))
     expect(result.verdict.needsReview).toBe(true)
+  })
+
+  it('模型不能把规则强制的 P0 降级', async () => {
+    // 降级等于绕过低峰窗口的闸门：那个窗口只放行 P2/P3，P0 掉下来就会被顺延。
+    const model: EventDecisionPort = {
+      name: 'llm',
+      decide: async () => ({ project: 'router-agent', priority: 'P3', confidence: 0.95, needsReview: false }),
+    }
+    const service = new EventDecisionService({
+      decision: { provider: 'llm', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
+      rule: ruleDecisionPort,
+      model,
+    })
+    const result = await service.decide(inputOf({
+      event: eventOf({ raw: { labels: [{ name: 'security' }] } }),
+      source: { enabled: true, kind: 'github', repo: 'blankPen/router-agent' },
+    }))
+    expect(result.verdict.priority).toBe('P0')
   })
 
   it('模型能把规则要求的人审改回自动执行（规则没要求人审时）', async () => {
@@ -254,5 +292,105 @@ describe('事件决策 · 风险标签护栏', () => {
     expect(result.verdict.priority).toBe('P0')
     expect(result.verdict.needsReview).toBe(true)
     expect(result.verdict.reason).toContain('风险标签')
+  })
+})
+
+describe('事件决策 · 规则化', () => {
+  it('阈值来自规则而不是全局默认', async () => {
+    const model: EventDecisionPort = {
+      name: 'llm',
+      decide: async () => ({ project: 'router-agent', priority: 'P1', confidence: 0.45 }),
+    }
+    const rule = compileRuleTemplate({
+      id: 'rule-issue',
+      eventType: 'github.issues.opened',
+      thresholds: { isValid: 0.4 },
+    })
+    const service = new EventDecisionService({
+      decision: { provider: 'llm', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
+      rule: ruleDecisionPort,
+      model,
+    })
+    const result = await service.decide(inputOf({ rule }))
+    expect(result.verdict.needsReview).toBe(false)
+  })
+
+  it('判定 state 带事件类型、链接与来源 context', () => {
+    const rule = compileRuleTemplate({ id: 'rule-issue', eventType: 'github.issues.opened' })
+    const input = inputOf({
+      rule,
+      event: eventOf({
+        eventType: 'github.issues.opened',
+        repo: 'blankPen/router-agent',
+        branch: 'main',
+        url: 'https://github.com/blankPen/router-agent/issues/1',
+        context: { repo: 'blankPen/router-agent', actor: 'alice' },
+      }),
+    })
+    const state = stateOf(input)
+    expect(state.payload.type).toBe('github.issues.opened')
+    expect(state.payload.url).toContain('/issues/1')
+    expect(state.payload.actor).toBe('alice')
+    expect(state.rule.intent).toBe('')
+  })
+
+  it('project 用 choice 后，问题数量不随项目数增长', async () => {
+    let questions: Record<string, unknown> = {}
+    const fetchMock = async (_url: unknown, init?: RequestInit) => {
+      questions = JSON.parse(String(init?.body)).questions
+      return new Response(JSON.stringify({
+        answers: {
+          is_valid: { noul: 0.9 },
+          autorun: { choice: 'auto' },
+          priority: { score: 1 },
+          project: { choice: 'router-agent' },
+          skill: { choice: 'bug-triage' },
+        },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }
+    const projects = Array.from({ length: 20 }, (_, index) => ({
+      name: `project-${index}`,
+      repo: `/r/project-${index}`,
+      defaultBranch: 'main',
+    }))
+    projects[0] = PROJECTS[0]!
+    const rule = compileRuleTemplate({ id: 'rule-issue', eventType: 'github.issues.opened' })
+    const port = createJevDecisionPort(new JevClient(
+      { apiKey: 'k', model: 'm' },
+      { fetch: fetchMock as unknown as typeof fetch },
+    ))
+    await port.decide(inputOf({ rule, projects }))
+    expect(Object.keys(questions).sort()).toEqual(['autorun', 'is_valid', 'priority', 'project', 'skill'])
+    expect(questions.project).toMatchObject({
+      type: 'choice',
+      criteria: expect.objectContaining({ 'router-agent': expect.any(String) }),
+    })
+  })
+
+  it('风险标签来自规则，未配置的默认标签不再强制人审', async () => {
+    const rule = compileRuleTemplate({
+      id: 'rule-issue',
+      eventType: 'github.issues.opened',
+      guardrails: { riskLabels: ['custom-risk'] },
+    })
+    const service = new EventDecisionService({
+      decision: { provider: 'rule', prompt: '', confidenceThreshold: 0.6, fallback: 'review' },
+      rule: ruleDecisionPort,
+    })
+    const security = await service.decide(inputOf({
+      rule,
+      event: eventOf({ raw: { labels: [{ name: 'security' }] } }),
+      source: { enabled: true, kind: 'github', repo: 'blankPen/router-agent' },
+    }))
+    expect(security.verdict.priority).toBe('P3')
+    expect(security.verdict.needsReview).toBe(false)
+
+    const custom = await service.decide(inputOf({
+      rule,
+      event: eventOf({ raw: { labels: [{ name: 'custom-risk' }] } }),
+      source: { enabled: true, kind: 'github', repo: 'blankPen/router-agent' },
+    }))
+    expect(custom.verdict.priority).toBe('P0')
+    expect(custom.verdict.needsReview).toBe(true)
   })
 })

@@ -327,9 +327,9 @@ ra logs --follow | grep '"message":"decision:'
 
 ## 事件总线（多来源事件）
 
-事件总线把「飞书消息之外」的事也接进来：GitHub 仓库的 Issue / PR / Action，以及自定义来源插件。事件先进队列，由决策模型一次判定出「要不要做 / 优先级 / 类型 / 归属项目 / 执行方式 / 要不要人审」，再分级派发：**能直接做的开单，需要人看的推管理员审核**。
+事件总线把「飞书消息之外」的事也接进来：GitHub 仓库的 Issue / PR / Action，以及自定义来源插件。事件先进队列，按 **eventType 精确匹配一条决策规则**，由规则里的问题判定「是否有效 / 能否自动执行 / 优先级 / 归属项目 / 执行方式」，再分级派发：**能直接做的开单，需要人看的推管理员审核**。
 
-事件本身**不绑定项目** —— 归属项目由决策模型按下面的决策 prompt 判定。**默认关闭**。
+事件本身**不绑定项目** —— 归属项目由规则判定。**默认关闭**；没有匹配规则的事件只收集、不判定、不调用模型。
 
 在 Web 面板「配置 → 事件总线」里配（也可以写 `config.yaml`）：
 
@@ -350,9 +350,39 @@ events:
     feishu:
       enabled: false                 # 飞书群消息由消息链路处理，这里只留开关
       kind: feishu
+  rules:
+    - id: rule-github-action-error
+      eventType: github.workflow_run.failure
+      intent: |-
+        所有 GitHub Action 失败都处理并自动执行。
+        执行流程：分析报错原因，修复并提交 PR。
+      questions:
+        is_valid:
+          type: noul
+          instructions: 该事件是否属于需要处理的 GitHub Action 失败事件？
+        autorun:
+          type: choice
+          criteria:
+            auto: 可以自动执行，不需要人工确认。
+            review: 涉及发布、生产或信息不足时转人工。
+        priority:
+          type: score
+          instructions: 评估处理优先级。
+          criteria: [低, 中, 高, 紧急]
+        project:
+          type: choice
+          instructions: 根据事件内容判断归属项目。
+      workflowPrompt: 分析失败步骤，修复并提交 PR。
+      guardrails:
+        riskLabels: [security, prod, production, incident, payment, release]
+      thresholds:
+        isValid: 0.5
+        autoRun: 0.5
+        projectPick: 0.4
+      version: 1
   decision:
     provider: llm                    # jev | llm | rule
-    prompt: |                        # 自然语言判定规则（面板里可编辑）
+    prompt: |                        # 旧版全局 prompt，仅作兼容
       # 项目归属
       - 来自 GitHub 仓库 xxx 的事件，归项目 router-agent
       # 处理方式
@@ -361,7 +391,8 @@ events:
       - 线上告警 P0
       # 拿不准时
       - 判断不了项目或优先级就标需人审
-    confidenceThreshold: 0.6         # 低于阈值转人工
+    fallbackToPrompt: false          # true = 未匹配规则时仍用旧 prompt 判定（老配置兼容）
+    confidenceThreshold: 0.6         # 旧 prompt 兜底的置信度阈值
     fallback: review                 # review 转人工 | pending 留队重试（见下方说明）
   policy:
     peak: { start: "09:00", end: "20:00", priorities: [P0, P1] }
@@ -371,6 +402,27 @@ events:
     reviewNotify: true
     reviewChatId: ""                 # 审核通知发到哪个会话；留空只落面板
 ```
+
+### 决策规则
+
+规则按 `eventType` 精确匹配，`eventType` 必须带来源前缀（例如 `github.workflow_run.failure`、`feishu.message.received`）。同一个类型只允许一条规则；没有匹配规则的事件状态是 **`undecided`（未判定）**，留在队列里，不调用模型，也不计配额。
+
+固定四问骨架：
+
+| 问题 | 类型 | 落点 |
+|-|-|-|
+| `is_valid` | `noul` | 低于阈值 → `invalid`，只留记录 |
+| `autorun` | `choice` | `auto` 自动执行；`review` 进待审核 |
+| `priority` | `score` | 决定时间窗与配额排序 |
+| `project` | `choice` | 决定派工仓库；`unknown` 一律转人工 |
+
+`workflowPrompt` 会作为「执行流程」拼进 Worker 的授权范围；宿主的安全护栏（只改本仓库、不碰生产环境与发布）始终追加，规则和模型都不能覆盖。`guardrails.riskLabels` 命中时强制人审并提 P0。
+
+规则变更（新增 / 修改 / 整段保存）后，宿主会把这些类型下状态为 `undecided` 的事件重新激活成 `pending`；已经判定或已顺延的事件不会被重判。打开 `fallbackToPrompt` 或修改兜底 prompt 时，未判定事件也会重新激活。删除规则不会影响已开出的工单。
+
+事件页的「规则命中」区按 `ruleId + status` 聚合展示每条规则命中了多少条事件（有效 / 人审 / 无效 / 合计）。长期 0 命中的规则通常说明 `eventType` 配错了。
+
+兼容说明：旧配置只有 `events.decision.prompt` 时，加载后 `fallbackToPrompt` 自动为 `true`，行为与升级前一致；新配置和新写回的配置显式写 `false`。
 
 ### GitHub 仓库订阅
 
@@ -386,15 +438,25 @@ events:
 | Pull Request | `opened` 新建、`reopened` 重开、`edited` 更新、`closed` 关闭、`synchronize` 有新提交、`reviewed` 收到评审、`merged` 已合并、`commented` 评论 |
 | Action | `requested` 触发、`success` 成功、`completed` 执行结束（任何结论都算）、`failure` 失败、`cancelled` 取消、`skipped` 跳过、`action_required` 需人工处理 |
 
-数据来自 GitHub 的两条线：`repos/<repo>/events`（Issue、PR、评论、评审）与 `repos/<repo>/actions/runs`（工作流）。每个仓库用游标做增量拉取，同一个事件不会重复入队。
+数据来自 GitHub 的两条线：`repos/<repo>/events`（Issue、PR、评论、评审）与 `repos/<repo>/actions/runs`（工作流）。每个订阅用游标做增量拉取，同一个事件不会重复入队。
+
+**新订阅只收订阅之后发生的事**：首次轮询只记下当前水位（基线），GitHub 上积攒的历史不入队。之后才按增量拉取。
+
+**增量拉取只处理最近 3 天的事件**：按事件自带的 `created_at` 裁掉更早的存量，避免服务停摆或游标落后时把陈年旧事重新灌进队列；窗口外的 PR 也不会额外查详情。时间窗口只决定「要不要入队」，游标仍按见过的最新 id 推进。
+
+**去重靠事件的唯一 id**：同一来源的同一事件只会有一条记录，无论被拉取多少次。判定依据是来源给的 `externalId`（同一事件必须稳定不变），宿主按 `(来源, externalId)` 唯一入库。GitHub 的 `externalId` 形如 `github:pull_request:owner/repo#112:20383857679` —— 带上 GitHub 的事件 id，所以「同一个 PR 的新建与评论」是两条不同事件，而同一条事件重复拉到不会重复开单。自定义来源插件只要遵守这条约定即可；不遵守时同一事件会重复入队。
+
+**事件类型带来源前缀**：落到队列里的事件类型一律带来源前缀 —— GitHub 的 `github.issues.opened` / `github.pull_request.merged` / `github.workflow_run.failure`，飞书的 `feishu.*`。不同来源的同名类型不会混淆，面板「事件」页一眼能看出事件来自哪里。**订阅配置里的类型 id 不带前缀**（面板多选与用户已有配置都不受影响），前缀只加在事件入库时。决策模型补充分类时也保留前缀：`github.issues.opened` 被模型判成 bug 后是 `github.bug`，不会把「来自哪个来源」的信息抹掉。自定义来源插件按同一约定给自己的类型加前缀（插件 id 或来源种类名）。
+
+**游标只在「能入队的事件」范围内推进**：GitHub 的事件流里混着几套互不相关的 id 编号空间 —— 仓库级事件（PushEvent / CreateEvent）的 id 比 Issue / PR 事件大几十亿。游标若按整页取 id 最大值，会被仓库级事件顶到别的空间，之后所有 Issue / PR 事件的 id 都小于游标而被永久挡掉。所以水位只按命中订阅的事件推进。
 
 两条线都翻页拉取（每页 100 条、最多 3 页）。GitHub 的事件流里混着大量 PushEvent / WatchEvent，订阅的 Issue / PR 事件常排在第 2、3 页 —— 只拉第 1 页会整片收不到。工作流还没跑完时记「触发」事件，跑完后按结论记 success / failure / cancelled / skipped / action_required。
 
-**归属项目怎么定**：订阅里不写「已知项目线索」，而是按**订阅的仓库名**去匹配项目清单 —— 仓库名与项目名（或项目仓库路径的末段）一致就归到那个项目。匹配不上时由决策模型按 prompt 判定，判不出来转人工。
+**归属项目怎么定**：订阅里不写「已知项目线索」。规则里的 `project` 选择使用当前运行时的项目清单作为闭集，项目候选在判定时注入，不在规则里固化仓库。候选里选不中（`unknown`）时，旧路径仍会按**订阅的仓库名**兜底匹配项目清单；两者都匹配不上就转人工。
 
-**优先级怎么定**：订阅里不写「默认优先级」。事件入队时是中性档位（P3），优先级由决策阶段定 —— 命中风险标签直接提 P0，其余由决策模型按 prompt 判定。每日配额同理：只由 `events.policy` 的全局配额与单来源上限决定。
+**优先级怎么定**：订阅里不写「默认优先级」。事件入队时是中性档位（P3），优先级由**命中规则**的 `priority` 问题判定；命中 `riskLabels` 时直接提 P0 并强制人审。每日配额同理：只由 `events.policy` 的全局配额与单来源上限决定。配额统计的是**当天开出过工单**的事件条数，不是事件在 GitHub 上发生的时间。
 
-事件进队列后等下一次决策 tick 判定。判定结论与派发结果都在面板「事件」页能看到（事件页只做查看与审核，来源与判定策略一律回「配置 → 事件总线」改）。
+事件进队列后等下一次决策 tick 判定；没有匹配规则的事件会显示在「事件 → 未判定」筛选里，配好规则并保存后自动重新入判定循环。判定结论与派发结果都在面板「事件」页能看到（事件页只做查看与审核，来源与规则一律回「配置 → 事件总线」改）。
 
 **`fallback` 决定「判不出来」时怎么办**：
 
@@ -417,7 +479,7 @@ events:
 
 模型没配好时自动退回规则判定，事件不会丢，只是更多走人工审核。
 
-**风险标签是硬护栏**：事件自带的风险标签命中 `security` / `prod` / `production` / `incident` / `payment` / `release` 时，事件强制 P0 并**必须人工确认**，模型说了不算 —— 模型的 `needsReview: false` 覆盖不掉规则层的人审要求。
+**风险标签是硬护栏**：事件自带的风险标签命中 `security` / `prod` / `production` / `incident` / `payment` / `release` 时，事件强制 P0 并**必须人工确认**，模型说了不算 —— 模型的 `needsReview: false` 覆盖不掉规则层的人审要求，模型给的低优先级也降不掉规则强制的 P0（降级等于绕过低峰窗口的闸门）。
 
 **判定只跑一次**：事件判定过一次就记住结论，等窗口或配额时不再重复调模型；只有判定失败（模型报错）才会重试，连续失败 5 次后转人工处理，不再无限重试。
 

@@ -2650,6 +2650,38 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 }
 .event-summary-cell.quiet { justify-content: flex-end; }
 
+.event-rule-distribution {
+  margin-bottom: 20px;
+  padding: 16px 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+}
+.event-rule-head h2 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+.event-rule-head p { margin: 0 0 12px; font-size: var(--fs-small); color: var(--muted); }
+.event-rule-list { display: flex; flex-direction: column; }
+.event-rule-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 9px 0;
+  border-top: 1px solid var(--rule);
+  font-size: 13px;
+}
+.event-rule-row:first-child { border-top: 0; padding-top: 0; }
+.event-rule-name { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.event-rule-name strong { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.event-rule-name span { font-size: 12px; color: var(--muted); font-family: var(--mono); }
+.event-rule-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.event-rule-counts .quiet { color: var(--muted); }
+
 .event-filters {
   display: flex;
   flex-wrap: wrap;
@@ -2750,6 +2782,8 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 .event-status.s-review i { background: var(--warning); }
 .event-status.s-pending { color: var(--info); }
 .event-status.s-pending i { background: var(--info); }
+.event-status.s-undecided { color: var(--muted); }
+.event-status.s-undecided i { background: var(--muted); }
 .event-status.s-done { color: var(--positive); }
 .event-status.s-done i { background: var(--positive); }
 

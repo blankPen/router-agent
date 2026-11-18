@@ -65,7 +65,7 @@ export interface ConfigBlock {
   id: string
   title: string
   description?: string
-  render?: 'fields' | 'runtime' | 'projects' | 'specs' | 'custom' | 'events'
+  render?: 'fields' | 'runtime' | 'projects' | 'specs' | 'custom' | 'events' | 'events-rules'
   fields: FieldDef[]
   /** 块自己管理的、不是普通字段的配置路径（如群列表）。 */
   paths?: string[]
@@ -363,9 +363,17 @@ export const CONFIG_GROUPS: ConfigGroup[] = [
         effectLabel: '保存后立即生效',
       },
       {
+        id: 'events-rules',
+        title: '决策规则',
+        description: '按事件类型各自配置判定问题、执行流程与护栏。规则存在本身就是该类事件的判定开关。',
+        render: 'events-rules',
+        fields: [],
+        effectLabel: '保存后立即生效',
+      },
+      {
         id: 'events-decision',
-        title: '决策策略',
-        description: '事件进队列后由决策模型一次判定：要不要处理、多急、归哪个项目、用哪种处理方式。判定依据就是下面这段 prompt。',
+        title: '判定方式与全局兜底',
+        description: 'provider 是部署级选择；旧 prompt 只有在显式开启全局兜底时才会作用于未匹配规则的事件。',
         fields: [
           {
             path: 'events.decision.provider',
@@ -380,9 +388,15 @@ export const CONFIG_GROUPS: ConfigGroup[] = [
           },
           {
             path: 'events.decision.prompt',
-            label: '判定 prompt',
+            label: '旧版全局 prompt',
             kind: 'textarea',
-            hint: '写清「哪类事件归哪个项目、走哪种处理方式、什么算急、拿不准怎么办」',
+            hint: '兼容保留；新规则体系下默认不参与判定，开启下面的兜底开关后才生效',
+          },
+          {
+            path: 'events.decision.fallbackToPrompt',
+            label: '未匹配规则时使用全局 prompt',
+            kind: 'switch',
+            hint: '老配置兼容开关；新装机器保持关闭，未匹配事件留在「未判定」队列，不调模型',
           },
           {
             path: 'events.decision.confidenceThreshold',

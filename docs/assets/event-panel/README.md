@@ -65,3 +65,14 @@
 - 一个仓库一条订阅，仓库之间互不影响；每条订阅单独开关、单独选事件。
 - 收到的事件先进事件队列，再由决策阶段判断要不要处理、归到哪个项目、用什么方式处理。
 - 优先级与每日配额只在全局决策策略里配置；订阅本身不带这些参数。
+
+## 五、决策规则（当前）：按事件类型各自判定
+
+截图见 [event-rules/README.md](event-rules/README.md)。
+
+| 截图 | 说明 |
+|-|-|
+| `event-rules/config-rules-before.png` | 改造前：只有一段全局判定 prompt，所有事件走同一套判定 |
+| `event-rules/config-rules-after.png` | 改造后：新增「决策规则」分组，规则按 `eventType` 精确匹配 |
+| `event-rules/events-before.png` | 改造前：事件页没有「未判定」这一档 |
+| `event-rules/events-after.png` | 改造后：未判定事件只收集，不调模型、不派工 |

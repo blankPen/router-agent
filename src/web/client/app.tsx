@@ -71,6 +71,7 @@ import { FeishuBotPanel } from './feishu-panel.js'
 import { LogAssistantFab } from './log-assistant.js'
 import { EventsView } from './events-panel.js'
 import { EventSourcesConfig } from './events-config.js'
+import { EventRulesConfig } from './event-rules.js'
 import { eventSourceFields, eventSourcePathsIn, type SourceMeta } from './event-sources.js'
 import { SpecsEditor } from './specs-editor.js'
 import {
@@ -1636,6 +1637,15 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
             defaults={defaults}
             setField={setField}
             errors={errors}
+            onNotice={notice => setNotice(notice)}
+          />
+        )
+      }
+      if (block.render === 'events-rules') {
+        return (
+          <EventRulesConfig
+            draft={draft}
+            setField={setField}
             onNotice={notice => setNotice(notice)}
           />
         )

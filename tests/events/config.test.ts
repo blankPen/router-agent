@@ -11,6 +11,8 @@ describe('事件配置', () => {
     // GitHub 仓库由面板「添加仓库」创建，默认配置里不留空壳来源。
     expect(config.events.sources.github).toBeUndefined()
     expect(config.events.decision.prompt.length).toBeGreaterThan(0)
+    expect(config.events.decision.fallbackToPrompt).toBe(false)
+    expect(config.events.rules).toEqual([])
   })
 
   it('从 YAML 读取事件配置', () => {
@@ -216,6 +218,76 @@ describe('事件配置', () => {
     const config = defaultConfig()
     const result = applyConfigPatch(config, { 'events.enabled': true })
     expect(result.errors).toEqual([])
+  })
+
+  it('从 YAML 读取按 eventType 的规则集', () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-events-'))
+    writeFileSync(join(home, 'config.yaml'), [
+      'events:',
+      '  decision:',
+      '    fallbackToPrompt: false',
+      '  rules:',
+      '    - id: rule-ci',
+      '      eventType: github.workflow_run.failure',
+      '      intent: 修复 CI',
+      '      workflowPrompt: 分析失败并提交 PR',
+      '      thresholds:',
+      '        isValid: 0.4',
+      '        autoRun: 0.6',
+      '        projectPick: 0.3',
+      '',
+    ].join('\n'), 'utf8')
+    const config = loadConfig(home, {})
+    expect(config.events.rules).toHaveLength(1)
+    expect(config.events.rules[0]).toMatchObject({
+      id: 'rule-ci',
+      eventType: 'github.workflow_run.failure',
+      workflowPrompt: '分析失败并提交 PR',
+      thresholds: { isValid: 0.4, autoRun: 0.6, projectPick: 0.3 },
+    })
+    expect(config.events.rules[0]?.questions.is_valid.type).toBe('noul')
+    expect(config.events.decision.fallbackToPrompt).toBe(false)
+  })
+
+  it('旧配置只写了 decision.prompt 时保留全局兜底行为', () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-events-'))
+    writeFileSync(join(home, 'config.yaml'), [
+      'events:',
+      '  decision:',
+      '    provider: llm',
+      '    prompt: 旧的全局判定规则',
+      '',
+    ].join('\n'), 'utf8')
+    const config = loadConfig(home, {})
+    expect(config.events.decision.fallbackToPrompt).toBe(true)
+    expect(config.events.rules).toEqual([])
+  })
+
+  it('规则整段写入做 eventType 前缀与重复校验', () => {
+    const config = defaultConfig()
+    const good = applyConfigPatch(config, {
+      'events.rules': [{
+        id: 'rule-ci',
+        eventType: 'github.workflow_run.failure',
+        intent: '修复 CI',
+        workflowPrompt: '分析并修复',
+      }],
+    })
+    expect(good.errors).toEqual([])
+    expect(config.events.rules[0]?.id).toBe('rule-ci')
+
+    const badPrefix = applyConfigPatch(config, {
+      'events.rules': [{ id: 'bad', eventType: 'workflow_run.failure', intent: 'x' }],
+    })
+    expect(badPrefix.errors[0]?.message).toContain('来源前缀')
+
+    const duplicate = applyConfigPatch(config, {
+      'events.rules': [
+        { id: 'a', eventType: 'github.issues.opened', intent: 'a' },
+        { id: 'b', eventType: 'github.issues.opened', intent: 'b' },
+      ],
+    })
+    expect(duplicate.errors[0]?.message).toContain('事件类型重复')
   })
 })
 

@@ -738,6 +738,19 @@ describe('事件队列', () => {
     db.close()
   })
 
+  it('按规则统计命中分布，未命中规则的事件不计入', () => {
+    const db = store()
+    db.insertEvent(event({ id: 'evt_a', externalId: 'x#a', ruleId: 'rule-a', status: 'pending' }))
+    db.insertEvent(event({ id: 'evt_b', externalId: 'x#b', ruleId: 'rule-a', status: 'review' }))
+    db.insertEvent(event({ id: 'evt_c', externalId: 'x#c', ruleId: 'rule-b', status: 'invalid' }))
+    db.insertEvent(event({ id: 'evt_d', externalId: 'x#d', status: 'undecided' }))
+    expect(db.countEventsByRule()).toEqual({
+      'rule-a': { pending: 1, review: 1, done: 0, invalid: 0 },
+      'rule-b': { pending: 0, review: 0, done: 0, invalid: 1 },
+    })
+    db.close()
+  })
+
   it('已判定的事件不会再被当成待判定领取', () => {
     const db = store()
     db.insertEvent(event({ id: 'evt_new' }))

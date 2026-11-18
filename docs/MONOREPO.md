@@ -152,6 +152,11 @@ export default plugin
 3. 插件用 `options.fields` 声明自己的可配置项，面板设置弹窗按声明自动渲染，值落在 `events.sources.<id>.options.<key>`；
 4. 加载失败只记 `event:plugin-failed`，不影响其它来源。
 
+插件产出的事件要遵守两条约定：
+
+- `externalId` **同一事件必须稳定不变** —— 宿主按 `(来源, externalId)` 唯一入库，靠它去重；
+- `eventType` **带来源前缀**（插件 id 或来源种类名，如 `myplugin.deploy.failed`）—— 不同来源的同名类型靠前缀区分。
+
 协议与配置形状见 [CONFIGURATION.md](CONFIGURATION.md#自定义事件来源npm-插件)。
 
 内置来源（GitHub 仓库订阅 / feishu）由宿主直接装配，不走插件机制。
