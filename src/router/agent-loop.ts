@@ -779,8 +779,11 @@ export class AgentLoop {
         } else {
           const { key, value } = command.change
           try {
-            this.engine.changeUserMemory(owner, command.change, trigger.id)
-            text = value === null ? `已清除${scope}的「${key}」偏好。` : `已保存${scope}的偏好「${key}=${value}」。`
+            const applied = this.engine.changeUserMemory(owner, command.change, trigger.id)
+            // 命令没生效时（重放，或比当前设置旧）不能说「已保存」，否则回话与真实状态不符。
+            text = applied
+              ? (value === null ? `已清除${scope}的「${key}」偏好。` : `已保存${scope}的偏好「${key}=${value}」。`)
+              : `这条偏好命令没有生效：当前设置比它更新，或已经处理过了。`
           } catch (error) {
             // 写库失败必须在这里收口：异常冒泡会让这条消息退回 pending，下一轮无限重试。
             this.logger.warn('memory:write-failed', {

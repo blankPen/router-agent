@@ -150,8 +150,9 @@ export class Engine {
     return this.store.insertTrigger(stored)
   }
 
-  changeUserMemory(owner: MemoryOwner, change: MemoryChange, triggerId: string): void {
-    this.store.changeUserMemory(owner, change, triggerId, this.clock.now())
+  /** 返回 false 表示这条命令没有生效（已处理过或比当前记录旧）。 */
+  changeUserMemory(owner: MemoryOwner, change: MemoryChange, triggerId: string): boolean {
+    return this.store.changeUserMemory(owner, change, triggerId, this.clock.now())
   }
 
   /** 记录一个 Decision；accept 时同时创建 Mandate 与 Ticket。 */

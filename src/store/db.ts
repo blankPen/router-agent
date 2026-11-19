@@ -633,10 +633,15 @@ export class Store {
     return Object.fromEntries(rows.map(row => [String(row.key), String(row.value)])) as ReplyPreferences
   }
 
-  changeUserMemory(owner: MemoryOwner, change: MemoryChange, triggerId: string, now: string): void {
+  /**
+   * 应用一条偏好变更。返回 false 表示这条命令没有生效：
+   * 要么已经处理过（同一 trigger 重放），要么比当前记录旧。
+   */
+  changeUserMemory(owner: MemoryOwner, change: MemoryChange, triggerId: string, now: string): boolean {
     this.db.exec('BEGIN IMMEDIATE')
     try {
       const receipt = this.db.prepare('INSERT INTO user_memory_changes (trigger_id) VALUES (?) ON CONFLICT(trigger_id) DO NOTHING').run(triggerId)
+      let applied = false
       if (receipt.changes > 0) {
         const key = [owner.channelId, owner.actorId, owner.chatId, change.key] as const
         // 只应用比当前记录更新的命令：一条失败后重试的旧保存不能把更新的删除改回来。
@@ -659,9 +664,11 @@ export class Store {
             INSERT INTO user_memory_revisions (channel_id, actor_id, chat_id, key, updated_at) VALUES (?, ?, ?, ?, ?)
             ON CONFLICT (channel_id, actor_id, chat_id, key) DO UPDATE SET updated_at = excluded.updated_at
           `).run(...key, now)
+          applied = true
         }
       }
       this.db.exec('COMMIT')
+      return applied
     } catch (error) {
       try {
         this.db.exec('ROLLBACK')

@@ -999,6 +999,21 @@ describe('长期回复偏好', () => {
 
     expect(store.listUserMemories(owner)).toEqual({})
   })
+
+  it('命令没有生效时不说「已保存」，回话与真实状态一致', async () => {
+    const { engine, store, loop } = setup()
+    const owner = { channelId: 'feishu', chatId: 'oc_dev', actorId: 'ou_alice' }
+    store.changeUserMemory(owner, { key: '回复语言', value: null }, 'delete-new', '2026-11-06T11:00:00.000Z')
+    engine.ingest(trigger({ text: '/记忆 保存 回复语言=日语' }))
+    // 复用同一条 trigger：第一次已处理过，第二次是重放。
+    await loop.tick()
+    store.setTriggerDisposition('t1', 'pending')
+    await loop.tick()
+
+    const texts = store.listOutbox().map(item => item.text)
+    expect(texts.some(text => text.includes('没有生效'))).toBe(true)
+    expect(texts.some(text => text.includes('已保存') && text.includes('日语'))).toBe(false)
+  })
 })
 
 describe('/new 命令识别', () => {
