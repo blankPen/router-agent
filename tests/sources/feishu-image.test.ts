@@ -12,6 +12,7 @@ import {
   parseMessageImageKeys,
   parseSavedPath,
   readImageInput,
+  stripImageMarkers,
 } from '@router-agent/channel-feishu'
 import type { CommandRunner } from '#infra/process.js'
 
@@ -272,5 +273,11 @@ describe('attachImageText', () => {
   it('imageKeysOf 只认 img_ 前缀', () => {
     expect(imageKeysOf({ imageKeys: ['img_ok', 'file_no', 3] })).toEqual(['img_ok'])
     expect(imageKeysOf(null)).toEqual([])
+  })
+
+  it('stripImageMarkers 去掉预渲染的图片标记，保留用户正文', () => {
+    expect(stripImageMarkers('/记忆 保存 回复语言=英语![Image](img_xxx)')).toBe('/记忆 保存 回复语言=英语')
+    expect(stripImageMarkers('<img key="img_xxx"/>改下超时')).toBe('改下超时')
+    expect(stripImageMarkers('改下超时')).toBe('改下超时')
   })
 })

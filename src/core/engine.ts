@@ -3,6 +3,7 @@ import { attachmentsOf, withAttachmentManifest } from './attachments.js'
 import { negotiateAcceptance, type Policy, type Acceptance } from '#core/policy.js'
 import { computeStage } from '#core/stage.js'
 import { messageContext, noopSink, preview, type EventSink } from '#core/events.js'
+import type { MemoryChange, MemoryOwner } from './memory.js'
 import type {
   Assignment,
   Decision,
@@ -147,6 +148,11 @@ export class Engine {
     }
     const stored = resolved.threadId === trigger.threadId ? trigger : { ...trigger, threadId: resolved.threadId }
     return this.store.insertTrigger(stored)
+  }
+
+  /** 返回 false 表示这条命令没有生效（已处理过或比当前记录旧）。 */
+  changeUserMemory(owner: MemoryOwner, change: MemoryChange, triggerId: string): boolean {
+    return this.store.changeUserMemory(owner, change, triggerId, this.clock.now())
   }
 
   /** 记录一个 Decision；accept 时同时创建 Mandate 与 Ticket。 */

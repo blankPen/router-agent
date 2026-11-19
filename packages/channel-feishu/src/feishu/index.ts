@@ -3,7 +3,7 @@ import type { CommandRunner } from '@router-agent/infra/process.js'
 import type { ImageTranscriber } from '@router-agent/infra/vision.js'
 import type { Trigger } from '@router-agent/core/model.js'
 import { FeishuBotAdmin } from '../sources/feishu-bot-admin.js'
-import { attachImageText } from '../sources/feishu-image.js'
+import { attachImageText, stripImageMarkers } from '../sources/feishu-image.js'
 import { normalizeCardAction } from '../sources/feishu-reply.js'
 import {
   FeishuConsumer,
@@ -156,12 +156,20 @@ export class FeishuChannel implements ChannelAdapter {
 
   async enrich(trigger: Trigger): Promise<Trigger> {
     const quoted = await attachQuotedMessage(trigger, this.runner, { logger: this.logger })
-    return attachImageText(quoted, {
+    const enriched = await attachImageText(quoted, {
       runner: this.runner,
       transcriber: this.transcriber,
       ...(this.opts.imagesRoot ? { imagesRoot: this.opts.imagesRoot } : {}),
       logger: this.logger,
     })
+    // 原文要去掉图片标记：标记是事件流预渲染出来的，不属于用户敲的内容，
+    // 留着会让 `/记忆 保存 回复语言=英语` 这类命令解析失败。
+    const originalText = stripImageMarkers(trigger.text)
+    if (enriched.text === trigger.text && originalText === trigger.text) return enriched
+    return {
+      ...enriched,
+      raw: { ...(enriched.raw as Record<string, unknown> | undefined), originalText },
+    }
   }
 
   async send(message: OutboundMessage): Promise<SendReceipt> {

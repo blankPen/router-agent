@@ -5,6 +5,7 @@ import type { SourceKind, Strength, Ticket, Trigger } from '#core/model.js'
 import { DEFAULT_CHANNEL_ID } from '#channel/port.js'
 import { messageContext } from '#core/events.js'
 import { noopLogger, errorMessage, type Logger } from '#infra/logger.js'
+import type { MemoryOwner, ReplyPreferences } from '../core/memory.js'
 import { activeDraft, resolveDispatch, type DispatchMissing, type DispatchSettings } from './dispatch.js'
 import { readRouterPrompt } from '../specs/index.js'
 import { IntakeCoordinator, type MemberSettingsView } from './intake-flow.js'
@@ -14,6 +15,7 @@ import { isSmallTalk as smallTalkRule } from '#core/admission.js'
 import { toolScopeFor } from '#core/tool-scope.js'
 import type { SessionKeyParts } from './session-registry.js'
 import { modelFailureMessage } from './model-failure.js'
+import { MEMORY_HELP, parseMemoryCommand } from './memory.js'
 import type {
   DecisionAudit,
   DecisionEngine,
@@ -263,6 +265,13 @@ export class AgentLoop {
         return
       }
 
+      const originalText = (trigger.raw as { originalText?: unknown } | undefined)?.originalText
+      const memoryCommand = !trigger.mediaOnly && parseMemoryCommand(typeof originalText === 'string' ? originalText : trigger.text)
+      if (memoryCommand) {
+        this.handleMemoryCommand(trigger, result, memoryCommand)
+        return
+      }
+
       // 订阅扇出优先：已订阅线程的消息不经过研判。
       if (this.hasLiveSubscription(trigger.threadId)) {
         const delivered = this.engine.fanOut(trigger.id)
@@ -494,6 +503,7 @@ export class AgentLoop {
     try {
       text = await this.decisionEngine.reply({
         systemPrompt: this.sessionsEnabled ? this.unifiedSystemPrompt : this.systemPromptFor(trigger, this.conversationPrompt),
+        replyPreferences: this.replyPreferencesFor(trigger),
         userPrompt: JSON.stringify({
           message: trigger.text,
           addressed: trigger.addressed,
@@ -579,6 +589,7 @@ export class AgentLoop {
         strength,
         systemPrompt: this.sessionsEnabled ? this.unifiedSystemPrompt : this.systemPromptFor(trigger),
         userPrompt: this.contextPrompt(trigger),
+        replyPreferences: this.replyPreferencesFor(trigger),
         canMutate: this.canMutate(trigger),
         toolScope: toolScopeFor(this.isAllowlisted(trigger)),
         ...(session ? { session } : {}),
@@ -724,6 +735,73 @@ export class AgentLoop {
     }
   }
 
+  private memoryOwner(trigger: Trigger, crossChat = false): MemoryOwner {
+    return {
+      channelId: trigger.channelId ?? DEFAULT_CHANNEL_ID,
+      actorId: trigger.actorId,
+      chatId: crossChat ? '' : trigger.chatId,
+    }
+  }
+
+  private replyPreferencesFor(trigger: Trigger): ReplyPreferences | undefined {
+    if (trigger.isBot || !trigger.actorId || !trigger.chatId || !this.isAllowed(trigger) || !this.shouldReply(trigger)) return
+    try {
+      const preferences = this.store.listUserMemories(this.memoryOwner(trigger), true)
+      return Object.keys(preferences).length > 0 ? preferences : undefined
+    } catch (error) {
+      this.logger.warn('memory:read-failed', { triggerId: trigger.id, ...messageContext(trigger), detail: errorMessage(error) })
+    }
+  }
+
+  private handleMemoryCommand(
+    trigger: Trigger,
+    result: TickResult,
+    command: NonNullable<ReturnType<typeof parseMemoryCommand>>,
+  ): void {
+    if (!trigger.actorId || !trigger.chatId || !this.canMutate(trigger)) {
+      this.routerAction(trigger, 'ignore', { reason: 'memory:ignored' })
+      this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'explicit', reason: 'memory:ignored' })
+      result.ignored += 1
+      return
+    }
+
+    let text = MEMORY_HELP
+    if (command.action !== 'help') {
+      if (command.crossChat && trigger.addressed !== 'direct') {
+        text = '跨群偏好请在私聊中管理。'
+      } else {
+        const owner = this.memoryOwner(trigger, command.crossChat)
+        const scope = command.crossChat ? '跨群' : '当前会话'
+        if (command.action === 'list') {
+          const entries = Object.entries(this.store.listUserMemories(owner))
+            .map(([key, value]) => `- ${key}=${value}`)
+          text = entries.length > 0 ? [`${scope}的已保存偏好：`, ...entries].join('\n') : `${scope}还没有已保存的偏好。`
+        } else {
+          const { key, value } = command.change
+          try {
+            const applied = this.engine.changeUserMemory(owner, command.change, trigger.id)
+            // 命令没生效时（重放，或比当前设置旧）不能说「已保存」，否则回话与真实状态不符。
+            text = applied
+              ? (value === null ? `已清除${scope}的「${key}」偏好。` : `已保存${scope}的偏好「${key}=${value}」。`)
+              : `这条偏好命令没有生效：当前设置比它更新，或已经处理过了。`
+          } catch (error) {
+            // 写库失败必须在这里收口：异常冒泡会让这条消息退回 pending，下一轮无限重试。
+            this.logger.warn('memory:write-failed', {
+              triggerId: trigger.id,
+              ...messageContext(trigger),
+              detail: errorMessage(error),
+            })
+            text = '偏好没能保存成功，请稍后再试。'
+          }
+        }
+      }
+    }
+    this.routerAction(trigger, 'reply', { reason: 'memory:command' })
+    this.reply(trigger, text, `memory:${trigger.id}`)
+    this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'explicit', reason: 'memory:command' })
+    result.replied += 1
+  }
+
   /** `/new`：只重置发送者自己的 session，不影响同群其他人。 */
   private async handleSessionReset(trigger: Trigger, result: TickResult): Promise<void> {
     const parts = this.sessionKeyOf(trigger)
@@ -763,7 +841,7 @@ export class AgentLoop {
     }
     this.reply(
       trigger,
-      '好，之前你和我的上下文我不带了，咱们重新开始。\n工单和历史记录都还在，群里其他人的会话也不受影响。',
+      '好，咱们重新开始。已保存的偏好仍会生效，工单和历史记录都还在，群里其他人的会话也不受影响。',
       `session-reset:${trigger.id}`,
     )
     this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'explicit', reason: 'session:reset' })

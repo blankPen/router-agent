@@ -1,6 +1,7 @@
 import type { Decision, Strength, Trigger } from '#core/model.js'
 import type { ToolScope } from '#core/tool-scope.js'
 import type { SessionKeyParts } from './session-registry.js'
+import type { ReplyPreferences } from '../core/memory.js'
 
 /**
  * 研判层端口。
@@ -36,6 +37,7 @@ export interface DecisionRequest {
   strength: Strength
   systemPrompt: string
   userPrompt: string
+  replyPreferences?: ReplyPreferences
   /**
    * 是否允许调用写工具（关单 / 回收 workspace）。
    * 由 AgentLoop 按 Gate 的准入结果给出：发送人在名单内，且是 @ 或私聊。
@@ -56,6 +58,7 @@ export interface DecisionRequest {
 export interface ReplyRequest {
   systemPrompt: string
   userPrompt: string
+  replyPreferences?: ReplyPreferences
   /** 会话复用：本轮落在哪个 session；不传则保持旧的「一次一建」行为。 */
   session?: SessionKeyParts
 }

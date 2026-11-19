@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { describe, expect, it, vi } from 'vitest'
 import { Store } from '../../src/store/db.js'
 import { Engine } from '../../src/core/engine.js'
 import { AgentLoop, clarifyFallback, isReopenRequest, isSmallTalk } from '../../src/router/agent-loop.js'
@@ -15,6 +18,7 @@ import type { Trigger } from '#core/model.js'
 import { admitsByScope, effectiveAdmins, scopeOf, type Policy } from '#core/policy.js'
 import { chatEntry } from '../../src/config.js'
 import { normalizeFeishuEventDetailed, type FeishuConfig, type UnaddressedContext } from '@router-agent/channel-feishu'
+import type { ReplyPreferences } from '../../src/core/memory.js'
 import type { DispatchSettings } from '../../src/router/dispatch.js'
 import type { SessionKeyParts } from '../../src/router/session-registry.js'
 
@@ -28,12 +32,12 @@ interface FakeResponse {
 
 /** 用确定性响应模拟 Pi 研判与回复两条通道。 */
 class FakeEngine implements DecisionEngine {
-  requests: { kind: 'assess' | 'reply'; systemPrompt: string; userPrompt: string; canMutate?: boolean; session?: SessionKeyParts }[] = []
+  requests: { kind: 'assess' | 'reply'; systemPrompt: string; userPrompt: string; canMutate?: boolean; session?: SessionKeyParts; replyPreferences?: ReplyPreferences }[] = []
   sessions = { reset: [] as string[], transcripts: [] as { key: string; text: string }[] }
   constructor(private responses: FakeResponse[]) {}
 
   async assess(req: DecisionRequest): Promise<DecisionEngineResult> {
-    this.requests.push({ kind: 'assess', systemPrompt: req.systemPrompt, userPrompt: req.userPrompt, canMutate: req.canMutate, ...(req.session ? { session: req.session } : {}) })
+    this.requests.push({ kind: 'assess', systemPrompt: req.systemPrompt, userPrompt: req.userPrompt, canMutate: req.canMutate, replyPreferences: req.replyPreferences, ...(req.session ? { session: req.session } : {}) })
     const res = this.responses.shift() ?? { content: '{"decision":"ignore","reason":"no more responses"}', toolCalls: [] }
     const audit = {
       engine: 'pi' as const,
@@ -67,7 +71,7 @@ class FakeEngine implements DecisionEngine {
   }
 
   async reply(req: ReplyRequest): Promise<string> {
-    this.requests.push({ kind: 'reply', systemPrompt: req.systemPrompt, userPrompt: req.userPrompt })
+    this.requests.push({ kind: 'reply', systemPrompt: req.systemPrompt, userPrompt: req.userPrompt, replyPreferences: req.replyPreferences })
     return this.responses.shift()?.content ?? ''
   }
 
@@ -849,6 +853,169 @@ describe('会话复用与 /new', () => {
   })
 })
 
+describe('长期回复偏好', () => {
+  it('重启后按人和渠道恢复跨群偏好，群内设置覆盖，删除和 /new 各自生效', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ra-memory-'))
+    const path = join(home, 'state.db')
+    const clock = { now: () => '2026-11-06T10:00:10.000Z' }
+    const llm = new FakeEngine([])
+    let store = new Store(path)
+    let n = 0
+    function start() {
+      const engine = new Engine({
+        store,
+        policy: { ...policy, allowed: ['ou_alice', 'ou_bob'] },
+        clock,
+        ids: { next: p => `${p}_${++n}` },
+      })
+      const loop = new AgentLoop({ engine, decisionEngine: llm, clock, batchWindowMs: 0, sessionsEnabled: true })
+      return { engine, loop }
+    }
+    let running = start()
+    async function send(text: string, fields: Partial<Trigger> = {}) {
+      const id = `t${++n}`
+      running.engine.ingest(trigger({ id, externalId: id, threadId: id, text, ...fields }))
+      await running.loop.tick()
+      return id
+    }
+    const dm = { addressed: 'direct', chatId: 'oc_dm' } as const
+    try {
+      const originalSave = await send('/记忆 保存 跨群 回复语言=英语', dm)
+      await send('/记忆 保存 跨群 回复详略=详细', dm)
+      await send('@阿罗 /记忆 保存 回复语言=日语')
+      await send('/记忆 列表')
+      expect(store.listOutbox().map(item => item.text)).toContain('当前会话的已保存偏好：\n- 回复语言=日语')
+      expect(llm.requests).toHaveLength(0)
+      expect(llm.sessions.transcripts).toHaveLength(0)
+
+      store.close()
+      store = new Store(path)
+      running = start()
+      await send('/new')
+      await send('你好')
+      expect(llm.requests.at(-1)?.replyPreferences).toEqual({ 回复语言: '日语', 回复详略: '详细' })
+
+      await send('帮我检查这个项目', { chatId: 'oc_other' })
+      expect(llm.requests.findLast(req => req.kind === 'assess')?.replyPreferences).toEqual({ 回复语言: '英语', 回复详略: '详细' })
+      await send('你好', { actorId: 'ou_bob' })
+      expect(llm.requests.at(-1)?.replyPreferences).toBeUndefined()
+      await send('你好', { channelId: 'other-channel' })
+      expect(llm.requests.at(-1)?.replyPreferences).toBeUndefined()
+
+      await send('/记忆 删除 回复语言')
+      await send('你好')
+      expect(llm.requests.at(-1)?.replyPreferences?.回复语言).toBe('英语')
+      await send('/记忆 删除 跨群 回复语言', dm)
+      store.setTriggerDisposition(originalSave, 'pending')
+      await running.loop.tick()
+      await send('你好')
+      expect(llm.requests.at(-1)?.replyPreferences).toEqual({ 回复详略: '详细' })
+    } finally {
+      store.close()
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('命令只在白名单内的 @ 或私聊生效，群聊不能管理跨群偏好', async () => {
+    const { engine, store, llm, loop } = setup()
+    const attempts: Partial<Trigger>[] = [
+      { actorId: 'ou_outsider' },
+      { addressed: 'none' },
+      { isBot: true },
+      { text: '/记忆 保存 跨群 回复语言=日语' },
+      { text: '/记忆 保存 回复语言=随便输入' },
+    ]
+    for (const [index, fields] of attempts.entries()) {
+      const id = `denied_${index}`
+      engine.ingest(trigger({ id, externalId: id, text: '/记忆 保存 回复语言=日语', ...fields }))
+    }
+    await loop.tick()
+    expect(llm.requests).toHaveLength(0)
+    expect(store.listUserMemories({ channelId: 'feishu', chatId: 'oc_dev', actorId: 'ou_alice' }, true)).toEqual({})
+    expect(store.listOutbox().map(item => item.text)).toEqual(expect.arrayContaining([
+      '跨群偏好请在私聊中管理。',
+      expect.stringContaining('支持的偏好'),
+    ]))
+    expect(store.listOutbox()).toHaveLength(2)
+  })
+
+  it('活跃工单话题里的记忆命令由 Router 处理，引用里的命令不会执行', async () => {
+    const { engine, store, llm, loop } = setup([ACCEPT()])
+    engine.ingest(trigger({ id: 'open-ticket' }))
+    expect((await loop.tick()).accepted).toHaveLength(1)
+
+    engine.ingest(trigger({
+      id: 'memory-own', externalId: 'memory-own',
+      text: '[引用的消息] 请继续\n\n@阿罗 /记忆 保存 回复详略=简洁',
+      raw: { originalText: '@阿罗 /记忆 保存 回复详略=简洁' },
+    }))
+    expect(await loop.tick()).toMatchObject({ fannedOut: 0, replied: 1 })
+    engine.ingest(trigger({
+      id: 'memory-quote', externalId: 'memory-quote',
+      text: '/记忆 删除 回复详略',
+      raw: { originalText: '@阿罗 请继续' },
+    }))
+    expect(await loop.tick()).toMatchObject({ fannedOut: 1 })
+    expect(llm.requests).toHaveLength(1)
+    expect(store.listUserMemories({ channelId: 'feishu', chatId: 'oc_dev', actorId: 'ou_alice' })).toEqual({ 回复详略: '简洁' })
+  })
+
+  it('偏好读取失败时仍研判并按 triggerId 记录原因', async () => {
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    const { engine, store, llm, loop } = setup([ACCEPT()], undefined, undefined, true, undefined, logger)
+    vi.spyOn(store, 'listUserMemories').mockImplementation(() => { throw new Error('读取失败') })
+    engine.ingest(trigger())
+    const result = await loop.tick()
+    expect(result.accepted).toHaveLength(1)
+    expect(llm.requests[0]?.replyPreferences).toBeUndefined()
+    expect(logger.warn).toHaveBeenCalledWith('memory:read-failed', expect.objectContaining({ triggerId: 't1', chat: 'oc_dev', actor: 'ou_alice', detail: '读取失败' }))
+  })
+
+  it('偏好写入失败时不再重试，并按 triggerId 记录原因', async () => {
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    const { engine, store, loop } = setup([], undefined, undefined, false, undefined, logger)
+    vi.spyOn(store, 'changeUserMemory').mockImplementation(() => { throw new Error('写入失败') })
+    engine.ingest(trigger({ text: '/记忆 保存 回复语言=日语' }))
+
+    const first = await loop.tick()
+    expect(first.replied).toBe(1)
+    // 失败的消息要收口，不能退回 pending 让下一轮再领一次。
+    expect(store.getTrigger('t1')?.disposition).toBe('evaluated')
+
+    const second = await loop.tick()
+    expect(second.replied).toBe(0)
+    expect(logger.warn).toHaveBeenCalledWith('memory:write-failed', expect.objectContaining({
+      triggerId: 't1', chat: 'oc_dev', actor: 'ou_alice', detail: '写入失败',
+    }))
+  })
+
+  it('更早的保存重试时不会把更新的删除改回来', async () => {
+    const { store } = setup()
+    const owner = { channelId: 'feishu', chatId: 'oc_dev', actorId: 'ou_alice' }
+    // 更新的删除先落地。
+    store.changeUserMemory(owner, { key: '回复语言', value: null }, 'delete-new', '2026-11-06T11:00:00.000Z')
+    // 更早的保存随后失败重试：不该把偏好复活。
+    store.changeUserMemory(owner, { key: '回复语言', value: '日语' }, 'save-old', '2026-11-06T10:00:00.000Z')
+
+    expect(store.listUserMemories(owner)).toEqual({})
+  })
+
+  it('命令没有生效时不说「已保存」，回话与真实状态一致', async () => {
+    const { engine, store, loop } = setup()
+    const owner = { channelId: 'feishu', chatId: 'oc_dev', actorId: 'ou_alice' }
+    store.changeUserMemory(owner, { key: '回复语言', value: null }, 'delete-new', '2026-11-06T11:00:00.000Z')
+    engine.ingest(trigger({ text: '/记忆 保存 回复语言=日语' }))
+    // 复用同一条 trigger：第一次已处理过，第二次是重放。
+    await loop.tick()
+    store.setTriggerDisposition('t1', 'pending')
+    await loop.tick()
+
+    const texts = store.listOutbox().map(item => item.text)
+    expect(texts.some(text => text.includes('没有生效'))).toBe(true)
+    expect(texts.some(text => text.includes('已保存') && text.includes('日语'))).toBe(false)
+  })
+})
+
 describe('/new 命令识别', () => {
   it('只认整条消息，允许前面带一个 @机器人', async () => {
     const { parseSessionResetCommand } = await import('../../src/router/agent-loop.js')
@@ -1067,6 +1234,19 @@ describe('关键链路日志', () => {
 
     const entry = logs.find(log => log.message === 'router:action')
     expect(entry?.extra?.action).toBe('ignore')
+  })
+
+  it('记忆命令记 router:action=reply，与其它消息路径保持一致', async () => {
+    const { logs, logger } = recorder()
+    const { engine, loop } = setup([], undefined, undefined, false, undefined, logger)
+    engine.ingest(trigger({ text: '/记忆 保存 回复语言=日语' }))
+
+    await loop.tick()
+
+    const entry = logs.find(log => log.message === 'router:action')
+    expect(entry?.level).toBe('info')
+    expect(entry?.extra?.action).toBe('reply')
+    expect(entry?.extra?.triggerId).toBe('t1')
   })
 })
 
