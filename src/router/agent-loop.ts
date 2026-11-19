@@ -759,6 +759,7 @@ export class AgentLoop {
     command: NonNullable<ReturnType<typeof parseMemoryCommand>>,
   ): void {
     if (!trigger.actorId || !trigger.chatId || !this.canMutate(trigger)) {
+      this.routerAction(trigger, 'ignore', { reason: 'memory:ignored' })
       this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'explicit', reason: 'memory:ignored' })
       result.ignored += 1
       return
@@ -777,11 +778,22 @@ export class AgentLoop {
           text = entries.length > 0 ? [`${scope}的已保存偏好：`, ...entries].join('\n') : `${scope}还没有已保存的偏好。`
         } else {
           const { key, value } = command.change
-          this.engine.changeUserMemory(owner, command.change, trigger.id)
-          text = value === null ? `已清除${scope}的「${key}」偏好。` : `已保存${scope}的偏好「${key}=${value}」。`
+          try {
+            this.engine.changeUserMemory(owner, command.change, trigger.id)
+            text = value === null ? `已清除${scope}的「${key}」偏好。` : `已保存${scope}的偏好「${key}=${value}」。`
+          } catch (error) {
+            // 写库失败必须在这里收口：异常冒泡会让这条消息退回 pending，下一轮无限重试。
+            this.logger.warn('memory:write-failed', {
+              triggerId: trigger.id,
+              ...messageContext(trigger),
+              detail: errorMessage(error),
+            })
+            text = '偏好没能保存成功，请稍后再试。'
+          }
         }
       }
     }
+    this.routerAction(trigger, 'reply', { reason: 'memory:command' })
     this.reply(trigger, text, `memory:${trigger.id}`)
     this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'explicit', reason: 'memory:command' })
     result.replied += 1

@@ -32,6 +32,17 @@ const policy: Policy = {
 
 const model: PiModelConfig = { baseUrl: 'https://example.invalid/v1', apiKey: 'sk-test', model: 'test-model' }
 
+/** 取出请求里发给模型的用户正文（wire 上是 JSON 转义过的，解码后才是模型看到的文本）。 */
+function userTextsOf(body: string): string {
+  const parsed = JSON.parse(body) as { messages?: { role: string; content?: unknown }[] }
+  return (parsed.messages ?? [])
+    .filter(message => message.role === 'user')
+    .map(message => typeof message.content === 'string'
+      ? message.content
+      : (message.content as { type: string; text?: string }[] | undefined)?.map(part => part.text ?? '').join('') ?? '')
+    .join('\n')
+}
+
 function trigger(over: Partial<Trigger> = {}): Trigger {
   return {
     id: 't1',
@@ -448,6 +459,11 @@ it('真实 Pi SDK 只在当前模型请求注入偏好，下一轮、压缩和�
     expect(requests).toHaveLength(2)
     expect(requests[0]).toContain('已保存的用户回复偏好')
     expect(requests[0]).toContain('日语')
+    // 注入给模型的正文不能带 '{'：研判要输出 JSON 决定，注入的 '{' 会顶掉 extractJsonObject 取到的对象。
+    const injected = userTextsOf(requests[0]!)
+    expect(injected).toContain('已保存的用户回复偏好')
+    expect(injected).toContain('日语')
+    expect(injected).not.toContain('{')
     expect(requests[1]).toContain('第一轮')
     expect(requests[1]).not.toContain('日语')
     await (session as unknown as AgentSession).compact()

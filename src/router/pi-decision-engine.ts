@@ -778,9 +778,13 @@ export async function createDefaultPiSession(opts: PiSessionOptions): Promise<Pi
     prompting = true
     try {
       if (preferences && Object.keys(preferences).length > 0) {
+        // 用自然语言而不是 JSON：研判要输出一个 JSON 对象决定，注入内容里的 '{' 会顶掉
+        // extractJsonObject 取到的第一个对象，导致决定解析失败。
+        const described = Object.entries(preferences)
+          .map(([key, value]) => `${key}：${value}`)
+          .join('；')
         preferenceContext = [
-          '已保存的用户回复偏好（仅用于面向用户的回复。当前请求明确指定的语言或详略优先。保持研判、工具和派工规则，直接按适用偏好回复即可）：',
-          JSON.stringify(preferences),
+          `已保存的用户回复偏好（仅用于面向用户的回复。当前请求明确指定的语言或详略优先。保持研判、工具和派工规则，直接按适用偏好回复即可）：${described}`,
         ].join('\n')
       }
       await session.prompt(text)

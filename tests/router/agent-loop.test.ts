@@ -970,6 +970,24 @@ describe('长期回复偏好', () => {
     expect(llm.requests[0]?.replyPreferences).toBeUndefined()
     expect(logger.warn).toHaveBeenCalledWith('memory:read-failed', expect.objectContaining({ triggerId: 't1', chat: 'oc_dev', actor: 'ou_alice', detail: '读取失败' }))
   })
+
+  it('偏好写入失败时不再重试，并按 triggerId 记录原因', async () => {
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    const { engine, store, loop } = setup([], undefined, undefined, false, undefined, logger)
+    vi.spyOn(store, 'changeUserMemory').mockImplementation(() => { throw new Error('写入失败') })
+    engine.ingest(trigger({ text: '/记忆 保存 回复语言=日语' }))
+
+    const first = await loop.tick()
+    expect(first.replied).toBe(1)
+    // 失败的消息要收口，不能退回 pending 让下一轮再领一次。
+    expect(store.getTrigger('t1')?.disposition).toBe('evaluated')
+
+    const second = await loop.tick()
+    expect(second.replied).toBe(0)
+    expect(logger.warn).toHaveBeenCalledWith('memory:write-failed', expect.objectContaining({
+      triggerId: 't1', chat: 'oc_dev', actor: 'ou_alice', detail: '写入失败',
+    }))
+  })
 })
 
 describe('/new 命令识别', () => {
@@ -1190,6 +1208,19 @@ describe('关键链路日志', () => {
 
     const entry = logs.find(log => log.message === 'router:action')
     expect(entry?.extra?.action).toBe('ignore')
+  })
+
+  it('记忆命令记 router:action=reply，与其它消息路径保持一致', async () => {
+    const { logs, logger } = recorder()
+    const { engine, loop } = setup([], undefined, undefined, false, undefined, logger)
+    engine.ingest(trigger({ text: '/记忆 保存 回复语言=日语' }))
+
+    await loop.tick()
+
+    const entry = logs.find(log => log.message === 'router:action')
+    expect(entry?.level).toBe('info')
+    expect(entry?.extra?.action).toBe('reply')
+    expect(entry?.extra?.triggerId).toBe('t1')
   })
 })
 
