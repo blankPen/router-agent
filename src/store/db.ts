@@ -291,6 +291,16 @@ CREATE TABLE IF NOT EXISTS user_memory_changes (
   trigger_id TEXT PRIMARY KEY
 );
 
+-- 每次变更的顺序记录：重试一条旧命令时，靠它判断这条命令是否比当前值更新。
+CREATE TABLE IF NOT EXISTS user_memory_revisions (
+  channel_id TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
+  key TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (channel_id, actor_id, chat_id, key)
+);
+
 -- 会话复用：一个 session_key（群/话题 + 人）对应一个落盘的 Pi session。
 -- 一个 key 会随着 /new 留下多行历史：active 是当前，superseded 等清理，purged 是已删文件。
 CREATE TABLE IF NOT EXISTS chat_sessions (
@@ -629,19 +639,35 @@ export class Store {
       const receipt = this.db.prepare('INSERT INTO user_memory_changes (trigger_id) VALUES (?) ON CONFLICT(trigger_id) DO NOTHING').run(triggerId)
       if (receipt.changes > 0) {
         const key = [owner.channelId, owner.actorId, owner.chatId, change.key] as const
-        if (change.value === null) {
-          this.db.prepare('DELETE FROM user_memories WHERE channel_id = ? AND actor_id = ? AND chat_id = ? AND key = ?')
-            .run(...key)
-        } else {
+        // 只应用比当前记录更新的命令：一条失败后重试的旧保存不能把更新的删除改回来。
+        const current = this.db.prepare(`
+          SELECT updated_at FROM user_memory_revisions
+          WHERE channel_id = ? AND actor_id = ? AND chat_id = ? AND key = ?
+        `).get(...key) as { updated_at: string } | undefined
+        if (!current || current.updated_at <= now) {
+          if (change.value === null) {
+            this.db.prepare('DELETE FROM user_memories WHERE channel_id = ? AND actor_id = ? AND chat_id = ? AND key = ?')
+              .run(...key)
+          } else {
+            this.db.prepare(`
+              INSERT INTO user_memories (channel_id, actor_id, chat_id, key, value, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+              ON CONFLICT (channel_id, actor_id, chat_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            `).run(...key, change.value, now)
+          }
+          // 删除也要留下顺序记录，否则更早的保存仍能把它改回来。
           this.db.prepare(`
-            INSERT INTO user_memories (channel_id, actor_id, chat_id, key, value, updated_at) VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT (channel_id, actor_id, chat_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-          `).run(...key, change.value, now)
+            INSERT INTO user_memory_revisions (channel_id, actor_id, chat_id, key, updated_at) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (channel_id, actor_id, chat_id, key) DO UPDATE SET updated_at = excluded.updated_at
+          `).run(...key, now)
         }
       }
       this.db.exec('COMMIT')
     } catch (error) {
-      this.db.exec('ROLLBACK')
+      try {
+        this.db.exec('ROLLBACK')
+      } catch {
+        // SQLite 可能已经自动回滚，回滚失败不能盖掉真正的失败原因。
+      }
       throw error
     }
   }

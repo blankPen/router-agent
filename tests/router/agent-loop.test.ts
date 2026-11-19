@@ -988,6 +988,17 @@ describe('长期回复偏好', () => {
       triggerId: 't1', chat: 'oc_dev', actor: 'ou_alice', detail: '写入失败',
     }))
   })
+
+  it('更早的保存重试时不会把更新的删除改回来', async () => {
+    const { store } = setup()
+    const owner = { channelId: 'feishu', chatId: 'oc_dev', actorId: 'ou_alice' }
+    // 更新的删除先落地。
+    store.changeUserMemory(owner, { key: '回复语言', value: null }, 'delete-new', '2026-11-06T11:00:00.000Z')
+    // 更早的保存随后失败重试：不该把偏好复活。
+    store.changeUserMemory(owner, { key: '回复语言', value: '日语' }, 'save-old', '2026-11-06T10:00:00.000Z')
+
+    expect(store.listUserMemories(owner)).toEqual({})
+  })
 })
 
 describe('/new 命令识别', () => {
