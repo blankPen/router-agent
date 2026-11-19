@@ -382,7 +382,8 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 CREATE TABLE IF NOT EXISTS attention (
   ticket_id TEXT PRIMARY KEY,
   question TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  expires_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS questions (
@@ -655,6 +656,12 @@ export class Store {
     const threadColumns = this.db.prepare('PRAGMA table_info(threads)').all() as Row[]
     if (!threadColumns.some(column => column.name === 'channel_id')) {
       this.db.exec('ALTER TABLE threads ADD COLUMN channel_id TEXT')
+    }
+    // 待答问题加过期时间：过期后不再把工单钉在「已阻塞」，
+    // 否则一条陈旧的待答问题能让工单永远停在 blocked（tk-85 评审 S-03）。
+    const attentionColumns = this.db.prepare('PRAGMA table_info(attention)').all() as Row[]
+    if (!attentionColumns.some(column => column.name === 'expires_at')) {
+      this.db.exec('ALTER TABLE attention ADD COLUMN expires_at TEXT')
     }
     const ticketColumns = this.db.prepare('PRAGMA table_info(tickets)').all() as Row[]
     if (!ticketColumns.some(column => column.name === 'repo')) {
@@ -1333,6 +1340,12 @@ export class Store {
     return (this.db.prepare("SELECT * FROM tickets WHERE stage NOT IN ('done', 'closed') ORDER BY created_at").all() as Row[]).map(ticketFromRow)
   }
 
+  /** 在办工单数：开单侧闸门用，避免一次批量事件开出过多工单。 */
+  countOpenTickets(): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM tickets WHERE stage NOT IN ('done', 'closed')").get() as Row | undefined
+    return Number(row?.n ?? 0)
+  }
+
   // ---------- 派工草稿（多项目 / 多分支补齐） ----------
 
   saveDispatchDraft(draft: DispatchDraft): void {
@@ -1880,18 +1893,18 @@ export class Store {
 
   // ---------- Attention ----------
 
-  setAttention(ticketId: string, question: string, at: string): void {
-    this.db.prepare('INSERT INTO attention (ticket_id, question, created_at) VALUES (?, ?, ?) ON CONFLICT(ticket_id) DO UPDATE SET question = excluded.question, created_at = excluded.created_at')
-      .run(ticketId, question, at)
+  setAttention(ticketId: string, question: string, at: string, expiresAt?: string): void {
+    this.db.prepare('INSERT INTO attention (ticket_id, question, created_at, expires_at) VALUES (?, ?, ?, ?) ON CONFLICT(ticket_id) DO UPDATE SET question = excluded.question, created_at = excluded.created_at, expires_at = excluded.expires_at')
+      .run(ticketId, question, at, expiresAt ?? null)
   }
 
   clearAttention(ticketId: string): void {
     this.db.prepare('DELETE FROM attention WHERE ticket_id = ?').run(ticketId)
   }
 
-  getAttention(ticketId: string): { question: string; createdAt: string } | null {
+  getAttention(ticketId: string): { question: string; createdAt: string; expiresAt: string | null } | null {
     const row = this.db.prepare('SELECT * FROM attention WHERE ticket_id = ?').get(ticketId) as Row | undefined
-    return row ? { question: String(row.question), createdAt: String(row.created_at) } : null
+    return row ? { question: String(row.question), createdAt: String(row.created_at), expiresAt: row.expires_at ? String(row.expires_at) : null } : null
   }
 
   // ---------- Questions（Worker --ask 的选择题） ----------

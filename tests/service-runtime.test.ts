@@ -247,6 +247,8 @@ describe('运行时机制', () => {
     const failed = logs.filter(item => item.message === 'input:deliver-failed')
     expect(failed).toHaveLength(1)
     expect(failed[0]?.extra).toMatchObject({ ticketId, attempt: 1 })
+    const notices = store.listOutbox(50).filter(item => item.text.includes('暂时没送到'))
+    expect(notices).toHaveLength(1)
 
     // cooldown 内每个 tick 都不应再次投递。
     now += 1_000
@@ -272,6 +274,8 @@ describe('运行时机制', () => {
     }
     expect(logs.some(item => item.message === 'input:redeliver-giveup')).toBe(true)
     expect(store.getAttention(ticketId)?.question ?? '').toContain('5 次')
+    const texts = store.listOutbox(50).map(item => item.text).join('\n')
+    expect(texts).toContain('已重试 5 次仍未送达')
   })
 
   it('Agent 停在交互式提示上时转人工并通知话题，不再静默重投', async () => {

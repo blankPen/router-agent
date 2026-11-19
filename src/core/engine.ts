@@ -93,6 +93,18 @@ export interface WorkerState {
 const defaultClock: Clock = { now: () => new Date().toISOString() }
 const defaultIds: IdGen = { next: prefix => `${prefix}_${crypto.randomUUID()}` }
 
+/** 待答问题多久算过期；过期后不再把工单钉在「已阻塞」。 */
+const ATTENTION_TTL_MS = 24 * 3_600_000
+
+/** 待答问题是否已过期；存量数据没有 expires_at 时按创建时间 + TTL 算，避免旧记录永久阻塞。 */
+function isExpiredAttention(attention: { createdAt: string; expiresAt: string | null } | null, now: string): boolean {
+  if (!attention) return false
+  const expiry = Date.parse(attention.expiresAt ?? attention.createdAt)
+  const current = Date.parse(now)
+  if (!Number.isFinite(expiry) || !Number.isFinite(current)) return false
+  return expiry + (attention.expiresAt ? 0 : ATTENTION_TTL_MS) <= current
+}
+
 /**
  * 领域内核的唯一状态写入口。
  * Router、Worker、面板都不直接写 SQLite，全部经由这里。
@@ -498,7 +510,7 @@ export class Engine {
 
   setAttention(ticketId: string, question: string): void {
     this.requireTicket(ticketId)
-    this.store.setAttention(ticketId, question, this.clock.now())
+    this.store.setAttention(ticketId, question, this.clock.now(), this.attentionExpiry())
     this.refreshStage(ticketId)
   }
 
@@ -509,12 +521,25 @@ export class Engine {
     this.refreshStage(ticketId)
   }
 
+  /**
+   * 待答问题的过期时间。
+   *
+   * 没有过期机制的待答问题会让工单永久停在「已阻塞」：worker 已经不在，
+   * 再没人来回答，这条记录却一直把阶段钉在 blocked（tk-85 评审 S-03）。
+   * 过期后它不再阻塞阶段推导；工单仍可在被人工处理时重新登记。
+   */
+  private attentionExpiry(): string {
+    return new Date(Date.parse(this.clock.now()) + ATTENTION_TTL_MS).toISOString()
+  }
+
   /** 重新推导阶段并落库。 */
   refreshStage(ticketId: string): Stage {
     const ticket = this.requireTicket(ticketId)
     const assignment = this.store.latestAssignment(ticketId)
     const latestReport = this.store.latestReport(ticketId)
-    const hasAttention = Boolean(this.store.getAttention(ticketId))
+    // 过期的待答问题不再阻塞：worker 已经不在时不会有人来回答它。
+    const attention = this.store.getAttention(ticketId)
+    const hasAttention = Boolean(attention) && !isExpiredAttention(attention, this.clock.now())
     const stage = computeStage({ ticket, assignment, latestReport, hasAttention })
     if (stage !== ticket.stage) {
       this.store.updateTicket({ ...ticket, stage, updatedAt: this.clock.now() })

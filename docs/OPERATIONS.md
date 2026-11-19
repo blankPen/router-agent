@@ -91,7 +91,7 @@ Router 不做对话，只在必要时说话：
 | `intake:decision-dropped` | AgentLoop | `triggerId` `chat` `rule` | 决策层确定性准入命中（bot / 媒体 / 口令 / 噪声），直接忽略 |
 | `intake:decision-ignore` | AgentLoop | `triggerId` `chat` `msgType` `action` `confidence` | 决策层判定无需跟进（chitchat / grumble 等），忽略该消息 |
 | `intake:opened` | AgentLoop | `intakeId` `chat` `chatName` `actor` `actorName` `actorType` `kind` `action` `project` | 为一条消息创建需求会话；`kind` 是 issue（成员需求）/ question（成员咨询）/ request（管理员澄清），`action` 是路由层落地的动作（reply / analysis / clarify） |
-| `router:action` | AgentLoop | `triggerId` `action` `ticketId`（open_ticket 时）`stage`（澄清中）`missing` | 路由层为这条消息选出的唯一动作：reply / ticket_tool / open_ticket / analysis / ignore；同一条 trigger 只记一次。`analysis` 表示需求要先讨论几轮再开单 |
+| `router:action` | AgentLoop | `triggerId` `action` `reason` `stage` `ticketId`（open_ticket 时）`missing` | 路由层为这条消息选出的唯一动作：reply / ticket_tool / open_ticket / analysis / ignore；同一条 trigger 只记一次。`reason` 是研判给出的理由，`stage` 是路由阶段（gate / assess）或澄清阶段（clarify）；`open_ticket` 另记开单后的工单阶段与 ID。`analysis` 表示需求要先讨论几轮再开单 |
 | `intake:clarify` | AgentLoop | `intakeId` `questions` | 分析 Agent 发起追问 |
 | `intake:answered` | AgentLoop | `intakeId` `chat` | 分析 Agent 直接给出结论，会话结束，不产出需求单 |
 | `intake:ready` | AgentLoop | `intakeId` `chat` `title` `approvers` | 需求单整理完成，已 @管理员终审 |
@@ -123,10 +123,10 @@ Router 不做对话，只在必要时说话：
 | `input:queued` | Engine | `ticketId` `seq` `text` | Router 准备发给 worker 的内容 |
 | `input:deduped` | Engine | `ticketId` `inputId` `seq` `kind` `sourceKey` | 同一条来源消息重复到达（飞书重投 / 面板再点一次），复用已有输入，没有重复投给 worker |
 | `input:delivered` | Service | `ticketId` `count` `inputIds` `text` | 实际投递进 worker 终端的输入；`inputIds` 是这轮真正送出的输入 id |
-| `input:deliver-failed` | Service | `ticketId` `inputId` `attempt` `message` | 投递进 worker 终端失败，按指数退避重试 |
+| `input:deliver-failed` | Service | `ticketId` `inputId` `attempt` `message` | 投递进 worker 终端失败，按指数退避重试；首次失败会通知话题，后续失败不重复打扰 |
 | `input:queued` | Service | `ticketId` `inputId` `reason` | 运行时正忙（busy），这轮没投出去，退避后再投 |
 | `input:unacked-timeout` | Service | `ticketId` `inputId` `waitedMs` | 已投递很久仍未 ack：只提示人工确认，不再把原文重投给 worker |
-| `input:redeliver-giveup` | Service | `ticketId` `inputId` `attempt` | 同一条输入重投到上限仍未成功，已标 attention 转人工 |
+| `input:redeliver-giveup` | Service | `ticketId` `inputId` `attempt` | 同一条输入重投到上限仍未成功，已标 attention 并通知话题转人工 |
 | `input:rejected` | Service | `ticketId` `inputId` `reason` | 运行时明确拒绝输入，按退避重试 |
 | `worker:lost` | Service | `ticketId` `handle` `reason` `lastSeq` `expired` | 执行会话已不存在；已投递未 ack 的输入标为 `expired`，不再参与重投 |
 | `input:relaunch` | Service | `ticketId` `pending` | 因新消息重建 worker；同一批积压输入只触发一次 |
@@ -159,6 +159,7 @@ Router 不做对话，只在必要时说话：
 | `api:input` / `api:stop` / `api:policy` / `api:config` | HTTP API | — | 面板 / CLI 的操作 |
 | `idle:nudge` / `idle:stale` | Service | — | 空闲唤醒与失联标记 |
 | `idle:resumed` | Service | `ticketId` | 已标记 stale 的 worker 又出现新活动，解除 attention 与僵尸水位 |
+| `attention:cleared` | Service | `ticketId` `reason` `from` `to` | 工单出现新进展后自动解除陈旧的待答问题；`reason=pr-progress` 表示 PR 状态变化触发 |
 | `idle:transfer` | Service | `ticketId` | worker 已退出且无法恢复，转人工并通知发起人 |
 | `idle:blocked` | Service | `ticketId` `detail` | worker 正在等待人工处理（权限 / 输入），已通知发起人 |
 | `retention:baseline` | Service | `baselineAt` `openTickets` | 服务启动时重置闲置治理计时基线：启动前就已无进展的工单不补发提醒 |
@@ -168,7 +169,7 @@ Router 不做对话，只在必要时说话：
 | `retention:closed` | Service | `ticketId` `reason` | 闲置超时自动关单 |
 | `retention:sweep-failed` | Service | `ticketId` `detail` | 单个工单的闲置治理检查失败 |
 | `pr:linked` / `pr:state` | Service | — | PR / MR 跟踪；PR 进入 `merged` / `closed` 只更新状态并通知发起人，工单保持开放，可继续追问 |
-| `pr:track-failed` | Service | `ticketId` `prNumber` `repo` `detail` | PR / MR 状态查询无结果；同一工单 + PR 只记一次 |
+| `pr:track-failed` | Service | `ticketId` `prNumber` `repo` `detail` | PR / MR 状态查询无结果；同一工单 + PR 只记一次，并通知话题转人工确认 |
 | `recover:*` | Service | — | 重启对账 |
 | `recover:trigger-released` | Service | `released` | 重启时把中断在 `evaluating` 的 Trigger 放回 `pending`，避免消息被永久吞掉 |
 | `recover:interrupted` | Service | `ticketId` `turnId` `mode` `autoRecovered` | 发现 worker 上一轮被服务重启打断，按 `policy.interruptedRecovery` 处置 |
@@ -310,7 +311,7 @@ Router 不做对话，只在必要时说话：
 | `event:invalid` | Event | `eventId` `sourceId` `reason` | 事件被判为无效（P4），只留记录不再处理 |
 | `event:review-queued` | Event | `eventId` `sourceId` `priority` `reason` | 事件需要人审，已进待审核队列 |
 | `event:review-notified` | Event | `eventId` `chatId` | 待审核事件已推送给管理员 |
-| `event:deferred` | Event | `eventId` `sourceId` `reason` | 时间窗或配额不允许，顺延等待（不丢事件） |
+| `event:deferred` | Event | `eventId` `sourceId` `reason` | 时间窗、配额或在办工单上限不允许，顺延等待（不丢事件） |
 | `event:dispatched` | Event | `eventId` `sourceId` `ticketId` `priority` `project` `skill` | 事件已开单，交给现有 Worker 链路执行 |
 | `event:already-dispatched` | Event | `eventId` `ticketId` | 同一事件重复处理，但工单已开过；不重复开单 |
 | `event:kickoff` | EventKickoff | `ticketId` `eventId` `sourceId` `chat` `threadId` `messageId` `actor` `actorType` | 事件工单派工前已私聊接收人并建话题，工单与后续通知已绑到该话题；这是「事件开工 → 用户可回复」的起点 |
@@ -324,7 +325,7 @@ Router 不做对话，只在必要时说话：
 | `event:completed` | Event | `eventId` `ticketId` | 事件对应工单已完成，结论已回写来源 |
 | `event:writeback-failed` / `event:writeback-skipped` | Event | `eventId` `sourceId` `detail` | 结论回写来源失败 / 来源没有回写能力（只落库） |
 | `event:writeback-unsupported` | Event | `sourceId` `externalId` | 来源不支持回写（没配回调地址 / 取不到 issue 号），结论只落库 |
-| `event:decision-failed` | Event | `eventId` `provider` `detail` | 判定模型调用失败，已降级为待审核（事件不丢） |
+| `event:decision-failed` | Event | `eventId` `provider` `permanent` `detail` | 判定模型调用失败；`permanent=true`（401 / 403 / 451）直接转人工，否则留在队列等下一轮重判 |
 | `event:decision-no-output` | Event | `eventId` `provider` | 模型没给出可用结论，按兜底处理 |
 | `event:decision-unparsable` | Event | `eventId` | 模型返回的内容解析不出 JSON 结论，按兜底处理 |
 | `event:decision-incomplete` | Event | `eventId` `sourceId` `ruleId` `reason` | 判定没完成（模型失败等）；事件留在队列等下一轮，不派工也不丢 |

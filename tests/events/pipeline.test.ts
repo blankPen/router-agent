@@ -202,6 +202,35 @@ describe('事件管线', () => {
     expect(store.getEvent(second.id)?.execution).toBe('deferred')
   })
 
+  it('在办工单达到上限时事件顺延，不开出新工单', async () => {
+    const { store, pipeline, config } = setup()
+    config.events.policy.maxOpenTickets = 1
+
+    const first = pipeline.ingest('github', SOURCE, { externalId: 'issue:a#80', title: '崩溃', body: '崩了', eventType: 'github.issues.opened' })
+    await pipeline.process(first)
+    expect(store.getEvent(first.id)?.ticketId).toBeTruthy()
+
+    // 在办工单已达上限：第二条事件排队等工单收尾，不再凭空开单。
+    const second = pipeline.ingest('github', SOURCE, { externalId: 'issue:a#81', title: '崩溃', body: '崩了', eventType: 'github.issues.opened' })
+    await pipeline.process(second)
+    expect(store.getEvent(second.id)?.ticketId).toBeUndefined()
+    expect(store.getEvent(second.id)?.execution).toBe('deferred')
+    expect(store.getEvent(second.id)?.reason).toContain('在办工单')
+  })
+
+  it('在办工单上限为 0 时不限制开单', async () => {
+    const { store, pipeline, config } = setup()
+    config.events.policy.maxOpenTickets = 0
+
+    const first = pipeline.ingest('github', SOURCE, { externalId: 'issue:a#90', title: '崩溃', body: '崩了', eventType: 'github.issues.opened' })
+    await pipeline.process(first)
+    const second = pipeline.ingest('github', SOURCE, { externalId: 'issue:a#91', title: '崩溃', body: '崩了', eventType: 'github.issues.opened' })
+    await pipeline.process(second)
+
+    expect(store.getEvent(first.id)?.ticketId).toBeTruthy()
+    expect(store.getEvent(second.id)?.ticketId).toBeTruthy()
+  })
+
   it('高优事件不受时间窗限制，低优事件在高峰顺延', async () => {
     const { store, pipeline } = setup()
     const event = pipeline.ingest('github', SOURCE, { externalId: 'issue:a#6', title: '崩溃', body: '崩了', eventType: 'github.issues.opened' })
@@ -314,6 +343,39 @@ describe('事件管线', () => {
     expect(modelCalls).toBeLessThanOrEqual(MAX_EVENT_ATTEMPTS)
     expect(stored.execution).toBe('failed')
     expect(stored.lastError).toContain('模型超时')
+  })
+
+  it('判定模型返回 451 时直接转人工，不重试到上限', async () => {
+    let modelCalls = 0
+    const model: EventDecisionPort = {
+      name: 'jev',
+      decide: async () => {
+        modelCalls += 1
+        throw new Error('jev:http-451 {"title":"Typesafe is not available in your region.","status":451}')
+      },
+    }
+    const { store, engine, config } = setup()
+    config.events.decision = { ...config.events.decision, provider: 'jev', fallback: 'pending' }
+    const service = new EventDecisionService({ decision: config.events.decision, rule: ruleDecisionPort, model })
+    const pipeline = new EventPipeline({
+      store,
+      engine,
+      config: () => config,
+      clock: () => new Date(2026, 10, 13, 22, 0, 0).toISOString(),
+      ids: prefix => `${prefix}_${modelCalls}`,
+      decision: service,
+    })
+    const event = pipeline.ingest('github', SOURCE, { externalId: 'issue:a#12', title: '崩溃', body: '崩了', eventType: 'github.issues.opened' })
+
+    await pipeline.tick(20)
+    const stored = store.getEvent(event.id)!
+    expect(stored.status).toBe('review')
+    expect(stored.needsReview).toBe(true)
+    expect(stored.reason).toContain('451')
+    expect(stored.execution).not.toBe('failed')
+
+    for (let round = 0; round < 10; round += 1) await pipeline.tick(20)
+    expect(modelCalls).toBe(1)
   })
 
   it('没有匹配规则的事件保持未判定，不被领取也不调模型', async () => {

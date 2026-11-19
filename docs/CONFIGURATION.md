@@ -389,6 +389,7 @@ events:
     offPeak: { start: "20:00", end: "09:00", priorities: [P2, P3] }
     perSourceDailyLimit: 50          # 单来源每日配额，超了顺延（不丢）
     dailyEventLimit: 200             # 全局每日自动执行条数
+    maxOpenTickets: 20               # 在办工单数上限，超了事件顺延排队（0 = 不限）
     reviewNotify: true
     reviewChatId: ""                 # 审核通知发到哪个会话；留空只落面板
 ```

@@ -248,6 +248,65 @@ describe('Engine', () => {
     expect(store.getAttention(ticket!.id)?.question).toBe('请提供一个可用的测试账号')
   })
 
+  it('待答问题过期后不再把工单钉在已阻塞', () => {
+    engine.ingest(makeTrigger())
+    const { ticket } = engine.decide({ triggerId: 'trg_1', decision: 'accept', strength: 'explicit', reason: 'ok' })
+    const assignment = engine.startAssignment(ticket!.id, { runtimeId: 'orca', handle: 'term-1', workdir: '/tmp/wt' })
+    engine.report(assignment.id, {
+      ticketId: ticket!.id,
+      turn: 1,
+      state: 'ready',
+      summary: 'PR 已开',
+      ackedInputs: [],
+    })
+    expect(store.getTicket(ticket!.id)?.stage).toBe('review')
+
+    // worker 丢了之后又写了一条待答问题：工单被钉在 blocked。
+    engine.setAttention(ticket!.id, '执行会话已不存在')
+    expect(store.getTicket(ticket!.id)?.stage).toBe('blocked')
+
+    // 待答问题过期后重新推导阶段：工单不再永久停在 blocked。
+    clock.advance(25 * 3_600_000)
+    expect(engine.refreshStage(ticket!.id)).toBe('review')
+  })
+
+  it('未过期的待答问题仍然把工单钉在已阻塞', () => {
+    engine.ingest(makeTrigger())
+    const { ticket } = engine.decide({ triggerId: 'trg_1', decision: 'accept', strength: 'explicit', reason: 'ok' })
+    const assignment = engine.startAssignment(ticket!.id, { runtimeId: 'orca', handle: 'term-1', workdir: '/tmp/wt' })
+    engine.report(assignment.id, {
+      ticketId: ticket!.id,
+      turn: 1,
+      state: 'ready',
+      summary: 'PR 已开',
+      ackedInputs: [],
+    })
+
+    engine.setAttention(ticket!.id, '执行会话已不存在')
+    clock.advance(60_000)
+    expect(engine.refreshStage(ticket!.id)).toBe('blocked')
+  })
+
+  it('存量待答问题没有 expires_at 时按创建时间兜底过期', () => {
+    engine.ingest(makeTrigger())
+    const { ticket } = engine.decide({ triggerId: 'trg_1', decision: 'accept', strength: 'explicit', reason: 'ok' })
+    const assignment = engine.startAssignment(ticket!.id, { runtimeId: 'orca', handle: 'term-1', workdir: '/tmp/wt' })
+    engine.report(assignment.id, {
+      ticketId: ticket!.id,
+      turn: 1,
+      state: 'ready',
+      summary: 'PR 已开',
+      ackedInputs: [],
+    })
+
+    // 旧版本写入的 attention 没有 expires_at：按创建时间 + TTL 兜底，不能永久阻塞。
+    store.setAttention(ticket!.id, '执行会话已不存在', '2026-11-06T10:00:00.000Z')
+    expect(engine.refreshStage(ticket!.id)).toBe('blocked')
+
+    clock.advance(25 * 3_600_000)
+    expect(engine.refreshStage(ticket!.id)).toBe('review')
+  })
+
   it('工单结束要求 PR 不再处于 open', () => {
     engine.ingest(makeTrigger())
     const { ticket } = engine.decide({ triggerId: 'trg_1', decision: 'accept', strength: 'explicit', reason: 'ok' })

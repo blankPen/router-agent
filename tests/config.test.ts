@@ -50,6 +50,18 @@ describe('全局状态目录与配置', () => {
     expect(loadConfig(dir).runtime.default).toBe('claude-code')
   })
 
+  it('事件开单上限可配置，0 表示不限', () => {
+    const dir = home()
+    ensureHome(dir)
+    writeFileSync(join(dir, 'config.yaml'), ['events:', '  policy:', '    maxOpenTickets: 5'].join('\n'))
+    expect(loadConfig(dir).events.policy.maxOpenTickets).toBe(5)
+
+    const unlimited = home()
+    ensureHome(unlimited)
+    writeFileSync(join(unlimited, 'config.yaml'), ['events:', '  policy:', '    maxOpenTickets: 0'].join('\n'))
+    expect(loadConfig(unlimited).events.policy.maxOpenTickets).toBe(0)
+  })
+
   it('图片转文本默认开启，可配置关闭与阈值', () => {
     expect(loadConfig(home()).feishu.images).toEqual({ enabled: true, maxChars: 2_000, timeoutMs: 60_000 })
 

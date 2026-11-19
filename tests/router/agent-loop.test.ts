@@ -1027,6 +1027,8 @@ describe('关键链路日志', () => {
     expect(entry?.extra?.action).toBe('open_ticket')
     expect(entry?.extra?.ticketId).toBe(result.accepted[0]?.id)
     expect(entry?.extra?.triggerId).toBe('t1')
+    expect(entry?.extra?.reason).toBe('明确的可执行请求')
+    expect(entry?.extra?.stage).toBe('todo')
   })
 
   it('查询 / 清理工具答复时记 router:action=ticket_tool，不再重复记 ignore', async () => {
@@ -1043,6 +1045,8 @@ describe('关键链路日志', () => {
     const actionEntries = logs.filter(log => log.message === 'router:action')
     expect(actionEntries).toHaveLength(1)
     expect(actionEntries[0]?.extra?.action).toBe('ticket_tool')
+    expect(actionEntries[0]?.extra?.reason).toBe('ops:closed-tk-1')
+    expect(actionEntries[0]?.extra?.stage).toBe('assess')
   })
 
   it('明显寒暄时记 router:action=reply，不重复记 ignore', async () => {
@@ -1055,6 +1059,7 @@ describe('关键链路日志', () => {
     const actionEntries = logs.filter(log => log.message === 'router:action')
     expect(actionEntries).toHaveLength(1)
     expect(actionEntries[0]?.extra?.action).toBe('reply')
+    expect(actionEntries[0]?.extra?.stage).toBe('gate')
   })
 
   it('名单内未 @ 的消息判 ignore 时记 router:action=ignore', async () => {
@@ -1067,6 +1072,8 @@ describe('关键链路日志', () => {
 
     const entry = logs.find(log => log.message === 'router:action')
     expect(entry?.extra?.action).toBe('ignore')
+    expect(entry?.extra?.reason).toBe('闲聊')
+    expect(entry?.extra?.stage).toBe('assess')
   })
 })
 

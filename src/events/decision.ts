@@ -92,19 +92,22 @@ export class EventDecisionService {
         }
       } catch (error) {
         // 模型失败不丢事件：降级成待审核，人来定。
+        // 401 / 403 / 451 这类永久错误重试也不会变好，直接转人工，不浪费 5 次重试。
+        const permanent = isPermanentDecisionError(error)
         this.logger.error('event:decision-failed', {
           eventId: input.event.id,
           provider: this.model.name,
+          permanent,
           message: errorMessage(error),
         })
         // 判定没完成：模型失败时不存在可信结论，不能拿去派工。
         // 兜底策略 pending 表示事件留在队列里等下一轮重判，而不是转人工。
         output = {
           ...output,
-          needsReview: current.fallback !== 'pending',
+          needsReview: permanent || current.fallback !== 'pending',
           reason: `判定模型失败：${errorMessage(error)}`,
         }
-        decided = false
+        decided = permanent
         basis = `${basis}+failed`
       }
     }
@@ -216,6 +219,11 @@ export class EventDecisionService {
     )
   }
 
+}
+
+/** 判定模型的永久错误：重试不会成功，直接转人工。 */
+function isPermanentDecisionError(error: unknown): boolean {
+  return /jev:http-(401|403|451)\b/.test(errorMessage(error))
 }
 
 /**
