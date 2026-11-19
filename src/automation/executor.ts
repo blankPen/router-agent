@@ -46,6 +46,8 @@ export interface RuntimeRunInput {
   tools: AutomationTool[]
   /** 硬超时（毫秒）。 */
   timeoutMs: number
+  /** 本次执行的记录 id；日志带上它才能把一条执行记录和它的日志串起来。 */
+  runId?: string
   /** 上报当前阶段；面板据此显示「跑到哪一步了」。 */
   onPhase?: (phase: AutomationRunPhase) => void
 }
@@ -98,6 +100,7 @@ class AiAutomationExecutor implements AutomationExecutor {
     const runtime = runtimeOf(this.deps, automation)
     logger.info('automation:execute-start', {
       automationId: automation.id,
+      ...(input.runId ? { runId: input.runId } : {}),
       type: automation.type,
       runtime: runtime.id,
       project: automation.project,
@@ -110,6 +113,7 @@ class AiAutomationExecutor implements AutomationExecutor {
       workdir: input.workdir,
       tools,
       timeoutMs,
+      ...(input.runId ? { runId: input.runId } : {}),
       ...(input.onPhase ? { onPhase: input.onPhase } : {}),
     })
     if (!outcome) {
@@ -141,7 +145,10 @@ class ScriptAutomationExecutor implements AutomationExecutor {
     let script = automation.script?.trim() ?? ''
     if (!script) {
       // 不在执行时偷偷生成脚本：生成结果要人工在面板确认过才算数。
-      logger.warn('automation:script-missing', { automationId: automation.id })
+      logger.warn('automation:script-missing', {
+        automationId: automation.id,
+        ...(input.runId ? { runId: input.runId } : {}),
+      })
       return {
         status: 'failed',
         summary: '还没有脚本正文：请在面板点「生成脚本」，确认后再执行',
@@ -158,6 +165,7 @@ class ScriptAutomationExecutor implements AutomationExecutor {
     } catch (error) {
       logger.error('automation:script-write-failed', {
         automationId: automation.id,
+        ...(input.runId ? { runId: input.runId } : {}),
         scriptPath,
         message: errorMessage(error),
       })
@@ -165,6 +173,7 @@ class ScriptAutomationExecutor implements AutomationExecutor {
     }
     logger.info('automation:execute-start', {
       automationId: automation.id,
+      ...(input.runId ? { runId: input.runId } : {}),
       type: automation.type,
       runtime: runtime.id,
       project: automation.project,
@@ -180,6 +189,7 @@ class ScriptAutomationExecutor implements AutomationExecutor {
       workdir,
       tools,
       timeoutMs,
+      ...(input.runId ? { runId: input.runId } : {}),
       ...(input.onPhase ? { onPhase: input.onPhase } : {}),
     })
     if (!outcome) {
@@ -197,6 +207,39 @@ class ScriptAutomationExecutor implements AutomationExecutor {
 /** 空产出。 */
 export function emptyOutputs(): AutomationRunOutputs {
   return { ticketIds: [], eventIds: [] }
+}
+
+/**
+ * 把一条工具写进契约。
+ *
+ * 光给工具名和一句说明不够：模型不知道这个工具要传哪些参数，
+ * 只能靠猜——猜错的代价是一次 `missing-<参数>` 的拒绝，
+ * 表现为自动化反复调同一个工具却拿不到结果。
+ * 所以入参 schema 一起写进契约，必填项单独点名。
+ */
+export function describeTool(tool: AutomationTool): string {
+  const lines = [`- \`${tool.name}\`：${tool.description}`]
+  const params = toolParams(tool)
+  if (params.length === 0) return lines.join('\n')
+  lines.push(`  参数：${params.join('；')}`)
+  return lines.join('\n')
+}
+
+/** 工具入参的摘要：名字、类型与必填项。 */
+function toolParams(tool: AutomationTool): string[] {
+  const properties = tool.parameters?.properties
+  if (!properties || typeof properties !== 'object') return []
+  const required = Array.isArray(tool.parameters?.required)
+    ? (tool.parameters.required as unknown[]).map(item => String(item))
+    : []
+  return Object.entries(properties as Record<string, { type?: string; description?: string }>).map(
+    ([name, schema]) => {
+      const type = schema?.type ?? 'string'
+      const desc = schema?.description ? `（${schema.description}）` : ''
+      const flag = required.includes(name) ? '必填' : '可选'
+      return `${name}: ${type} ${flag}${desc}`
+    },
+  )
 }
 
 /**
@@ -220,7 +263,7 @@ export function buildContract(automation: Automation, tools: AutomationTool[]): 
     automation.branch ? `- 起始分支：${automation.branch}` : '',
     '',
     '## 可用工具',
-    ...tools.map(tool => `- \`${tool.name}\`：${tool.description}`),
+    ...tools.map(describeTool),
     '',
     '## 怎么调用工具',
     '用命令行调用（在本任务的工作目录里执行）：',
@@ -270,7 +313,7 @@ export function buildScriptContract(automation: Automation, tools: AutomationToo
     '脚本跑完就结束：不要顺手改脚本，除非脚本本身跑不起来（这时修好后重跑一次，仍失败就如实报告）。',
     '',
     '## 可用工具',
-    ...tools.map(tool => `- \`${tool.name}\`：${tool.description}`),
+    ...tools.map(describeTool),
     '',
     '## 怎么调用工具',
     '用命令行调用（在本任务的工作目录里执行）：',

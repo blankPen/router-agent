@@ -53,6 +53,18 @@ const tools: AutomationTool[] = [{
  handler: () => ({ tickets: [] }),
 }]
 
+const toolsWithParams: AutomationTool[] = [{
+  name: 'automation_get_ticket',
+  description: '按工单 ID 读取工单详情',
+  parameters: {
+    type: 'object',
+    properties: { ticket_id: { type: 'string', description: '工单 ID，例如 tk-8' } },
+    required: ['ticket_id'],
+  },
+  mutates: false,
+  handler: () => ({ ticket: null }),
+}]
+
 function harness(over: {
  generateScript?: (automation: Automation) => Promise<string | null>
  outcome?: RuntimeRunOutcome
@@ -175,5 +187,21 @@ describe('自动化执行器', () => {
     expect(result.status).toBe('failed')
     expect(result.summary).toContain('生成脚本')
  })
+
+  it('契约带上工具入参 schema，模型才知道每个工具要传哪些参数', async () => {
+    const { input, executors } = harness()
+    await executors.get('ai')!.execute({
+      automation: task(),
+      tools: toolsWithParams,
+      timeoutMs: 60_000,
+      maxRetries: 0,
+      workdir: workdir(),
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+    })
+
+    const contract = input()!.contract
+    expect(contract).toContain('ticket_id')
+    expect(contract).toContain('必填')
+  })
 
 })

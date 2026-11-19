@@ -181,6 +181,7 @@ export async function executeRun(
     })
     deps.logger.info('automation:run-finished', {
       automationId: automation.id,
+      runId: run.id,
       status: finished.status,
       durationMs: finished.durationMs,
       ticketIds: finished.outputs.ticketIds.length,
@@ -191,13 +192,13 @@ export async function executeRun(
 
   const executor = deps.executors.get(automation.type)
   if (!executor) {
-    deps.logger.error('automation:executor-missing', { automationId: automation.id, type: automation.type })
+    deps.logger.error('automation:executor-missing', { automationId: automation.id, runId: run.id, type: automation.type })
     return finish('failed', `没有 ${automation.type} 类型的执行器`, emptyOutputs(), `executor:unavailable:${automation.type}`)
   }
 
   const scheduleError = validateSchedule(automation.schedule)
   if (scheduleError) {
-    deps.logger.error('automation:schedule-invalid', { automationId: automation.id, message: scheduleError })
+    deps.logger.error('automation:schedule-invalid', { automationId: automation.id, runId: run.id, message: scheduleError })
     return finish('failed', `触发计划不合法：${scheduleError}`, emptyOutputs(), 'schedule:invalid')
   }
 
@@ -218,12 +219,14 @@ export async function executeRun(
         maxRetries: 0,
         workdir,
         logger: deps.logger,
+        runId: run.id,
         ...(deps.reportPhase ? { onPhase: phase => deps.reportPhase?.(run, phase) } : {}),
       })
       last = { status: result.status, summary: result.summary, outputs: result.outputs, error: result.error }
     } catch (error) {
       deps.logger.error('automation:execute-failed', {
         automationId: automation.id,
+        runId: run.id,
         attempt,
         message: errorMessage(error),
       })
@@ -236,7 +239,7 @@ export async function executeRun(
     }
     if (last.status === 'success') break
     if (attempt < attempts) {
-      deps.logger.warn('automation:retry', { automationId: automation.id, attempt, status: last.status })
+      deps.logger.warn('automation:retry', { automationId: automation.id, runId: run.id, attempt, status: last.status })
     }
   }
 

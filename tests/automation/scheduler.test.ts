@@ -124,6 +124,24 @@ describe('自动化调度器', () => {
     expect(result.runs).toHaveLength(0)
   })
 
+  it('执行链路上的日志都带上 runId，能把一条执行记录和它的日志串起来', async () => {
+    const calls: number[] = []
+    const h = harness({
+      tasks: [task()],
+      executor: fakeExecutor('ai', () => ({ status: 'failed', summary: '跑挂了' }), calls),
+    })
+    h.states.set('auto_1', { taskId: 'auto_1', nextRunAt: '2026-11-18T08:59:00.000Z' })
+
+    await tickAutomations(h.deps)
+
+    const runId = h.runs[0]!.id
+    const events = h.logs.filter(log => log.event.startsWith('automation:'))
+    expect(events.length).toBeGreaterThan(0)
+    for (const event of events) {
+      expect(event.fields.runId, `${event.event} 缺少 runId`).toBe(runId)
+    }
+  })
+
   it('执行过程中上报的阶段写回执行记录', async () => {
     const calls: number[] = []
     const h = harness({

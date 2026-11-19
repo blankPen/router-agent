@@ -144,6 +144,7 @@ export async function runThroughRuntime(
     workdir = started.workdir
     deps.logger.info('automation:runtime-started', {
       automationId: automation.id,
+      ...(input.runId ? { runId: input.runId } : {}),
       runtime: runtime.id,
       handle,
       workdir,
@@ -151,6 +152,7 @@ export async function runThroughRuntime(
   } catch (error) {
     deps.logger.error('automation:runtime-start-failed', {
       automationId: automation.id,
+      ...(input.runId ? { runId: input.runId } : {}),
       runtime: runtime.id,
       message: errorMessage(error),
     })
@@ -166,7 +168,7 @@ export async function runThroughRuntime(
   const ref = { handle, ticketId, workdir }
   if (!workdir) {
     deps.logger.error('automation:runtime-workdir-missing', { automationId: automation.id, runtime: runtime.id })
-    await stopQuietly(runtime, ref, automation, deps)
+    await stopQuietly(runtime, ref, automation, deps, input.runId)
     return {
       status: 'failed',
       summary: '运行时没有返回工作目录，脚本未执行',
@@ -189,7 +191,7 @@ export async function runThroughRuntime(
         workdir,
         message: errorMessage(error),
       })
-      await stopQuietly(runtime, ref, automation, deps)
+      await stopQuietly(runtime, ref, automation, deps, input.runId)
       return {
         status: 'failed',
         summary: `脚本写入运行时工作目录失败：${preview(errorMessage(error), 200)}`,
@@ -210,14 +212,15 @@ export async function runThroughRuntime(
   }
   try {
     input.onPhase?.('running')
-    const outcome = await waitForCompletion(runtime, ref, deadline, now, deps, automation, workdir, deps.sleep ?? sleep)
+    const outcome = await waitForCompletion(runtime, ref, deadline, now, deps, automation, workdir, deps.sleep ?? sleep, input.runId)
     input.onPhase?.('collecting')
     // agent 可能顺手修了跑不起来的脚本：改动要写回任务定义，下一轮才有意义。
-    if (input.script) collectScriptChange(automation, input.script, workdir, deps)
+    if (input.script) collectScriptChange(automation, input.script, workdir, deps, input.runId)
     const outputs = deps.collectOutputs(automation, new Date(startedAt).toISOString())
     if (outcome.status === 'success') {
       deps.logger.info('automation:runtime-finished', {
         automationId: automation.id,
+        ...(input.runId ? { runId: input.runId } : {}),
         runtime: runtime.id,
         durationMs: now() - startedAt,
         ticketIds: outputs.ticketIds.length,
@@ -226,6 +229,7 @@ export async function runThroughRuntime(
     } else {
       deps.logger.error('automation:runtime-failed', {
         automationId: automation.id,
+        ...(input.runId ? { runId: input.runId } : {}),
         runtime: runtime.id,
         durationMs: now() - startedAt,
         message: outcome.error ?? outcome.summary,
@@ -234,8 +238,8 @@ export async function runThroughRuntime(
     return { ...outcome, outputs }
   } finally {
     // 结束会话：自动化是无人值守的，不能留一个常驻 worker 吃并发额度。
-    await stopQuietly(runtime, ref, automation, deps)
-    await removeWorkspaceQuietly(runtime, ref, automation, deps)
+    await stopQuietly(runtime, ref, automation, deps, input.runId)
+    await removeWorkspaceQuietly(runtime, ref, automation, deps, input.runId)
   }
 }
 
@@ -245,6 +249,7 @@ async function removeWorkspaceQuietly(
   ref: { handle: string; ticketId: string; workdir: string },
   automation: Automation,
   deps: AutomationRunnerDeps,
+  runId?: string,
 ): Promise<void> {
   // 运行时不支持回收就跳过：不是每个 runtime 都能回收工作区。
   if (!runtime.removeWorkspace) return
@@ -261,12 +266,14 @@ async function removeWorkspaceQuietly(
     await runtime.removeWorkspace({ ticketId: ref.ticketId, workdir: ref.workdir, repo: automation.repo })
     deps.logger.info('automation:workspace-removed', {
       automationId: automation.id,
+      ...(runId ? { runId } : {}),
       workdir: ref.workdir,
     })
   } catch (error) {
     // 回收失败不影响执行结论：工作区留着也比把执行记录写成失败强。
     deps.logger.warn('automation:workspace-remove-failed', {
       automationId: automation.id,
+      ...(runId ? { runId } : {}),
       workdir: ref.workdir,
       message: errorMessage(error),
     })
@@ -283,6 +290,7 @@ function collectScriptChange(
   original: string,
   workdir: string,
   deps: AutomationRunnerDeps,
+  runId?: string,
 ): void {
   if (!deps.onScriptChanged) return
   const path = join(workdir, 'automation.sh')
@@ -293,6 +301,7 @@ function collectScriptChange(
     // 读不到不是问题：脚本可能没落盘，用原定义继续跑。
     deps.logger.warn('automation:script-readback-failed', {
       automationId: automation.id,
+      ...(runId ? { runId } : {}),
       path,
       message: errorMessage(error),
     })
@@ -301,6 +310,7 @@ function collectScriptChange(
   if (current.trim() === original.trim()) return
   deps.logger.info('automation:script-updated-by-agent', {
     automationId: automation.id,
+    ...(runId ? { runId } : {}),
     chars: current.length,
   })
   deps.onScriptChanged(automation, current)
@@ -312,12 +322,14 @@ async function stopQuietly(
   ref: { handle: string; ticketId: string; workdir: string },
   automation: Automation,
   deps: AutomationRunnerDeps,
+  runId?: string,
 ): Promise<void> {
   try {
     await runtime.stop(ref, 'automation:finished')
   } catch (error) {
     deps.logger.warn('automation:runtime-stop-failed', {
       automationId: automation.id,
+      ...(runId ? { runId } : {}),
       runtime: runtime.id,
       message: errorMessage(error),
     })
@@ -334,6 +346,7 @@ async function waitForCompletion(
   automation: Automation,
   workdir: string,
   wait: (ms: number) => Promise<void>,
+  runId?: string,
 ): Promise<Omit<RuntimeRunOutcome, 'outputs'>> {
   while (now() < deadline) {
     await wait(POLL_INTERVAL_MS)
@@ -359,7 +372,7 @@ async function waitForCompletion(
     }
     if (!status) continue
     if (status.phase === 'exited' || status.phase === 'lost') {
-      const detail = await readOutput(runtime, ref, deps, automation)
+      const detail = await readOutput(runtime, ref, deps, automation, runId)
       const exitFailed = status.phase === 'exited' && (status.exitCode ?? 0) !== 0
       return {
         status: status.phase === 'lost' || exitFailed ? 'failed' : 'success',
@@ -372,7 +385,7 @@ async function waitForCompletion(
       }
     }
     if (status.phase === 'blocked') {
-      const detail = await readOutput(runtime, ref, deps, automation)
+      const detail = await readOutput(runtime, ref, deps, automation, runId)
       return {
         status: 'failed',
         summary: detail || `自动化 ${automation.name} 需要人工介入`,
@@ -410,6 +423,7 @@ async function readOutput(
   ref: { handle: string; ticketId: string; workdir: string },
   deps: AutomationRunnerDeps,
   automation: Automation,
+  runId?: string,
 ): Promise<string> {
   try {
     const output = await runtime.output?.(ref, { limit: 40 })
@@ -419,6 +433,7 @@ async function readOutput(
     // 读不到输出不影响执行结论：记一条 warn 后按空摘要继续，失败原因仍可从会话状态判断。
     deps.logger.warn('automation:output-failed', {
       automationId: automation.id,
+      ...(runId ? { runId } : {}),
       runtime: runtime.id,
       message: errorMessage(error),
     })

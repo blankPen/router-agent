@@ -144,6 +144,10 @@ interface AutomationTool {
 ra automation tool --id <任务 id> --name <工具名> --args '<JSON 入参>'
 ```
 
+契约里除了工具名与说明，还会带上每个工具的**入参 schema**（参数名、类型、是否必填）。
+没有它，模型只能靠猜参数名，猜错的代价是一次 `missing-<参数>` 拒绝——
+表现就是同一个工具反复调、却始终拿不到结果。
+
 鉴权与限流：
 
 - 工具只按任务绑定的项目范围操作；`project` / `repo` 来自任务定义，不由调用方传入。
@@ -158,6 +162,20 @@ ra automation tool --id <任务 id> --name <工具名> --args '<JSON 入参>'
 - 「新建自动化」弹窗沿用「添加决策规则」的分段与间距，字段顺序：名称 → 类型 → 提示词 / 脚本描述 → runtime → 项目 → 执行时间。
 - 手动触发是**异步**的：接口立即返回一条 `running` 记录，面板按 3 秒轮询（有任务在跑时）刷新阶段；执行记录每行带「查看日志」深链，跳到日志页并按任务 id 过滤。
 - 飞书里描述「我想监听 / 定期处理 X」时，先用确定性词表预筛，再让模型整理为草稿。草稿落到 `automation_drafts` 并在面板「待确认草稿」显示；用户在面板检查、编辑并保存后才写进 `automation.tasks`。模型识别不确定（例如没说项目、计划不合法）时只回问，不落库。
+
+## 排查：脚本生成失败
+
+面板点「生成脚本」失败时，报错里带的就是真实原因，不用猜：
+
+| 报错 | 含义 | 怎么办 |
+|-|-|-|
+| `chat:empty-response:max_tokens` | 推理模型把输出额度全花在思考上，正文一个字没吐出来 | 已在 `src/automation/service.ts` 用 `maxTokens: 8000` + 思考预算 `1024` 兜住；若仍出现，多半是模型网关忽略了思考参数，换 `llm.model` |
+| `chat:timeout(180000ms)` | 写脚本比默认 60s 慢 | 已放宽到 180s；仍超时说明网关侧卡住，先用面板「日志」页看同一时间段的 `chat:*` 事件 |
+| `chat:http-4xx` / `chat:http-5xx` | 模型地址、密钥或额度有问题 | 按状态码查 `llm.baseUrl` / `llm.apiKey` / 网关额度 |
+| `模型只返回了思考，没有脚本正文` | 模型返回了空正文 | 换模型，或把任务描述写具体一点 |
+
+执行链路上的日志都带 `runId`：用 `ra logs` 过滤 `automationId`，再用 `runId` 就能把一次执行的
+`execute-start` → `run-phase` → `runtime-finished` / `runtime-failed` → `run-finished` 串成一条线。
 
 ## 扩展位
 

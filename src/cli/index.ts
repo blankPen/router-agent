@@ -1989,6 +1989,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       dismissDraft: id => automationService.dismissDraft(id),
       trigger: id => automationService.trigger(id),
       generateScript: id => automationService.generateScriptFor(id),
+      generateScriptWithReason: id => automationService.generateScriptWithReason(id),
       draft: async text => automationService.draftFromText(text),
       invokeTool: (automationId, name, args) => automationService.invokeTool(automationId, name, args),
     },

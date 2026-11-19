@@ -272,22 +272,22 @@ Router 不做对话，只在必要时说话：
 | `api:spec` | HTTP API | `spec` `action` | 人格 / 规范文本保存或重置 |
 | `automation:scheduler-started` / `automation:scheduler-stopped` | Automation | `tasks` | 调度器随服务启停；`tasks` 是当前任务数 |
 | `automation:manual-trigger` | Automation | `automationId` `name` | 面板 / CLI 手动触发一次 |
-| `automation:execute-start` | Automation | `automationId` `type` `runtime` `project` `timeoutMs` | 一次执行开始：类型、运行时与目标项目 |
+| `automation:execute-start` | Automation | `automationId` `runId` `type` `runtime` `project` `timeoutMs` | 一次执行开始：类型、运行时与目标项目 |
 | `automation:script-generated` / `automation:script-generate-failed` / `automation:script-generate-unavailable` / `automation:script-generate-rejected` | Automation | `automationId` `chars` / `reason` / `detail` | 面板「生成脚本」的生成结果；没配模型或任务不是脚本类型时降级并留原因 |
 | `automation:script-persisted` / `automation:script-persist-failed` | Automation | `automationId` `chars` / `detail` | 生成的脚本写回任务定义成功 / 落盘失败 |
-| `automation:script-missing` / `automation:script-write-failed` | Automation | `automationId` `scriptPath` / `detail` | 任务没有脚本正文（需先生成）或落盘失败 |
-| `automation:script-staged` / `automation:script-stage-failed` | Automation | `automationId` `scriptPath` / `workdir` `detail` | 落盘脚本已复制到 runtime 的 worktree / 复制失败 |
-| `automation:runtime-started` / `automation:runtime-start-failed` / `automation:runtime-workdir-missing` | Automation | `automationId` `runtime` `handle` `workdir` / `detail` | runtime 会话已启动 / 启动失败 / 没有返回工作目录 |
-| `automation:runtime-finished` / `automation:runtime-failed` / `automation:runtime-stop-failed` | Automation | `automationId` `runtime` `durationMs` `ticketIds` `eventIds` / `detail` | 执行结束、失败或停会话失败 |
-| `automation:status-failed` / `automation:output-failed` | Automation | `automationId` `runtime` `detail` | 轮询 runtime 状态或读尾部输出失败；执行继续，失败原因留在日志 |
+| `automation:script-missing` / `automation:script-write-failed` | Automation | `automationId` `runId` `scriptPath` / `detail` | 任务没有脚本正文（需先生成）或落盘失败 |
+| `automation:script-staged` / `automation:script-stage-failed` | Automation | `automationId` `runId` `scriptPath` / `workdir` `detail` | 落盘脚本已复制到 runtime 的 worktree / 复制失败 |
+| `automation:runtime-started` / `automation:runtime-start-failed` / `automation:runtime-workdir-missing` | Automation | `automationId` `runId` `runtime` `handle` `workdir` / `detail` | runtime 会话已启动 / 启动失败 / 没有返回工作目录 |
+| `automation:runtime-finished` / `automation:runtime-failed` / `automation:runtime-stop-failed` | Automation | `automationId` `runId` `runtime` `durationMs` `ticketIds` `eventIds` / `detail` | 执行结束、失败或停会话失败 |
+| `automation:status-failed` / `automation:output-failed` | Automation | `automationId` `runId` `runtime` `detail` | 轮询 runtime 状态或读尾部输出失败；执行继续，失败原因留在日志 |
 | `automation:missed` | Automation | `automationId` `scheduledAt` `delayMs` | 服务未运行导致过期，记为 missed 且不补跑 |
-| `automation:retry` | Automation | `automationId` `attempt` `status` | 失败后按 `maxRetries` 重试 |
-| `automation:run-finished` | Automation | `automationId` `status` `durationMs` `ticketIds` `eventIds` | 执行记录收尾；面板「执行记录」的数据来源 |
+| `automation:retry` | Automation | `automationId` `runId` `attempt` `status` | 失败后按 `maxRetries` 重试 |
+| `automation:run-finished` | Automation | `automationId` `runId` `status` `durationMs` `ticketIds` `eventIds` | 执行记录收尾；面板「执行记录」的数据来源 |
 | `automation:run-phase` | Automation | `automationId` `runId` `phase` | 执行中的阶段变化（生成脚本 / 启动运行时 / 执行中 / 收集产出） |
 | `automation:run-crashed` | Automation | `automationId` `runId` `detail` | 后台执行抛错，执行记录停在 running |
 | `automation:runs-interrupted` | Automation | `count` | 服务重启时把上一轮挂在「执行中」的执行记录收尾成失败 |
-| `automation:script-updated-by-agent` / `automation:script-readback-failed` | Automation | `automationId` `chars` / `workdir` `detail` | agent 执行期间改过脚本（改后正文写回任务定义）/ 读回脚本失败 |
-| `automation:executor-missing` / `automation:schedule-invalid` / `automation:execute-failed` | Automation | `automationId` `type` / `detail` | 执行器缺失、计划非法或执行抛错 |
+| `automation:script-updated-by-agent` / `automation:script-readback-failed` | Automation | `automationId` `runId` `chars` / `workdir` `detail` | agent 执行期间改过脚本（改后正文写回任务定义）/ 读回脚本失败 |
+| `automation:executor-missing` / `automation:schedule-invalid` / `automation:execute-failed` | Automation | `automationId` `runId` `type` / `detail` | 执行器缺失、计划非法或执行抛错 |
 | `automation:tool-invoked` / `automation:tool-rejected` / `automation:tool-failed` | Automation | `automationId` `tool` `error` `detail` | 内置工具调用成功 / 被范围或限流拒绝 / handler 抛错 |
 | `automation:draft-created` / `automation:draft-uncertain` / `automation:draft-unavailable` / `automation:draft-failed` / `automation:draft-dismissed` | Automation | `draftId` `automationId` `source` `detail` | 对话式草稿的创建、回问、降级与忽略 |
 | `config:automation-invalid` | Config | `detail` | `automation.tasks` 中某条任务校验失败，已忽略该条 |

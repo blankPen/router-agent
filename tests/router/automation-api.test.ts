@@ -142,6 +142,28 @@ describe('自动化 HTTP API', () => {
     expect(res.json.error).toBe('script:generate-failed')
   })
 
+  it('POST /api/automations/script 把真实失败原因带回去，面板能说清卡在哪', async () => {
+    const withReason = await createApiServer({
+      engine,
+      store,
+      config,
+      automation: {
+        ...port,
+        generateScriptWithReason: async () => ({
+          error: 'script:generate-failed',
+          reason: 'chat:empty-response:max_tokens',
+        }),
+      },
+    })
+    try {
+      const res = await call(withReason, 'POST', '/api/automations/script', { id: 'auto_1' })
+      expect(res.status).toBe(502)
+      expect(res.json.message).toBe('chat:empty-response:max_tokens')
+    } finally {
+      await withReason.close()
+    }
+  })
+
   it('POST /api/automations/script 缺少任务 id 返回 400', async () => {
     const res = await call(server, 'POST', '/api/automations/script', {})
     expect(res.status).toBe(400)
