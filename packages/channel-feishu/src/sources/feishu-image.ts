@@ -351,7 +351,8 @@ function imageStagingDir(root: string | undefined, triggerId: string): string {
   return dir
 }
 
-function stripImageMarkers(text: string): string {
+/** 去掉事件流预渲染出来的图片标记（如 `![Image](img_xxx)`），只留用户真正敲的正文。 */
+export function stripImageMarkers(text: string): string {
   let out = String(text ?? '')
   for (const pattern of IMAGE_KEY_PATTERNS) out = out.replace(pattern, '')
   return out.replace(/\n{3,}/g, '\n\n').trim()
