@@ -168,11 +168,11 @@ describe('ra CLI', () => {
     const { writeFileSync } = await import('node:fs')
     writeFileSync(configPath, [
       'feishu:',
-      '  chats: [oc_dsh]',
+      '  chats: [oc_demo]',
       '  allowed: [ou_me]',
       '  botOpenIds: [ou_bot, cli_bot]',
       'projects:',
-      '  - name: teamwork-repos',
+      '  - name: demo-repos',
       `    repo: ${process.cwd()}`,
       '    defaultBranch: main',
       'policy:',
@@ -190,14 +190,14 @@ describe('ra CLI', () => {
       orca: {
         async run(argv) {
           if (argv[0] === 'status') return { code: 0, stdout: 'runtimeReachable: true\nruntimeState: ready', stderr: '' }
-          return { code: 0, stdout: JSON.stringify({ result: { repos: [{ displayName: 'teamwork-repos', path: '/p', kind: 'git' }] } }), stderr: '' }
+          return { code: 0, stdout: JSON.stringify({ result: { repos: [{ displayName: 'demo-repos', path: '/p', kind: 'git' }] } }), stderr: '' }
         },
       },
       lark: {
         async run(argv) {
           if (argv[0] === 'auth') return { code: 0, stdout: JSON.stringify({ identities: { bot: { available: true }, user: { available: true } } }), stderr: '' }
           if (argv[0] === 'event') return { code: 0, stdout: JSON.stringify({ data: { decision: { status: 'ready', preconditions: [] } } }), stderr: '' }
-          if (argv[1] === '+chat-list') return { code: 0, stdout: JSON.stringify({ data: { chats: [{ chat_id: 'oc_dsh', name: 'DSH' }] } }), stderr: '' }
+          if (argv[1] === '+chat-list') return { code: 0, stdout: JSON.stringify({ data: { chats: [{ chat_id: 'oc_demo', name: 'Demo' }] } }), stderr: '' }
           return { code: 0, stdout: JSON.stringify({ data: { users: [], bots: [{ member_id: 'ou_bot', app_id: 'cli_bot' }] } }), stderr: '' }
         },
       },

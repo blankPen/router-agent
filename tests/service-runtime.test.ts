@@ -247,6 +247,8 @@ describe('运行时机制', () => {
     const failed = logs.filter(item => item.message === 'input:deliver-failed')
     expect(failed).toHaveLength(1)
     expect(failed[0]?.extra).toMatchObject({ ticketId, attempt: 1 })
+    const notices = store.listOutbox(50).filter(item => item.text.includes('暂时没送到'))
+    expect(notices).toHaveLength(1)
 
     // cooldown 内每个 tick 都不应再次投递。
     now += 1_000
@@ -272,6 +274,8 @@ describe('运行时机制', () => {
     }
     expect(logs.some(item => item.message === 'input:redeliver-giveup')).toBe(true)
     expect(store.getAttention(ticketId)?.question ?? '').toContain('5 次')
+    const texts = store.listOutbox(50).map(item => item.text).join('\n')
+    expect(texts).toContain('已重试 5 次仍未送达')
   })
 
   it('Agent 停在交互式提示上时转人工并通知话题，不再静默重投', async () => {
@@ -424,6 +428,48 @@ describe('运行时机制', () => {
     })
     await service.checkIdle(now + 2000)
     expect(runtime.delivered.length).toBe(before)
+  })
+
+  it('nudge 后终端又有新输出时重新计时，不按旧 nudge 时间误标 stale', async () => {
+    const { ticketId, handle, assignmentId } = await launchOne()
+    service.onWorkerState({
+      ticketId, assignmentId, turn: 1, state: 'progress', summary: '做到一半', prNumber: 0, prUrl: '',
+      ackedInputs: [], updatedAt: new Date(now).toISOString(),
+    })
+    runtime.handles.set(handle, { lastOutputAt: new Date(now - 10 * 60_000).toISOString() })
+
+    await service.checkIdle(now)
+    expect(runtime.delivered.filter(item => item.text === 'status?')).toHaveLength(1)
+
+    // 唤醒之后 worker 又输出过一次；旧实现不会刷新 nudgedAt，最后按旧时间直接标 stale。
+    runtime.handles.set(handle, { lastOutputAt: new Date(now + 60_000).toISOString() })
+    await service.checkIdle(now + 60_000)
+    await service.checkIdle(now + 301_000)
+
+    expect(store.getAttention(ticketId)?.question ?? '').not.toContain('无响应')
+    expect(logs.some(item => item.message === 'idle:stale')).toBe(false)
+    expect(runtime.delivered.filter(item => item.text === 'status?')).toHaveLength(2)
+  })
+
+  it('主动巡检读到会话有新内容时也重置 stale 计时', async () => {
+    const { ticketId, handle, assignmentId } = await launchOne()
+    service.onWorkerState({
+      ticketId, assignmentId, turn: 1, state: 'progress', summary: '做到一半', prNumber: 0, prUrl: '',
+      ackedInputs: [], updatedAt: new Date(now).toISOString(),
+    })
+    runtime.handles.set(handle, { lastOutputAt: new Date(now - 10 * 60_000).toISOString() })
+    await service.checkIdle(now)
+
+    runtime.sessionEvents = [{ at: new Date(now + 10 * 60_000).toISOString(), kind: 'text', text: '正在补测试' }]
+    runtime.sessionAt = new Date(now + 10 * 60_000).toISOString()
+    runtime.handles.set(handle, { lastOutputAt: new Date(now + 10 * 60_000).toISOString() })
+    await service.probeProgress(now + 11 * 60_000)
+    expect(store.listOutbox(200).some(item => item.text.includes('进展巡检'))).toBe(true)
+
+    await service.checkIdle(now + 17 * 60_000)
+    expect(store.getAttention(ticketId)?.question ?? '').not.toContain('无响应')
+    expect(logs.some(item => item.message === 'idle:stale')).toBe(false)
+    expect(runtime.delivered.filter(item => item.text === 'status?')).toHaveLength(2)
   })
 
   it('worker 长时间不报进展时，Router 主动读终端并同步到话题', async () => {

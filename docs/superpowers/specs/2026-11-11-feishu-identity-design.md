@@ -9,9 +9,9 @@
 但 `feishu.botOpenIds` / `feishu.botNames` 都是空数组，导致该群消息全部命中
 `trigger:dropped reason=mention:required`，机器人一条都没回。
 
-同期发现第二个配置错误：`feishu.allowed` 里写的是 `ou_82fb106b096ac2a7563f9a2a6077a44d`，
+同期发现第二个配置错误：`feishu.allowed` 里写的是 `ou_cross_app`，
 而当前应用（`cli_a9225095e04cdbc2`）看到的同一个用户是
-`ou_aa94092a6fd14dd0672a7f327a00fd61`。用机器人身份查前者会直接报错
+`ou_alice`。用机器人身份查前者会直接报错
 `code 99992361 open_id cross app`。
 
 根因不是某一行代码写错，而是**配置模型让用户去填应用内部 id**：
@@ -56,7 +56,7 @@
 | 机器人身份可把 open_id 解析成姓名/邮箱/user_id/union_id | `lark-cli contact +get-user --user-id ou_... --as bot` |
 | 机器人身份可把邮箱批量解析成 open_id | `lark-cli api POST /open-apis/contact/v3/users/batch_get_id`（`data.user_list[].user_id` 即 open_id） |
 | 邮箱查无此人时**不报错**，只是该条没有 `user_id` 字段 | 实测：需按字段缺失判断，不能只看 `ok` |
-| 跨应用 open_id 会被飞书拒绝 | 查 `ou_82fb...` 返回 `99992361 open_id cross app` |
+| 跨应用 open_id 会被飞书拒绝 | 查 `ou_cross_app...` 返回 `99992361 open_id cross app` |
 | 机器人没有邮箱 | 群成员列表里 bot 只有 `app_id` 与 `member_id` |
 
 三个 id 的作用域：open_id = 应用；union_id = 开发者；user_id = 租户。
@@ -126,7 +126,7 @@ allowedByChatOpenIds: Record<string, string[]>   // 群级名单的解析结果
 按已确认的决定：**解析不出来也允许保存，靠告警暴露**。可见点：
 
 1. **启动 / 配置变更时**：逐条扫描名单，解析不了的写 `config:identity-invalid`（warn），
-   条目用掩码形式（`p***@dewu.com`）入日志。
+   条目用掩码形式（`a***@example.com`）入日志。
 2. **面板**：飞书配置区块顶部列出「有 N 条名单条目没能解析到具体的人」，并给出建议
    （改用邮箱 / 确认对方在群里 / 重新授权通讯录权限）；每个条目旁标状态。
 3. **群级名单全部解析不出来时**（已确认的处理方式）：该群**拒绝所有人**并标红告警——
@@ -184,7 +184,7 @@ allowedByChatOpenIds: Record<string, string[]>   // 群级名单的解析结果
 | `feishu:bot-identity-failed` | error | `detail` | 机器人身份识别失败（mention 群会丢消息） |
 | `feishu:chat-allowlist-empty` | error | `chat` `name` | 群级名单解析为空，该群拒绝所有人 |
 
-邮箱一律掩码后入日志（`p***@dewu.com`），不记完整邮箱。
+邮箱一律掩码后入日志（`a***@example.com`），不记完整邮箱。
 
 `docs/OPERATIONS.md` 的日志事件表同步补齐。
 
@@ -207,7 +207,7 @@ allowedByChatOpenIds: Record<string, string[]>   // 群级名单的解析结果
 
 ## 八、验收标准
 
-1. 配置里只填邮箱 `pengzhen02@dewu.com`，该用户在该群的 @ 消息能被正常接收并回复，**且不需要重启**。
+1. 配置里只填邮箱 `alice@example.com`，该用户在该群的 @ 消息能被正常接收并回复，**且不需要重启**。
 2. 配置里填当前应用的 `ou_`，行为与邮箱一致。
 3. 配置里填另一个应用的 `ou_`：能保存，但面板与日志都能看到「解析不到」。
 4. `mode: mention` 且机器人身份解析失败时，启动日志出现 error 级事件，不是静默丢消息。
@@ -217,7 +217,7 @@ allowedByChatOpenIds: Record<string, string[]>   // 群级名单的解析结果
 
 - `IdentityResolver` 的落点与命名（建议 `src/sources/feishu-identity.ts`）。
 - `state.db` 新表的具体 schema（走 `SCHEMA` 常量，`CREATE TABLE IF NOT EXISTS` 幂等）。
-- 掩码邮箱的具体格式（建议 `p***@dewu.com`）。
+- 掩码邮箱的具体格式（建议 `a***@example.com`）。
 - 面板「解析状态」的展示位置（建议飞书配置区块顶部一行 + 每个条目旁的状态标记）。
 - 名单条目是否在落盘前归一化（trim + 邮箱小写）——会影响 `policy.version` 的指纹与 config.yaml 往返一致性，
   建议只在**解析时**归一，落盘保留用户原样。

@@ -6,7 +6,7 @@
 ## 1. 自动化测试
 
 ```
-pnpm check   # tsc --noEmit + vitest
+pnpm check   # 内部链接扫描 + tsc --noEmit + vitest
 Test Files  27 passed (27)
 Tests       291 passed | 4 skipped
 ```
@@ -52,7 +52,7 @@ Tests       291 passed | 4 skipped
 
 用临时 git 仓库注册到 Orca，调用**项目内的 `OrcaRuntime.start()`** 走完整链路：
 
-- 成功创建 worktree：`/Users/admin/orca/workspaces/ra-orca-smoke/ra-tk_smoke`
+- 成功创建 worktree：`/Users/me/orca/workspaces/ra-orca-smoke/ra-tk_smoke`
 - 解析出 `handle=term_...` 与 `workdir`
 - 终端状态 `running`，`terminal read` 能看到完整的 worker 手册（约 2.2KB prompt 被 Claude Code 正常接收）→ **P0-1 prompt 长度可行**
 - worktree 内 Claude Code 的 cwd 为 worktree 路径 → **P0-2 可行**

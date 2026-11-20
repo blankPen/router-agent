@@ -5,7 +5,7 @@
  * 这里只做纯展示计算（掩码、汇总），不引 React，方便单测覆盖。
  *
  * 语义约束：
- * - 邮箱只以掩码形态出现在界面上（`p***@dewu.com`），不渲染完整邮箱；
+ * - 邮箱只以掩码形态出现在界面上（`a***@example.com`），不渲染完整邮箱；
  * - 解析失败不阻断保存，提示只是提醒，不是「保存失败」。
  */
 
@@ -64,7 +64,7 @@ export function normalizeIdentityStatus(status: Partial<IdentityStatusView> | nu
   }
 }
 
-/** 邮箱掩码：只留首字符，域名保留（`p***@dewu.com`），与后端保持一致。 */
+/** 邮箱掩码：只留首字符，域名保留（`a***@example.com`），与后端保持一致。 */
 export function maskEmail(email: string): string {
   const at = email.indexOf('@')
   if (at <= 0) return email

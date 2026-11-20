@@ -11,6 +11,7 @@ packages/core              领域内核：Ticket / Mandate / Assignment / Stage 
 packages/infra             基础设施：Logger、CommandRunner、对话模型、图片识别、插件加载器
 packages/runtime           Runtime SDK：WorkerRuntime 端口、RuntimeRegistry、插件协议
 packages/channel           Channel SDK：ChannelAdapter 端口、ChannelRegistry、入站管线、插件协议
+packages/event              事件来源 SDK：EventSource 端口、EventSourceRegistry、插件协议
 packages/runtime-orca        内置插件：Orca
 packages/runtime-claude-code 内置插件：Claude Code
 packages/runtime-codex       内置插件：Codex App
@@ -26,11 +27,11 @@ templates/channel-plugin   自定义 channel 包模板
 依赖方向是单向的：
 
 ```text
-core  ←  infra  ←  runtime / channel  ←  src/
+core  ←  infra  ←  runtime / channel / event  ←  src/
 ```
 
 - `packages/*` 不能 import `src/`（有测试兜底：`tests/architecture/packages.test.ts`）；
-- `runtime` 与 `channel` 互不依赖，都只向下依赖 `core` / `infra`；
+- `runtime` 与 `channel` 与 `event` 互不依赖，都只向下依赖 `core` / `infra`；
 - 适配器需要的配置形状放在 `packages/core/src/config.ts`（`RuntimeConfigView` / `ChannelConfigView`），
   宿主 `AppConfig` 结构上兼容，适配器不再直接 import 宿主配置。
 
@@ -42,6 +43,7 @@ core  ←  infra  ←  runtime / channel  ←  src/
 | `#infra/*` | `packages/infra/src/*` |
 | `#runtime/*` | `packages/runtime/src/*` |
 | `#channel/*` | `packages/channel/src/*` |
+| `#event/*` | `packages/event/src/*` |
 | `@router-agent/core` / `@router-agent/infra` / `@router-agent/runtime` / `@router-agent/channel` | workspace 包（`node_modules` 软链到 `packages/*`） |
 
 三处解析保持一致：
@@ -100,6 +102,26 @@ export default plugin
 `env`、`logger` 与可选的命令运行器。插件只依赖 `@router-agent/runtime` / `@router-agent/core` /
 `@router-agent/infra`，不要 import 宿主 `src/`。
 
+### 事件来源插件
+
+事件来源与 runtime / channel 同构：插件只负责「把外面发生的事变成事件」，判定与派发由宿主统一做。
+
+```ts
+import type { EventPlugin } from '@router-agent/event'
+
+const plugin: EventPlugin = {
+  kind: 'event',
+  meta: { id: 'my-source', name: 'My Source', hint: '...' },
+  options: { fields: [{ key: 'endpoint', label: '接口地址', kind: 'text' }] },
+  create(ctx) { /* 返回 EventSource */ },
+}
+
+export default plugin
+```
+
+`EventSource` 实现 `poll()`（拉取型）、`start(sink)`（订阅型）或 `publish()`（结论回写）中的任意组合；
+插件声明的字段落在 `events.sources.<id>.options.<key>`。
+
 ### channel 插件
 
 ```ts
@@ -122,6 +144,22 @@ export default plugin
 `pnpm build` 即可在配置页填写本地路径联调，发布到 npm 后填包名即可。
 
 面板截图（改造前后）见 `docs/assets/plugin-before-after/README.md`。
+
+## 新增一个事件来源插件
+
+1. 插件包实现 `EventPlugin`（`kind: 'event'`），依赖 `@router-agent/event` / `@router-agent/core` / `@router-agent/infra`；
+2. 面板「配置 → 事件总线 → 添加自定义事件」填 npm 包名即可安装，装完按插件声明的 `meta.id` 登记成来源；也可以手写 `events.sources.<id>.plugin: <包名>`；
+3. 插件用 `options.fields` 声明自己的可配置项，面板设置弹窗按声明自动渲染，值落在 `events.sources.<id>.options.<key>`；
+4. 加载失败只记 `event:plugin-failed`，不影响其它来源。
+
+插件产出的事件要遵守两条约定：
+
+- `externalId` **同一事件必须稳定不变** —— 宿主按 `(来源, externalId)` 唯一入库，靠它去重；
+- `eventType` **带来源前缀**（插件 id 或来源种类名，如 `myplugin.deploy.failed`）—— 不同来源的同名类型靠前缀区分。
+
+协议与配置形状见 [CONFIGURATION.md](CONFIGURATION.md#自定义事件来源npm-插件)。
+
+内置来源（GitHub 仓库订阅 / feishu）由宿主直接装配，不走插件机制。
 
 ## 新增一个内置 runtime / channel
 

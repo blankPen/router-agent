@@ -1,10 +1,11 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { timingSafeEqual as timingSafeEqualBytes } from 'node:crypto'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { extname, join, normalize, resolve } from 'node:path'
 import type { Store } from '../store/db.js'
 import type { Engine } from '../core/engine.js'
-import { HOT_CONFIG_PREFIXES, isKnownRuntimeId, publicConfig, publicDefaults, publicPlugins, type AppConfig, type PolicyResolution } from '../config.js'
+import { HOT_CONFIG_PREFIXES, isKnownRuntimeId, isLoopbackHost, projectsForRuntime, publicConfig, publicDefaults, publicPlugins, type AppConfig, type PolicyResolution } from '../config.js'
 import type { AcpRuntimeAdmin } from '@router-agent/runtime-acp'
 import { normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
 import { ProjectSetupError, type ProjectSetupPort } from './project-setup.js'
@@ -19,6 +20,8 @@ import type { WorkerStateFile } from '#runtime/report-poller.js'
 import type { ResumeHint } from '#runtime/port.js'
 import type { WorkspaceAdminPort } from '#runtime/workspaces/overview.js'
 import type { PluginPackageAdmin } from './plugin-admin.js'
+import type { EventRule } from '../events/rules.js'
+import { readLogs } from './log-tail.js'
 import type { LogAssistantQuestion, LogAssistantOverview, LogDiagnosis } from './log-assistant.js'
 import { buildIssueBody, type IssueReporter } from './issue-report.js'
 import { SpecError } from '../specs/index.js'
@@ -82,6 +85,59 @@ export interface LogAssistantPort {
   diagnose(question: LogAssistantQuestion): Promise<LogDiagnosis>
 }
 
+/** 事件总线的面板能力；缺省时事件相关端点返回 404。 */
+export interface EventApiPort {
+  listEvents(filter: { status?: string; priority?: string; sourceId?: string; limit?: number }): unknown[]
+  listSources(): unknown[]
+  /** 面板操作：批准 / 驳回 / 延后 / 忽略 / 重试 / 改优先级。 */
+  apply(eventId: string, action: string, options: { priority?: string; project?: string }): Promise<unknown | null>
+  /** 当前决策策略。 */
+  decision(): { provider: string; confidenceThreshold: number; fallback: string }
+  /** 当前规则集。 */
+  rules(): EventRule[]
+  /** 按规则统计事件命中分布（ruleId → status → 条数）。 */
+  ruleStats(): Record<string, Record<string, number>>
+  /** 自然语言提炼规则草稿；不可用时返回模板。 */
+  compileRule(input: { id: string; eventType: string; intent: string; workflowPrompt?: string }): Promise<EventRule>
+  /** 按状态统计事件条数（面板统计卡用；不受列表 limit 影响）。 */
+  counts(): Record<string, number>
+}
+
+/** 自动化的面板能力；缺省时自动化相关端点返回 404。 */
+export interface AutomationApiPort {
+  /** 任务列表（含调度状态）。 */
+  listTasks(): unknown[]
+  /** 执行记录列表。 */
+  listRuns(automationId?: string): unknown[]
+  /** 单条执行记录；面板轮询用来看执行进度。 */
+  getRun(id: string): unknown | null
+  /** 待确认的对话式草稿。 */
+  listDrafts(): unknown[]
+  /** 忽略一条待确认草稿。 */
+  dismissDraft(id: string): boolean
+  /** 手动触发一次；返回执行记录。 */
+  trigger(id: string): Promise<unknown | null>
+  /** 生成脚本正文；返回脚本文本，生成不了时返回 null。 */
+  generateScript(id: string): Promise<string | null>
+  /**
+   * 生成脚本正文并带上失败原因。
+   *
+   * 面板要能告诉用户到底卡在哪（没配模型 / 超时 / 额度被思考吃光），
+   * 只返回 null 的话只能给出「生成失败，请重试」这种空话。
+   */
+  generateScriptWithReason?(id: string): Promise<{ script: string } | { error: string; reason: string }>
+  /** 从自然语言生成任务草稿（对话式创建入口用）。 */
+  draft(text: string): Promise<unknown | null>
+  /** 调用自动化内置工具；范围与限流在服务层强制。 */
+  invokeTool(automationId: string, name: string, args: Record<string, unknown>): Promise<{
+    ok: boolean
+    status: number
+    error: string
+    hint?: string
+    result?: unknown
+  }>
+}
+
 export interface ApiServerOptions {
   engine: Engine
   store: Store
@@ -109,6 +165,10 @@ export interface ApiServerOptions {
   feishuBot?: ChannelAdmin
   /** 已注册的消息通道；面板据此渲染「渠道配置」的渠道列表。缺省时返回空列表。 */
   channels?: ChannelRegistry
+  /** 事件总线；缺省时事件相关端点返回 404。 */
+  events?: EventApiPort
+  /** 自动化；缺省时自动化相关端点返回 404。 */
+  automation?: AutomationApiPort
   /** 面板「日志」页读取的日志文件；缺省时用 `<home>/logs/router-agent.log`。 */
   logPath?: string
   /** 项目登记：目录选择、Git 探测、clone 与 Orca 仓库登记；缺省时端点返回 404。 */
@@ -133,7 +193,7 @@ export interface ApiServerOptions {
   plugins?: {
     runtimes?: Array<{ id: string; name: string; label: string; hint: string; installHint?: string; installUrl?: string; packageName?: string; deprecated?: boolean; loadedIds?: string[] }>
     channels?: Array<{ id: string; name: string; hint: string; default?: boolean; packageName?: string; loadedIds?: string[] }>
-    failures?: Array<{ kind: 'runtime' | 'channel'; id: string; specifier: string; message: string }>
+    failures?: Array<{ kind: 'runtime' | 'channel' | 'event'; id: string; specifier: string; message: string }>
   }
 }
 
@@ -173,6 +233,11 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
     isRecord,
     buildIssueBody,
   })
+  // 被拒的来源按「路径 + 来源」记一次：面板开放时浏览器轮询会被反复拒绝，
+  // 逐条打日志会把真正的错误淹没（AGENTS.md 高频路径降噪）。
+  // 用「方法 + 路径」做键而不是原样记路径：路径由客户端决定，无界增长会变成内存问题。
+  const deniedSeen = new Set<string>()
+  const DENIED_SEEN_LIMIT = 200
 
   const server = createServer((req, res) => {
     handle(req, res).catch(error => {
@@ -190,6 +255,29 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
     const url = new URL(req.url ?? '/', 'http://localhost')
     const path = url.pathname
 
+    // 面板开放访问时（配了令牌），API 请求都要带令牌。
+    // 不按来源 IP 放行本机：内网穿透的流量也是从 127.0.0.1 进来的，放行等于没有鉴权。
+    // 静态资源不拦：面板外壳本身不含敏感信息，数据一律走 API。
+    if (path.startsWith('/api/') && !isAuthorized(req, config.server.token)) {
+      const remote = req.socket.remoteAddress ?? ''
+      const key = `${req.method} ${path}`
+      if (!deniedSeen.has(key)) {
+        // 只保留最近的若干条：恶意客户端可以不断换路径，不能让它把内存撑爆。
+        if (deniedSeen.size >= DENIED_SEEN_LIMIT) {
+          const oldest = deniedSeen.values().next().value
+          if (oldest !== undefined) deniedSeen.delete(oldest)
+        }
+        deniedSeen.add(key)
+        logger.warn('api:access-denied', {
+          method: req.method,
+          path,
+          remote,
+          host: String(req.headers.host ?? ''),
+        })
+      }
+      return respond(res, 401, { error: 'token-required', message: '面板已开放访问，请带 x-ra-token 请求头' })
+    }
+
     for (const route of routes) {
       const ctx: ApiRouteContext = { req, res, url, path, params: [] }
       if (!route.match(ctx)) continue
@@ -203,9 +291,15 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
   }
 
   const port = opts.port ?? 0
+  const host = config.server.host
+  // 对外监听却没有令牌：宁可起不来，也不能开一个谁都能改配置的口子。
+  if (!isLoopbackHost(host) && !config.server.token) {
+    logger.error('api:access-token-missing', { host })
+    throw new Error(`监听 ${host} 需要配置访问令牌（server.token）`)
+  }
   await new Promise<void>((resolvePromise, reject) => {
     server.once('error', reject)
-    server.listen(port, '127.0.0.1', () => {
+    server.listen(port, host, () => {
       server.off('error', reject)
       resolvePromise()
     })
@@ -223,6 +317,26 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * 请求是否被允许访问面板 API。
+ *
+ * 令牌为空时不做校验（只在本机监听时的默认形态）；
+ * 令牌非空时，请求头 `x-ra-token` 里必须带对令牌。
+ */
+function isAuthorized(req: IncomingMessage, token: string): boolean {
+  if (!token) return true
+  const header = String(req.headers['x-ra-token'] ?? '')
+  return Boolean(header) && timingSafeEqual(header, token)
+}
+
+/** 定长比较，避免令牌被逐字节试探；长度不同直接判否。 */
+function timingSafeEqual(a: string, b: string): boolean {
+  const left = Buffer.from(a)
+  const right = Buffer.from(b)
+  // timingSafeEqual 要求等长输入，长度不同先判否。
+  return left.length === right.length && timingSafeEqualBytes(left, right)
 }
 
 /** 上报里的三态布尔：true / false / 未声明。字符串兼容旧客户端。 */
@@ -249,6 +363,12 @@ function configPayload(
     plugins: publicPlugins(config, plugins),
     detecting: runtimeAdmin?.isDetecting() ?? false,
     identity: identity?.snapshot() ?? emptyIdentityStatus(),
+    // 项目清单：自动化面板要选目标项目，不必再让前端解析配置草稿。
+    projects: projectsForRuntime(config).map(project => ({
+      name: project.name,
+      repo: project.repo,
+      defaultBranch: project.defaultBranch,
+    })),
     // 哪些配置路径保存后立即生效：面板按它给配置项标「立即生效 / 重启生效」。
     hotPaths: [...HOT_CONFIG_PREFIXES],
   }
@@ -366,3 +486,4 @@ function legacyReply(raw: unknown): string {
   const value = raw as Record<string, unknown>
   return [String(value.content ?? '').trim(), String(value.url ?? '').trim()].filter(Boolean).join('\n\n')
 }
+

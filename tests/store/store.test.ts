@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { Store } from '../../src/store/db.js'
 import type { Assignment, Input, Intake, Report, Ticket, Trigger } from '#core/model.js'
 import { type Policy } from '#core/policy.js'
+import type { EventRecord } from '#core/event.js'
 
 function store(): Store {
   return new Store(':memory:')
@@ -46,7 +47,7 @@ const ticket: Ticket = {
   chatId: 'oc_chat',
   mandateId: 'md1',
   stage: 'todo',
-  repo: 'dsh/router-agent',
+  repo: 'acme/router-agent',
   branch: 'main',
   prNumber: 0,
   prUrl: '',
@@ -497,12 +498,12 @@ describe('派工草稿', () => {
       threadId: 'feishu:oc_chat:om_2',
       actorId: 'ou_alice',
       task: '把登录超时改成 30 秒',
-      repo: 'name:dsh/router-agent',
+      repo: 'name:acme/router-agent',
       branch: 'main',
       updatedAt: '2026-11-06T10:01:00.000Z',
     })
     const draft = db.getDispatchDraft('oc_chat', 'ou_alice')!
-    expect(draft).toMatchObject({ repo: 'name:dsh/router-agent', branch: 'main', threadId: 'feishu:oc_chat:om_2' })
+    expect(draft).toMatchObject({ repo: 'name:acme/router-agent', branch: 'main', threadId: 'feishu:oc_chat:om_2' })
 
     db.clearDispatchDraft('oc_chat', 'ou_alice')
     expect(db.getDispatchDraft('oc_chat', 'ou_alice')).toBeNull()
@@ -510,8 +511,8 @@ describe('派工草稿', () => {
 
   it('工单的 repo/branch 会落库并读回', () => {
     const db = store()
-    db.insertTicket({ ...ticket, repo: 'name:dsh/router-agent', branch: 'release' })
-    expect(db.getTicket('tk1')).toMatchObject({ repo: 'name:dsh/router-agent', branch: 'release' })
+    db.insertTicket({ ...ticket, repo: 'name:acme/router-agent', branch: 'release' })
+    expect(db.getTicket('tk1')).toMatchObject({ repo: 'name:acme/router-agent', branch: 'release' })
   })
 
   it('工单编号计数器原子自增，重启后从上次的值继续', () => {
@@ -604,7 +605,7 @@ describe('需求识别存储', () => {
     actorId: 'ou_bob',
     actorName: 'Bob',
     project: 'router-agent',
-    repo: 'name:dsh/router-agent',
+    repo: 'name:acme/router-agent',
     branch: 'main',
     status: 'clarifying',
     kind: 'issue',
@@ -666,14 +667,14 @@ describe('身份别名缓存', () => {
     const db = store()
     expect(db.getIdentityAlias('cli_a', 'email', 'a@b.com')).toBeNull()
 
-    db.setIdentityAlias('cli_a', 'email', 'a@b.com', 'ou_x', '阿振')
-    expect(db.getIdentityAlias('cli_a', 'email', 'a@b.com')).toEqual({ openId: 'ou_x', name: '阿振' })
+    db.setIdentityAlias('cli_a', 'email', 'a@b.com', 'ou_x', 'Alice')
+    expect(db.getIdentityAlias('cli_a', 'email', 'a@b.com')).toEqual({ openId: 'ou_x', name: 'Alice' })
     db.close()
   })
 
   it('换个 appId 缓存不通用：open_id 是应用内唯一的', () => {
     const db = store()
-    db.setIdentityAlias('cli_a', 'email', 'a@b.com', 'ou_x', '阿振')
+    db.setIdentityAlias('cli_a', 'email', 'a@b.com', 'ou_x', 'Alice')
 
     // 另一个应用里同一个人的 open_id 完全不同，旧应用的缓存不能被复用。
     expect(db.getIdentityAlias('cli_b', 'email', 'a@b.com')).toBeNull()
@@ -682,7 +683,7 @@ describe('身份别名缓存', () => {
 
   it('同一 appId 下不同 kind 互不串', () => {
     const db = store()
-    db.setIdentityAlias('cli_a', 'email', 'a@b.com', 'ou_x', '阿振')
+    db.setIdentityAlias('cli_a', 'email', 'a@b.com', 'ou_x', 'Alice')
 
     expect(db.getIdentityAlias('cli_a', 'open_id', 'a@b.com')).toBeNull()
     db.close()
@@ -691,14 +692,114 @@ describe('身份别名缓存', () => {
   it('缓存落盘，重开数据库后仍能读到', () => {
     const path = join(tmpdir(), `ra-identity-${Date.now()}-${Math.random().toString(16).slice(2)}.db`)
     const db = new Store(path)
-    db.setIdentityAlias('cli_a', 'email', 'a@b.com', 'ou_x', '阿振')
+    db.setIdentityAlias('cli_a', 'email', 'a@b.com', 'ou_x', 'Alice')
     db.close()
 
     const reopened = new Store(path)
-    expect(reopened.getIdentityAlias('cli_a', 'email', 'a@b.com')).toEqual({ openId: 'ou_x', name: '阿振' })
+    expect(reopened.getIdentityAlias('cli_a', 'email', 'a@b.com')).toEqual({ openId: 'ou_x', name: 'Alice' })
     reopened.close()
     rmSync(path, { force: true })
     rmSync(`${path}-wal`, { force: true })
     rmSync(`${path}-shm`, { force: true })
+  })
+})
+
+describe('事件队列', () => {
+  function event(over: Partial<EventRecord> = {}): EventRecord {
+    return {
+      id: 'evt_1',
+      sourceId: 'github',
+      sourceKind: 'github',
+      externalId: 'issue:a#1',
+      title: '登录偶发失败',
+      body: '偶发 500',
+      receivedAt: '2026-11-13T10:00:00.000Z',
+      status: 'pending',
+      execution: 'none',
+      priority: 'P2',
+      eventType: 'issue',
+      needsReview: false,
+      updatedAt: '2026-11-13T10:00:00.000Z',
+      attempts: 0,
+      ...over,
+    }
+  }
+
+  it('按状态统计条数，不受列表 limit 影响', () => {
+    const db = store()
+    for (let i = 0; i < 250; i += 1) {
+      db.insertEvent(event({ id: `evt_${i}`, externalId: `x#${i}` }))
+    }
+    db.insertEvent(event({ id: 'evt_done', externalId: 'x#done', status: 'done' }))
+    const counts = db.countEventsByStatus()
+    expect(counts.pending).toBe(250)
+    expect(counts.done).toBe(1)
+    expect(db.listEvents()).toHaveLength(200)
+    db.close()
+  })
+
+  it('按规则统计命中分布，未命中规则的事件不计入', () => {
+    const db = store()
+    db.insertEvent(event({ id: 'evt_a', externalId: 'x#a', ruleId: 'rule-a', status: 'pending' }))
+    db.insertEvent(event({ id: 'evt_b', externalId: 'x#b', ruleId: 'rule-a', status: 'review' }))
+    db.insertEvent(event({ id: 'evt_c', externalId: 'x#c', ruleId: 'rule-b', status: 'invalid' }))
+    db.insertEvent(event({ id: 'evt_d', externalId: 'x#d', status: 'undecided' }))
+    expect(db.countEventsByRule()).toEqual({
+      'rule-a': { pending: 1, review: 1, done: 0, invalid: 0 },
+      'rule-b': { pending: 0, review: 0, done: 0, invalid: 1 },
+    })
+    db.close()
+  })
+
+  it('已判定的事件不会再被当成待判定领取', () => {
+    const db = store()
+    db.insertEvent(event({ id: 'evt_new' }))
+    db.insertEvent(event({ id: 'evt_decided', externalId: 'x#2', decidedAt: '2026-11-13T10:00:00.000Z' }))
+    const claimed = db.claimPendingEvents()
+    expect(claimed.map(item => item.id)).toEqual(['evt_new'])
+    expect(claimed[0]?.attempts).toBe(1)
+    db.close()
+  })
+
+  it('判定过但没派出去的事件会被单独取出来重试', () => {
+    const db = store()
+    db.insertEvent(event({ id: 'evt_deferred', externalId: 'x#3', decidedAt: '2026-11-13T10:00:00.000Z', execution: 'deferred' }))
+    db.insertEvent(event({ id: 'evt_dispatched', externalId: 'x#4', decidedAt: '2026-11-13T10:00:00.000Z', ticketId: 'tk_1' }))
+    const waiting = db.listDecidedUndispatched()
+    expect(waiting.map(item => item.id)).toEqual(['evt_deferred'])
+    db.close()
+  })
+
+  it('旧库里的 prompt_version 列被去掉，事件本身不丢', () => {
+    // 旧版全局 prompt 删掉了，这一列不再有人写：迁移后不该留着它。
+    const dir = mkdtempSync(join(tmpdir(), 'ra-store-migrate-'))
+    const path = join(dir, 'state.db')
+    const legacy = new DatabaseSync(path)
+    legacy.exec(`CREATE TABLE events (
+      id TEXT PRIMARY KEY, source_id TEXT NOT NULL, source_kind TEXT NOT NULL, external_id TEXT NOT NULL,
+      title TEXT NOT NULL, body TEXT NOT NULL, url TEXT, raw TEXT, context TEXT, received_at TEXT NOT NULL,
+      status TEXT NOT NULL, execution TEXT NOT NULL DEFAULT 'none', priority TEXT NOT NULL,
+      event_type TEXT NOT NULL DEFAULT '', project TEXT, repo TEXT, branch TEXT, skill TEXT,
+      needs_review INTEGER NOT NULL DEFAULT 0, reason TEXT, confidence REAL, prompt_version INTEGER,
+      basis TEXT, rule_id TEXT, rule_version INTEGER, ticket_id TEXT, trigger_id TEXT, decided_at TEXT,
+      updated_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+      UNIQUE (source_id, external_id))`)
+    legacy.exec(`INSERT INTO events
+      (id, source_id, source_kind, external_id, title, body, received_at, status, execution, priority, event_type,
+       needs_review, prompt_version, basis, rule_id, rule_version, updated_at, attempts)
+      VALUES ('evt_legacy', 'github', 'github', 'issue:a#1', '旧事件', '内容', '2026-11-13T10:00:00.000Z',
+       'pending', 'none', 'P2', 'github.issues.opened', 0, 7, 'rule+llm', 'rule-issue', 3, '2026-11-13T10:00:00.000Z', 0)`)
+    legacy.close()
+
+    const db = new Store(path)
+    const migrated = db.getEvent('evt_legacy')!
+    expect(migrated.title).toBe('旧事件')
+    expect(migrated.ruleId).toBe('rule-issue')
+    expect(migrated.ruleVersion).toBe(3)
+    const columns = (db as unknown as { db: DatabaseSync })
+      .db.prepare('PRAGMA table_info(events)').all() as { name: string }[]
+    expect(columns.some(column => column.name === 'prompt_version')).toBe(false)
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
   })
 })

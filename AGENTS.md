@@ -50,7 +50,10 @@ core  ←  infra  ←  runtime / channel  ←  src/
 - **不预判未来测试**，不写投机性实现；重构不在红绿循环里做，留到交付前。
 - **先确认 seam**：测的是哪个公开边界、这层测试能兜住什么、兜不住什么；没确认的边界不写测试。
 - 修 bug 同样走红绿：先写一个复现失败路径的测试，再改实现。
-- 提交前 `pnpm check`（`pnpm typecheck` + `pnpm test`）必须绿。
+- 提交前 `pnpm check`（`pnpm check:links` + `pnpm typecheck` + `pnpm test`）必须绿。
+- **不写公司与内部环境绑定的链接**：示例一律用通用占位（`example.com` / `example.feishu.cn` /
+  `acme`），不写真实租户域名、公司邮箱域与内部组织名。`pnpm check:links` 会在提交与 CI 时拦截，
+  新增示例前先想清楚该用哪个占位。
 
 ## 3. 代码风格：ponytail（最小完整改动）
 

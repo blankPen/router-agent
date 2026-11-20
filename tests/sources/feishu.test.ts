@@ -1,6 +1,6 @@
 import { chatEntry } from '../../src/config.js'
 import { describe, expect, it } from 'vitest'
-import { attachQuotedMessage, FeishuSender, feishuCard, feishuCardSendCommand, feishuCreateDocCommand, feishuReactionCommand, fitIdempotencyKey, normalizeCardMarkdown, normalizeFeishuEvent, normalizeFeishuEventDetailed, parseDocumentUrl, parseMessageThreadIds, parseQuotedMessage, quotedMessageCommand, shouldSendAsText, type FeishuConfig, type UnaddressedContext } from '@router-agent/channel-feishu'
+import { attachQuotedMessage, FeishuSender, feishuCard, feishuCardSendCommand, feishuCreateDocCommand, feishuDirectSendCommand, feishuReactionCommand, fitIdempotencyKey, normalizeCardMarkdown, normalizeFeishuEvent, normalizeFeishuEventDetailed, parseDocumentUrl, parseMessageMeta, parseMessageThreadIds, parseQuotedMessage, parseSendReceipt, quotedMessageCommand, shouldSendAsText, type FeishuConfig, type UnaddressedContext } from '@router-agent/channel-feishu'
 
 const cfg: FeishuConfig = {
   chats: [chatEntry('oc_dev'), chatEntry('oc_other', { scope: 'mention' })],
@@ -114,7 +114,7 @@ describe('飞书事件归一化', () => {
 
   it('系统消息与互动卡片不进入领域', () => {
     // system：建群 / 拉人 / 改群名，都是噪音；interactive：content 是原始卡片 JSON，不能当需求。
-    expect(normalizeFeishuEventDetailed(evt({ message_type: 'system', content: '阿振(Pz) started the group chat.' }), cfg))
+    expect(normalizeFeishuEventDetailed(evt({ message_type: 'system', content: 'Alice started the group chat.' }), cfg))
       .toMatchObject({ dropped: 'system-message' })
     expect(normalizeFeishuEventDetailed(evt({ message_type: 'interactive', content: '{"title":"聊完了","elements":[]}' }), cfg))
       .toMatchObject({ dropped: 'card-message' })
@@ -230,6 +230,44 @@ describe('线程标识回查', () => {
     expect(parseMessageThreadIds('not json').size).toBe(0)
     expect(parseMessageThreadIds(JSON.stringify({ ok: true, data: {} })).size).toBe(0)
   })
+
+  it('从 mget 输出里取消息所在会话、话题与根消息', () => {
+    const meta = parseMessageMeta(JSON.stringify({
+      data: {
+        messages: [{ message_id: 'om_thread', chat_id: 'oc_p2p', thread_id: 'omt_topic', root_id: 'om_thread' }],
+      },
+    }), 'om_thread')
+    expect(meta).toEqual({ messageId: 'om_thread', chatId: 'oc_p2p', threadId: 'omt_topic', rootId: 'om_thread', parentId: '' })
+  })
+
+  it('mget 输出不可解析时返回 null，由调用方按根消息兜底', () => {
+    expect(parseMessageMeta('not json')).toBeNull()
+    expect(parseMessageMeta(JSON.stringify({ data: {} }))).toBeNull()
+  })
+})
+
+describe('私聊发送', () => {
+  it('按 user_id 发私聊，并从回执里取 message_id 与 chat_id', async () => {
+    const calls: string[][] = []
+    const sender = new FeishuSender({
+      async run(argv) {
+        calls.push(argv)
+        return { code: 0, stdout: JSON.stringify({ data: { message_id: 'om_dm', chat_id: 'oc_p2p' } }), stderr: '' }
+      },
+    })
+
+    const receipt = await sender.sendDirect('ou_pz', '事件已开工', 'kickoff:1')
+
+    expect(calls[0]).toEqual(feishuDirectSendCommand('ou_pz', '事件已开工', 'kickoff:1'))
+    expect(receipt).toEqual({ messageId: 'om_dm', chatId: 'oc_p2p' })
+  })
+
+  it('兼容不同层级的回执结构与旧的无回执输出', () => {
+    expect(parseSendReceipt(JSON.stringify({ message_id: 'om_a', chat_id: 'oc_a' }))).toEqual({ messageId: 'om_a', chatId: 'oc_a' })
+    expect(parseSendReceipt(JSON.stringify({ data: { messageId: 'om_b', chatId: 'oc_b' } }))).toEqual({ messageId: 'om_b', chatId: 'oc_b' })
+    expect(parseSendReceipt(JSON.stringify({ ok: true }))).toEqual({})
+    expect(parseSendReceipt('not json')).toEqual({})
+  })
 })
 
 describe('飞书文档交付', () => {
@@ -238,13 +276,13 @@ describe('飞书文档交付', () => {
     const sender = new FeishuSender({
       async run(argv, opts) {
         calls.push({ argv, ...(opts?.input !== undefined ? { input: opts.input } : {}) })
-        return { code: 0, stdout: JSON.stringify({ ok: true, data: { document: { url: 'https://x.feishu.cn/docx/abc' } } }), stderr: '' }
+        return { code: 0, stdout: JSON.stringify({ ok: true, data: { document: { url: 'https://example.feishu.cn/docx/abc' } } }), stderr: '' }
       },
     })
 
     const url = await sender.createDocument('可优化点清单', '# 全文')
 
-    expect(url).toBe('https://x.feishu.cn/docx/abc')
+    expect(url).toBe('https://example.feishu.cn/docx/abc')
     expect(calls[0]!.argv).toEqual(feishuCreateDocCommand('可优化点清单'))
     expect(calls[0]!.argv).toContain('-')
     expect(calls[0]!.input).toBe('# 全文')
@@ -445,31 +483,31 @@ describe('引用消息', () => {
           message_id: 'om_parent',
           msg_type: 'text',
           content: '@_user_1 看下这个项目有什么可优化的么',
-          mentions: [{ key: '@_user_1', name: '皮皮虾' }],
-          sender: { name: '阿振(Pz)' },
+          mentions: [{ key: '@_user_1', name: 'Bob' }],
+          sender: { name: 'Alice' },
         }],
       },
     }))!
-    expect(quoted).toEqual({ id: 'om_parent', text: '@皮皮虾 看下这个项目有什么可优化的么', author: '阿振(Pz)', images: [] })
+    expect(quoted).toEqual({ id: 'om_parent', text: '@Bob 看下这个项目有什么可优化的么', author: 'Alice', images: [] })
   })
 
   it('attach 把引用正文拼到消息前面，并写回 raw', async () => {
     const runner = new RecordingRunner()
     runner.response = JSON.stringify({
-      data: { messages: [{ message_id: 'om_parent', msg_type: 'text', content: '看下最近改了什么', sender: { name: '阿振' } }] },
+      data: { messages: [{ message_id: 'om_parent', msg_type: 'text', content: '看下最近改了什么', sender: { name: 'Alice' } }] },
     })
     const base = normalizeFeishuEvent(evt({ parent_id: 'om_parent', content: '@router-agent' }), cfg)!
     const t = await attachQuotedMessage(base, runner as never)
 
     expect(runner.calls[0]).toEqual(quotedMessageCommand('om_parent'))
-    expect(t.text).toBe('[引用 阿振的消息] 看下最近改了什么\n\n@router-agent')
+    expect(t.text).toBe('[引用 Alice的消息] 看下最近改了什么\n\n@router-agent')
     expect((t.raw as Record<string, any>).quote.text).toBe('看下最近改了什么')
   })
 
   it('引用的是纯图片消息时记录 image_key，交给图片转文本链路', async () => {
     const runner = new RecordingRunner()
     runner.response = JSON.stringify({
-      data: { messages: [{ message_id: 'om_parent', msg_type: 'image', content: '{"image_key":"img_v3_quote"}', sender: { name: '阿振' } }] },
+      data: { messages: [{ message_id: 'om_parent', msg_type: 'image', content: '{"image_key":"img_v3_quote"}', sender: { name: 'Alice' } }] },
     })
     const base = normalizeFeishuEvent(evt({ parent_id: 'om_parent', content: '照这个改' }), cfg)!
     const t = await attachQuotedMessage(base, runner as never)
@@ -580,8 +618,8 @@ describe('未寻址消息放行（tk-59：已绑定工单话题内名单内成�
 
 describe('发送人显示名', () => {
   it('actorNames 里查到人时填上显示名', () => {
-    const named: FeishuConfig = { ...cfg, actorNames: new Map([['ou_alice', '阿振(Pz)']]) }
-    expect(normalizeFeishuEvent(evt(), named)!.actorName).toBe('阿振(Pz)')
+    const named: FeishuConfig = { ...cfg, actorNames: new Map([['ou_alice', 'Alice']]) }
+    expect(normalizeFeishuEvent(evt(), named)!.actorName).toBe('Alice')
   })
 
   it('actorNames 为空或查不到这个人时留空且不报错', () => {

@@ -1,6 +1,6 @@
 {
   "name": "router-agent",
-  "version": "0.3.42",
+  "version": "0.3.44",
   "description": "飞书消息 → 常驻 Router 研判 → 派发到 Orca worktree 内 Claude Code 执行 → PR 跟踪闭环的双层 Agent 系统",
   "license": "MIT",
   "type": "module",
@@ -41,10 +41,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
+    "check:links": "node scripts/check-internal-links.mjs",
     "build:web": "node scripts/build-web.mjs",
     "build": "tsc -p tsconfig.build.json && node scripts/build-web.mjs && node scripts/flatten-dist.mjs && node scripts/build-packages.mjs",
-    "check": "pnpm typecheck && pnpm test",
-    "start": "node dist/cli/main.js start"
+    "check": "pnpm check:links && pnpm typecheck && pnpm test",
+    "start": "node dist/cli/main.js stop && node dist/cli/main.js start"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
@@ -52,17 +53,18 @@
     ]
   },
   "dependencies": {
-    "@router-agent/channel-feishu": "0.3.42",
-    "@router-agent/channel": "0.3.42",
-    "@router-agent/core": "0.3.42",
-    "@router-agent/infra": "0.3.42",
-    "@router-agent/runtime": "0.3.42",
-    "@router-agent/runtime-acp": "0.3.42",
-    "@router-agent/runtime-claude-code": "0.3.42",
-    "@router-agent/runtime-codex": "0.3.42",
-    "@router-agent/runtime-herdr": "0.3.42",
-    "@router-agent/runtime-orca": "0.3.42",
-    "@router-agent/runtime-t3code": "0.3.42",
+    "@router-agent/channel-feishu": "0.3.44",
+    "@router-agent/channel": "0.3.44",
+    "@router-agent/core": "0.3.44",
+    "@router-agent/event": "0.3.44",
+    "@router-agent/infra": "0.3.44",
+    "@router-agent/runtime": "0.3.44",
+    "@router-agent/runtime-acp": "0.3.44",
+    "@router-agent/runtime-claude-code": "0.3.44",
+    "@router-agent/runtime-codex": "0.3.44",
+    "@router-agent/runtime-herdr": "0.3.44",
+    "@router-agent/runtime-orca": "0.3.44",
+    "@router-agent/runtime-t3code": "0.3.44",
     "@inquirer/prompts": "7.8.6",
     "@earendil-works/pi-coding-agent": "1.5.0",
     "commander": "12.1.0",
@@ -84,6 +86,7 @@
     "#core/*": "./dist/packages/core/src/*",
     "#infra/*": "./dist/packages/infra/src/*",
     "#runtime/*": "./dist/packages/runtime/src/*",
-    "#channel/*": "./dist/packages/channel/src/*"
+    "#channel/*": "./dist/packages/channel/src/*",
+    "#event/*": "./dist/packages/event/src/*"
   }
 }

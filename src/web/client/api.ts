@@ -6,6 +6,7 @@
 import type { RuntimeChoiceView } from './runtime-model.js'
 import type { IdentityStatusView } from './identity-status.js'
 import type { RuntimeOptionSpec } from '#runtime/runtimes/options.js'
+import { tokenHeaders } from './access-token.js'
 
 export type { IdentityEntryView, IdentityStatusView } from './identity-status.js'
 
@@ -53,25 +54,39 @@ export interface PluginView {
 }
 
 export async function getJson<T>(path: string): Promise<T> {
-  const res = await fetch(path)
+  const res = await fetch(path, { headers: tokenHeaders() })
   const data = await res.json()
-  if (!res.ok) throw new Error((data as { message?: string; error?: string }).message ?? (data as { error?: string }).error ?? `HTTP ${res.status}`)
+  if (!res.ok) throw apiError(res.status, data)
   return data as T
 }
 
 export async function sendJson<T>(path: string, method: string, body: unknown): Promise<T> {
   const res = await fetch(path, {
     method,
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...tokenHeaders() },
     body: JSON.stringify(body),
   })
   const data = await res.json()
   if (!res.ok) {
     const failure = data as { error?: string; message?: string; errors?: { path: string; message: string }[] }
     const detail = failure.errors?.map(item => `${item.path}: ${item.message}`).join('；')
-    throw new Error(detail || failure.message || failure.error || `HTTP ${res.status}`)
+    throw apiError(res.status, data, detail)
   }
   return data as T
+}
+
+/** API 报错带上状态码：面板据此区分「没带令牌」与普通失败。 */
+export interface ApiError extends Error {
+  status: number
+  code?: string
+}
+
+function apiError(status: number, data: unknown, detail?: string): ApiError {
+  const failure = data as { error?: string; message?: string }
+  const error = new Error(detail || failure.message || failure.error || `HTTP ${status}`) as ApiError
+  error.status = status
+  error.code = failure.error
+  return error
 }
 
 /** 配置保存的统一返回；两个配置页共用。 */

@@ -35,6 +35,10 @@ export function parseReleaseTag(
   tagName: string,
 ): { channel: 'stable' | 'beta' | 'alpha'; version: string } | null
 export function isShippableChange(files: string[]): boolean
+export function createPublishedChecker(
+  names: readonly string[],
+  listVersions?: (name: string) => readonly string[],
+): (version: string) => boolean
 export function planRelease(
   context: ReleaseContext,
   isPublished: (version: string) => boolean,

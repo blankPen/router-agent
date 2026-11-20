@@ -12,6 +12,12 @@ import { admitsByScope, effectiveAdmins, scopeOf, shouldAcknowledge } from '#cor
 import { logDimensions } from '#core/events.js'
 import { loadRuntimePlugins, type LoadedRuntimePlugins } from '#runtime/plugins/loader.js'
 import { loadChannelPlugins, type LoadedChannelPlugins } from '#channel/plugins/loader.js'
+import { createEventWiring } from '../events/wiring.js'
+import { AutomationService, type AutomationServiceDeps } from '../automation/service.js'
+import { EventKickoff } from '../events/kickoff.js'
+import { ruleEventTypes } from '../events/rules.js'
+import { compileEventRule } from '../events/rule-compile.js'
+import { createChatClient } from '#infra/chat.js'
 import { AcpRuntimeAdmin } from '@router-agent/runtime-acp'
 import { readDetectionSnapshot } from '@router-agent/runtime-acp'
 import { WORKER_RUNTIME_IDS, normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
@@ -22,8 +28,9 @@ import { createFeishuChannel, createFeishuDocumenter } from '@router-agent/chann
 import { ChannelIngress } from '#channel/ingress.js'
 import { ChannelRegistry } from '#channel/registry.js'
 import { ChannelRouter } from '#channel/router.js'
+import { DEFAULT_CHANNEL_ID } from '#channel/port.js'
 import { ChatDirectory } from '@router-agent/channel-feishu'
-import { resolveRuntimeIdentity, detailText, type IdentityCache, type IdentityStatusView, type RuntimeIdentity } from '@router-agent/channel-feishu'
+import { IdentityResolver, resolveRuntimeIdentity, detailText, type IdentityCache, type IdentityStatusView, type RuntimeIdentity } from '@router-agent/channel-feishu'
 import { createLarkRunner, larkEnv } from '@router-agent/channel-feishu'
 import { parseMessageThreadIds, type MessageAdmission, type UnaddressedAdmission } from '@router-agent/channel-feishu'
 import { createVisionTranscriber, type ImageTranscriber } from '#infra/vision.js'
@@ -42,6 +49,7 @@ import type { AssessmentAudit } from '../router/decision-engine.js'
 import type { ClassificationAudit } from '../router/decision/agent.js'
 import type { WorkerStateFile } from '#runtime/report-poller.js'
 import { RouterService, type Logger } from '../service.js'
+import { logLevelOf } from '../router/log-levels.js'
 import { EffectsProcessor } from '../core/effects.js'
 import { createApiServer, emptyIdentityStatus, type IdentityPort } from '../router/api.js'
 import { PluginPackageAdmin } from '../router/plugin-admin.js'
@@ -50,6 +58,7 @@ import { scanLocalProjects } from '../router/project-scan.js'
 import { createLogAssistant } from '../router/log-assistant.js'
 import { createDiagnosisTools } from '../router/diagnosis-tools.js'
 import { createIssueReporter } from '../router/issue-report.js'
+import { ensureServerToken, panelUrlList, tokenHeader } from './panel-url.js'
 
 // 版本号以 package.json 为唯一来源（见 src/update/index.ts），`ra -v` 与更新检查共用同一个值。
 export const VERSION: string = PACKAGE_VERSION
@@ -283,6 +292,16 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
       setCode(await cmdDoc(homeOf(opts, output), opts, output))
     })
 
+  withHome(program.command('automation [action]')
+    .description('自动化：list / runs / trigger / tool（tool 供自动化任务里的 agent 调用内置工具）')
+    .option('--id <id>', '自动化任务 id（trigger / tool 必填）')
+    .option('--name <name>', '工具名（tool 必填）')
+    .option('--args <json>', '工具入参 JSON（tool 可选，默认 {}）')
+    .option('--json', '以 JSON 输出')
+    .action(async (action: string | undefined, opts: { home?: string; id?: string; name?: string; args?: string; json?: boolean }) => {
+      setCode(await cmdAutomation(homeOf(opts, output), action ?? 'list', opts, output))
+    }))
+
   withHome(program.command('migrate [action]')
     .description('数据迁移：migrate sessions | threads --dry-run | --apply | --verify（人工手动执行）')
     .option('--dry-run', '只读检查，不写库（默认行为）')
@@ -442,7 +461,7 @@ async function cmdReply(home: string, opts: ReplyOptions & { port?: string }, ou
     ? (title: string, markdown: string) => createFeishuDocumenter({ runner: output.lark ?? createLarkRunner() }).createDocument(title, markdown)
     : undefined
   return runReply(
-    { home, port, stdout: output.stdout, stderr: output.stderr, ...(createDocument ? { createDocument } : {}) },
+    { home, port, stdout: output.stdout, stderr: output.stderr, ...(config.server.token ? { token: config.server.token } : {}), ...(createDocument ? { createDocument } : {}) },
     opts,
   )
 }
@@ -466,6 +485,172 @@ async function cmdDoc(_home: string, opts: { title: string; content?: string }, 
 
 function collect(value: string, previous: string[]): string[] {
   return [...previous, value]
+}
+
+/**
+ * `ra automation`：自动化任务的命令行入口。
+ *
+ * list / runs / trigger 走本地状态库；tool 走服务端口，
+ * 让自动化任务里的 agent 能调用内置工具（查工单、建工单、查事件、写事件）。
+ */
+async function cmdAutomation(
+  home: string,
+  action: string,
+  opts: { id?: string; name?: string; args?: string; json?: boolean },
+  output: CliIo,
+): Promise<number> {
+  const config = loadConfig(home)
+  const store = openStore(home)
+  try {
+    switch (action) {
+      case 'list': {
+        const tasks = config.automation.tasks
+        if (opts.json) {
+          output.stdout(JSON.stringify(tasks, null, 2))
+          return 0
+        }
+        if (tasks.length === 0) {
+          output.stdout('暂无自动化任务')
+          return 0
+        }
+        output.stdout('ID\t类型\t启用\t计划\t项目\t名称')
+        for (const task of tasks) {
+          output.stdout(`${task.id}\t${task.type}\t${task.enabled ? '是' : '否'}\t${task.schedule.kind}\t${task.project}\t${task.name}`)
+        }
+        return 0
+      }
+      case 'runs': {
+        const runs = store.listAutomationRuns(opts.id ? { automationId: opts.id } : {})
+        if (opts.json) {
+          output.stdout(JSON.stringify(runs, null, 2))
+          return 0
+        }
+        if (runs.length === 0) {
+          output.stdout('暂无执行记录')
+          return 0
+        }
+        output.stdout('ID\t任务\t状态\t耗时\t结果')
+        for (const run of runs) {
+          output.stdout(`${run.id}\t${run.automationId}\t${run.status}\t${run.durationMs ?? '-'}\t${run.summary.slice(0, 80)}`)
+        }
+        return 0
+      }
+      case 'trigger': {
+        if (!opts.id) {
+          output.stderr('用法：ra automation trigger --id <任务 id>')
+          return 2
+        }
+        return triggerAutomation(config, opts.id, output)
+      }
+      case 'tool': {
+        if (!opts.id || !opts.name) {
+          output.stderr('用法：ra automation tool --id <任务 id> --name <工具名> [--args <json>]')
+          return 2
+        }
+        let args: Record<string, unknown> = {}
+        if (opts.args) {
+          try {
+            const parsed = JSON.parse(opts.args)
+            if (parsed && typeof parsed === 'object') args = parsed as Record<string, unknown>
+            else {
+              output.stderr('--args 必须是 JSON 对象')
+              return 2
+            }
+          } catch {
+            output.stderr('--args 不是合法 JSON')
+            return 2
+          }
+        }
+        return invokeAutomationTool(config, opts.id, opts.name, args, output)
+      }
+      default:
+        output.stderr(`未知操作 automation ${action}；可用：list / runs / trigger / tool`)
+        return 2
+    }
+  } finally {
+    store.close()
+  }
+}
+
+/**
+ * 手动触发一次自动化：走服务端口，保证与调度器共用同一套执行管线。
+ *
+ * 触发是异步的（接口立即返回 running 记录），这里轮询到结束再打印结果，
+ * 让命令行用户看到和面板一样的结论。
+ */
+async function triggerAutomation(config: AppConfig, id: string, output: CliIo): Promise<number> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${config.server.port}/api/automations/trigger`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...tokenHeader(config) },
+      body: JSON.stringify({ id }),
+    })
+    const data = await res.json().catch(() => null) as { run?: { id?: string; status?: string; summary?: string }; error?: string } | null
+    if (!res.ok) {
+      output.stderr(`触发失败：${data?.error ?? `HTTP ${res.status}`}`)
+      return 1
+    }
+    const runId = data?.run?.id
+    if (!runId) {
+      output.stdout(`${data?.run?.status ?? 'unknown'}\t${data?.run?.summary ?? ''}`)
+      return 0
+    }
+    const finished = await waitAutomationRun(config, runId, output)
+    output.stdout(`${finished.status}\t${finished.summary}`)
+    return 0
+  } catch (error) {
+    output.stderr(`服务不可达：${error instanceof Error ? error.message : String(error)}`)
+    return 1
+  }
+}
+
+/** 轮询一条执行记录直到结束；超时按未知状态收尾，不无限等。 */
+async function waitAutomationRun(
+  config: AppConfig,
+  runId: string,
+  output: CliIo,
+): Promise<{ status: string; summary: string }> {
+  const deadline = Date.now() + 15 * 60_000
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 3_000))
+    const res = await fetch(`http://127.0.0.1:${config.server.port}/api/automations/runs/${encodeURIComponent(runId)}`, {
+      headers: tokenHeader(config),
+    })
+    const data = await res.json().catch(() => null) as { run?: { status?: string; summary?: string } } | null
+    const status = data?.run?.status ?? 'unknown'
+    if (status !== 'running') {
+      return { status, summary: data?.run?.summary ?? '' }
+    }
+  }
+  output.stderr('等待执行结束超时；执行仍在后台进行，可稍后用 ra automation runs 查看。')
+  return { status: 'unknown', summary: '' }
+}
+
+/** 调用自动化内置工具：走服务端口，范围与限流由服务层强制。 */
+async function invokeAutomationTool(
+  config: AppConfig,
+  automationId: string,
+  name: string,
+  args: Record<string, unknown>,
+  output: CliIo,
+): Promise<number> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${config.server.port}/api/automations/tools`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...tokenHeader(config) },
+      body: JSON.stringify({ automationId, name, args }),
+    })
+    const data = await res.json().catch(() => null) as { result?: unknown; error?: string; hint?: string } | null
+    if (!res.ok) {
+      output.stderr(data?.hint ? `${data.error}：${data.hint}` : (data?.error ?? `HTTP ${res.status}`))
+      return 1
+    }
+    output.stdout(JSON.stringify(data?.result ?? null, null, 2))
+    return 0
+  } catch (error) {
+    output.stderr(`服务不可达：${error instanceof Error ? error.message : String(error)}`)
+    return 1
+  }
 }
 
 async function cmdSimulate(
@@ -825,7 +1010,7 @@ async function cmdTicketStop(home: string, ticketId: string, output: CliIo): Pro
   try {
     const res = await fetch(`http://127.0.0.1:${config.server.port}/api/tickets/${ticketId}/stop`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...tokenHeader(config) },
       body: JSON.stringify({ reason: 'ra ticket --stop' }),
     })
     if (res.ok) {
@@ -908,6 +1093,9 @@ function cmdConfig(home: string, output: CliIo): number {
   return 0
 }
 
+/** 回显时需要打码的配置项：密钥类字段不进 shell 历史 / 日志。 */
+const SECRET_CONFIG_KEYS = new Set(['llm.apiKey', 'decision.jev.apiKey', 'server.token'])
+
 function cmdConfigSet(home: string, key: string, value: string, output: CliIo): number {
   ensureHome(home)
   const path = join(home, 'config.yaml')
@@ -919,7 +1107,7 @@ function cmdConfigSet(home: string, key: string, value: string, output: CliIo): 
   }
   writeConfig(home, config)
   // 密钥类字段不回显明文，避免进 shell 历史 / 日志。
-  output.stdout(key === 'llm.apiKey' ? `${key} = ******` : `${key} = ${value}`)
+  output.stdout(SECRET_CONFIG_KEYS.has(key) ? `${key} = ******` : `${key} = ${value}`)
   output.stdout(`已写入 ${path}`)
   return 0
 }
@@ -1095,7 +1283,7 @@ async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
 
 function cmdWeb(home: string, output: CliIo): number {
   const config = loadConfig(home)
-  const url = `http://127.0.0.1:${config.server.port}/`
+  const url = panelUrlList(home, config)[0]!
   output.stdout(`Web 面板: ${url}`)
   openPanel(url, output)
   return 0
@@ -1105,12 +1293,13 @@ async function cmdStart(home: string, opts: { foreground?: boolean; open?: boole
   ensureHome(home)
   const config = loadConfig(home, output.env as NodeJS.ProcessEnv)
   // 直接落到「初始化」页：ra start 之后要配的运行时 / 项目 / 飞书 / 群都在这里。
-  const panelUrl = `http://127.0.0.1:${config.server.port}/#setup`
+  const panelUrls = panelUrlList(home, config, '#setup')
+  const panelUrl = panelUrls[0]!
   const shouldOpen = opts.open !== false
   const pid = readPid(home)
   if (pid && alive(pid)) {
     output.stdout(`服务已在运行 (pid ${pid})`)
-    output.stdout(`Web 面板: ${panelUrl}`)
+    printPanelUrls(panelUrls, output)
     if (shouldOpen) await openPanelWhenReady(panelUrl, output)
     return 0
   }
@@ -1144,17 +1333,33 @@ async function cmdStart(home: string, opts: { foreground?: boolean; open?: boole
   writeFileSync(join(home, 'router-agent.pid'), String(child.pid ?? ''), 'utf8')
   output.stdout(`Router 服务已启动 (pid ${child.pid})`)
   output.stdout(`日志: ${join(home, 'logs', 'router-agent.log')}`)
-  output.stdout(`Web 面板: ${panelUrl}`)
+  printPanelUrls(panelUrls, output)
   if (shouldOpen) await openPanelWhenReady(panelUrl, output)
   return 0
+}
+
+/** 打印面板地址；对外开放时把局域网地址一并列出。 */
+function printPanelUrls(urls: string[], output: CliIo): void {
+  for (const url of urls) output.stdout(`Web 面板: ${url}`)
 }
 
 /** 服务就绪探测与浏览器打开：给服务 10 秒，避免刚启动时开出 404 白页。 */
 const PANEL_READY_TIMEOUT_MS = 10_000
 
-async function panelReady(url: string): Promise<boolean> {
+/**
+ * 探测面板是否已就绪。
+ *
+ * 地址栏里带的是 `?token=…`，而 `new URL('api/status', url)` 拼出来的新 URL
+ * 不保留查询参数——面板开放访问时服务端要求 x-ra-token，
+ * 探测请求漏带令牌必然被 401 拒掉，`ra start` 只会一直说「面板暂未就绪」。
+ */
+export async function panelReady(url: string): Promise<boolean> {
   try {
-    const res = await fetch(new URL('api/status', url), { signal: AbortSignal.timeout(1_000) })
+    const token = new URL(url).searchParams.get('token') ?? ''
+    const res = await fetch(new URL('api/status', url), {
+      headers: token ? { 'x-ra-token': token } : {},
+      signal: AbortSignal.timeout(1_000),
+    })
     return res.ok
   } catch {
     return false
@@ -1214,6 +1419,13 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   const logger = createLogger(home, output)
   const config = loadConfig(home, process.env, { logger })
   ensureHome(home)
+  // 对外开放却没有令牌：生成一个并落盘。
+  // 令牌必须持久化——每次启动换一个的话，已经发出去的地址会突然失效。
+  const tokenBefore = config.server.token
+  ensureServerToken(home, config)
+  if (!tokenBefore && config.server.token) {
+    logger.info('server:token-generated', { host: config.server.host })
+  }
   // 运行时探测在后台跑：先读缓存，API 立即可用，探测完成后刷新。
   const runtimeAdmin = new AcpRuntimeAdmin({ home, env: process.env, config })
   // 插件 npm 包安装任务：面板「安装依赖」与 CLI 共用同一套安装逻辑。
@@ -1270,7 +1482,10 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     .catch(error => logger.warn('runtime:detect-failed', { message: error instanceof Error ? error.message : String(error) }))
   const sink = (event: { event: string; [key: string]: unknown }): void => {
     const { event: name, ...extra } = event
-    logger.info(name, extra)
+    const level = logLevelOf(name)
+    if (level === 'warn') logger.warn(name, extra)
+    else if (level === 'error') logger.error(name, extra)
+    else logger.info(name, extra)
   }
   logger.info('serve:starting', {
     home,
@@ -1531,6 +1746,24 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   const feishuChannel = channels.get('feishu') as ReturnType<typeof createFeishuChannel> | undefined
   if (!feishuChannel) logger.warn('channel:feishu-missing', { detail: '飞书通道未加载；检查 channels.feishu 插件入口' })
   const outbox = new ChannelRouter(channels, logger)
+  // 事件工单开工前私聊用户并建话题：接收人来自事件来源的 owner（邮箱 / ou_）。
+  const kickoffOwnerResolver = new IdentityResolver({
+    lark: larkRunner,
+    appId: config.feishu.appId,
+    cache: identityCacheOf(store),
+    logger,
+  })
+  const eventKickoff = new EventKickoff({
+    store,
+    config: () => config,
+    channels,
+    logger,
+    resolveOwner: async entry => {
+      const resolved = await kickoffOwnerResolver.resolveEntries([entry])
+      const found = resolved.entries.find(item => item.openId)
+      return found ? { openId: found.openId, ...(found.name ? { name: found.name } : {}) } : null
+    },
+  })
 
   const clearReaction = async (messageId: string): Promise<void> => {
     const saved = store.getReaction(messageId)
@@ -1568,6 +1801,34 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     handlers: {},
     onEvent: sink,
   })
+  // 自动化：定时触发的任务。调度器内嵌在服务进程内，随服务起停。
+  // 事件总线在下面才装配，这里用延迟引用拿它的入队能力。
+  let ingestAutomationEvent: AutomationServiceDeps['ingestEvent']
+  const automationService = new AutomationService({
+    config: () => config,
+    store,
+    engine,
+    runtimes,
+    logger,
+    chat: model ? createChatClient(model) : null,
+    // 自动化写入的事件进收件箱，走现有事件判定链路。
+    ingestEvent: input => ingestAutomationEvent?.(input) ?? null,
+    // 生成的脚本写回任务定义并落盘，避免每次执行都重新生成。
+    saveTaskScript: (taskId, script) => {
+      const task = config.automation.tasks.find(item => item.id === taskId)
+      if (!task) return
+      task.script = script
+      task.updatedAt = new Date().toISOString()
+      try {
+        writeConfig(config.home, config)
+        logger.info('automation:script-persisted', { automationId: taskId, chars: script.length })
+      } catch (error) {
+        // 落盘失败不回滚内存里的脚本：本次执行仍可用，下次保存配置时会一起写回。
+        logger.error('automation:script-persist-failed', { automationId: taskId, message: errorMessage(error) })
+      }
+    },
+  })
+
   const service = decisionEngine
     ? new RouterService({
       config,
@@ -1581,6 +1842,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       effects,
       sender: outbox,
       channels,
+      kickoff: eventKickoff,
       decisionEngine,
       ...(intakeEngine ? { intakeEngine } : {}),
       ...(decisionAgent ? { decisionAgent } : {}),
@@ -1588,8 +1850,72 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       ...(identity?.approverOpenIdsByChat ? { intakeApprovers: identity.approverOpenIdsByChat } : {}),
       orca: orcaRunner,
       onDecisionAudit,
+      // 飞书里的自然语言 → 待确认草稿；确认后才写 automation.tasks。
+      automationDraft: async trigger => {
+        const result = await automationService.captureDraft(
+          trigger.text,
+          `feishu:${trigger.chatId}`,
+          trigger.actorId,
+        )
+        return result?.reply ?? null
+      },
     })
     : null
+
+  // 事件总线：多来源事件 → 队列 → 决策 → 分级派发。
+  // 事件链路与飞书消息链路只在「派工 → Worker」处汇合：事件判定后合成工单，
+  // 之后完全沿用现有派工与 Worker 流程。
+  const eventWiring = createEventWiring({
+    config: () => config,
+    store,
+    engine,
+    logger,
+    runner: ghRunner,
+    model: () => model,
+    onReview: event => {
+      if (!config.events.policy.reviewNotify) return
+      const chatId = config.events.policy.reviewChatId.trim()
+      if (!chatId) return
+      const text = [
+        `事件待审核：${event.title}`,
+        `优先级：${event.priority}`,
+        event.reason ? `判定理由：${event.reason}` : '',
+        '到面板「收件箱」页批准 / 驳回 / 延后。',
+      ].filter(Boolean).join('\n')
+      store.enqueueOutbox({
+        id: `ob_event_review_${event.id}`,
+        key: `event:review:${event.id}`,
+        channelKind: DEFAULT_CHANNEL_ID,
+        channelId: chatId,
+        threadId: '',
+        text,
+        now: new Date().toISOString(),
+      })
+      logger.info('event:review-notified', { eventId: event.id, chatId })
+    },
+    onDispatched: () => {
+      // 事件开出的工单同样要尽快派出去，不用等下一个秒级 tick。
+      void service?.launchPending()
+    },
+  })
+  // 事件总线就位后补上自动化的入队能力。
+  ingestAutomationEvent = input => {
+    // 来源 id 用自动化任务 id：执行记录据此把产出对回任务。
+    const sourceId = `automation:${input.automationId}`
+    const envelope = {
+      externalId: `${sourceId}:${input.eventType}:${crypto.randomUUID()}`,
+      eventType: input.eventType,
+      title: input.title,
+      body: input.body,
+      receivedAt: new Date().toISOString(),
+      // 事件判定前就带上项目范围，自动化的工具查询据此过滤，不会看到无关项目的事件。
+      context: { repo: input.repo, project: input.project },
+    }
+    return eventWiring.pipeline.ingest(sourceId, { enabled: true, kind: 'feishu' }, envelope).id
+  }
+  automationService.initStates()
+  automationService.closeStaleRuns()
+  automationService.start()
 
   const webRoot = fileURLToPath(new URL('../web', import.meta.url))
   // 日志页的智能排查助手：复用研判模型，没配模型时自动降级为规则式排查。
@@ -1650,6 +1976,45 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       failures: [...runtimePlugins.failures, ...channelPlugins.failures],
     },
     update: updateService,
+    events: {
+      listEvents: filter => eventWiring.manager.listEvents(filter),
+      listSources: () => eventWiring.manager.listSources(),
+      apply: (eventId, action, options) => eventWiring.manager.apply(
+        eventId,
+        action as Parameters<typeof eventWiring.manager.apply>[1],
+        {
+          ...(options.priority ? { priority: options.priority as never } : {}),
+          ...(options.project ? { project: options.project } : {}),
+        },
+      ),
+      decision: () => {
+        const decision = config.events.decision
+        return {
+          provider: decision.provider,
+          confidenceThreshold: decision.confidenceThreshold,
+          fallback: decision.fallback,
+        }
+      },
+      rules: () => config.events.rules,
+      ruleStats: () => eventWiring.manager.countEventRules(),
+      compileRule: input => compileEventRule(input, {
+        client: model ? createChatClient(model) : null,
+        logger,
+      }),
+      counts: () => eventWiring.manager.countEvents(),
+    },
+    automation: {
+      listTasks: () => automationService.list(),
+      listRuns: automationId => automationService.runs(automationId ? { automationId } : {}),
+      getRun: id => automationService.run(id),
+      listDrafts: () => automationService.listDrafts(),
+      dismissDraft: id => automationService.dismissDraft(id),
+      trigger: id => automationService.trigger(id),
+      generateScript: id => automationService.generateScriptFor(id),
+      generateScriptWithReason: id => automationService.generateScriptWithReason(id),
+      draft: async text => automationService.draftFromText(text),
+      invokeTool: (automationId, name, args) => automationService.invokeTool(automationId, name, args),
+    },
     ...(feishuChannel?.admin ? { feishuBot: feishuChannel.admin } : {}),
     channels,
     identity: identityPort,
@@ -1682,11 +2047,20 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     onPolicyChange: updated => {
       logger.info('policy:updated', { version: engine.policy().version, acceptMode: updated.policy.acceptMode })
     },
-    onConfigChange: (_updated, changed) => {
+    onConfigChange: (updated, changed) => {
       logger.info('config:updated', { changed })
+      const rulesChanged = changed.includes('events.rules')
+      // 规则变化后，把之前只收集不判定的事件重新激活。
+      if (rulesChanged) {
+        const activated = store.activateUndecidedEvents(ruleEventTypes(updated.events.rules), new Date().toISOString())
+        logger.info('event:rule-activated', { ruleId: 'config', activated })
+      }
+      if (changed.some(path => path.startsWith('events.'))) {
+        void eventWiring.manager.reloadSources()
+      }
     },
   })
-  logger.info('api:listening', { port: config.server.port })
+  logger.info('api:listening', { port: config.server.port, host: config.server.host })
   // 首查走后台，失败只进日志；之后每 6 小时刷新一次，面板读到的是缓存结果。
   void updateService.check(true)
   const updateTimer = setInterval(() => { void updateService.check(true) }, 6 * 60 * 60 * 1_000)
@@ -1747,16 +2121,23 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   }
   const chatTimer = service ? setInterval(refreshChats, 600_000) : null
   chatTimer?.unref()
+  // 总开关关着也要起管理器：面板随时可能打开它，起晚了判定管线不会跟着启动。
+  await eventWiring.manager.start()
+  if (config.events.enabled) {
+    output.stdout(`事件总线已启动（${Object.keys(config.events.sources).filter(id => config.events.sources[id]?.enabled).length} 个来源已启用）。`)
+  }
   if (service) {
     refreshChats()
     await service.start()
-    output.stdout(`Router 服务运行中：http://127.0.0.1:${config.server.port}/`)
+    output.stdout(`Router 服务运行中：${panelUrlList(home, config)[0]}`)
   } else {
-    output.stdout(`Web 配置服务运行中：http://127.0.0.1:${config.server.port}/（LLM 未配置，Router 未启动）`)
+    output.stdout(`Web 配置服务运行中：${panelUrlList(home, config)[0]}（LLM 未配置，Router 未启动）`)
   }
 
-  const stopRuntime = (): void => {
+  const stopRuntime = async (): Promise<void> => {
     channels.stopAll()
+    eventWiring.manager.stop()
+    await automationService.stop()
     if (chatTimer) clearInterval(chatTimer)
     clearInterval(updateTimer)
     if (updateRestartTimer) {
@@ -1764,7 +2145,8 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       clearTimeout(updateRestartTimer)
       updateRestartTimer = null
     }
-    service?.stop()
+    // 必须等在途周期收尾再关库：在途周期还在读写 store，先关库会报 "database is not open"。
+    await service?.stop()
     store.close()
   }
 
@@ -1776,7 +2158,7 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
 
   requestRestart = async (): Promise<void> => {
     logger.info('serve:restarting', { pid: process.pid })
-    stopRuntime()
+    await stopRuntime()
     // 先让出端口，再拉起新进程，否则会撞 EADDRINUSE。
     await api.close()
     releaseHost()
@@ -1801,15 +2183,16 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     }
   }
 
-  const shutdown = (): void => {
+  const shutdown = async (): Promise<void> => {
     logger.info('serve:stopping', {})
-    stopRuntime()
-    void api.close()
+    // 退出前等在途周期收尾并关库，否则在途周期会撞上已关闭的 DB。
+    await stopRuntime()
+    await api.close()
     releaseHost()
     process.exit(0)
   }
-  process.on('SIGTERM', shutdown)
-  process.on('SIGINT', shutdown)
+  process.on('SIGTERM', () => { void shutdown() })
+  process.on('SIGINT', () => { void shutdown() })
   return new Promise<number>(() => {
     // 常驻直到收到信号
   })

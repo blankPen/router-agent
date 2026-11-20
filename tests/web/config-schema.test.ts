@@ -35,6 +35,7 @@ describe('配置分组与块', () => {
       'channels',
       'projects',
       'admission',
+      'events',
       'ops',
     ])
     expect(CONFIG_GROUPS.map(group => group.title)).toEqual([
@@ -44,6 +45,7 @@ describe('配置分组与块', () => {
       '渠道配置',
       '项目配置',
       '消息准入',
+      '事件总线',
       '其他设置',
     ])
   })
@@ -188,6 +190,12 @@ describe('配置路径收集', () => {
   it('块路径包含块自己声明的非字段路径', () => {
     const block = { id: 'chats', title: '群', fields: [], paths: ['feishu.chats'] }
     expect(blockPaths(block)).toEqual(['feishu.chats'])
+  })
+
+  it('决策规则整段被追踪：改规则后能进保存补丁', () => {
+    const events = CONFIG_GROUPS.find(group => group.id === 'events')!
+    const paths = events.blocks.flatMap(blockPaths)
+    expect(paths).toContain('events.rules')
   })
 
   it('注入探测结果后运行时下拉用真实选项', () => {

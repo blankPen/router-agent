@@ -186,7 +186,10 @@ export class JevDecisionProvider implements DecisionProvider {
     const msgTypeScore = answers.msg_type
     const projectRelated = answers.project_related
     const urgency = answers.urgency
-    if (needsFollowup === undefined || msgTypeScore === undefined || projectRelated === undefined || urgency === undefined) {
+    if (typeof needsFollowup !== 'number'
+      || typeof msgTypeScore !== 'number'
+      || typeof projectRelated !== 'number'
+      || typeof urgency !== 'number') {
       throw new Error('decision:answer-missing')
     }
     return {

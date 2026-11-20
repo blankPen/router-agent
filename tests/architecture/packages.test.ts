@@ -45,6 +45,7 @@ describe('monorepo 包边界', () => {
       'runtime-t3code',
       'channel',
       'channel-feishu',
+      'event',
     ]) {
       const pkg = JSON.parse(readFileSync(join(packagesDir, name, 'package.json'), 'utf8')) as {
         name: string

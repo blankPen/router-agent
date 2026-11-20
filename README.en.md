@@ -38,7 +38,7 @@ router-agent (`ra`) is a resident two-layer agent system: **the Router only tria
 
 It is built for everyday "message in, code out" collaboration. If you only need a one-off edit, opening your usual coding agent directly is faster.
 
-It is a **clean rewrite** of dsh-superagent, with no dependency on the prototype's tmux / DSE profile.
+It is a **clean rewrite** of agent-prototype, with no dependency on the prototype's tmux / DSE profile.
 
 ## Quick start
 
@@ -263,7 +263,8 @@ The global option `--home <dir>` switches the state directory (for tests and mul
 pnpm test        # 1230 tests pass (4 skipped by default, including the live Pi check)
 pnpm typecheck
 pnpm build       # tsc + esbuild (web dashboard and Markdown assets)
-pnpm check       # typecheck + test
+pnpm check:links # scan for company- or internal-environment-specific links / accounts
+pnpm check       # check:links + typecheck + test
 RA_PI_VERIFY=1 npx vitest run tests/verify-pi-live.test.ts   # real Pi + real model (skipped by default)
 ```
 
@@ -307,7 +308,7 @@ The detailed docs are currently Chinese-only.
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Full `config.yaml`, `ra config set`, environment variables, model and Feishu setup, admission matrix, idle governance |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Reply policy, web dashboard, log events, troubleshooting and known limitations |
 | [docs/API.md](docs/API.md) | Local HTTP API |
-| [docs/COMPARISON.md](docs/COMPARISON.md) | Gap analysis against the dsh-superagent prototype and transferable mechanisms |
+| [docs/COMPARISON.md](docs/COMPARISON.md) | Gap analysis against the agent-prototype prototype and transferable mechanisms |
 | [docs/AGENT-ADAPTER-DESIGN.md](docs/AGENT-ADAPTER-DESIGN.md) | Agent tool adapter contract design: Orca / Claude Code / Codex |
 | [docs/DIAGNOSIS-REDESIGN.md](docs/DIAGNOSIS-REDESIGN.md) | Smart diagnosis redesign: doctor probe → log scan → finding triage |
 | [docs/VERIFICATION.md](docs/VERIFICATION.md) | Real-environment verification records and remaining manual steps |

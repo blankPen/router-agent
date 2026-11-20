@@ -61,6 +61,7 @@ import {
   type LocalProviderList,
   type LocalProviderView,
   type PluginView,
+  type ApiError,
 } from './api.js'
 import { Icon, LogoMark } from './icons.js'
 import { defaultSelectedPaths, mergeImportedProjects, type ScanCandidate } from './project-scan.js'
@@ -68,6 +69,11 @@ import type { IdentityStatusView } from './identity-status.js'
 import { RuntimeCards, type RuntimeNotice } from './runtime-cards.js'
 import { FeishuBotPanel } from './feishu-panel.js'
 import { LogAssistantFab } from './log-assistant.js'
+import { EventsView } from './events-panel.js'
+import { AutomationView } from './automation-panel.js'
+import { EventSourcesConfig } from './events-config.js'
+import { EventRulesConfig } from './event-rules.js'
+import { eventSourceFields, eventSourcePathsIn, type SourceMeta } from './event-sources.js'
 import { SpecsEditor } from './specs-editor.js'
 import {
   mergeRuntimeChoices,
@@ -75,6 +81,8 @@ import {
   runtimeStatusLabel,
 } from './runtime-model.js'
 import { hashForTab, tabFromHash, type Tab } from './tabs.js'
+import { navItems } from './nav.js'
+import { captureTokenFromUrl } from './access-token.js'
 import { THEME_MODE_LABEL, nextThemeMode, useThemeMode, type ThemeMode } from './theme.js'
 import {
   readSkippedVersion,
@@ -276,7 +284,34 @@ function sleep(ms: number): Promise<void> {
 
 type RestartPhase = 'idle' | 'restarting' | 'done' | 'error'
 
+/**
+ * 面板开放访问后的「没带令牌」提示屏。
+ *
+ * 服务端对 API 全量校验令牌，缺令牌时整个面板都读不到数据。
+ * 与其让每个页面各报一次错，不如一屏说清楚该怎么打开。
+ */
+function AccessDenied(): JSX.Element {
+  return (
+    <div className="access-denied">
+      <div className="access-denied-card">
+        <Icon name="alert" size={22} />
+        <h1>面板已开放访问，需要访问令牌</h1>
+        <p>
+          当前地址没有带上访问令牌，API 请求都被拒绝了。
+          请用 <code>ra start</code> 打印的完整地址打开（末尾带 <code>?token=…</code>），
+          或在本机执行 <code>ra web</code> 重新打开面板。
+        </p>
+        <small>令牌在 config.yaml 的 server.token，也可以用 ra config set server.token &lt;令牌&gt; 自行设置。</small>
+      </div>
+    </div>
+  )
+}
+
 function App(): JSX.Element {
+  // 面板开放访问时令牌在地址栏里：先取出来存好，再把地址栏里的明文抹掉。
+  useEffect(() => { captureTokenFromUrl() }, [])
+  // 服务端要求令牌但当前没有：整个面板都用不了，先挡一屏说明。
+  const [accessDenied, setAccessDenied] = useState(false)
   // `ra start` 会带 #setup 打开面板；刷新时也从 hash 恢复当前页签。
   const [tab, setTab] = useState<Tab>(() => tabFromHash(window.location.hash) ?? 'tickets')
   const [status, setStatus] = useState<ServiceStatus | null>(null)
@@ -325,7 +360,10 @@ function App(): JSX.Element {
 
   useEffect(() => {
     const load = (): void => {
-      void getJson<ServiceStatus>('/api/status').then(setStatus).catch(() => undefined)
+      void getJson<ServiceStatus>('/api/status').then(setStatus).catch(error => {
+        // 面板开放访问后没带令牌：整个界面都读不到数据，直接说清楚比到处报错好。
+        setAccessDenied((error as ApiError).code === 'token-required')
+      })
     }
     load()
     const timer = setInterval(load, 15_000)
@@ -439,6 +477,7 @@ function App(): JSX.Element {
 
   return (
     <div className="shell">
+      {accessDenied && <AccessDenied />}
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-mark"><LogoMark size={34} /></span>
@@ -457,28 +496,13 @@ function App(): JSX.Element {
         </div>
 
         <nav className="side-nav" ref={navRef}>
-          <button className={`nav-tab ${tab === 'setup' ? 'active' : ''}`} onClick={() => switchTab('setup')}>
-            <Icon name="zap" />
-            <span>初始化</span>
-          </button>
-          <button className={`nav-tab ${tab === 'tickets' ? 'active' : ''}`} onClick={() => switchTab('tickets')}>
-            <Icon name="inbox" />
-            <span>工单</span>
-            {status && status.tickets.open > 0 && <span className="nav-count">{status.tickets.open}</span>}
-          </button>
-          <button className={`nav-tab ${tab === 'config' ? 'active' : ''}`} onClick={() => switchTab('config')}>
-            <Icon name="sliders" />
-            <span>配置</span>
-          </button>
-          <button className={`nav-tab ${tab === 'sources' ? 'active' : ''}`} onClick={() => switchTab('sources')}>
-            <Icon name="radio" />
-            <span>来源</span>
-          </button>
-          {/* 日志是排障时的末位入口，放在菜单最后，日常操作优先。 */}
-          <button className={`nav-tab ${tab === 'logs' ? 'active' : ''}`} onClick={() => switchTab('logs')}>
-            <Icon name="file-text" />
-            <span>日志</span>
-          </button>
+          {navItems(status?.tickets.open ?? 0).map(item => (
+            <button key={item.tab} className={`nav-tab ${tab === item.tab ? 'active' : ''}`} onClick={() => switchTab(item.tab)}>
+              <Icon name={item.icon} />
+              <span>{item.label}</span>
+              {item.count !== undefined && item.count > 0 && <span className="nav-count">{item.count}</span>}
+            </button>
+          ))}
         </nav>
 
         <div className="sidebar-bottom">
@@ -523,6 +547,8 @@ function App(): JSX.Element {
           />
         )}
         {tab === 'tickets' && <TicketsView />}
+        {tab === 'events' && <EventsView />}
+        {tab === 'automation' && <AutomationView />}
         {tab === 'logs' && <LogsView />}
         {tab === 'config' && (
           <ConfigView
@@ -628,7 +654,10 @@ function PageHead({ title, subtitle, actions }: {
 
 function TicketsView(): JSX.Element {
   const [tickets, setTickets] = useState<Ticket[]>([])
-  const [selected, setSelected] = useState<string | null>(null)
+  const [selected, setSelected] = useState<string | null>(() => {
+    const match = /^#tickets\/([^/?#]+)/.exec(window.location.hash)
+    return match ? decodeURIComponent(match[1]!) : null
+  })
   const [detail, setDetail] = useState<TicketDetail | null>(null)
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [lastSync, setLastSync] = useState<Date | null>(null)
@@ -675,6 +704,9 @@ function TicketsView(): JSX.Element {
     setSelected(null)
     setDetail(null)
     setDetailError(null)
+    if (window.location.hash.startsWith('#tickets/')) {
+      history.replaceState(null, '', '#tickets')
+    }
   }, [])
 
   useEffect(() => {
@@ -1258,6 +1290,18 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
   const [notice, setNotice] = useState<RuntimeNotice | null>(null)
   const [pendingRestart, setPendingRestart] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [eventSources, setEventSources] = useState<SourceMeta[]>([])
+
+  // 事件来源的字段是来源自己声明的，配置页要按它们渲染并追踪改动。
+  const loadEventSources = useCallback((): void => {
+    void getJson<{ sources?: SourceMeta[] }>('/api/events')
+      .then(data => setEventSources(data.sources ?? []))
+      .catch(() => undefined)
+  }, [])
+
+  useEffect(() => {
+    loadEventSources()
+  }, [loadEventSources])
 
   // 重启开始后不再提示「需重启」。
   useEffect(() => {
@@ -1307,7 +1351,10 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
   const groupBlocks = useMemo(() => groups.flatMap(group => group.blocks), [groups])
   const channelBlocks = useMemo(() => channels.flatMap(channel => channel.blocks), [channels])
   const allBlocks = useMemo(() => [...groupBlocks, ...channelBlocks], [groupBlocks, channelBlocks])
-  const trackedPaths = useMemo(() => allBlocks.flatMap(block => blockPaths(block)), [allBlocks])
+  const trackedPaths = useMemo(() => [
+    ...allBlocks.flatMap(block => blockPaths(block)),
+    ...eventSourcePathsIn(eventSources, (draft?.events?.sources ?? {}) as Record<string, unknown>),
+  ], [allBlocks, eventSources, draft])
 
   const changed = useMemo(() => {
     if (!draft || !original) return []
@@ -1369,6 +1416,13 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
       const message = fieldError(field, fieldValue(draft, field.path, optionDefaults))
       if (message) map.set(field.path, message)
     }
+    // 事件来源的字段同样是动态的，只校验本次确实要提交的路径。
+    const changedSet = new Set(changed)
+    for (const field of eventSourceFields(eventSources)) {
+      if (!changedSet.has(field.path)) continue
+      const message = fieldError(field, fieldValue(draft, field.path, optionDefaults))
+      if (message) map.set(field.path, message)
+    }
     // 渠道自己的校验（群列表之类），由渠道描述提供。
     for (const channel of channels) {
       for (const [path, message] of Object.entries(channel.validate?.(draft) ?? {})) {
@@ -1418,6 +1472,8 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
       // 保存后服务端会重解析名单，这里同步最新状态（解析失败也不影响保存结果）。
       if (result.identity) setIdentity(result.identity)
       setPendingRestart(result.restartRequired)
+      // 新加的事件来源插件要等来源重新装配后才出现在列表里，保存后刷新一次。
+      if (Object.keys(patch).some(path => path.startsWith('events.sources.'))) loadEventSources()
       const message = secretDropNotice(patch, result) ?? (result.identityEffective === false
         ? {
             // 名单重解析失败时保存仍然成功（配置已落盘），但新名单还没生效，必须说清楚。
@@ -1563,6 +1619,27 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
         )
       }
       if (block.render === 'specs') return <SpecsEditor />
+      if (block.render === 'events') {
+        return (
+          <EventSourcesConfig
+            sources={eventSources}
+            draft={draft}
+            defaults={defaults}
+            setField={setField}
+            errors={errors}
+            onNotice={notice => setNotice(notice)}
+          />
+        )
+      }
+      if (block.render === 'events-rules') {
+        return (
+          <EventRulesConfig
+            draft={draft}
+            setField={setField}
+            onNotice={notice => setNotice(notice)}
+          />
+        )
+      }
       // 块标题命中时整块保留，否则只留下命中的字段。
       const fields = blockHit ? block.fields : block.fields.filter(field => matches(field.label, field.path, field.hint))
       if (fields.length === 0) return <p className="editor-empty">没有匹配的配置项。</p>
@@ -3122,6 +3199,12 @@ function LogsView(): JSX.Element {
 
   const setDimension = useCallback((key: keyof LogFilter, value: string): void => {
     setFilter(prev => ({ ...prev, [key]: value }))
+  }, [])
+
+  // 从别的页深链过来时带着关键字（如自动化页的「查看日志」）：进页面就按它筛。
+  useEffect(() => {
+    const keyword = new URLSearchParams(window.location.hash.split('?')[1] ?? '').get('keyword')
+    if (keyword) setFilter(prev => ({ ...prev, keyword }))
   }, [])
 
   const toggleRow = useCallback((seq: number): void => {

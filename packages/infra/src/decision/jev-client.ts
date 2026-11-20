@@ -16,14 +16,14 @@ export interface JevConfig {
 }
 
 export interface JevQuestion {
-  type: 'noul' | 'score'
+  type: 'noul' | 'score' | 'choice'
   instructions: string
-  /** score 档位（0..N-1 的下标）；用于把分数归一化到 0~1。 */
-  criteria?: string[]
+  /** score 档位（0..N-1 的下标）或 choice 选项（选项 id → 说明）。 */
+  criteria?: string[] | Record<string, string>
 }
 
-/** 每个问题的答案（已归一化到 0~1）。 */
-export type JevAnswers = Record<string, number>
+/** 每个问题的答案：noul / score 归一化到 0~1，choice 返回选项 id。 */
+export type JevAnswers = Record<string, number | string>
 
 const JEV_ENDPOINT = 'https://api.typesafe.ai/v1/systemone'
 const DEFAULT_TIMEOUT_MS = 5_000
@@ -76,7 +76,7 @@ export class JevClient {
         const detail = await res.text().catch(() => '')
         throw new JevError('http', `jev:http-${res.status} ${detail.slice(0, 200)}`)
       }
-      const data = (await res.json()) as { answers?: Record<string, { noul?: number; score?: number }> }
+      const data = (await res.json()) as { answers?: Record<string, { noul?: number; score?: number; choice?: string }> }
       return this.extractAnswers(data.answers ?? {}, questions)
     } catch (error) {
       if (error instanceof JevError) throw error
@@ -87,22 +87,29 @@ export class JevClient {
     }
   }
 
-  private extractAnswers(answers: Record<string, { noul?: number; score?: number }>, questions: Record<string, JevQuestion>): JevAnswers {
+  private extractAnswers(answers: Record<string, { noul?: number; score?: number; choice?: string }>, questions: Record<string, JevQuestion>): JevAnswers {
     const out: JevAnswers = {}
     for (const id of Object.keys(questions)) {
       const question = questions[id]
       if (!question) throw new JevError('malformed', `jev:malformed:${id}`)
       const raw = answers[id]
       if (!raw) throw new JevError('malformed', `jev:malformed:${id}`)
-      let value: number
+      let value: number | string
       if (question.type === 'score') {
-        const criteria = question.criteria ?? []
+        const criteria = Array.isArray(question.criteria) ? question.criteria : []
         const top = criteria.length - 1
         const score = raw.score
         if (typeof score !== 'number' || !Number.isFinite(score) || score < 0 || top <= 0) {
           throw new JevError('malformed', `jev:malformed:${id}`)
         }
         value = score / top
+      } else if (question.type === 'choice') {
+        const options = question.criteria && !Array.isArray(question.criteria) ? Object.keys(question.criteria) : []
+        const choice = raw.choice
+        if (typeof choice !== 'string' || options.length === 0 || !options.includes(choice)) {
+          throw new JevError('malformed', `jev:malformed:${id}`)
+        }
+        value = choice
       } else {
         const noul = raw.noul
         if (typeof noul !== 'number' || !Number.isFinite(noul) || noul < 0 || noul > 1) {
@@ -110,7 +117,7 @@ export class JevClient {
         }
         value = noul
       }
-      out[id] = Math.min(1, Math.max(0, value))
+      out[id] = typeof value === 'number' ? Math.min(1, Math.max(0, value)) : value
     }
     return out
   }

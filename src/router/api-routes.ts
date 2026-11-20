@@ -1011,5 +1011,242 @@ export function apiRoutes(deps: ApiRouteDeps): ApiRoute[] {
       return respond(res, 200, job)
     },
   },
+
+  // ---------- 事件总线 ----------
+
+  {
+    match: exact('/api/events', 'GET'),
+    async handle({ req, res, url, path, params }) {
+      if (!opts.events) return respond(res, 404, { error: 'events-not-supported' })
+      const status = url.searchParams.get('status') ?? undefined
+      const priority = url.searchParams.get('priority') ?? undefined
+      const sourceId = url.searchParams.get('sourceId') ?? undefined
+      const limit = Number(url.searchParams.get('limit'))
+      return respond(res, 200, {
+        events: opts.events.listEvents({
+          ...(status ? { status } : {}),
+          ...(priority ? { priority } : {}),
+          ...(sourceId ? { sourceId } : {}),
+          ...(Number.isFinite(limit) && limit > 0 ? { limit } : {}),
+        }),
+        sources: opts.events.listSources(),
+        decision: opts.events.decision(),
+        rules: opts.events.rules(),
+        ruleStats: opts.events.ruleStats(),
+        counts: opts.events.counts(),
+        // 候选项目：人工批准时用来挑归属项目（事件本身不绑项目）。
+        projects: config.projects.map(project => ({ name: project.name, repo: project.repo })),
+      })
+    },
+  },
+
+  {
+    match: exact('/api/events/rules', 'GET'),
+    async handle({ req, res, url, path, params }) {
+      if (!opts.events) return respond(res, 404, { error: 'events-not-supported' })
+      return respond(res, 200, { rules: opts.events.rules(), ruleStats: opts.events.ruleStats() })
+    },
+  },
+
+  {
+    match: exact('/api/events/rules/compile', 'POST'),
+    async handle({ req, res, url, path, params }) {
+      if (!opts.events) return respond(res, 404, { error: 'events-not-supported' })
+      const body = await readJson(req)
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      const eventType = typeof body.eventType === 'string' ? body.eventType.trim() : ''
+      const intent = typeof body.intent === 'string' ? body.intent.trim() : ''
+      if (!id || !eventType || !intent) {
+        return respond(res, 400, { error: 'rule-input-required', message: 'id / eventType / intent 不能为空' })
+      }
+      const rule = await opts.events.compileRule({
+        id,
+        eventType,
+        intent,
+        ...(typeof body.workflowPrompt === 'string' ? { workflowPrompt: body.workflowPrompt } : {}),
+      })
+      onEvent({ event: 'api:event-rule-compiled', ruleId: rule.id, eventType: rule.eventType })
+      return respond(res, 200, { rule })
+    },
+  },
+
+  {
+    match: pattern(/^\/api\/events\/rules(?:\/([^/]+))?$/, ''),
+    async handle({ req, res, url, path, params }) {
+      if (req.method !== 'POST' && req.method !== 'PUT' && req.method !== 'DELETE') return respond(res, 404, { error: 'not-found' })
+      if (!opts.events) return respond(res, 404, { error: 'events-not-supported' })
+      const routeId = params[0] ? decodeURIComponent(params[0]) : ''
+      let next: unknown[]
+      let savedId = routeId
+      if (req.method === 'DELETE') {
+        if (!routeId) return respond(res, 400, { error: 'rule-id-required' })
+        if (!config.events.rules.some(rule => rule.id === routeId)) return respond(res, 404, { error: 'rule-not-found' })
+        next = config.events.rules.filter(rule => rule.id !== routeId)
+      } else {
+        const body = await readJson(req)
+        const incoming = isRecord(body.rule) ? body.rule : body
+        const id = typeof incoming.id === 'string' && incoming.id.trim() ? incoming.id.trim() : routeId
+        if (!id) return respond(res, 400, { error: 'rule-id-required' })
+        savedId = id
+        const existing = config.events.rules.find(rule => rule.id === id)
+        const candidate = {
+          ...incoming,
+          id,
+          version: existing ? existing.version + 1 : Number(incoming.version) > 0 ? Number(incoming.version) : 1,
+        }
+        next = [...config.events.rules.filter(rule => rule.id !== id), candidate]
+      }
+      const preview = structuredClone(config)
+      const result = applyConfigPatch(preview, { 'events.rules': next })
+      if (result.errors.length > 0) {
+        logger.warn('config:event-rule-rejected', { errors: result.errors })
+        return respond(res, 400, { error: 'invalid-config', errors: result.errors })
+      }
+      if (config.home && result.changed.length > 0) {
+        try {
+          writeConfig(config.home, preview)
+        } catch (error) {
+          logger.error('config:event-rule-write-failed', { home: config.home, message: errorMessage(error) })
+          return respond(res, 500, { error: 'config-write-failed', message: errorMessage(error) })
+        }
+      }
+      applyConfigPatch(config, { 'events.rules': next })
+      await opts.onConfigChange?.(config, result.changed)
+      const rules = opts.events.rules()
+      const saved = savedId ? rules.find(rule => rule.id === savedId) : undefined
+      onEvent({ event: 'api:event-rules', changed: result.changed, count: rules.length })
+      return respond(res, 200, { ok: true, ...(saved ? { rule: saved } : {}), rules })
+    },
+  },
+
+  {
+    match: pattern(/^\/api\/events\/([^/]+)\/action$/, 'POST'),
+    async handle({ req, res, url, path, params }) {
+      if (!opts.events) return respond(res, 404, { error: 'events-not-supported' })
+      const eventId = params[0]!
+      const body = await readJson(req)
+      const action = String(body.action ?? '')
+      if (!['approve', 'reject', 'defer', 'ignore', 'retry', 'priority'].includes(action)) {
+        return respond(res, 400, { error: 'action-invalid', message: `不支持的操作：${action}` })
+      }
+      const result = await opts.events.apply(eventId, action, {
+        ...(typeof body.priority === 'string' ? { priority: body.priority } : {}),
+        ...(typeof body.project === 'string' ? { project: body.project } : {}),
+      })
+      if (!result) return respond(res, 404, { error: 'event-not-found' })
+      onEvent({ event: 'api:event-action', eventId, action })
+      return respond(res, 200, { event: result })
+    },
+  },
+
+  // ---------- 自动化 ----------
+
+  {
+    match: exact('/api/automations', 'GET'),
+    async handle({ req, res, url, path, params }) {
+      if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
+      return respond(res, 200, {
+        tasks: opts.automation.listTasks(),
+        runs: opts.automation.listRuns(url.searchParams.get('automationId') ?? undefined),
+        drafts: opts.automation.listDrafts(),
+      })
+    },
+  },
+
+  {
+    match: exact('/api/automations/runs', 'GET'),
+    async handle({ req, res, url, path, params }) {
+      if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
+      return respond(res, 200, { runs: opts.automation.listRuns(url.searchParams.get('automationId') ?? undefined) })
+    },
+  },
+
+  {
+    match: pattern(/^\/api\/automations\/runs\/([^/]+)$/, 'GET'),
+    async handle({ req, res, url, path, params }) {
+      if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
+      const id = decodeURIComponent(params[0]!).trim()
+      const run = id ? opts.automation.getRun(id) : null
+      if (!run) return respond(res, 404, { error: 'automation-run-not-found' })
+      return respond(res, 200, { run })
+    },
+  },
+
+  {
+    match: exact('/api/automations/trigger', 'POST'),
+    async handle({ req, res, url, path, params }) {
+      if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
+      const body = await readJson(req)
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      if (!id) return respond(res, 400, { error: 'id-required', message: '自动化任务 id 不能为空' })
+      const run = await opts.automation.trigger(id)
+      if (!run) return respond(res, 404, { error: 'automation-not-found' })
+      return respond(res, 201, { run })
+    },
+  },
+
+  {
+    match: exact('/api/automations/draft', 'POST'),
+    async handle({ req, res, url, path, params }) {
+      if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
+      const body = await readJson(req)
+      const text = typeof body.text === 'string' ? body.text.trim() : ''
+      if (!text) return respond(res, 400, { error: 'text-required', message: '请先描述要创建的自动化' })
+      const draft = await opts.automation.draft(text)
+      // 识别不确定时不自动落库：返回 null 让面板提示用户补充说明。
+      if (!draft) return respond(res, 200, { draft: null, message: '没能确定要创建的自动化，请补充说明。' })
+      return respond(res, 200, { draft })
+    },
+  },
+
+  {
+    match: exact('/api/automations/script', 'POST'),
+    async handle({ req, res, url, path, params }) {
+      if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
+      const body = await readJson(req)
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      if (!id) return respond(res, 400, { error: 'id-required', message: '自动化任务 id 不能为空' })
+      // 有带原因的入口就用它：面板要能说清失败在哪一步。
+      if (opts.automation.generateScriptWithReason) {
+        const outcome = await opts.automation.generateScriptWithReason(id)
+        if ('script' in outcome) return respond(res, 200, { script: outcome.script })
+        return respond(res, 502, { error: outcome.error, message: outcome.reason })
+      }
+      const script = await opts.automation.generateScript(id)
+      if (!script) {
+        return respond(res, 502, { error: 'script:generate-failed', message: '脚本生成失败，请检查模型配置后重试。' })
+      }
+      return respond(res, 200, { script })
+    },
+  },
+
+  {
+    match: exact('/api/automations/drafts/dismiss', 'POST'),
+    async handle({ req, res, url, path, params }) {
+      if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
+      const body = await readJson(req)
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      if (!id) return respond(res, 400, { error: 'id-required', message: '草稿 id 不能为空' })
+      const changed = opts.automation.dismissDraft(id)
+      if (!changed) return respond(res, 404, { error: 'draft-not-found' })
+      return respond(res, 200, { ok: true })
+    },
+  },
+
+  {
+    match: exact('/api/automations/tools', 'POST'),
+    async handle({ req, res, url, path, params }) {
+      if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
+      const body = await readJson(req)
+      const id = typeof body.automationId === 'string' ? body.automationId.trim() : ''
+      const name = typeof body.name === 'string' ? body.name.trim() : ''
+      if (!id) return respond(res, 400, { error: 'automationId-required', message: '自动化任务 id 不能为空' })
+      if (!name) return respond(res, 400, { error: 'name-required', message: '工具名不能为空' })
+      const args = isRecord(body.args) ? body.args : {}
+      const outcome = await opts.automation.invokeTool(id, name, args)
+      if (!outcome.ok) return respond(res, outcome.status, { error: outcome.error, ...(outcome.hint ? { hint: outcome.hint } : {}) })
+      return respond(res, 200, { result: outcome.result })
+    },
+  },
   ]
 }
