@@ -167,7 +167,11 @@ export async function runThroughRuntime(
   const deadline = startedAt + timeoutMs
   const ref = { handle, ticketId, workdir }
   if (!workdir) {
-    deps.logger.error('automation:runtime-workdir-missing', { automationId: automation.id, runtime: runtime.id })
+    deps.logger.error('automation:runtime-workdir-missing', {
+      automationId: automation.id,
+      ...(input.runId ? { runId: input.runId } : {}),
+      runtime: runtime.id,
+    })
     await stopQuietly(runtime, ref, automation, deps, input.runId)
     return {
       status: 'failed',
@@ -183,11 +187,13 @@ export async function runThroughRuntime(
       writeFileSync(target, input.script, 'utf8')
       deps.logger.info('automation:script-staged', {
         automationId: automation.id,
+        ...(input.runId ? { runId: input.runId } : {}),
         scriptPath: target,
       })
     } catch (error) {
       deps.logger.error('automation:script-stage-failed', {
         automationId: automation.id,
+        ...(input.runId ? { runId: input.runId } : {}),
         workdir,
         message: errorMessage(error),
       })
@@ -206,6 +212,7 @@ export async function runThroughRuntime(
   } catch (error) {
     deps.logger.warn('automation:result-clean-failed', {
       automationId: automation.id,
+      ...(input.runId ? { runId: input.runId } : {}),
       workdir,
       message: errorMessage(error),
     })
@@ -365,6 +372,7 @@ async function waitForCompletion(
     } catch (error) {
       deps.logger.warn('automation:status-failed', {
         automationId: automation.id,
+        ...(runId ? { runId } : {}),
         runtime: runtime.id,
         message: errorMessage(error),
       })
