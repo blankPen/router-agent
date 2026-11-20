@@ -21,6 +21,7 @@ export const PUBLISH_ORDER = [
   'infra',
   'runtime',
   'channel',
+  'event',
   'runtime-codex',
   'runtime-herdr',
   'runtime-claude-code',

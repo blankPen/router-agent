@@ -50,6 +50,18 @@ describe('全局状态目录与配置', () => {
     expect(loadConfig(dir).runtime.default).toBe('claude-code')
   })
 
+  it('事件开单上限可配置，0 表示不限', () => {
+    const dir = home()
+    ensureHome(dir)
+    writeFileSync(join(dir, 'config.yaml'), ['events:', '  policy:', '    maxOpenTickets: 5'].join('\n'))
+    expect(loadConfig(dir).events.policy.maxOpenTickets).toBe(5)
+
+    const unlimited = home()
+    ensureHome(unlimited)
+    writeFileSync(join(unlimited, 'config.yaml'), ['events:', '  policy:', '    maxOpenTickets: 0'].join('\n'))
+    expect(loadConfig(unlimited).events.policy.maxOpenTickets).toBe(0)
+  })
+
   it('图片转文本默认开启，可配置关闭与阈值', () => {
     expect(loadConfig(home()).feishu.images).toEqual({ enabled: true, maxChars: 2_000, timeoutMs: 60_000 })
 
@@ -282,6 +294,57 @@ describe('全局状态目录与配置', () => {
     expect(cfg.llm?.contextWindow).toBe(200_000)
     expect(setConfigValue(cfg, 'llm.contextWindow', '0')).toBe(false)
     expect(setConfigValue(cfg, 'nope.nope', 'x')).toBe(false)
+  })
+})
+
+describe('事件来源接收人', () => {
+  it('owner 从 YAML 读入，并允许面板保存', () => {
+    const dir = home()
+    ensureHome(dir)
+    writeFileSync(join(dir, 'config.yaml'), [
+      'events:',
+      '  sources:',
+      '    github-1:',
+      '      enabled: true',
+      '      kind: github',
+      '      repo: blankPen/router-agent',
+      '      owner: pz@example.com',
+    ].join('\n'))
+    const cfg = loadConfig(dir)
+    expect(cfg.events.sources['github-1']?.owner).toBe('pz@example.com')
+
+    const base = loadConfig(home())
+    const result = applyConfigPatch(base, {
+      'events.sources.github-1': {
+        enabled: true,
+        kind: 'github',
+        repo: 'acme/web',
+        events: [],
+        owner: 'ou_pz',
+      },
+    })
+    expect(result.errors).toEqual([])
+    expect(base.events.sources['github-1']?.owner).toBe('ou_pz')
+  })
+
+  it('owner 写成既不是邮箱也不是 open_id 时拒绝保存', () => {
+    const base = loadConfig(home())
+    const result = applyConfigPatch(base, {
+      'events.sources.github-1': {
+        enabled: true,
+        kind: 'github',
+        repo: 'acme/web',
+        events: [],
+        owner: 'pz',
+      },
+    })
+    expect(result.errors).toContainEqual({ path: 'events.sources.github-1', message: expect.stringContaining('邮箱') })
+  })
+
+  it('单独保存 owner 字段时同样校验格式', () => {
+    const base = loadConfig(home())
+    const result = applyConfigPatch(base, { 'events.sources.feishu.owner': 'pz' })
+    expect(result.errors).toContainEqual({ path: 'events.sources.feishu.owner', message: expect.stringContaining('邮箱') })
   })
 })
 

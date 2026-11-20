@@ -1,10 +1,11 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { timingSafeEqual as timingSafeEqualBytes } from 'node:crypto'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { extname, join, normalize, resolve } from 'node:path'
 import type { Store } from '../store/db.js'
 import type { Engine } from '../core/engine.js'
-import { applyConfigPatch, HOT_CONFIG_PREFIXES, isKnownRuntimeId, policyOf, publicConfig, publicDefaults, publicPlugins, requiresRestart, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
+import { applyConfigPatch, HOT_CONFIG_PREFIXES, isKnownRuntimeId, isLoopbackHost, policyOf, projectsForRuntime, publicConfig, publicDefaults, publicPlugins, requiresRestart, writeConfig, type AppConfig, type PolicyResolution } from '../config.js'
 import { InstallStartError, type AcpRuntimeAdmin } from '@router-agent/runtime-acp'
 import { normalizeRuntimeId } from '#runtime/runtimes/catalog.js'
 import { ReportRejectedError } from '#runtime/evidence-gate.js'
@@ -21,6 +22,7 @@ import type { WorkerStateFile } from '#runtime/report-poller.js'
 import type { ResumeHint } from '#runtime/port.js'
 import { isReplyPayload, type ReplyPayload } from '#core/reply.js'
 import type { WorkspaceAdminPort } from '#runtime/workspaces/overview.js'
+import type { EventRule } from '../events/rules.js'
 import { PluginInstallStartError, type PluginPackageAdmin } from './plugin-admin.js'
 import { readLogs } from './log-tail.js'
 import type { LogAssistantQuestion, LogAssistantOverview, LogDiagnosis } from './log-assistant.js'
@@ -89,6 +91,59 @@ export interface LogAssistantPort {
   diagnose(question: LogAssistantQuestion): Promise<LogDiagnosis>
 }
 
+/** 事件总线的面板能力；缺省时事件相关端点返回 404。 */
+export interface EventApiPort {
+  listEvents(filter: { status?: string; priority?: string; sourceId?: string; limit?: number }): unknown[]
+  listSources(): unknown[]
+  /** 面板操作：批准 / 驳回 / 延后 / 忽略 / 重试 / 改优先级。 */
+  apply(eventId: string, action: string, options: { priority?: string; project?: string }): Promise<unknown | null>
+  /** 当前决策策略。 */
+  decision(): { provider: string; confidenceThreshold: number; fallback: string }
+  /** 当前规则集。 */
+  rules(): EventRule[]
+  /** 按规则统计事件命中分布（ruleId → status → 条数）。 */
+  ruleStats(): Record<string, Record<string, number>>
+  /** 自然语言提炼规则草稿；不可用时返回模板。 */
+  compileRule(input: { id: string; eventType: string; intent: string; workflowPrompt?: string }): Promise<EventRule>
+  /** 按状态统计事件条数（面板统计卡用；不受列表 limit 影响）。 */
+  counts(): Record<string, number>
+}
+
+/** 自动化的面板能力；缺省时自动化相关端点返回 404。 */
+export interface AutomationApiPort {
+  /** 任务列表（含调度状态）。 */
+  listTasks(): unknown[]
+  /** 执行记录列表。 */
+  listRuns(automationId?: string): unknown[]
+  /** 单条执行记录；面板轮询用来看执行进度。 */
+  getRun(id: string): unknown | null
+  /** 待确认的对话式草稿。 */
+  listDrafts(): unknown[]
+  /** 忽略一条待确认草稿。 */
+  dismissDraft(id: string): boolean
+  /** 手动触发一次；返回执行记录。 */
+  trigger(id: string): Promise<unknown | null>
+  /** 生成脚本正文；返回脚本文本，生成不了时返回 null。 */
+  generateScript(id: string): Promise<string | null>
+  /**
+   * 生成脚本正文并带上失败原因。
+   *
+   * 面板要能告诉用户到底卡在哪（没配模型 / 超时 / 额度被思考吃光），
+   * 只返回 null 的话只能给出「生成失败，请重试」这种空话。
+   */
+  generateScriptWithReason?(id: string): Promise<{ script: string } | { error: string; reason: string }>
+  /** 从自然语言生成任务草稿（对话式创建入口用）。 */
+  draft(text: string): Promise<unknown | null>
+  /** 调用自动化内置工具；范围与限流在服务层强制。 */
+  invokeTool(automationId: string, name: string, args: Record<string, unknown>): Promise<{
+    ok: boolean
+    status: number
+    error: string
+    hint?: string
+    result?: unknown
+  }>
+}
+
 export interface ApiServerOptions {
   engine: Engine
   store: Store
@@ -116,6 +171,10 @@ export interface ApiServerOptions {
   feishuBot?: ChannelAdmin
   /** 已注册的消息通道；面板据此渲染「渠道配置」的渠道列表。缺省时返回空列表。 */
   channels?: ChannelRegistry
+  /** 事件总线；缺省时事件相关端点返回 404。 */
+  events?: EventApiPort
+  /** 自动化；缺省时自动化相关端点返回 404。 */
+  automation?: AutomationApiPort
   /** 面板「日志」页读取的日志文件；缺省时用 `<home>/logs/router-agent.log`。 */
   logPath?: string
   /** 项目登记：目录选择、Git 探测、clone 与 Orca 仓库登记；缺省时端点返回 404。 */
@@ -140,7 +199,7 @@ export interface ApiServerOptions {
   plugins?: {
     runtimes?: Array<{ id: string; name: string; label: string; hint: string; installHint?: string; installUrl?: string; packageName?: string; deprecated?: boolean; loadedIds?: string[] }>
     channels?: Array<{ id: string; name: string; hint: string; default?: boolean; packageName?: string; loadedIds?: string[] }>
-    failures?: Array<{ kind: 'runtime' | 'channel'; id: string; specifier: string; message: string }>
+    failures?: Array<{ kind: 'runtime' | 'channel' | 'event'; id: string; specifier: string; message: string }>
   }
 }
 
@@ -158,6 +217,11 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
   const localProviders = opts.localProviders ?? {
     discover: () => discoverLocalProviders({ home: homedir() }),
   }
+  // 被拒的来源按「路径 + 来源」记一次：面板开放时浏览器轮询会被反复拒绝，
+  // 逐条打日志会把真正的错误淹没（AGENTS.md 高频路径降噪）。
+  // 用「方法 + 路径」做键而不是原样记路径：路径由客户端决定，无界增长会变成内存问题。
+  const deniedSeen = new Set<string>()
+  const DENIED_SEEN_LIMIT = 200
 
   const server = createServer((req, res) => {
     handle(req, res).catch(error => {
@@ -174,6 +238,29 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://localhost')
     const path = url.pathname
+
+    // 面板开放访问时（配了令牌），API 请求都要带令牌。
+    // 不按来源 IP 放行本机：内网穿透的流量也是从 127.0.0.1 进来的，放行等于没有鉴权。
+    // 静态资源不拦：面板外壳本身不含敏感信息，数据一律走 API。
+    if (path.startsWith('/api/') && !isAuthorized(req, config.server.token)) {
+      const remote = req.socket.remoteAddress ?? ''
+      const key = `${req.method} ${path}`
+      if (!deniedSeen.has(key)) {
+        // 只保留最近的若干条：恶意客户端可以不断换路径，不能让它把内存撑爆。
+        if (deniedSeen.size >= DENIED_SEEN_LIMIT) {
+          const oldest = deniedSeen.values().next().value
+          if (oldest !== undefined) deniedSeen.delete(oldest)
+        }
+        deniedSeen.add(key)
+        logger.warn('api:access-denied', {
+          method: req.method,
+          path,
+          remote,
+          host: String(req.headers.host ?? ''),
+        })
+      }
+      return respond(res, 401, { error: 'token-required', message: '面板已开放访问，请带 x-ra-token 请求头' })
+    }
 
     if (path === '/api/status' && req.method === 'GET') {
       const tickets = opts.store.listTickets({ limit: 500 })
@@ -283,6 +370,208 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
     }
 
     // 工作区批量清理：按运行时分组列出 / 回收已关闭工单的遗留 worktree。
+    // ---------- 事件总线 ----------
+
+    if (path === '/api/events' && req.method === 'GET') {
+      if (!opts.events) return respond(res, 404, { error: 'events-not-supported' })
+      const status = url.searchParams.get('status') ?? undefined
+      const priority = url.searchParams.get('priority') ?? undefined
+      const sourceId = url.searchParams.get('sourceId') ?? undefined
+      const limit = Number(url.searchParams.get('limit'))
+      return respond(res, 200, {
+        events: opts.events.listEvents({
+          ...(status ? { status } : {}),
+          ...(priority ? { priority } : {}),
+          ...(sourceId ? { sourceId } : {}),
+          ...(Number.isFinite(limit) && limit > 0 ? { limit } : {}),
+        }),
+        sources: opts.events.listSources(),
+        decision: opts.events.decision(),
+        rules: opts.events.rules(),
+        ruleStats: opts.events.ruleStats(),
+        counts: opts.events.counts(),
+        // 候选项目：人工批准时用来挑归属项目（事件本身不绑项目）。
+        projects: config.projects.map(project => ({ name: project.name, repo: project.repo })),
+      })
+    }
+
+    if (path === '/api/events/rules' && req.method === 'GET') {
+      if (!opts.events) return respond(res, 404, { error: 'events-not-supported' })
+      return respond(res, 200, { rules: opts.events.rules(), ruleStats: opts.events.ruleStats() })
+    }
+
+    // 自动化：任务列表、执行记录与手动触发。
+    if (path === '/api/automations' && req.method === 'GET') {
+      if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
+      return respond(res, 200, {
+        tasks: opts.automation.listTasks(),
+        runs: opts.automation.listRuns(url.searchParams.get('automationId') ?? undefined),
+        drafts: opts.automation.listDrafts(),
+      })
+    }
+
+    if (path === '/api/automations/runs' && req.method === 'GET') {
+      if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
+      return respond(res, 200, { runs: opts.automation.listRuns(url.searchParams.get('automationId') ?? undefined) })
+    }
+
+    // 单条执行记录：面板轮询这一条就能看出任务跑到哪一步了。
+    if (path.startsWith('/api/automations/runs/') && req.method === 'GET') {
+      if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
+      const id = decodeURIComponent(path.slice('/api/automations/runs/'.length)).trim()
+      const run = id ? opts.automation.getRun(id) : null
+      if (!run) return respond(res, 404, { error: 'automation-run-not-found' })
+      return respond(res, 200, { run })
+    }
+
+    if (path === '/api/automations/trigger' && req.method === 'POST') {
+      if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
+      const body = await readJson(req)
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      if (!id) return respond(res, 400, { error: 'id-required', message: '自动化任务 id 不能为空' })
+      const run = await opts.automation.trigger(id)
+      if (!run) return respond(res, 404, { error: 'automation-not-found' })
+      return respond(res, 201, { run })
+    }
+
+    if (path === '/api/automations/draft' && req.method === 'POST') {
+      if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
+      const body = await readJson(req)
+      const text = typeof body.text === 'string' ? body.text.trim() : ''
+      if (!text) return respond(res, 400, { error: 'text-required', message: '请先描述要创建的自动化' })
+      const draft = await opts.automation.draft(text)
+      // 识别不确定时不自动落库：返回 null 让面板提示用户补充说明。
+      if (!draft) return respond(res, 200, { draft: null, message: '没能确定要创建的自动化，请补充说明。' })
+      return respond(res, 200, { draft })
+    }
+
+    // 生成脚本：显式一步，生成结果要人工在面板确认后才写进任务。
+    if (path === '/api/automations/script' && req.method === 'POST') {
+      if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
+      const body = await readJson(req)
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      if (!id) return respond(res, 400, { error: 'id-required', message: '自动化任务 id 不能为空' })
+      // 有带原因的入口就用它：面板要能说清失败在哪一步。
+      if (opts.automation.generateScriptWithReason) {
+        const outcome = await opts.automation.generateScriptWithReason(id)
+        if ('script' in outcome) return respond(res, 200, { script: outcome.script })
+        return respond(res, 502, { error: outcome.error, message: outcome.reason })
+      }
+      const script = await opts.automation.generateScript(id)
+      if (!script) {
+        return respond(res, 502, { error: 'script:generate-failed', message: '脚本生成失败，请检查模型配置后重试。' })
+      }
+      return respond(res, 200, { script })
+    }
+
+    if (path === '/api/automations/drafts/dismiss' && req.method === 'POST') {
+      if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
+      const body = await readJson(req)
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      if (!id) return respond(res, 400, { error: 'id-required', message: '草稿 id 不能为空' })
+      const changed = opts.automation.dismissDraft(id)
+      if (!changed) return respond(res, 404, { error: 'draft-not-found' })
+      return respond(res, 200, { ok: true })
+    }
+
+    // 自动化工具调用：runtime 里的 agent 通过它操作工单与事件。
+    // 范围与鉴权在服务层强制（工具只允许操作本任务所属项目的数据）。
+    if (path === '/api/automations/tools' && req.method === 'POST') {
+      if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
+      const body = await readJson(req)
+      const id = typeof body.automationId === 'string' ? body.automationId.trim() : ''
+      const name = typeof body.name === 'string' ? body.name.trim() : ''
+      if (!id) return respond(res, 400, { error: 'automationId-required', message: '自动化任务 id 不能为空' })
+      if (!name) return respond(res, 400, { error: 'name-required', message: '工具名不能为空' })
+      const args = isRecord(body.args) ? body.args : {}
+      const outcome = await opts.automation.invokeTool(id, name, args)
+      if (!outcome.ok) return respond(res, outcome.status, { error: outcome.error, ...(outcome.hint ? { hint: outcome.hint } : {}) })
+      return respond(res, 200, { result: outcome.result })
+    }
+
+    if (path === '/api/events/rules/compile' && req.method === 'POST') {
+      if (!opts.events) return respond(res, 404, { error: 'events-not-supported' })
+      const body = await readJson(req)
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      const eventType = typeof body.eventType === 'string' ? body.eventType.trim() : ''
+      const intent = typeof body.intent === 'string' ? body.intent.trim() : ''
+      if (!id || !eventType || !intent) {
+        return respond(res, 400, { error: 'rule-input-required', message: 'id / eventType / intent 不能为空' })
+      }
+      const rule = await opts.events.compileRule({
+        id,
+        eventType,
+        intent,
+        ...(typeof body.workflowPrompt === 'string' ? { workflowPrompt: body.workflowPrompt } : {}),
+      })
+      onEvent({ event: 'api:event-rule-compiled', ruleId: rule.id, eventType: rule.eventType })
+      return respond(res, 200, { rule })
+    }
+
+    const eventRulePath = path.match(/^\/api\/events\/rules(?:\/([^/]+))?$/)
+    if (eventRulePath && (req.method === 'POST' || req.method === 'PUT' || req.method === 'DELETE')) {
+      if (!opts.events) return respond(res, 404, { error: 'events-not-supported' })
+      const routeId = eventRulePath[1] ? decodeURIComponent(eventRulePath[1]) : ''
+      let next: unknown[]
+      let savedId = routeId
+      if (req.method === 'DELETE') {
+        if (!routeId) return respond(res, 400, { error: 'rule-id-required' })
+        if (!config.events.rules.some(rule => rule.id === routeId)) return respond(res, 404, { error: 'rule-not-found' })
+        next = config.events.rules.filter(rule => rule.id !== routeId)
+      } else {
+        const body = await readJson(req)
+        const incoming = isRecord(body.rule) ? body.rule : body
+        const id = typeof incoming.id === 'string' && incoming.id.trim() ? incoming.id.trim() : routeId
+        if (!id) return respond(res, 400, { error: 'rule-id-required' })
+        savedId = id
+        const existing = config.events.rules.find(rule => rule.id === id)
+        const candidate = {
+          ...incoming,
+          id,
+          version: existing ? existing.version + 1 : Number(incoming.version) > 0 ? Number(incoming.version) : 1,
+        }
+        next = [...config.events.rules.filter(rule => rule.id !== id), candidate]
+      }
+      const preview = structuredClone(config)
+      const result = applyConfigPatch(preview, { 'events.rules': next })
+      if (result.errors.length > 0) {
+        logger.warn('config:event-rule-rejected', { errors: result.errors })
+        return respond(res, 400, { error: 'invalid-config', errors: result.errors })
+      }
+      if (config.home && result.changed.length > 0) {
+        try {
+          writeConfig(config.home, preview)
+        } catch (error) {
+          logger.error('config:event-rule-write-failed', { home: config.home, message: errorMessage(error) })
+          return respond(res, 500, { error: 'config-write-failed', message: errorMessage(error) })
+        }
+      }
+      applyConfigPatch(config, { 'events.rules': next })
+      await opts.onConfigChange?.(config, result.changed)
+      const rules = opts.events.rules()
+      const saved = savedId ? rules.find(rule => rule.id === savedId) : undefined
+      onEvent({ event: 'api:event-rules', changed: result.changed, count: rules.length })
+      return respond(res, 200, { ok: true, ...(saved ? { rule: saved } : {}), rules })
+    }
+
+    const eventAction = path.match(/^\/api\/events\/([^/]+)\/action$/)
+    if (eventAction && req.method === 'POST') {
+      if (!opts.events) return respond(res, 404, { error: 'events-not-supported' })
+      const eventId = eventAction[1]!
+      const body = await readJson(req)
+      const action = String(body.action ?? '')
+      if (!['approve', 'reject', 'defer', 'ignore', 'retry', 'priority'].includes(action)) {
+        return respond(res, 400, { error: 'action-invalid', message: `不支持的操作：${action}` })
+      }
+      const result = await opts.events.apply(eventId, action, {
+        ...(typeof body.priority === 'string' ? { priority: body.priority } : {}),
+        ...(typeof body.project === 'string' ? { project: body.project } : {}),
+      })
+      if (!result) return respond(res, 404, { error: 'event-not-found' })
+      onEvent({ event: 'api:event-action', eventId, action })
+      return respond(res, 200, { event: result })
+    }
+
     if (path === '/api/workspaces' && req.method === 'GET') {
       if (!opts.workspaceAdmin) return respond(res, 501, { error: 'workspace-admin-not-supported' })
       return respond(res, 200, await opts.workspaceAdmin.list())
@@ -929,8 +1218,9 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       const body = await readJson(req)
       const kind = body.kind === undefined || body.kind === 'runtime'
         ? 'runtime' as const
-        : body.kind === 'channel' ? 'channel' as const : null
-      if (!kind) return respond(res, 400, { error: 'invalid-kind', message: 'kind 只能是 runtime / channel' })
+        : body.kind === 'channel' ? 'channel' as const
+          : body.kind === 'event' ? 'event' as const : null
+      if (!kind) return respond(res, 400, { error: 'invalid-kind', message: 'kind 只能是 runtime / channel / event' })
       const id = typeof body.id === 'string' ? body.id.trim() : ''
       try {
         const installOpts: { version?: string; packageName?: string; entry?: string } = {}
@@ -963,9 +1253,15 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
   }
 
   const port = opts.port ?? 0
+  const host = config.server.host
+  // 对外监听却没有令牌：宁可起不来，也不能开一个谁都能改配置的口子。
+  if (!isLoopbackHost(host) && !config.server.token) {
+    logger.error('api:access-token-missing', { host })
+    throw new Error(`监听 ${host} 需要配置访问令牌（server.token）`)
+  }
   await new Promise<void>((resolvePromise, reject) => {
     server.once('error', reject)
-    server.listen(port, '127.0.0.1', () => {
+    server.listen(port, host, () => {
       server.off('error', reject)
       resolvePromise()
     })
@@ -983,6 +1279,26 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * 请求是否被允许访问面板 API。
+ *
+ * 令牌为空时不做校验（只在本机监听时的默认形态）；
+ * 令牌非空时，请求头 `x-ra-token` 里必须带对令牌。
+ */
+function isAuthorized(req: IncomingMessage, token: string): boolean {
+  if (!token) return true
+  const header = String(req.headers['x-ra-token'] ?? '')
+  return Boolean(header) && timingSafeEqual(header, token)
+}
+
+/** 定长比较，避免令牌被逐字节试探；长度不同直接判否。 */
+function timingSafeEqual(a: string, b: string): boolean {
+  const left = Buffer.from(a)
+  const right = Buffer.from(b)
+  // timingSafeEqual 要求等长输入，长度不同先判否。
+  return left.length === right.length && timingSafeEqualBytes(left, right)
 }
 
 /** 上报里的三态布尔：true / false / 未声明。字符串兼容旧客户端。 */
@@ -1009,6 +1325,12 @@ function configPayload(
     plugins: publicPlugins(config, plugins),
     detecting: runtimeAdmin?.isDetecting() ?? false,
     identity: identity?.snapshot() ?? emptyIdentityStatus(),
+    // 项目清单：自动化面板要选目标项目，不必再让前端解析配置草稿。
+    projects: projectsForRuntime(config).map(project => ({
+      name: project.name,
+      repo: project.repo,
+      defaultBranch: project.defaultBranch,
+    })),
     // 哪些配置路径保存后立即生效：面板按它给配置项标「立即生效 / 重启生效」。
     hotPaths: [...HOT_CONFIG_PREFIXES],
   }
@@ -1132,3 +1454,4 @@ function legacyReply(raw: unknown): string {
   const value = raw as Record<string, unknown>
   return [String(value.content ?? '').trim(), String(value.url ?? '').trim()].filter(Boolean).join('\n\n')
 }
+

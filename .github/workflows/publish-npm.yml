@@ -278,8 +278,8 @@ jobs:
           esac
           echo "发布前置校验通过：版本 ${pkg_version}，dist-tag ${DIST_TAG}"
 
-      # 先发 SDK 与插件，最后发根包；任一包已存在于同版本时视为失败并中止。
-      # 根包 NPM_TOKEN 还必须能发布 @router-agent/* 作用域（首次发布尤甚）。
+      # 发布前兜底检查：发布计划已按根包与所有组件包判断过版本占用，
+      # 这里再确认一次，防止等待期间被并发发布占用。任一包已存在同版本时中止。
       - name: 检查待发布版本是否已被占用
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

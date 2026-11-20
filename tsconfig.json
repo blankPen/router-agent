@@ -24,6 +24,7 @@
       "#infra/*": ["packages/infra/src/*"],
       "#runtime/*": ["packages/runtime/src/*"],
       "#channel/*": ["packages/channel/src/*"],
+      "#event/*": ["packages/event/src/*"],
       "@router-agent/core": ["packages/core/src/index.ts"],
       "@router-agent/core/*": ["packages/core/src/*"],
       "@router-agent/infra": ["packages/infra/src/index.ts"],
@@ -45,7 +46,9 @@
       "@router-agent/channel": ["packages/channel/src/index.ts"],
       "@router-agent/channel/*": ["packages/channel/src/*"],
       "@router-agent/channel-feishu": ["packages/channel-feishu/src/index.ts"],
-      "@router-agent/channel-feishu/*": ["packages/channel-feishu/src/*"]
+      "@router-agent/channel-feishu/*": ["packages/channel-feishu/src/*"],
+      "@router-agent/event": ["packages/event/src/index.ts"],
+      "@router-agent/event/*": ["packages/event/src/*"]
     }
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "packages/*/src/**/*.ts", "tests/**/*.ts", "scripts/**/*.mjs"]

@@ -55,7 +55,9 @@ const MAX_LINES = 200
 
 /** 插件入口在配置里的路径；错误提示直接告诉用户写哪里。 */
 function entryPath(kind: PluginKind, id: string): string {
-  return kind === 'runtime' ? `runtime.plugins.${id}` : `channels.${id}`
+  if (kind === 'runtime') return `runtime.plugins.${id}`
+  if (kind === 'event') return `events.sources.${id}.plugin`
+  return `channels.${id}`
 }
 
 /** 安装任务的单进程管理器；API 与 CLI 共用。 */
@@ -72,7 +74,9 @@ export class PluginPackageAdmin {
 
   /** 读配置里声明的插件入口；`undefined` 表示没有这个插件。 */
   entryOf(kind: PluginKind, id: string): PluginEntry | undefined {
-    return kind === 'runtime' ? this.opts.config.runtime.plugins?.[id] : this.opts.config.channels?.[id]
+    if (kind === 'runtime') return this.opts.config.runtime.plugins?.[id]
+    if (kind === 'event') return this.opts.config.events.sources?.[id]?.plugin
+    return this.opts.config.channels?.[id]
   }
 
   installJob(jobId: string): PluginInstallJob | undefined {

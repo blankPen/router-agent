@@ -4,7 +4,7 @@ import { basename, dirname, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
 import type { Trigger } from '@router-agent/core/model.js'
 import type { ReplyBlock, ReplyPayload } from '@router-agent/core/reply.js'
-import type { QuestionCardUpdate } from '@router-agent/channel'
+import type { QuestionCardUpdate, SendReceipt } from '@router-agent/channel'
 import type { ChatAdmissionSettings } from '@router-agent/core/config.js'
 import type { CommandRunner } from '@router-agent/infra/process.js'
 import { noopLogger, errorMessage, type Logger } from '@router-agent/infra/logger.js'
@@ -285,6 +285,38 @@ export function parseMessageThreadIds(stdout: string): Map<string, string> {
   return result
 }
 
+/** 一条消息的会话与话题归属；用于新话题建立后登记别名。 */
+export interface FeishuMessageMeta {
+  messageId: string
+  chatId: string
+  threadId: string
+  rootId: string
+  parentId: string
+}
+
+/** 从 `+messages-mget` 的输出里取消息所在会话、话题与根消息。 */
+export function parseMessageMeta(stdout: string, messageId = ''): FeishuMessageMeta | null {
+  let json: unknown
+  try {
+    json = JSON.parse(stdout)
+  } catch {
+    return null
+  }
+  const root = json as Record<string, any>
+  const list = root?.data?.messages ?? root?.messages
+  if (!Array.isArray(list)) return null
+  const messages = list as Record<string, any>[]
+  const message = (messageId ? messages.find(item => String(item?.message_id ?? '') === messageId) : undefined) ?? messages[0]
+  if (!message) return null
+  return {
+    messageId: String(message.message_id ?? messageId),
+    chatId: String(message.chat_id ?? ''),
+    threadId: String(message.thread_id ?? ''),
+    rootId: String(message.root_id ?? ''),
+    parentId: String(message.parent_id ?? ''),
+  }
+}
+
 /** text / post 两种消息取正文；其余类型（图片、文件等）没有可读文本。 */
 function extractMessageText(message: Record<string, any>): string {
   const type = String(message.msg_type ?? 'text')
@@ -531,6 +563,29 @@ export function feishuSendCommand(chatId: string, text: string, idempotencyKey: 
   return ['im', '+messages-send', '--chat-id', chatId, `--text=${text}`, '--idempotency-key', idempotencyKey, '--as', 'bot', '--json']
 }
 
+/** 私聊：target 是用户 open_id（ou_），不是会话 ID。 */
+export function feishuDirectSendCommand(userId: string, text: string, idempotencyKey: string): string[] {
+  return ['im', '+messages-send', '--user-id', userId, `--text=${text}`, '--idempotency-key', idempotencyKey, '--as', 'bot', '--json']
+}
+
+/** 从发送 / 回复的 JSON 回执里取消息、会话与话题 ID；结构不认时不抛错。 */
+export function parseSendReceipt(stdout: string): SendReceipt {
+  try {
+    const doc = JSON.parse(stdout) as Record<string, any>
+    const data = doc?.data && typeof doc.data === 'object' ? doc.data : doc
+    const messageId = String(data?.message_id ?? data?.messageId ?? '')
+    const chatId = String(data?.chat_id ?? data?.chatId ?? '')
+    const threadId = String(data?.thread_id ?? data?.threadId ?? '')
+    return {
+      ...(messageId ? { messageId } : {}),
+      ...(chatId ? { chatId } : {}),
+      ...(threadId ? { threadId } : {}),
+    }
+  } catch {
+    return {}
+  }
+}
+
 /** 单行且没有 Markdown 语法的短回复，直接用纯文本发送，不必为了几个字开卡片。 */
 const SIMPLE_MESSAGE_MAX = 200
 
@@ -640,14 +695,23 @@ export function fitIdempotencyKey(key: string, max = 50): string {
 export class FeishuSender {
   constructor(private runner: CommandRunner, private logger: Logger = noopLogger) {}
 
-  async reply(messageId: string, text: string, idempotencyKey: string): Promise<void> {
+  async reply(messageId: string, text: string, idempotencyKey: string): Promise<SendReceipt> {
     const res = await this.runner.run(feishuReplyCommand(messageId, text, fitIdempotencyKey(idempotencyKey)))
     if (res.code !== 0) throw new Error(`feishu:send-failed: ${res.stderr.slice(0, 300)}`)
+    return parseSendReceipt(res.stdout)
   }
 
-  async send(chatId: string, text: string, idempotencyKey: string): Promise<void> {
+  async send(chatId: string, text: string, idempotencyKey: string): Promise<SendReceipt> {
     const res = await this.runner.run(feishuSendCommand(chatId, text, fitIdempotencyKey(idempotencyKey)))
     if (res.code !== 0) throw new Error(`feishu:send-failed: ${res.stderr.slice(0, 300)}`)
+    return parseSendReceipt(res.stdout)
+  }
+
+  /** 按 open_id 发私聊；返回实际落点，供上层把工单绑到该私聊的话题。 */
+  async sendDirect(userId: string, text: string, idempotencyKey: string): Promise<SendReceipt> {
+    const res = await this.runner.run(feishuDirectSendCommand(userId, text, fitIdempotencyKey(idempotencyKey)))
+    if (res.code !== 0) throw new Error(`feishu:send-failed: ${res.stderr.slice(0, 300)}`)
+    return parseSendReceipt(res.stdout)
   }
 
   /** 以互动卡片发送 Markdown；卡片失败时自动降级为 post 富文本。 */

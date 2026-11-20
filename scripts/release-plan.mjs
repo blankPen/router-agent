@@ -19,7 +19,8 @@
  *      - 拿不到推送前的版本（force push / 首推）→ 当前版本未发布就发布，不自动升版。
  *      - 改动文件都不进 npm 包（文档 / 测试 / CI 等）→ 跳过，避免无意义地刷版本号。
  *      - 当前版本还没发出去（例如上一次发布失败）→ 先补发当前版本，不跳号。
- *      - 其余情况自动升版，并跳过 npm 上已被占用的版本（只跳过确实已发布的版本）。
+ *      - 其余情况自动升版，并跳过 npm 上已被占用的版本
+ *        （根包或任一组件包已发布都算占用，避免 npm 传播延迟导致同版本重复计划）。
  *
  * 输出：写到 `$GITHUB_OUTPUT`（should_publish / release_version / apply_version /
  * dist_tag / writeback / reason），有 `$GITHUB_STEP_SUMMARY` 时同时写一段可读的发布计划。
@@ -28,6 +29,7 @@ import { execFileSync } from 'node:child_process'
 import { appendFileSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { PUBLISH_ORDER, packagePath } from './publish-packages.mjs'
 
 /** 提交信息里带这个标记就跳过自动发版。 */
 export const SKIP_KEYWORD = '[skip release]'
@@ -453,16 +455,35 @@ function readPackage() {
   return { name: pkg.name, version: pkg.version }
 }
 
-/** 用 npm view 判断版本是否已发布；网络异常按「未发布」处理，与原有工作流一致。 */
-function publishedChecker(name) {
-  return version => {
-    try {
-      execFileSync('npm', ['view', `${name}@${version}`, 'version'], { stdio: 'ignore' })
-      return true
-    } catch {
-      return false
-    }
+/** 读取某个包已发布的所有版本；网络异常按「未发布」处理，与原有工作流一致。 */
+function npmVersions(name) {
+  try {
+    const stdout = execFileSync('npm', ['view', name, 'versions', '--json'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    const parsed = JSON.parse(stdout)
+    return Array.isArray(parsed) ? parsed.map(String) : [String(parsed)]
+  } catch {
+    return []
   }
+}
+
+/**
+ * 同一版本会同时发布到所有包，任一个包已存在该版本就说明版本已被占用。
+ * 根包最后发布、在 npm 上可见最晚；只查根包会把「上一轮组件包已可见」误判为未占用。
+ */
+export function createPublishedChecker(names, listVersions = npmVersions) {
+  const published = new Set(names.flatMap(name => listVersions(name)))
+  return version => published.has(version)
+}
+
+/** 根包 + 所有参与发布的组件包。 */
+function releasePackageNames(rootName) {
+  return [
+    ...PUBLISH_ORDER.map(name => JSON.parse(readFileSync(packagePath(name), 'utf8')).name),
+    rootName,
+  ]
 }
 
 function writeOutput(key, value) {
@@ -534,7 +555,7 @@ function main() {
       tagName: process.env.PLAN_TAG_NAME || null,
       tagBranches: readLines(process.env.PLAN_TAG_BRANCHES_FILE),
     },
-    publishedChecker(name),
+    createPublishedChecker(releasePackageNames(name)),
   )
 
   writeOutput('should_publish', plan.shouldPublish)

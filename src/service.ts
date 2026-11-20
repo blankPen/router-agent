@@ -7,7 +7,7 @@ import type { ReplyBlock, ReplyPayload, ReplyQuestion } from '#core/reply.js'
 import { choiceBlockOf } from '#core/reply.js'
 import type { Store } from './store/db.js'
 import type { AppConfig, RetentionSettings, WorkspaceSettings } from './config.js'
-import { DEFAULT_CHAT_MEMBERS } from './config.js'
+import { DEFAULT_CHAT_MEMBERS, eventNotifyChat } from './config.js'
 import { STAGE_LABELS } from '#core/stage.js'
 import { WorkerRuntimeError, type WorkerRuntime, type WorkerContext, type SessionEvent, type WorkerRef, type AgentStatus, type ResumeHint } from '#runtime/port.js'
 import { AgentLoop } from './router/agent-loop.js'
@@ -109,8 +109,12 @@ export interface RouterServiceOptions {
   staleAfterMs?: number
   /** 注入触发源（服务层由通道适配器接入）。 */
   onTrigger?: (trigger: Trigger) => void
+  /** 事件工单开工前的私聊通知与会话绑定；不传时保持原有群通知路径。 */
+  kickoff?: { start(ticket: Ticket): Promise<unknown> }
   /** Claude Code 会话记录目录；默认 ~/.claude/projects，测试可注入。 */
   claudeProjectsDir?: string
+  /** 对话式创建自动化：生成草稿并回一段确认话；返回 null 表示不接管。 */
+  automationDraft?: (trigger: Trigger) => Promise<string | null>
 }
 
 /** 进展游标的起点标记：表示「从派工这一刻开始」，之前没有需要同步的报告。 */
@@ -175,6 +179,26 @@ function zombieCursorKey(ticketId: string): string {
 /** 未 ack 提醒水位：同一条输入只提醒一次。 */
 function unackedNoticeCursorKey(inputId: string): string {
   return `input:unacked-notice:${inputId}`
+}
+
+/**
+ * 计算一条外发消息的目标。
+ *
+ * 飞书 reply 的 message_id 只能是 om_/omt_ 开头的消息 ID；事件工单的 threadId
+ * 形如 `event:github:...#4225:failure`，直接取尾段会被当成非法 message_id（tk-79）。
+ */
+export function outboxTargetOf(
+  ticket: Pick<Ticket, 'channelId' | 'chatId' | 'threadId'>,
+  fallbackChatId: string,
+): { channelId: string; threadId: string } | null {
+  const channelKind = ticket.channelId ?? DEFAULT_CHANNEL_ID
+  let threadId = ticket.threadId
+  if (channelKind === DEFAULT_CHANNEL_ID) {
+    const tail = ticket.threadId.split(':').at(-1) ?? ''
+    threadId = /^(om_|omt_)/.test(tail) ? tail : ''
+  }
+  const channelId = ticket.chatId || (channelKind === DEFAULT_CHANNEL_ID && !threadId ? fallbackChatId : '')
+  return channelId || threadId ? { channelId, threadId } : null
 }
 
 /** 单条输入最多投递次数；超过转人工，不再无限重投。 */
@@ -531,6 +555,7 @@ export class RouterService {
   private git: CommandRunner
   private sender: OutboundSender
   private readonly channels?: ChannelRegistry
+  private readonly kickoff?: { start(ticket: Ticket): Promise<unknown> }
   /** 卡片回调事件流没启动成功的通道；auto 模式下选择题退化为序号回复。 */
   private readonly cardActionsUnavailable = new Set<string>()
   /** tick 与卡片回调共用一条投递队列，避免同一 Input 被并发投递两次。 */
@@ -543,6 +568,10 @@ export class RouterService {
   private claudeProjectsDir?: string
   private idle = new Map<string, { turn: number; nudgedAt: number | null; stale: boolean; blocked?: boolean; transferred?: boolean }>()
   private ticking = false
+  /** 在途周期的 promise；停服时等它收尾，避免 DB 被提前关掉。 */
+  private tickDone: Promise<void> | null = null
+  /** 停服标记：置位后不再启动新周期。 */
+  private stopping = false
   /** 每条输入已经投递过几次；用于区分并发去重与串行重投。 */
   private deliveryAttempts = new Map<string, number>()
   /** queued/rejected 后的退避截止时间，避免每秒拉起一次 Agent 查询。 */
@@ -634,6 +663,7 @@ export class RouterService {
             },
           }
         : {}),
+      ...(opts.automationDraft ? { automationDraft: opts.automationDraft } : {}),
     })
     this.poller = opts.poller ?? new ReportPoller({
       workersDir: join(opts.config.home, 'workers'),
@@ -645,6 +675,7 @@ export class RouterService {
     })
     this.sender = opts.sender ?? { send: async () => {} }
     this.channels = opts.channels
+    this.kickoff = opts.kickoff
     this.effects = opts.effects ?? new EffectsProcessor({
       store: opts.store,
       sender: this.sender,
@@ -1021,13 +1052,15 @@ export class RouterService {
 
   /** 一个完整周期：研判 → 上报 → Effects → 派工 → 投递。周期之间串行，避免重叠。 */
   async runOnce(): Promise<void> {
+    if (this.stopping) return
     if (this.ticking) return
     this.ticking = true
-    try {
-      await this.runCycle()
-    } finally {
+    const done = this.runCycle().finally(() => {
       this.ticking = false
-    }
+      this.tickDone = null
+    })
+    this.tickDone = done
+    await done
   }
 
   private async runCycle(): Promise<void> {
@@ -1040,6 +1073,7 @@ export class RouterService {
 
   async start(): Promise<void> {
     if (this.running) return
+    this.stopping = false
     this.running = true
     // 闲置治理计时基线：服务启动前就已经闲置的工单不补发通知，计时从启动时刻重新开始。
     const baseline = Date.parse(this.clock.now())
@@ -1072,10 +1106,19 @@ export class RouterService {
     if (this.workspace.enabled) every(this.workspace.sweepMinutes * 60_000, () => this.sweepClosedWorkspaces())
   }
 
-  stop(): void {
+  /**
+   * 停服。
+   *
+   * 停掉定时器后等在途周期收尾。调用方必须在 await 本方法之后再 `store.close()`，
+   * 否则在途周期会撞上已关闭的 DB，报 "database is not open"（tk-79）。
+   */
+  async stop(): Promise<void> {
     for (const timer of this.timers) clearInterval(timer)
     this.timers = []
     this.running = false
+    this.stopping = true
+    // 等在途周期收尾：它可能正在写 outbox / 改工单状态，早关库会丢状态。
+    await this.tickDone?.catch(() => {})
     void this.decisionEngine.disposeAllSessions?.().catch(() => {})
   }
 
@@ -1173,6 +1216,20 @@ export class RouterService {
   }
 
   private async launch(ticket: Ticket): Promise<Assignment> {
+    // 事件工单在真正派工前先私聊用户并把工单绑到话题；失败只降级通知，不能挡住派工。
+    if (this.kickoff && ticket.source.startsWith('event:')) {
+      try {
+        await this.kickoff.start(ticket)
+        ticket = this.store.getTicket(ticket.id) ?? ticket
+      } catch (error) {
+        this.logger.warn('event:kickoff-failed', {
+          ticketId: ticket.id,
+          sourceId: ticket.source.slice('event:'.length),
+          stage: 'launch',
+          detail: errorMessage(error).slice(0, 300),
+        })
+      }
+    }
     // 旧工单沿用创建时的运行时；新工单用默认运行时。
     const latest = this.store.latestAssignment(ticket.id)
     const runtimeId = latest?.runtimeId && this.runtimes.has(latest.runtimeId)
@@ -1452,6 +1509,12 @@ export class RouterService {
           this.store.expireInput(ticket.id, input.id)
           this.deliveryAttempts.delete(input.id)
           this.engine.setAttention(ticket.id, `输入 ${input.id} 已重投 ${MAX_DELIVERY_ATTEMPTS} 次仍未成功，请人工确认`)
+          this.notify(
+            ticket,
+            `工单「${ticket.title}」里有一条补充要求已重试 ${MAX_DELIVERY_ATTEMPTS} 次仍未送达 worker，已转人工处理。`
+            + `请在本话题确认 worker 会话是否还在，或直接补充一条新的要求。`,
+            `deliver-giveup:${ticket.id}:${input.id}`,
+          )
           this.logger.warn('input:redeliver-giveup', { ticketId: ticket.id, inputId: input.id, attempt: MAX_DELIVERY_ATTEMPTS })
           continue
         }
@@ -1525,6 +1588,15 @@ export class RouterService {
           if (await this.workerGone(assignment)) {
             this.handleLostWorker(ticket, 'input-deliver-failed')
             break
+          }
+          // 第一次失败就让用户知道：后面还有退避重试，不能静默等到 5 次才转人工。
+          if (attempt === 1) {
+            this.notify(
+              ticket,
+              `工单「${ticket.title}」里有一条补充要求暂时没送到 worker（第 1 次尝试失败）。`
+              + `Router 会自动重试；连续失败会转人工，并在本话题通知你。`,
+              `deliver-failed:${ticket.id}:${input.id}`,
+            )
           }
           this.logger.warn('input:deliver-failed', {
             ticketId: ticket.id,
@@ -1668,6 +1740,10 @@ export class RouterService {
 
       // keep：用 lastActivityAt 判断是否 idle；没有时间戳就不主动 nudge。
       const lastActivity = Date.parse(status?.lastActivityAt ?? '')
+      if (Number.isFinite(lastActivity) && nowMs - lastActivity <= this.idleAfterMs) {
+        // 唤醒之后又有输出：清掉旧 nudgedAt，否则活动一停就会按很久以前的时间直接判 stale（tk-77）。
+        this.noteWorkerActivity(ticket, lastActivity)
+      }
       if (!Number.isFinite(lastActivity) || nowMs - lastActivity <= this.idleAfterMs) continue
 
       if (!current.nudgedAt) {
@@ -1686,6 +1762,25 @@ export class RouterService {
         this.markIdleStale(ticket, nowMs)
       }
     }
+  }
+
+  /**
+   * 观察到 worker 仍有新活动：清理唤醒/失联标记。
+   *
+   * stale 是「唤醒后持续无响应」，时间应从最后一跳活动算起，不能一直沿用第一次 nudge 的时间。
+   */
+  private noteWorkerActivity(ticket: Ticket, atMs: number): void {
+    const state = this.idle.get(ticket.id)
+    if (!state) return
+    if (!state.stale && (state.nudgedAt === null || !Number.isFinite(atMs) || atMs <= state.nudgedAt)) return
+    const wasStale = state.stale
+    state.nudgedAt = null
+    state.stale = false
+    if (!wasStale) return
+    // 已经通知过「无响应」：worker 回来了，解除转人工与僵尸水位，避免后续一直被当成失联。
+    this.store.deleteCursor(zombieCursorKey(ticket.id))
+    this.engine.clearAttention(ticket.id)
+    this.log('idle:resumed', ticket.id, {})
   }
 
   private markIdleStale(ticket: Ticket, nowMs: number): void {
@@ -2268,10 +2363,13 @@ export class RouterService {
       return
     }
     // 上报有 HTTP 与 state.json 两条通道；重启后 poller 会重读旧文件，
-    // 用「上报时间早于最后一条已入库报告」把它挡掉，避免旧内容被重复投递。
+    // 旧内容要挡掉，避免重复投递。
+    // 去重键是 turn 优先、时间戳兜底：worker 写 state.json 与通过 HTTP 上报是两条独立路径，
+    // 两条通道的时间戳本来就可能对不上，只看时间戳会把更新的回合误杀（tk-85 评审 S-05）。
+    // 同一回合内多次上报是允许的（追问可能分几次回答），靠时间戳区分。
     const latestReport = this.store.latestReport(ticket.id)
-    const incomingAt = Date.parse(state.updatedAt)
-    if (latestReport && Number.isFinite(incomingAt) && Date.parse(latestReport.at) > incomingAt) {
+    const incomingTurn = Number(state.turn)
+    if (latestReport && this.isStaleReport(latestReport, incomingTurn, state.updatedAt)) {
       this.logger.info('report:stale-ignored', { ticketId: ticket.id, incoming: state.updatedAt, latest: latestReport.at })
       return
     }
@@ -2341,6 +2439,24 @@ export class RouterService {
     if (state.state === 'blocked' && !reply) {
       this.notify(ticket, `工单「${ticket.title}」卡住了：${state.humanAction ?? state.summary}`, `blocked:${ticket.id}:${reportKey}`)
     }
+  }
+
+  /**
+   * 判断这条上报是不是已经被收过了。
+   *
+   * 回合数比库里最新的小 → 一定是旧的。
+   * 回合数一样 → 靠上报时间判断：worker 同一回合可能分几次回答，
+   * 时间戳更晚的才算新的。
+   * 回合数更大 → 一定比库里新，不能因为时间戳对不上就丢掉（tk-85 评审 S-05）。
+   */
+  private isStaleReport(latest: { turn: number; at: string }, incomingTurn: number, incomingAt: string): boolean {
+    if (!Number.isFinite(incomingTurn)) return false
+    if (incomingTurn < latest.turn) return true
+    if (incomingTurn > latest.turn) return false
+    const incoming = Date.parse(incomingAt)
+    const stored = Date.parse(latest.at)
+    if (!Number.isFinite(incoming) || !Number.isFinite(stored)) return false
+    return stored > incoming
   }
 
   // ---------- 工单进展定时同步 ----------
@@ -2459,6 +2575,11 @@ export class RouterService {
       snippet = extractTerminalSnippet(output.lines)
       source = 'terminal'
       lastActivityAt = status?.lastActivityAt ? Date.parse(status.lastActivityAt) : Number.NaN
+    }
+
+    if (Number.isFinite(lastActivityAt) && nowMs - lastActivityAt <= this.idleAfterMs) {
+      // 会话文件有新内容说明 worker 还活着：同样要重置 stale 计时（tk-77 的会话在动，终端时间却没更新）。
+      this.noteWorkerActivity(ticket, lastActivityAt)
     }
 
     const snippetHash = snippetFingerprint(snippet)
@@ -2616,6 +2737,13 @@ let repo = ticket.repo
       const updated = this.engine.updatePr(ticket.id, { number: info.number, url: info.url || ticket.prUrl, state: info.state })
       if (before !== info.state) this.log('pr:state', ticket.id, { from: before, to: info.state })
 
+      // PR 有新进展说明工单还在往前走：解除陈旧的待答问题，别让它一直钉在 blocked。
+      // 之前 stale / zombie 两条转人工路径都只写 attention 不清除，工单从此不会自愈（tk-85 评审 S-10）。
+      if (before !== info.state && this.store.getAttention(ticket.id)) {
+        this.engine.clearAttention(ticket.id)
+        this.log('attention:cleared', ticket.id, { reason: 'pr-progress', from: before, to: info.state })
+      }
+
       // PR 终态不等于会话结束：合并或关闭后话题照常开着，用户追问还能接着推进。
       // 只有巡查判定长期无进展、或用户主动关闭时才会结束会话。
       if (before !== info.state && (info.state === 'merged' || info.state === 'closed') && updated.stage !== 'done') {
@@ -2637,6 +2765,12 @@ let repo = ticket.repo
     const now = this.clock.now()
     if (this.store.getCursor(key) !== null) return
     this.store.setCursor(key, now, now)
+    this.notify(
+      ticket,
+      `工单「${ticket.title}」的 PR #${prNumber} 状态查询没有结果，Router 暂时无法确认它是否已合并。`
+      + `会继续重试；如果一直查不到，请人工检查 PR 链接或仓库访问权限。`,
+      key,
+    )
     this.logger.warn('pr:track-failed', {
       ticketId: ticket.id,
       prNumber,
@@ -2648,6 +2782,12 @@ let repo = ticket.repo
   // ---------- 重启对账 ----------
 
   async recover(): Promise<void> {
+    // 重启后先把中断在 evaluating 的 Trigger 放回队列：领取时已经把它从 pending 改成
+    // evaluating，服务在研判途中退出就没人改回去了，消息会被永久吞掉（tk-79）。
+    const released = this.store.resetEvaluating()
+    if (released > 0) {
+      this.logger.warn('recover:trigger-released', { released })
+    }
     for (const ticket of this.store.listOpenTickets()) {
       const assignment = this.store.latestAssignment(ticket.id)
       const runtime = assignment ? this.runtimeFor(assignment) : null
@@ -2848,6 +2988,11 @@ let repo = ticket.repo
 
   /** 长内容按行切块并顺序进入 outbox，避免超过飞书单条消息长度。 */
   private queueLong(ticket: Ticket, header: string, content: string, key: string): void {
+    const target = outboxTargetOf(ticket, eventNotifyChat(this.config, ticket.repo))
+    if (!target) {
+      this.logger.warn('outbox:unroutable', { ticketId: ticket.id, key, threadId: ticket.threadId })
+      return
+    }
     const body = header ? `${header}\n\n${content}` : content
     const chunks = splitMessage(body, 3500)
     const base = Date.parse(this.clock.now())
@@ -2857,8 +3002,8 @@ let repo = ticket.repo
         id: `ob_${`${key}:${index}`.replace(/[^a-zA-Z0-9:_-]/g, '_')}`,
         key: `${key}:${index}`,
         channelKind: ticket.channelId ?? DEFAULT_CHANNEL_ID,
-        channelId: ticket.chatId,
-        threadId: ticket.threadId.split(':').at(-1) ?? '',
+        channelId: target.channelId,
+        threadId: target.threadId,
         text: `${chunk}${suffix}`,
         now: Number.isFinite(base) ? new Date(base + index).toISOString() : this.clock.now(),
       })
@@ -2867,13 +3012,18 @@ let repo = ticket.repo
 
   /** 结构化回复只发一条：卡片内部自行排版，切块会拆散图片与按钮。 */
   private queuePayload(ticket: Ticket, payload: ReplyPayload, key: string, turn: number): void {
+    const target = outboxTargetOf(ticket, eventNotifyChat(this.config, ticket.repo))
+    if (!target) {
+      this.logger.warn('outbox:unroutable', { ticketId: ticket.id, key, threadId: ticket.threadId })
+      return
+    }
     const prepared = this.prepareQuestion(ticket, payload, turn)
     this.store.enqueueOutbox({
       id: `ob_${key.replace(/[^a-zA-Z0-9:_-]/g, '_')}`,
       key,
       channelKind: ticket.channelId ?? DEFAULT_CHANNEL_ID,
-      channelId: ticket.chatId,
-      threadId: ticket.threadId.split(':').at(-1) ?? '',
+      channelId: target.channelId,
+      threadId: target.threadId,
       text: prepared.fallbackText,
       blocks: prepared.blocks,
       now: this.clock.now(),
@@ -2934,12 +3084,17 @@ let repo = ticket.repo
   }
 
   private queue(ticket: Ticket, text: string, key: string): void {
+    const target = outboxTargetOf(ticket, eventNotifyChat(this.config, ticket.repo))
+    if (!target) {
+      this.logger.warn('outbox:unroutable', { ticketId: ticket.id, key, threadId: ticket.threadId })
+      return
+    }
     this.store.enqueueOutbox({
       id: `ob_${key.replace(/[^a-zA-Z0-9:_-]/g, '_')}`,
       key,
       channelKind: ticket.channelId ?? DEFAULT_CHANNEL_ID,
-      channelId: ticket.chatId,
-      threadId: ticket.threadId.split(':').at(-1) ?? '',
+      channelId: target.channelId,
+      threadId: target.threadId,
       text,
       now: this.clock.now(),
     })
