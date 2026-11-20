@@ -27,6 +27,9 @@ export type AddressMode = 'mention' | 'direct' | 'none'
  * - evaluating：已被认领，正在处理；
  * - evaluated：已给出结论（决策记录在 decisions 表里）；
  * - fanned_out：已扇出给订阅该话题的工单。
+ *
+ * 只有这四个值：早期版本里的 `filtered` / `owned` 从未被写入过，
+ * 已删除，不要按「还有别的处置路径」去猜。
  */
 export type TriggerDisposition = 'pending' | 'evaluating' | 'evaluated' | 'fanned_out'
 

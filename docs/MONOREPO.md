@@ -133,6 +133,24 @@ export default plugin
    `packages/channel/src/plugins/loader.ts` 的 `DEFAULT_CHANNEL_PLUGINS`；
 5. 在根 `package.json` 加同版本依赖，保证装根包时能解析到内置插件。
 
+### 容易漏的几步
+
+上面 5 步之外，这几件也必须做，否则「代码写完了但用不上」：
+
+| 漏了什么 | 后果 | 怎么补 |
+|-|-|-|
+| 没在 `packages/runtime/src/runtimes/catalog.ts` 的 `WORKER_RUNTIMES` 登记 | 面板里看不到这个运行时，`normalizeRuntimeId` 也认不出 | 在该数组里加一项 |
+| 改 `packages/*/src` 后没跑 `pnpm build` | **CLI 用的还是旧产物**——根 `package.json` 的 `imports` 指向 `dist/`，不是源码 | 提交前跑 `pnpm build` |
+| 版本号没同步到 11 个包 | `pnpm publish` 或安装时会版本不一致 | `packages/` 下共 11 个包（`core` `infra` `runtime` `channel` + 6 个 runtime 包 + 飞书 channel 包），版本号要全部一致 |
+
+### 校验清单
+
+```bash
+pnpm typecheck    # 含 packages/*
+pnpm test         # 含 packages/*/tests/
+pnpm build        # 改了 packages/*/src 后必跑
+```
+
 ## 构建与发布
 
 ```bash
