@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, existsSync, writeFileSync } from 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { OrcaRuntime, OrcaCommandError, parseCreateResult, summarizeArgs } from '@router-agent/runtime-orca'
-import { claudeProjectSlug, describeToolInfo, describeToolUse } from '#runtime/agents/claude.js'
+import { claudeProjectSlug, describeToolInfo, describeToolUse } from '#runtime/agent-sessions/claude.js'
 import { worktreeCreate, terminalSend, terminalClose, terminalList, terminalRead, worktreeRemove, agentLaunch, repoAdd } from '@router-agent/runtime-orca'
 import type { CommandRunner, CommandResult } from '@router-agent/runtime-orca'
 import type { Assignment, Ticket } from '#core/model.js'

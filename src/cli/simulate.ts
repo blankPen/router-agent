@@ -5,7 +5,7 @@ import { policyOf, type AppConfig, type PolicyResolution } from '../config.js'
 import { Store } from '../store/db.js'
 import { AgentLoop } from '../router/agent-loop.js'
 import { dispatchSettingsOf } from '../router/dispatch.js'
-import type { DecisionAudit, DecisionEngine } from '../router/decision-engine.js'
+import type { AssessmentAudit, DecisionEngine } from '../router/decision-engine.js'
 
 export interface SimulateOptions {
   text: string
@@ -25,7 +25,7 @@ export interface SimulateResult {
   /** 这一轮排进 Outbox 的回复（话题开场 / 礼貌回复），便于本地验证话术。 */
   replies: string[]
   /** 本轮研判审计（含耗时 / token / 工具调用）。 */
-  audits: DecisionAudit[]
+  audits: AssessmentAudit[]
 }
 
 /**
@@ -51,7 +51,7 @@ export async function simulate(
   try {
     const engine = new Engine({ store, policy: policyOf(deps.config, deps.identity) })
     const decisionEngine = typeof deps.decisionEngine === 'function' ? deps.decisionEngine(store, engine) : deps.decisionEngine
-    const audits: DecisionAudit[] = []
+    const audits: AssessmentAudit[] = []
     const loop = new AgentLoop({
       engine,
       decisionEngine,

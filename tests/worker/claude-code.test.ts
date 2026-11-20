@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest'
 import type { CommandResult, CommandRunner } from '#infra/process.js'
 import { ClaudeCodeRuntime, allowedToolsFrom } from '@router-agent/runtime-claude-code'
 import type { WorkerContext, WorkerRef } from '#runtime/port.js'
-import { claudeProjectSlug } from '#runtime/agents/claude.js'
+import { claudeProjectSlug } from '#runtime/agent-sessions/claude.js'
 import { parseGitHubRepo } from '#runtime/workspaces/git-worktree.js'
 
 interface Call {

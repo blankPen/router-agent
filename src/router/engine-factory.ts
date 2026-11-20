@@ -9,7 +9,13 @@ import { SqliteSessionPersistence } from './session-persistence.js'
 import { RouterToolbox, type RouterToolboxDeps } from './tools.js'
 import type { Logger } from '#infra/logger.js'
 import { effectiveAdmins } from '#core/policy.js'
-import { DecisionAgent, JevDecisionProvider, LlmDecisionProvider, type DecisionProvider } from './decision/agent.js'
+import {
+  DecisionAgent,
+  JevDecisionProvider,
+  LlmDecisionProvider,
+  type ClassificationAudit,
+  type DecisionProvider,
+} from './decision/agent.js'
 import type { IntakeEngine } from './intake-engine.js'
 
 export interface DecisionEngineFactoryOptions {
@@ -62,6 +68,11 @@ export function createDecisionEngine(opts: DecisionEngineFactoryOptions): PiDeci
 export interface DecisionAgentFactoryOptions extends DecisionEngineFactoryOptions {
   intakeEngine?: IntakeEngine
   logger?: Logger
+  /**
+   * 决策层审计出口：每分类一次回调一次。
+   * 不传则分类结论只进日志（`decision:verdict` / `decision:failed`），不落审计文件。
+   */
+  onAudit?: (audit: ClassificationAudit) => void
 }
 
 /**
@@ -103,6 +114,7 @@ export function createDecisionAgent(opts: DecisionAgentFactoryOptions): Decision
     hasBoundTicket: trigger => Boolean(trigger.unaddressedAdmitted),
     isCommand: text => /^\s*(?:@\S+\s+)?\/new\s*$/.test(text),
     logger: opts.logger,
+    ...(opts.onAudit ? { onAudit: opts.onAudit } : {}),
   })
 }
 

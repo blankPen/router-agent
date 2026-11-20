@@ -23,14 +23,14 @@ export { buildWorkerPrompt, buildNeutralContract, buildWorkerBrief } from './spe
 export type { WorkerBriefInput } from './spec/index.js'
 export type { WorkerSkillSnapshot } from './spec/reader.js'
 export { GitWorktreeProvider } from './workspaces/git-worktree.js'
-export { AGENT_PROFILES, agentProfileOf, resolveSession, resolveSessionId } from './agents/registry.js'
+export { AGENT_PROFILES, agentProfileOf, resolveSession, resolveSessionId } from './agent-sessions/registry.js'
 export {
   claudeTranscriptPath,
   readClaudeSession,
   readTranscriptSince,
   transcriptSize,
-} from './agents/claude.js'
-export { ensureClaudeBackgroundReady } from './agents/claude-trust.js'
+} from './agent-sessions/claude.js'
+export { ensureClaudeBackgroundReady } from './agent-sessions/claude-trust.js'
 export { decidePermission, isAllowed, shellAllowed, commandOf } from './permissions.js'
 export type { AcpPermissionOption, AcpToolCallInfo, AcpToolKind } from './permissions.js'
 export * from './errors.js'

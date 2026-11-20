@@ -34,7 +34,13 @@ export interface DecisionProviderContext {
   admission: AdmissionVerdict
 }
 
-export interface DecisionAudit {
+/**
+ * 每次**决策层分类**（普通成员消息的 Jev / LLM 分类）的审计记录。
+ *
+ * 与研判层的 `AssessmentAudit`（`../decision-engine.js`）不是同一个东西：
+ * 决策层产出 `DecisionVerdict`，研判产出 `DecisionProposal`。
+ */
+export interface ClassificationAudit {
   triggerId: string
   provider: string
   outcome: 'dropped' | 'bypassed' | 'verdict' | 'failed'
@@ -61,7 +67,7 @@ export interface DecisionAgentOptions {
   /** 命令口令（/new、确认派单、驳回等）；缺省只认 /new 与 intake 口令。 */
   isCommand?: (text: string) => boolean
   logger?: Logger
-  onAudit?: (audit: DecisionAudit) => void
+  onAudit?: (audit: ClassificationAudit) => void
   /** 毫秒时钟，测试注入；缺省用 Date.now。 */
   now?: () => number
 }
@@ -74,7 +80,7 @@ export class DecisionAgent {
   private hasBoundTicketOf?: (trigger: Trigger) => boolean
   private isCommandOf: (text: string) => boolean
   private logger: Logger
-  private onAudit?: (audit: DecisionAudit) => void
+  private onAudit?: (audit: ClassificationAudit) => void
   private now: () => number
 
   constructor(opts: DecisionAgentOptions) {
@@ -144,7 +150,7 @@ export class DecisionAgent {
     }
   }
 
-  private audit(audit: DecisionAudit): void {
+  private audit(audit: ClassificationAudit): void {
     this.onAudit?.(audit)
   }
 }

@@ -103,7 +103,9 @@ WorkerRuntime 端口 ── OrcaRuntime（默认）/ ClaudeCodeRuntime / AcpRunt
 2. **工具白名单**：不给 shell / 文件 / MCP / 通用 skill。
 3. **写操作有界**：查询工具只读；清理工具只经 `Engine` 关单、把 workspace 回收排进 `Effects`（仍由服务层统一停终端 / 删 worktree），且只对准入名单内、明确 @ 或私聊的用户开放。`router_decide` 只产出 `DecisionProposal`，`Engine.decide()` 由 AgentLoop 统一调用。
 4. **超时与预算**：单次 60s、32k token，超时 / 超预算落 `unavailable`，不会拖住 `runCycle`。
-5. **审计与回放**：`~/.router-agent/logs/decisions.jsonl` 记录 prompt、工具序列、proposal、耗时与 token。
+5. **审计与回放**：两层各写一份，字段结构不同，不要混看——
+   - `~/.router-agent/logs/decisions.jsonl`：**研判层**（管理员消息）的 prompt、工具序列、proposal、耗时与 token。
+   - `~/.router-agent/logs/classifications.jsonl`：**决策层**（普通成员消息分类）的 provider、outcome、rule 与 verdict。
 
 Pi 侧完全隔离：AuthStorage / SettingsManager / SessionManager 全为 in-memory，关闭 extensions / skills / prompts / themes / AGENTS.md，不读写用户 `~/.pi`。
 

@@ -17,7 +17,7 @@ import type { SessionKeyParts } from './session-registry.js'
 import { modelFailureMessage } from './model-failure.js'
 import { MEMORY_HELP, parseMemoryCommand } from './memory.js'
 import type {
-  DecisionAudit,
+  AssessmentAudit,
   DecisionEngine,
   DecisionEngineResult,
   DecisionProposal,
@@ -52,7 +52,7 @@ export interface AgentLoopOptions {
   /** 人格配置（名字 / 语气 / 语言），只影响 system prompt 的设定段。 */
   persona?: { name: string; style: string; language: string }
   /** 审计出口：每次研判都会回调一次（CLI 落 decisions.jsonl）。 */
-  onAudit?: (audit: DecisionAudit) => void
+  onAudit?: (audit: AssessmentAudit) => void
   /** 关键链路日志：消息处理失败、模型不可用、会话读写失败都会在这里留痕。 */
   logger?: Logger
   /**
@@ -183,7 +183,7 @@ export class AgentLoop {
   private persona?: { name: string; style: string; language: string }
   /** 可替换：测试与模拟可以直接注入假引擎。 */
   decisionEngine: DecisionEngine
-  private onAudit?: (audit: DecisionAudit) => void
+  private onAudit?: (audit: AssessmentAudit) => void
   private logger: Logger
   private intake?: IntakeCoordinator
 

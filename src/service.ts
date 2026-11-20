@@ -11,7 +11,7 @@ import { DEFAULT_CHAT_MEMBERS } from './config.js'
 import { STAGE_LABELS } from '#core/stage.js'
 import { WorkerRuntimeError, type WorkerRuntime, type WorkerContext, type SessionEvent, type WorkerRef, type AgentStatus, type ResumeHint } from '#runtime/port.js'
 import { AgentLoop } from './router/agent-loop.js'
-import type { DecisionAudit, DecisionEngine } from './router/decision-engine.js'
+import type { AssessmentAudit, DecisionEngine } from './router/decision-engine.js'
 import { dispatchSettingsOf } from './router/dispatch.js'
 import type { IntakeEngine } from './router/intake-engine.js'
 import type { DecisionAgent } from './router/decision/agent.js'
@@ -25,7 +25,7 @@ import { buildNeutralContract, buildWorkerBrief, buildWorkerPrompt, ensureWorker
 import { migrateLegacySoul } from './specs/index.js'
 import { workBranch } from '#runtime/naming.js'
 import { buildResumeHint } from '#runtime/resume.js'
-import { resolveSession } from '#runtime/agents/registry.js'
+import { resolveSession } from '#runtime/agent-sessions/registry.js'
 import { runtimeOptionString } from '#runtime/runtimes/options.js'
 import {
   workspaceRuntimeLabel,
@@ -102,7 +102,7 @@ export interface RouterServiceOptions {
   /** 通道注册表；选择题回写卡片时按工单所在通道找适配器。 */
   channels?: ChannelRegistry
   agentLoopOptions?: { batchWindowMs?: number }
-  onDecisionAudit?: (audit: DecisionAudit) => void
+  onDecisionAudit?: (audit: AssessmentAudit) => void
   /** 终端多久没输出算空闲，默认 2 分钟。 */
   idleAfterMs?: number
   /** 唤醒后多久仍无响应算 stale，默认 5 分钟。 */

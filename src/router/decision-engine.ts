@@ -76,8 +76,14 @@ export interface DecisionTokens {
   total: number
 }
 
-/** 每次研判的审计记录。CLI 会把它落到 ~/.router-agent/logs/decisions.jsonl。 */
-export interface DecisionAudit {
+/**
+ * 每次**研判**（管理员消息的 LLM 判断）的审计记录。
+ * CLI 会把它落到 ~/.router-agent/logs/decisions.jsonl。
+ *
+ * 与决策层的 `ClassificationAudit`（`./decision/agent.js`）不是同一个东西：
+ * 研判产出 `DecisionProposal`，决策层产出 `DecisionVerdict`。
+ */
+export interface AssessmentAudit {
   engine: 'pi'
   triggerId: string
   durationMs: number
@@ -111,7 +117,7 @@ export interface DecisionEngineResult {
    * 不再额外消耗一次回复模型调用。
    */
   reply?: string
-  audit: DecisionAudit
+  audit: AssessmentAudit
 }
 
 export interface DecisionEngine {

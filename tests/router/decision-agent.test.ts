@@ -6,7 +6,7 @@ import {
   DecisionAgent,
   JevDecisionProvider,
   LlmDecisionProvider,
-  type DecisionAudit,
+  type ClassificationAudit,
   type DecisionProvider,
   type DecisionProviderContext,
 } from '../../src/router/decision/agent.js'
@@ -99,7 +99,7 @@ describe('DecisionAgent.decide', () => {
   it('member_request_returns_verdict_from_provider_answers', async () => {
     const provider = new StubProvider(() => answers({ msgTypeScore: 0.85 }))
     const { logger, events } = recordingLogger()
-    const audits: DecisionAudit[] = []
+    const audits: ClassificationAudit[] = []
     const agent = new DecisionAgent({ provider, isAdmin: () => false, logger, onAudit: audit => audits.push(audit), now: () => 1000 })
     const outcome = await agent.decide(trigger())
     expect(outcome.kind).toBe('verdict')

@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { Store } from '../src/store/db.js'
 import { Engine } from '../src/core/engine.js'
 import { RouterService, extractTerminalSnippet, extractSessionSnippet, formatProbeMessage } from '../src/service.js'
-import { claudeProjectSlug } from '#runtime/agents/claude.js'
+import { claudeProjectSlug } from '#runtime/agent-sessions/claude.js'
 import { defaultConfig, policyOf, type AppConfig, chatEntry } from '../src/config.js'
 import { } from '#core/policy.js'
 import type {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createDecisionAgent } from '../../src/router/engine-factory.js'
+import type { ClassificationAudit } from '../../src/router/decision/agent.js'
 import { defaultConfig, type AppConfig } from '../../src/config.js'
 import { Store } from '../../src/store/db.js'
 
@@ -79,5 +80,38 @@ describe('决策层装配', () => {
     const entry = logs.find(log => log.message === 'decision:provider-missing')
     expect(entry?.level).toBe('warn')
     expect(String(entry?.extra?.detail)).toContain('decision.enabled')
+  })
+
+  it('决策层分类结论会回调审计出口', async () => {
+    const { logs, logger } = recorder()
+    const audits: ClassificationAudit[] = []
+    const agent = createDecisionAgent({
+      config: configWith({ enabled: true, jev: { apiKey: 'sk-jev', model: 'jev-latest' } }),
+      store: new Store(':memory:'),
+      model: { baseUrl: 'https://example.invalid/v1', model: 'm', apiKey: 'k' },
+      logger,
+      onAudit: audit => audits.push(audit),
+    })
+
+    expect(agent).not.toBeNull()
+    await agent!.decide({
+      id: 'trg_1',
+      source: 'feishu',
+      externalId: 'ext_1',
+      threadId: 'th_1',
+      chatId: 'chat_1',
+      chatName: '群一',
+      actorId: 'ou_1',
+      actorName: '张三',
+      isBot: false,
+      text: '你好',
+      addressed: 'none',
+      receivedAt: '2026-01-01T00:00:00.000Z',
+      disposition: 'pending',
+    })
+
+    // 寒暄在准入阶段就被丢弃，但丢弃结论必须留下审计痕迹，否则查不到「为什么没反应」。
+    expect(audits).toHaveLength(1)
+    expect(audits[0]).toMatchObject({ triggerId: 'trg_1', outcome: 'dropped', rule: 'noise' })
   })
 })

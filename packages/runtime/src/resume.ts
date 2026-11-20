@@ -7,7 +7,7 @@
  */
 import type { ResumeHint } from './port.js'
 import { CLAUDE_CODE_RUNTIME_ID, ORCA_RUNTIME_ID, normalizeRuntimeId } from './runtimes/catalog.js'
-import { agentProfileOf } from './agents/registry.js'
+import { agentProfileOf } from './agent-sessions/registry.js'
 
 /** 单个运行时的 CLI 恢复模板。 */
 export interface ResumeSpec {

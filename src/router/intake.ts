@@ -1,9 +1,14 @@
-import type { Intake, IntakeKind, IntakeReport, Trigger } from '#core/model.js'
+import type { Intake, IntakeReport, ScreenedKind, Trigger } from '#core/model.js'
 import { extractJsonObject } from './model-config.js'
 
-/** 初筛结果。 */
+/**
+ * 初筛结果。
+ *
+ * `kind` 是初筛模型能产出的类型，不含 `request`：管理员自己提的需求
+ * 不经过初筛模型，由 Router 直接建会话（见 intake-flow.ts 的 startAdminRequest）。
+ */
 export interface ScreenerVerdict {
-  kind: IntakeKind
+  kind: ScreenedKind
   reason: string
 }
 
@@ -13,13 +18,13 @@ export type AnalystOutcome =
   | { action: 'answer'; reply: string }
   | { action: 'report'; reply: string; report: IntakeReport }
 
-const KINDS: IntakeKind[] = ['chat', 'question', 'issue']
+const KINDS: ScreenedKind[] = ['chat', 'question', 'issue']
 
 /** 解析初筛 JSON；格式不对时返回 null，由调用方按「不打扰用户」处理。 */
 export function parseScreenerVerdict(text: string): ScreenerVerdict | null {
   const json = extractJsonObject(text)
   if (!json) return null
-  const kind = String(json.kind ?? '') as IntakeKind
+  const kind = String(json.kind ?? '') as ScreenedKind
   if (!KINDS.includes(kind)) return null
   return { kind, reason: typeof json.reason === 'string' ? json.reason : '' }
 }

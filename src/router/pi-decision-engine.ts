@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import type { ReplyPreferences } from '../core/memory.js'
 import { extractJsonObject, type PiModelConfig } from './model-config.js'
 import type {
-  DecisionAudit,
+  AssessmentAudit,
   DecisionEngine,
   DecisionEngineResult,
   DecisionProposal,
@@ -229,7 +229,7 @@ export class PiDecisionEngine implements DecisionEngine {
     await this.sessions?.disposeAll()
   }
 
-  private auditOf(req: DecisionRequest | ReplyRequest): DecisionAudit {
+  private auditOf(req: DecisionRequest | ReplyRequest): AssessmentAudit {
     const triggerId = 'trigger' in req ? req.trigger.id : ''
     return {
       engine: 'pi',
@@ -324,7 +324,7 @@ export class PiDecisionEngine implements DecisionEngine {
   }
 
   private finishAssess(
-    audit: DecisionAudit,
+    audit: AssessmentAudit,
     req: DecisionRequest,
     state: ToolState,
     outcome: SessionOutcome,
@@ -630,7 +630,7 @@ export class PiDecisionEngine implements DecisionEngine {
   }
 
   private finish(
-    audit: DecisionAudit,
+    audit: AssessmentAudit,
     result: { proposal: DecisionProposal; reply?: string } | { unavailableReason: string; unavailableSource?: 'engine' | 'model' },
   ): DecisionEngineResult {
     if ('proposal' in result) {
