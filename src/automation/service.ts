@@ -508,6 +508,35 @@ export class AutomationService {
   }
 
   /**
+   * 为某个任务生成脚本，并把失败原因一起带出来。
+   *
+   * 只返回 null 的话，调用方只能给出「生成失败，请重试」这种空话：
+   * 用户分不清是模型没配、是超时，还是额度被思考吃光。
+   * 这里把真实原因带回去，面板才能说清到底卡在哪。
+   */
+  async generateScriptWithReason(id: string): Promise<{ script: string } | { error: string; reason: string }> {
+    const task = this.find(id)
+    if (!task) return { error: 'automation-not-found', reason: '找不到这个自动化任务' }
+    if (task.type !== 'script') {
+      this.logger.warn('automation:script-generate-rejected', { automationId: id, reason: 'not-script-type' })
+      return { error: 'script:not-script-type', reason: '只有脚本自动化才能生成脚本' }
+    }
+    if (!this.chat) {
+      this.logger.warn('automation:script-generate-unavailable', { automationId: id, reason: 'llm-unconfigured' })
+      return { error: 'script:llm-unconfigured', reason: '没有配置模型，先在「配置」里填好模型再生成' }
+    }
+    try {
+      return { script: await this.requestScript(task) }
+    } catch (error) {
+      this.logger.error('automation:script-generate-failed', {
+        automationId: id,
+        message: errorMessage(error),
+      })
+      return { error: 'script:generate-failed', reason: errorMessage(error) }
+    }
+  }
+
+  /**
    * 由模型生成脚本。
    *
    * 只生成脚本本身，不掺凭据：需要凭据的动作留给工具去取。
@@ -518,7 +547,24 @@ export class AutomationService {
       return null
     }
     try {
-      const turn = await this.chat.complete([
+      return await this.requestScript(task)
+    } catch (error) {
+      this.logger.error('automation:script-generate-failed', {
+        automationId: task.id,
+        message: errorMessage(error),
+      })
+      return null
+    }
+  }
+
+  /**
+   * 真正向模型要一次脚本。
+   *
+   * 失败往上抛：调用方要拿得到原因，才能告诉用户到底卡在哪。
+   * 记录日志与降级由 generateScript 负责。
+   */
+  private async requestScript(task: Automation): Promise<string> {
+    const turn = await this.chat!.complete([
         {
           role: 'system',
           content: [
@@ -540,18 +586,11 @@ export class AutomationService {
         timeoutMs: SCRIPT_GENERATION_TIMEOUT_MS,
       })
       const text = stripCodeFence(turn.content)
-      if (!text) return null
+      if (!text) throw new Error('模型只返回了思考，没有脚本正文')
       this.logger.info('automation:script-generated', { automationId: task.id, chars: text.length })
       // 关键增量：脚本写回任务定义，下次执行直接复用，面板也能查看 / 人工编辑。
       this.saveTaskScript?.(task.id, text)
       return text
-    } catch (error) {
-      this.logger.error('automation:script-generate-failed', {
-        automationId: task.id,
-        message: errorMessage(error),
-      })
-      return null
-    }
   }
 
   /**

@@ -125,6 +125,13 @@ export interface AutomationApiPort {
   trigger(id: string): Promise<unknown | null>
   /** 生成脚本正文；返回脚本文本，生成不了时返回 null。 */
   generateScript(id: string): Promise<string | null>
+  /**
+   * 生成脚本正文并带上失败原因。
+   *
+   * 面板要能告诉用户到底卡在哪（没配模型 / 超时 / 额度被思考吃光），
+   * 只返回 null 的话只能给出「生成失败，请重试」这种空话。
+   */
+  generateScriptWithReason?(id: string): Promise<{ script: string } | { error: string; reason: string }>
   /** 从自然语言生成任务草稿（对话式创建入口用）。 */
   draft(text: string): Promise<unknown | null>
   /** 调用自动化内置工具；范围与限流在服务层强制。 */
@@ -444,6 +451,12 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       const body = await readJson(req)
       const id = typeof body.id === 'string' ? body.id.trim() : ''
       if (!id) return respond(res, 400, { error: 'id-required', message: '自动化任务 id 不能为空' })
+      // 有带原因的入口就用它：面板要能说清失败在哪一步。
+      if (opts.automation.generateScriptWithReason) {
+        const outcome = await opts.automation.generateScriptWithReason(id)
+        if ('script' in outcome) return respond(res, 200, { script: outcome.script })
+        return respond(res, 502, { error: outcome.error, message: outcome.reason })
+      }
       const script = await opts.automation.generateScript(id)
       if (!script) {
         return respond(res, 502, { error: 'script:generate-failed', message: '脚本生成失败，请检查模型配置后重试。' })

@@ -198,6 +198,8 @@ export interface AutomationExecutionInput {
    */
   workdir: string
   logger: AutomationLogger
+  /** 本次执行的记录 id；日志带上它才能把一条执行记录和它的日志串起来。 */
+  runId?: string
   /** 上报当前阶段；面板据此显示「跑到哪一步了」。 */
   onPhase?: (phase: AutomationRunPhase) => void
 }

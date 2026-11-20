@@ -53,6 +53,34 @@ function fakeRuntime(workdir: string): WorkerRuntime {
 }
 
 describe('自动化执行桥', () => {
+  it('runtime 侧的日志带上 runId，能把执行记录和日志串起来', async () => {
+    const workdir = mkdtempSync(join(tmpdir(), 'ra-automation-runner-'))
+    const logs: Array<{ event: string; fields: Record<string, unknown> }> = []
+    await runThroughRuntime({
+      automation: task(),
+      runtime: fakeRuntime(workdir),
+      contract: '做完了就上报',
+      workdir,
+      tools: [],
+      timeoutMs: 60_000,
+      runId: 'run_1',
+    }, {
+      home: '/tmp/ra-tk84-runner',
+      collectOutputs: () => ({ ticketIds: [], eventIds: [] }),
+      logger: {
+        info: (event, fields) => logs.push({ event, fields: fields ?? {} }),
+        warn: (event, fields) => logs.push({ event, fields: fields ?? {} }),
+        error: (event, fields) => logs.push({ event, fields: fields ?? {} }),
+      },
+      sleep: async () => undefined,
+    })
+
+    expect(logs.length).toBeGreaterThan(0)
+    for (const log of logs) {
+      expect(log.fields.runId, `${log.event} 缺少 runId`).toBe('run_1')
+    }
+  })
+
   it('agent 报告完成后立即收尾，不再等到超时', async () => {
     const workdir = mkdtempSync(join(tmpdir(), 'ra-automation-runner-'))
     const outcome = await runThroughRuntime({

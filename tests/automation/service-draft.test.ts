@@ -177,6 +177,47 @@ describe('脚本生成', () => {
 
     expect(await service.generateScript(scriptTask())).toBe('#!/bin/sh\necho hi')
   })
+
+  it('生成失败时把真实原因带回去，面板能说清卡在哪', async () => {
+    const config = configOf()
+    config.automation.tasks = [scriptTask()]
+    const store = new Store(':memory:')
+    const engine = new Engine({ store, policy: policyOf(config) })
+    const service = new AutomationService({
+      config: () => config,
+      store,
+      engine,
+      runtimes: {} as RuntimeRegistry,
+      chat: {
+        complete: async () => {
+          throw new Error('chat:empty-response:max_tokens')
+        },
+      },
+    })
+
+    const outcome = await service.generateScriptWithReason('auto_script')
+
+    expect(outcome).toEqual({ error: 'script:generate-failed', reason: 'chat:empty-response:max_tokens' })
+  })
+
+  it('模型只给思考没给正文时报出真实原因而不是空话', async () => {
+    const config = configOf()
+    config.automation.tasks = [scriptTask()]
+    const store = new Store(':memory:')
+    const engine = new Engine({ store, policy: policyOf(config) })
+    const service = new AutomationService({
+      config: () => config,
+      store,
+      engine,
+      runtimes: {} as RuntimeRegistry,
+      chat: { complete: async () => ({ content: '', toolCalls: [] }) },
+    })
+
+    const outcome = await service.generateScriptWithReason('auto_script')
+
+    expect('error' in outcome).toBe(true)
+    expect('reason' in outcome && outcome.reason).toContain('脚本正文')
+  })
 })
 
 describe('手动触发', () => {
