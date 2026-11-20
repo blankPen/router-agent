@@ -56,7 +56,7 @@ src/specs           规范存储（persona / prompt 的落盘与读取）
 ⑨ 关单    Engine.closeTicket / setAttention
 ```
 
-### ③ `AgentLoop.handle` 的 10 步顺序
+### ③ `AgentLoop.handle` 的 11 步顺序
 
 **顺序本身是行为的一部分**——前面的步骤会「吃掉」消息。改顺序前先读
 `src/router/agent-loop.ts` 里 `handle()` 上方的注释。
@@ -64,15 +64,16 @@ src/specs           规范存储（persona / prompt 的落盘与读取）
 | 步 | 判断 | 落在 |
 |-|-|-|
 | 1 | `/new` 重置会话 | `handleSessionReset` |
-| 2 | 订阅线程扇出 | `tryFanOut` |
-| 3 | 澄清会话 / 待终审需求单 | `tryIntakeBeforeGate` |
-| 4 | 已关闭工单的话题 | `handleClosedThread` |
-| 5 | 准入判定 + 角色分流 | `gate()` + `tryMemberIntake` |
-| 6 | Gate 判定忽略 | `handle` |
-| 7 | 纯附件消息 | `replyMediaOnly` |
-| 8 | 只回话不开单 | `replyOnly` |
-| 9 | 显式请求（含寒暄） | `trySmallTalk` → `assess('explicit')` |
-| 10 | 推断请求 | `assess('inferred')` |
+| 2 | 记忆口令（`/记忆 …`） | `tryMemoryCommand` |
+| 3 | 订阅线程扇出 | `tryFanOut` |
+| 4 | 澄清会话 / 待终审需求单 | `tryIntakeBeforeGate` |
+| 5 | 已关闭工单的话题 | `handleClosedThread` |
+| 6 | 准入判定 + 角色分流 | `gate()` + `tryMemberIntake` |
+| 7 | Gate 判定忽略 | `handle` |
+| 8 | 纯附件消息 | `replyMediaOnly` |
+| 9 | 只回话不开单 | `replyOnly` |
+| 10 | 显式请求（含寒暄） | `trySmallTalk` → `assess('explicit')` |
+| 11 | 推断请求 | `assess('inferred')` |
 
 ---
 
