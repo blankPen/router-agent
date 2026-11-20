@@ -1,6 +1,9 @@
 import type { Intake, IntakeReport, ScreenedKind, Trigger } from '#core/model.js'
 import { extractJsonObject } from './model-config.js'
 
+// 终审口令的实现在 commands.ts（与其它口令放在一起）；这里转出以保持既有 import 路径可用。
+export { isApprovalCommand, isDismissCommand, isRejectionCommand } from './commands.js'
+
 /**
  * 初筛结果。
  *
@@ -64,33 +67,6 @@ export function parseAnalystOutcome(text: string): AnalystOutcome | null {
       assessment: field('assessment'),
     },
   }
-}
-
-/**
- * 终审关键词：管理员在需求单话题里回复这些词即视为通过。
- *
- * 不收「ok」「好」这类通用应答：一句「好」很容易是随口附和，
- * 把它当成派单确认等于让需求单在没人真正拍板的时候进了排期。
- */
-export function isApprovalCommand(text: string): boolean {
-  const normalized = text.trim().replace(/\s+/g, '')
-  if (!normalized || normalized.length > 20) return false
-  if (/不(用|需要|要)(派单|开单|处理|确认)|别(派单|开单)|驳回|拒绝|不用了|算了/.test(normalized)) return false
-  return /^(确认派单|确认开单|确认|通过|同意|可以派单|派单|开工|开单|approve)$/i.test(normalized)
-}
-
-/** 驳回关键词；只认短句，避免把管理员的一段解释误判成驳回。 */
-export function isRejectionCommand(text: string): boolean {
-  const normalized = text.trim().replace(/\s+/g, '')
-  if (!normalized || normalized.length > 30) return false
-  return /^(驳回|拒绝|不需要|不用处理|不用派单|不派单|关闭|reject|close)$/i.test(normalized)
-}
-
-/** 发起人主动放弃澄清。 */
-export function isDismissCommand(text: string): boolean {
-  const normalized = text.trim().replace(/\s+/g, '')
-  if (!normalized || normalized.length > 20) return false
-  return /^(不用了|算了|没事了|不用管了|不问了|取消|cancel|nevermind|never mind)$/i.test(normalized)
 }
 
 /**

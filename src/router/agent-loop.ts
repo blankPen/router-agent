@@ -12,6 +12,7 @@ import { IntakeCoordinator, type MemberSettingsView } from './intake-flow.js'
 import type { IntakeEngine } from './intake-engine.js'
 import type { DecisionAgent } from './decision/agent.js'
 import { isSmallTalk as smallTalkRule } from '#core/admission.js'
+import { isReopenRequest, parseSessionResetCommand } from './commands.js'
 import { toolScopeFor } from '#core/tool-scope.js'
 import type { SessionKeyParts } from './session-registry.js'
 import { modelFailureMessage } from './model-failure.js'
@@ -106,9 +107,6 @@ const REPLY_ONLY_TEXT = '这条消息我收到了，但当前策略暂不自动�
 const MEDIA_ONLY_TEXT = '收到附件了，但我看不到图片/文件里的内容。请用文字说一下要改什么，或者把关键信息贴成文字。'
 const THREAD_INTRO = (title: string, id: string) => `工单「${title}」已开始执行（${id}）。后续进展会在这个话题里更新。`
 
-/** 已关闭话题里，用户明确要求继续的关键词。 */
-const REOPEN_PATTERN = /重新开工|重新开单|重开|继续做|继续干|接着做|接着干|继续|reopen|retry|continue/i
-
 /**
  * 被群级白名单拒绝的 Gate 原因：普通成员路径不得绕过。
  *
@@ -120,13 +118,6 @@ const BLOCKED_BY_CHAT_ALLOWLIST = new Set(['admission:chat-allowlist-empty'])
 
 function isAllowlistBlocked(verdict: ReturnType<typeof gate>): boolean {
   return 'reason' in verdict && BLOCKED_BY_CHAT_ALLOWLIST.has(verdict.reason)
-}
-
-export function isReopenRequest(text: string): boolean {
-  const normalized = text.trim()
-  // 先排除「不用继续 / 别重开」这类否定表达，避免把收尾消息当成重开。
-  if (/不(用|需要|想|必)(继续|重开|重新)|别(继续|重开|重新)|不要(继续|重开|重新)/.test(normalized)) return false
-  return REOPEN_PATTERN.test(normalized)
 }
 
 /** 关闭话题的固定回复；不调用模型，保证每次都是同一套口径。 */
@@ -148,15 +139,13 @@ function reopenDraftKey(threadId: string, actorId: string): string {
   return `reopen:draft:${threadId}:${actorId}`
 }
 
-/** `/new`：只有整条消息就是命令时才生效，允许前面带一个 @机器人。 */
-export function parseSessionResetCommand(text: string): boolean {
-  return /^\s*(?:@\S+\s+)?\/new\s*$/.test(text)
-}
-
 /** 单一词表来源：寒暄判定在 core/admission.ts，这里只转发，保持公开 API 不变。 */
 export function isSmallTalk(text: string): boolean {
   return smallTalkRule(text)
 }
+
+// 口令解析的实现在 commands.ts；这里转出以保持既有 import 路径可用。
+export { isReopenRequest, parseSessionResetCommand } from './commands.js'
 
 /**
  * 常驻 Agent Loop：候选批处理 → Gate → （已订阅则扇出）→ 研判 → 决策。
