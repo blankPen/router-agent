@@ -30,7 +30,7 @@ const policy: Policy = {
 }
 
 const dispatch: DispatchSettings = {
-  projects: [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }],
+  projects: [{ name: 'router-agent', repo: 'name:acme/router-agent', defaultBranch: 'main' }],
   bindings: [chatEntry('oc_dev', { scope: 'all', repo: 'router-agent', branch: 'main' })],
 }
 
@@ -291,7 +291,7 @@ describe('需求识别（intake）', () => {
     const tickets = engine.store.listTickets()
     expect(tickets).toHaveLength(1)
     expect(tickets[0]?.title).toBe('登录 500')
-    expect(tickets[0]?.repo).toBe('name:dsh/router-agent')
+    expect(tickets[0]?.repo).toBe('name:acme/router-agent')
     expect(tickets[0]?.branch).toBe('main')
     const mandate = engine.store.getMandate(tickets[0]!.mandateId)
     expect(mandate?.scope).toContain('问题描述：点击登录返回 500')
@@ -483,7 +483,7 @@ describe('需求识别（intake）', () => {
       batchWindowMs: 0,
       source: 'feishu',
       dispatch: {
-        projects: [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }],
+        projects: [{ name: 'router-agent', repo: 'name:acme/router-agent', defaultBranch: 'main' }],
         bindings: [
           chatEntry('oc_dev', { scope: 'all', repo: 'router-agent', branch: 'main' }),
           chatEntry('oc_ops', { scope: 'all', repo: 'router-agent', branch: 'main' }),

@@ -62,7 +62,7 @@ const OK_BATCH = (email: string, openId: string): Reply => ({
   stderr: '',
 })
 
-const OK_USER = (openId: string, name: string, email = 'pengzhen02@dewu.com'): Reply => ({
+const OK_USER = (openId: string, name: string, email = 'alice@example.com'): Reply => ({
   code: 0,
   stdout: JSON.stringify({ ok: true, data: { user: { open_id: openId, user_id: 'u_1', name, email } } }),
   stderr: '',
@@ -79,7 +79,7 @@ describe('条目分类', () => {
 
 describe('邮箱掩码', () => {
   it('只保留邮箱首字符，域名保留', () => {
-    expect(maskEmail('pengzhen02@dewu.com')).toBe('p***@dewu.com')
+    expect(maskEmail('alice@example.com')).toBe('a***@example.com')
   })
 
   it('不是邮箱的字符串原样返回', () => {
@@ -92,9 +92,9 @@ describe('通讯录返回解析', () => {
   it('batch_get_id 返回 email → open_id 映射', () => {
     const map = parseBatchGetId(JSON.stringify({
       ok: true,
-      data: { user_list: [{ email: 'PengZhen02@dewu.com', user_id: 'ou_1' }] },
+      data: { user_list: [{ email: 'alice@example.com', user_id: 'ou_1' }] },
     }))
-    expect(map.get('pengzhen02@dewu.com')).toBe('ou_1')
+    expect(map.get('alice@example.com')).toBe('ou_1')
   })
 
   it('batch_get_id 输出无法解析时返回空映射', () => {
@@ -104,32 +104,32 @@ describe('通讯录返回解析', () => {
   it('contact +get-user 返回用户信息', () => {
     expect(parseContactUser(JSON.stringify({
       ok: true,
-      data: { user: { open_id: 'ou_1', user_id: 'u_1', name: '阿振(Pz)', email: 'pengzhen02@dewu.com' } },
-    }))).toEqual({ openId: 'ou_1', userId: 'u_1', name: '阿振(Pz)', email: 'pengzhen02@dewu.com' })
+      data: { user: { open_id: 'ou_1', user_id: 'u_1', name: 'Alice', email: 'alice@example.com' } },
+    }))).toEqual({ openId: 'ou_1', userId: 'u_1', name: 'Alice', email: 'alice@example.com' })
     expect(parseContactUser('not json')).toBeNull()
   })
 })
 
 describe('身份条目解析', () => {
   it('邮箱条目走 batch_get_id，解析出的 open_id 进入名单', async () => {
-    const openId = 'ou_aa94092a6fd14dd0672a7f327a00fd61'
+    const openId = 'ou_alice'
     const runner = makeRunner(argv => {
-      if (isBatch(argv)) return OK_BATCH('pengzhen02@dewu.com', openId)
-      return OK_USER(openId, '阿振(Pz)')
+      if (isBatch(argv)) return OK_BATCH('alice@example.com', openId)
+      return OK_USER(openId, 'Alice')
     })
     const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a' })
 
-    const resolution = await resolver.resolveEntries(['pengzhen02@dewu.com'])
+    const resolution = await resolver.resolveEntries(['alice@example.com'])
 
     expect(runner.calls[0]).toEqual([
       'api', 'POST', '/open-apis/contact/v3/users/batch_get_id',
       '--params', JSON.stringify({ user_id_type: 'open_id' }),
-      '--data', JSON.stringify({ emails: ['pengzhen02@dewu.com'] }),
+      '--data', JSON.stringify({ emails: ['alice@example.com'] }),
       '--as', 'bot', '--format', 'json',
     ])
     expect(resolution.openIds).toContain(openId)
-    expect(resolution.names.get(openId)).toBe('阿振(Pz)')
-    expect(resolution.entries[0]).toMatchObject({ kind: 'email', status: 'resolved', openId, name: '阿振(Pz)' })
+    expect(resolution.names.get(openId)).toBe('Alice')
+    expect(resolution.entries[0]).toMatchObject({ kind: 'email', status: 'resolved', openId, name: 'Alice' })
     expect(resolution.invalid).toHaveLength(0)
     expect(resolution.pending).toHaveLength(0)
   })
@@ -137,20 +137,20 @@ describe('身份条目解析', () => {
   it('邮箱查无此人（没有 user_id 字段）判定为 invalid 且不进名单', async () => {
     const runner = makeRunner(() => ({
       code: 0,
-      stdout: JSON.stringify({ ok: true, data: { user_list: [{ email: 'pengzhen02@dewu.com' }] } }),
+      stdout: JSON.stringify({ ok: true, data: { user_list: [{ email: 'alice@example.com' }] } }),
       stderr: '',
     }))
     const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a' })
 
-    const resolution = await resolver.resolveEntries(['pengzhen02@dewu.com'])
+    const resolution = await resolver.resolveEntries(['alice@example.com'])
 
     expect(resolution.entries[0]?.status).toBe('invalid')
     expect(resolution.entries[0]?.detail).toContain('查无此人')
-    expect(resolution.openIds).not.toContain('ou_aa94092a6fd14dd0672a7f327a00fd61')
+    expect(resolution.openIds).not.toContain('ou_alice')
     expect(resolution.openIds).toHaveLength(0)
     expect(resolution.invalid).toHaveLength(1)
     // 失败原因里不能出现完整邮箱
-    expect(resolution.entries[0]?.detail).not.toContain('pengzhen02@dewu.com')
+    expect(resolution.entries[0]?.detail).not.toContain('alice@example.com')
   })
 
   it('跨应用 open_id 判定为 invalid 并说明是跨应用', async () => {
@@ -161,7 +161,7 @@ describe('身份条目解析', () => {
     }))
     const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a' })
 
-    const resolution = await resolver.resolveEntries(['ou_82fb106b096ac2a7563f9a2a6077a44d'])
+    const resolution = await resolver.resolveEntries(['ou_cross_app'])
 
     expect(resolution.entries[0]?.status).toBe('invalid')
     expect(resolution.entries[0]?.detail).toContain('跨应用')
@@ -187,7 +187,7 @@ describe('身份条目解析', () => {
     const runner = makeRunner(() => ({ code: 1, stdout: '', stderr: 'permission denied' }))
     const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a' })
 
-    const resolution = await resolver.resolveEntries(['ou_aa94092a6fd14dd0672a7f327a00fd61'])
+    const resolution = await resolver.resolveEntries(['ou_alice'])
 
     expect(resolution.entries[0]?.status).toBe('pending')
     expect(resolution.invalid).toHaveLength(0)
@@ -199,7 +199,7 @@ describe('身份条目解析', () => {
     const runner = makeRunner(() => { throw new Error('spawn lark-cli ENOENT') })
     const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a' })
 
-    const resolution = await resolver.resolveEntries(['pengzhen02@dewu.com'])
+    const resolution = await resolver.resolveEntries(['alice@example.com'])
 
     expect(resolution.entries[0]?.status).toBe('pending')
     expect(resolution.entries[0]?.detail).toContain('spawn lark-cli ENOENT')
@@ -208,37 +208,37 @@ describe('身份条目解析', () => {
   })
 
   it('open_id 条目取回通讯录显示名并回填名字表', async () => {
-    const openId = 'ou_aa94092a6fd14dd0672a7f327a00fd61'
-    const runner = makeRunner(argv => OK_USER(requestedUserId(argv), '阿振(Pz)'))
+    const openId = 'ou_alice'
+    const runner = makeRunner(argv => OK_USER(requestedUserId(argv), 'Alice'))
     const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a' })
 
     const resolution = await resolver.resolveEntries([openId])
 
     expect(runner.calls[0]).toEqual(['contact', '+get-user', '--user-id', openId, '--as', 'bot', '--format', 'json'])
-    expect(resolution.names.get(openId)).toBe('阿振(Pz)')
+    expect(resolution.names.get(openId)).toBe('Alice')
     expect(resolution.entries[0]?.status).toBe('resolved')
   })
 
   it('缓存命中时不再调用 lark-cli', async () => {
     const runner = makeRunner(() => { throw new Error('不该被调用') })
     const cache: IdentityCache = {
-      get: () => ({ openId: 'ou_cached', name: '阿振(Pz)' }),
+      get: () => ({ openId: 'ou_cached', name: 'Alice' }),
       set: () => {},
     }
     const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a', cache })
 
-    const resolution = await resolver.resolveEntries(['pengzhen02@dewu.com'])
+    const resolution = await resolver.resolveEntries(['alice@example.com'])
 
     expect(runner.calls).toHaveLength(0)
     expect(resolution.openIds).toEqual(['ou_cached'])
-    expect(resolution.names.get('ou_cached')).toBe('阿振(Pz)')
+    expect(resolution.names.get('ou_cached')).toBe('Alice')
   })
 
   it('解析成功后写缓存，键带 appId 与条目类型', async () => {
-    const openId = 'ou_aa94092a6fd14dd0672a7f327a00fd61'
+    const openId = 'ou_alice'
     const runner = makeRunner(argv => {
-      if (isBatch(argv)) return OK_BATCH('pengzhen02@dewu.com', openId)
-      return OK_USER(openId, '阿振(Pz)')
+      if (isBatch(argv)) return OK_BATCH('alice@example.com', openId)
+      return OK_USER(openId, 'Alice')
     })
     const sets: unknown[][] = []
     const cache: IdentityCache = {
@@ -247,15 +247,15 @@ describe('身份条目解析', () => {
     }
     const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a', cache })
 
-    await resolver.resolveEntries(['pengzhen02@dewu.com'])
+    await resolver.resolveEntries(['alice@example.com'])
 
-    expect(sets).toContainEqual(['cli_a', 'email', 'pengzhen02@dewu.com', openId, '阿振(Pz)'])
+    expect(sets).toContainEqual(['cli_a', 'email', 'alice@example.com', openId, 'Alice'])
   })
 
   it('名字暂时取不到时不写缓存，下次解析会重试补名字', async () => {
-    const openId = 'ou_aa94092a6fd14dd0672a7f327a00fd61'
+    const openId = 'ou_alice'
     const runner = makeRunner(argv => {
-      if (isBatch(argv)) return OK_BATCH('pengzhen02@dewu.com', openId)
+      if (isBatch(argv)) return OK_BATCH('alice@example.com', openId)
       return { code: 1, stdout: '', stderr: 'contact timeout' }
     })
     const sets: unknown[][] = []
@@ -265,7 +265,7 @@ describe('身份条目解析', () => {
     }
     const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a', cache })
 
-    const resolution = await resolver.resolveEntries(['pengzhen02@dewu.com'])
+    const resolution = await resolver.resolveEntries(['alice@example.com'])
 
     // 身份已经确定（open_id 拿到了），只是显示名没取到
     expect(resolution.entries[0]?.status).toBe('resolved')
@@ -276,10 +276,10 @@ describe('身份条目解析', () => {
   })
 
   it('没有 appId 时不写缓存，避免跨应用污染', async () => {
-    const openId = 'ou_aa94092a6fd14dd0672a7f327a00fd61'
+    const openId = 'ou_alice'
     const runner = makeRunner(argv => {
-      if (isBatch(argv)) return OK_BATCH('pengzhen02@dewu.com', openId)
-      return OK_USER(openId, '阿振(Pz)')
+      if (isBatch(argv)) return OK_BATCH('alice@example.com', openId)
+      return OK_USER(openId, 'Alice')
     })
     const sets: unknown[][] = []
     const cache: IdentityCache = {
@@ -288,7 +288,7 @@ describe('身份条目解析', () => {
     }
     const resolver = new IdentityResolver({ lark: runner, cache })
 
-    await resolver.resolveEntries(['pengzhen02@dewu.com'])
+    await resolver.resolveEntries(['alice@example.com'])
 
     expect(sets).toHaveLength(0)
   })
@@ -306,14 +306,14 @@ describe('身份条目解析', () => {
   })
 
   it('重复条目的 open_id 去重', async () => {
-    const openId = 'ou_aa94092a6fd14dd0672a7f327a00fd61'
+    const openId = 'ou_alice'
     const runner = makeRunner(argv => {
-      if (isBatch(argv)) return OK_BATCH('pengzhen02@dewu.com', openId)
-      return OK_USER(openId, '阿振(Pz)')
+      if (isBatch(argv)) return OK_BATCH('alice@example.com', openId)
+      return OK_USER(openId, 'Alice')
     })
     const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a' })
 
-    const resolution = await resolver.resolveEntries(['pengzhen02@dewu.com', 'pengzhen02@dewu.com'])
+    const resolution = await resolver.resolveEntries(['alice@example.com', 'alice@example.com'])
 
     expect(resolution.openIds).toEqual([openId])
     expect(resolution.entries).toHaveLength(2)
@@ -323,38 +323,38 @@ describe('身份条目解析', () => {
 describe('失败信息里的邮箱必须掩码', () => {
   it('lark-cli 抛异常时异常信息里的邮箱掩码后才进 detail', async () => {
     const runner = makeRunner(() => {
-      throw new Error('spawn failed: --data {"emails":["pengzhen02@dewu.com"]}')
+      throw new Error('spawn failed: --data {"emails":["alice@example.com"]}')
     })
     const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a' })
 
-    const resolution = await resolver.resolveEntries(['pengzhen02@dewu.com'])
+    const resolution = await resolver.resolveEntries(['alice@example.com'])
 
     expect(resolution.entries[0]?.status).toBe('pending')
-    expect(resolution.entries[0]?.detail).not.toContain('pengzhen02@dewu.com')
-    expect(resolution.entries[0]?.detail).toContain('p***@dewu.com')
+    expect(resolution.entries[0]?.detail).not.toContain('alice@example.com')
+    expect(resolution.entries[0]?.detail).toContain('a***@example.com')
   })
 
   it('缓存读写异常里的邮箱掩码后才进日志', async () => {
     const { events, logger } = captureLogger()
     const cache: IdentityCache = {
-      get: () => { throw new Error(`cache lookup failed for pengzhen02@dewu.com`) },
-      set: () => { throw new Error(`cache write failed for pengzhen02@dewu.com`) },
+      get: () => { throw new Error(`cache lookup failed for alice@example.com`) },
+      set: () => { throw new Error(`cache write failed for alice@example.com`) },
     }
     const runner = makeRunner(argv => {
-      if (isBatch(argv)) return OK_BATCH('pengzhen02@dewu.com', 'ou_1')
-      return OK_USER('ou_1', '阿振(Pz)')
+      if (isBatch(argv)) return OK_BATCH('alice@example.com', 'ou_1')
+      return OK_USER('ou_1', 'Alice')
     })
     const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a', cache, logger })
 
-    await resolver.resolveEntries(['pengzhen02@dewu.com'])
+    await resolver.resolveEntries(['alice@example.com'])
 
     const cacheFailed = events.filter(event => event.message === 'identity:cache-failed')
     expect(cacheFailed.length).toBeGreaterThan(0)
     for (const event of cacheFailed) {
-      expect(String(event.extra?.detail)).not.toContain('pengzhen02@dewu.com')
-      expect(String(event.extra?.detail)).toContain('p***@dewu.com')
+      expect(String(event.extra?.detail)).not.toContain('alice@example.com')
+      expect(String(event.extra?.detail)).toContain('a***@example.com')
     }
-    expect(JSON.stringify(events)).not.toContain('pengzhen02@dewu.com')
+    expect(JSON.stringify(events)).not.toContain('alice@example.com')
   })
 })
 
@@ -367,7 +367,7 @@ describe('响应结构对不上时保留条目', () => {
     }))
     const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a' })
 
-    const resolution = await resolver.resolveEntries(['pengzhen02@dewu.com'])
+    const resolution = await resolver.resolveEntries(['alice@example.com'])
 
     expect(resolution.entries[0]?.status).toBe('pending')
     expect(resolution.invalid).toHaveLength(0)
@@ -379,13 +379,13 @@ describe('响应结构对不上时保留条目', () => {
       code: 0,
       stdout: JSON.stringify({
         ok: true,
-        data: { user_list: [{ email: 'pengzhen02@dewu.com', user_id: 'ou_1' }, { email: 'other@dewu.com', user_id: 'ou_2' }] },
+        data: { user_list: [{ email: 'alice@example.com', user_id: 'ou_1' }, { email: 'bob@example.com', user_id: 'ou_2' }] },
       }),
       stderr: '',
     }))
     const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a' })
 
-    const resolution = await resolver.resolveEntries(['pengzhen02@dewu.com'])
+    const resolution = await resolver.resolveEntries(['alice@example.com'])
 
     expect(resolution.entries[0]?.status).toBe('pending')
     expect(resolution.invalid).toHaveLength(0)
@@ -400,7 +400,7 @@ describe('响应结构对不上时保留条目', () => {
     }))
     const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a' })
 
-    const resolution = await resolver.resolveEntries(['pengzhen02@dewu.com'])
+    const resolution = await resolver.resolveEntries(['alice@example.com'])
 
     expect(resolution.entries[0]?.status).toBe('pending')
     expect(resolution.invalid).toHaveLength(0)
@@ -410,8 +410,8 @@ describe('响应结构对不上时保留条目', () => {
 
 describe('邮箱分片', () => {
   it('邮箱数量超过单次上限时按片请求，单片失败不影响其他片', async () => {
-    const emails = Array.from({ length: 51 }, (_, index) => `user${index}@dewu.com`)
-    const failed = 'user50@dewu.com'
+    const emails = Array.from({ length: 51 }, (_, index) => `user${index}@example.com`)
+    const failed = 'user50@example.com'
     const runner = makeRunner(argv => {
       if (isBatch(argv)) {
         const sent = sentEmails(argv)
@@ -425,7 +425,7 @@ describe('邮箱分片', () => {
           stderr: '',
         }
       }
-      return OK_USER(requestedUserId(argv), '阿振(Pz)')
+      return OK_USER(requestedUserId(argv), 'Alice')
     })
     const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a' })
 
@@ -447,27 +447,27 @@ describe('邮箱分片', () => {
 
 describe('解析日志', () => {
   it('解析成功写 info 事件，失败与待重试写 warn 事件且邮箱已掩码', async () => {
-    const openId = 'ou_aa94092a6fd14dd0672a7f327a00fd61'
+    const openId = 'ou_alice'
     const { events, logger } = captureLogger()
     const runner = makeRunner(argv => {
-      if (isBatch(argv)) return OK_BATCH('pengzhen02@dewu.com', openId)
-      if (requestedUserId(argv) === openId) return OK_USER(openId, '阿振(Pz)')
+      if (isBatch(argv)) return OK_BATCH('alice@example.com', openId)
+      if (requestedUserId(argv) === openId) return OK_USER(openId, 'Alice')
       return { code: 0, stdout: JSON.stringify({ ok: false, error: { code: '99992361', msg: 'cross app' } }), stderr: '' }
     })
     const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a', logger })
 
-    await resolver.resolveEntries(['pengzhen02@dewu.com', 'ou_cross_app'])
+    await resolver.resolveEntries(['alice@example.com', 'ou_cross_app'])
 
     const resolved = events.find(event => event.message === 'identity:resolved')
     expect(resolved?.level).toBe('info')
-    expect(resolved?.extra).toMatchObject({ entry: 'p***@dewu.com', actor: openId, name: '阿振(Pz)' })
+    expect(resolved?.extra).toMatchObject({ entry: 'a***@example.com', actor: openId, name: 'Alice' })
 
     const failed = events.find(event => event.message === 'identity:resolve-failed')
     expect(failed?.level).toBe('warn')
     expect(failed?.extra?.entry).toBe('ou_cross_app')
 
     // 日志里不能出现完整邮箱
-    expect(JSON.stringify(events)).not.toContain('pengzhen02@dewu.com')
+    expect(JSON.stringify(events)).not.toContain('alice@example.com')
   })
 
   it('暂时查不了写 warn 的 resolve-deferred 事件', async () => {
@@ -475,12 +475,12 @@ describe('解析日志', () => {
     const runner = makeRunner(() => ({ code: 1, stdout: '', stderr: 'boom' }))
     const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a', logger })
 
-    await resolver.resolveEntries(['pengzhen02@dewu.com'])
+    await resolver.resolveEntries(['alice@example.com'])
 
     const deferred = events.find(event => event.message === 'identity:resolve-deferred')
     expect(deferred?.level).toBe('warn')
-    expect(deferred?.extra?.entry).toBe('p***@dewu.com')
-    expect(JSON.stringify(events)).not.toContain('pengzhen02@dewu.com')
+    expect(deferred?.extra?.entry).toBe('a***@example.com')
+    expect(JSON.stringify(events)).not.toContain('alice@example.com')
   })
 })
 
@@ -494,7 +494,7 @@ describe('通讯录错误分类', () => {
     }))
     const resolver = new IdentityResolver({ lark: runner, appId: 'cli_a', logger })
 
-    const resolution = await resolver.resolveEntries(['ou_82fb106b096ac2a7563f9a2a6077a44d'])
+    const resolution = await resolver.resolveEntries(['ou_cross_app'])
 
     expect(resolution.invalid).toHaveLength(1)
     expect(resolution.pending).toHaveLength(0)
@@ -552,7 +552,7 @@ describe('机器人身份自动识别', () => {
   it('群成员里没有匹配 appId 的机器人时判定为未识别并说明原因', async () => {
     const runner = makeRunner(() => MEMBERS(
       [{ member_id: 'ou_other_bot', name: '别的机器人', app_id: 'cli_other' }],
-      [{ member_id: 'ou_alice', name: '阿振' }],
+      [{ member_id: 'ou_alice', name: 'Alice' }],
     ))
     const { events, logger } = captureLogger()
 
@@ -696,20 +696,20 @@ describe('机器人身份自动识别', () => {
 })
 
 describe('运行时身份装配', () => {
-  const OPEN_ID = 'ou_aa94092a6fd14dd0672a7f327a00fd61'
+  const OPEN_ID = 'ou_alice'
 
   it('全局名单里的邮箱被解析成 open_id 并带出显示名', async () => {
     const runner = makeRunner(argv => {
-      if (isBatch(argv)) return OK_BATCH('pengzhen02@dewu.com', OPEN_ID)
-      if (requestedUserId(argv) === OPEN_ID) return OK_USER(OPEN_ID, '阿振(Pz)')
+      if (isBatch(argv)) return OK_BATCH('alice@example.com', OPEN_ID)
+      if (requestedUserId(argv) === OPEN_ID) return OK_USER(OPEN_ID, 'Alice')
       return MEMBERS()
     })
-    const config = appConfig({ appId: 'cli_a', allowed: ['pengzhen02@dewu.com'] })
+    const config = appConfig({ appId: 'cli_a', allowed: ['alice@example.com'] })
 
     const identity = await resolveRuntimeIdentity({ config, lark: runner })
 
     expect(identity.allowedOpenIds).toEqual([OPEN_ID])
-    expect(identity.names.get(OPEN_ID)).toBe('阿振(Pz)')
+    expect(identity.names.get(OPEN_ID)).toBe('Alice')
     expect(identity.status.invalidCount).toBe(0)
     expect(identity.status.pendingCount).toBe(0)
     expect(identity.status.entries).toHaveLength(1)
@@ -717,31 +717,31 @@ describe('运行时身份装配', () => {
 
   it('群级名单单独解析并按群归位', async () => {
     const runner = makeRunner(argv => {
-      if (isBatch(argv)) return OK_BATCH('pengzhen02@dewu.com', OPEN_ID)
-      if (requestedUserId(argv) === OPEN_ID) return OK_USER(OPEN_ID, '阿振(Pz)')
+      if (isBatch(argv)) return OK_BATCH('alice@example.com', OPEN_ID)
+      if (requestedUserId(argv) === OPEN_ID) return OK_USER(OPEN_ID, 'Alice')
       return MEMBERS()
     })
     const config = appConfig({
       appId: 'cli_a',
-      chats: [chatEntry('oc_1', { scope: 'mention', allowed: ['pengzhen02@dewu.com'] })],
+      chats: [chatEntry('oc_1', { scope: 'mention', allowed: ['alice@example.com'] })],
     })
 
     const identity = await resolveRuntimeIdentity({ config, lark: runner })
 
     expect(identity.allowedByChatOpenIds).toEqual({ oc_1: [OPEN_ID] })
-    expect(identity.names.get(OPEN_ID)).toBe('阿振(Pz)')
+    expect(identity.names.get(OPEN_ID)).toBe('Alice')
   })
 
   it('普通成员需求的终审管理员支持邮箱，按群解析成 open_id', async () => {
     const runner = makeRunner(argv => {
-      if (isBatch(argv)) return OK_BATCH('pengzhen02@dewu.com', OPEN_ID)
-      if (requestedUserId(argv) === OPEN_ID) return OK_USER(OPEN_ID, '阿振(Pz)')
+      if (isBatch(argv)) return OK_BATCH('alice@example.com', OPEN_ID)
+      if (requestedUserId(argv) === OPEN_ID) return OK_USER(OPEN_ID, 'Alice')
       return MEMBERS()
     })
     const config = appConfig({
       appId: 'cli_a',
       chats: [
-        chatEntry('oc_1', { scope: 'all', members: { maxQuestions: 10, codeAccess: true, approvers: ['pengzhen02@dewu.com'] } }),
+        chatEntry('oc_1', { scope: 'all', members: { maxQuestions: 10, codeAccess: true, approvers: ['alice@example.com'] } }),
         chatEntry('oc_2', { scope: 'all' }),
       ],
     })
@@ -749,7 +749,7 @@ describe('运行时身份装配', () => {
     const identity = await resolveRuntimeIdentity({ config, lark: runner })
 
     expect(identity.approverOpenIdsByChat).toEqual({ oc_1: [OPEN_ID] })
-    expect(identity.names.get(OPEN_ID)).toBe('阿振(Pz)')
+    expect(identity.names.get(OPEN_ID)).toBe('Alice')
   })
 
   it('终审管理员配了邮箱却解析不出来时写 error 事件，该群没有可终审的人', async () => {
@@ -757,7 +757,7 @@ describe('运行时身份装配', () => {
     const { events, logger } = captureLogger()
     const config = appConfig({
       appId: 'cli_a',
-      chats: [chatEntry('oc_1', { scope: 'all', members: { maxQuestions: 10, codeAccess: true, approvers: ['pengzhen02@dewu.com'] } })],
+      chats: [chatEntry('oc_1', { scope: 'all', members: { maxQuestions: 10, codeAccess: true, approvers: ['alice@example.com'] } })],
     })
 
     const identity = await resolveRuntimeIdentity({ config, lark: runner, logger })
@@ -773,7 +773,7 @@ describe('运行时身份装配', () => {
     const { events, logger } = captureLogger()
     const config = appConfig({
       appId: 'cli_a',
-      chats: [chatEntry('oc_1', { scope: 'mention', allowed: ['pengzhen02@dewu.com'] })],
+      chats: [chatEntry('oc_1', { scope: 'mention', allowed: ['alice@example.com'] })],
     })
 
     const identity = await resolveRuntimeIdentity({ config, lark: runner, logger })
@@ -787,7 +787,7 @@ describe('运行时身份装配', () => {
   it('有条目解析不出来时写 warn 事件并计数', async () => {
     const runner = makeRunner(() => ({ code: 0, stdout: JSON.stringify({ ok: false, error: { code: '99992361', msg: 'cross app' } }), stderr: '' }))
     const { events, logger } = captureLogger()
-    const config = appConfig({ appId: 'cli_a', allowed: ['ou_82fb106b096ac2a7563f9a2a6077a44d'] })
+    const config = appConfig({ appId: 'cli_a', allowed: ['ou_cross_app'] })
 
     const identity = await resolveRuntimeIdentity({ config, lark: runner, logger })
 
@@ -847,16 +847,16 @@ describe('运行时身份装配', () => {
   it('缓存命中时不调用通讯录，名单仍然可用', async () => {
     const runner = makeRunner(() => { throw new Error('不该被调用') })
     const cache: IdentityCache = {
-      get: () => ({ openId: 'ou_cached', name: '阿振(Pz)' }),
+      get: () => ({ openId: 'ou_cached', name: 'Alice' }),
       set: () => {},
     }
-    const config = appConfig({ appId: 'cli_a', allowed: ['pengzhen02@dewu.com'] })
+    const config = appConfig({ appId: 'cli_a', allowed: ['alice@example.com'] })
 
     const identity = await resolveRuntimeIdentity({ config, lark: runner, cache })
 
     expect(runner.calls).toHaveLength(0)
     expect(identity.allowedOpenIds).toEqual(['ou_cached'])
-    expect(identity.names.get('ou_cached')).toBe('阿振(Pz)')
+    expect(identity.names.get('ou_cached')).toBe('Alice')
   })
 })
 
@@ -864,7 +864,7 @@ describe('全局名单为空时的告警', () => {
   it('一个都解析不出来时写 error 事件，并说明是待重试还是查无此人', async () => {
     const runner = makeRunner(() => ({ code: 1, stdout: '', stderr: 'permission denied' }))
     const { events, logger } = captureLogger()
-    const config = appConfig({ appId: 'cli_a', allowed: ['pengzhen02@dewu.com'] })
+    const config = appConfig({ appId: 'cli_a', allowed: ['alice@example.com'] })
 
     const identity = await resolveRuntimeIdentity({ config, lark: runner, logger })
 
@@ -881,11 +881,11 @@ describe('全局名单为空时的告警', () => {
   it('确认查无此人时 error 事件里写明是查无此人', async () => {
     const runner = makeRunner(() => ({
       code: 0,
-      stdout: JSON.stringify({ ok: true, data: { user_list: [{ email: 'pengzhen02@dewu.com' }] } }),
+      stdout: JSON.stringify({ ok: true, data: { user_list: [{ email: 'alice@example.com' }] } }),
       stderr: '',
     }))
     const { events, logger } = captureLogger()
-    const config = appConfig({ appId: 'cli_a', allowed: ['pengzhen02@dewu.com'] })
+    const config = appConfig({ appId: 'cli_a', allowed: ['alice@example.com'] })
 
     await resolveRuntimeIdentity({ config, lark: runner, logger })
 

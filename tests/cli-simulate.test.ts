@@ -10,8 +10,8 @@ import { extractJsonObject } from '../src/router/model-config.js'
 
 function config(): AppConfig {
   const value = defaultConfig()
-  value.projects = [{ name: 'teamwork-repos', repo: 'teamwork-repos', defaultBranch: 'main' }]
-  value.feishu.chats = [chatEntry('oc_dsh')]
+  value.projects = [{ name: 'demo-repos', repo: 'demo-repos', defaultBranch: 'main' }]
+  value.feishu.chats = [chatEntry('oc_demo')]
   value.feishu.allowed = ['ou_me']
   value.feishu.botOpenIds = ['ou_bot']
   return value
@@ -104,7 +104,7 @@ describe('ra simulate', () => {
 describe('ra simulate 的名单解析', () => {
   it('注入解析结果后按 open_id 判定名单内外', async () => {
     const cfg = config()
-    cfg.feishu.allowed = ['pengzhen02@dewu.com']
+    cfg.feishu.allowed = ['alice@example.com']
     const engine = new CountingEngine('{"decision":"accept","reason":"ok","title":"改超时","scope":"x"}')
     const home = mkdtempSync(join(tmpdir(), 'ra-sim-'))
 

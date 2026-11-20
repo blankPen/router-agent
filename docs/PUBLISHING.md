@@ -71,7 +71,7 @@
 
 ```bash
 pnpm version minor --no-git-tag-version   # 或 major / 指定的 patch
-pnpm check                                # 本地先跑一遍
+pnpm check                                # 本地先跑一遍（含内部链接扫描）
 git add -A && git commit -m "chore: 发布 v$(node -p "require('./package.json').version")"
 git push origin HEAD                      # 发起 PR
 ```
@@ -118,7 +118,7 @@ Actions → 发布 npm 包 → Run workflow。发布的是所选分支 `package.
    锁文件会停在旧版本，下一次 CI 的 `--frozen-lockfile` 安装会直接失败；
 5. `node scripts/publish-packages.mjs --check-publisher`：用 `npm whoami` + `npm view router-agent maintainers --json`
    确认 token 用户是根包维护者。无权限时 npm 对已存在的包返回 **E404（伪装成不存在）**，不是 E403；
-6. `pnpm check`（类型检查 + 全量测试）；
+6. `pnpm check`（内部链接扫描 + 类型检查 + 全量测试）；
 7. `pnpm build`（tsc + esbuild + 各包独立产物）；
 8. **发布前置校验**：版本号与发布计划一致、构建产物存在（`dist/cli/index.js` 等）、
    dist-tag 与所在分支匹配（beta 分支必须是 `beta`、alpha 分支必须是 `alpha`）；

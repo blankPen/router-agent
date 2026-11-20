@@ -46,7 +46,7 @@ const ticket: Ticket = {
   chatId: 'oc_chat',
   mandateId: 'md1',
   stage: 'todo',
-  repo: 'dsh/router-agent',
+  repo: 'acme/router-agent',
   branch: 'main',
   prNumber: 0,
   prUrl: '',
@@ -497,12 +497,12 @@ describe('派工草稿', () => {
       threadId: 'feishu:oc_chat:om_2',
       actorId: 'ou_alice',
       task: '把登录超时改成 30 秒',
-      repo: 'name:dsh/router-agent',
+      repo: 'name:acme/router-agent',
       branch: 'main',
       updatedAt: '2026-11-06T10:01:00.000Z',
     })
     const draft = db.getDispatchDraft('oc_chat', 'ou_alice')!
-    expect(draft).toMatchObject({ repo: 'name:dsh/router-agent', branch: 'main', threadId: 'feishu:oc_chat:om_2' })
+    expect(draft).toMatchObject({ repo: 'name:acme/router-agent', branch: 'main', threadId: 'feishu:oc_chat:om_2' })
 
     db.clearDispatchDraft('oc_chat', 'ou_alice')
     expect(db.getDispatchDraft('oc_chat', 'ou_alice')).toBeNull()
@@ -510,8 +510,8 @@ describe('派工草稿', () => {
 
   it('工单的 repo/branch 会落库并读回', () => {
     const db = store()
-    db.insertTicket({ ...ticket, repo: 'name:dsh/router-agent', branch: 'release' })
-    expect(db.getTicket('tk1')).toMatchObject({ repo: 'name:dsh/router-agent', branch: 'release' })
+    db.insertTicket({ ...ticket, repo: 'name:acme/router-agent', branch: 'release' })
+    expect(db.getTicket('tk1')).toMatchObject({ repo: 'name:acme/router-agent', branch: 'release' })
   })
 
   it('工单编号计数器原子自增，重启后从上次的值继续', () => {
@@ -604,7 +604,7 @@ describe('需求识别存储', () => {
     actorId: 'ou_bob',
     actorName: 'Bob',
     project: 'router-agent',
-    repo: 'name:dsh/router-agent',
+    repo: 'name:acme/router-agent',
     branch: 'main',
     status: 'clarifying',
     kind: 'issue',
@@ -666,14 +666,14 @@ describe('身份别名缓存', () => {
     const db = store()
     expect(db.getIdentityAlias('cli_a', 'email', 'a@b.com')).toBeNull()
 
-    db.setIdentityAlias('cli_a', 'email', 'a@b.com', 'ou_x', '阿振')
-    expect(db.getIdentityAlias('cli_a', 'email', 'a@b.com')).toEqual({ openId: 'ou_x', name: '阿振' })
+    db.setIdentityAlias('cli_a', 'email', 'a@b.com', 'ou_x', 'Alice')
+    expect(db.getIdentityAlias('cli_a', 'email', 'a@b.com')).toEqual({ openId: 'ou_x', name: 'Alice' })
     db.close()
   })
 
   it('换个 appId 缓存不通用：open_id 是应用内唯一的', () => {
     const db = store()
-    db.setIdentityAlias('cli_a', 'email', 'a@b.com', 'ou_x', '阿振')
+    db.setIdentityAlias('cli_a', 'email', 'a@b.com', 'ou_x', 'Alice')
 
     // 另一个应用里同一个人的 open_id 完全不同，旧应用的缓存不能被复用。
     expect(db.getIdentityAlias('cli_b', 'email', 'a@b.com')).toBeNull()
@@ -682,7 +682,7 @@ describe('身份别名缓存', () => {
 
   it('同一 appId 下不同 kind 互不串', () => {
     const db = store()
-    db.setIdentityAlias('cli_a', 'email', 'a@b.com', 'ou_x', '阿振')
+    db.setIdentityAlias('cli_a', 'email', 'a@b.com', 'ou_x', 'Alice')
 
     expect(db.getIdentityAlias('cli_a', 'open_id', 'a@b.com')).toBeNull()
     db.close()
@@ -691,11 +691,11 @@ describe('身份别名缓存', () => {
   it('缓存落盘，重开数据库后仍能读到', () => {
     const path = join(tmpdir(), `ra-identity-${Date.now()}-${Math.random().toString(16).slice(2)}.db`)
     const db = new Store(path)
-    db.setIdentityAlias('cli_a', 'email', 'a@b.com', 'ou_x', '阿振')
+    db.setIdentityAlias('cli_a', 'email', 'a@b.com', 'ou_x', 'Alice')
     db.close()
 
     const reopened = new Store(path)
-    expect(reopened.getIdentityAlias('cli_a', 'email', 'a@b.com')).toEqual({ openId: 'ou_x', name: '阿振' })
+    expect(reopened.getIdentityAlias('cli_a', 'email', 'a@b.com')).toEqual({ openId: 'ou_x', name: 'Alice' })
     reopened.close()
     rmSync(path, { force: true })
     rmSync(`${path}-wal`, { force: true })

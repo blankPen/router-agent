@@ -41,9 +41,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
+    "check:links": "node scripts/check-internal-links.mjs",
     "build:web": "node scripts/build-web.mjs",
     "build": "tsc -p tsconfig.build.json && node scripts/build-web.mjs && node scripts/flatten-dist.mjs && node scripts/build-packages.mjs",
-    "check": "pnpm typecheck && pnpm test",
+    "check": "pnpm check:links && pnpm typecheck && pnpm test",
     "start": "node dist/cli/main.js start"
   },
   "pnpm": {

@@ -1,7 +1,7 @@
-# router-agent vs dsh-superagent-prototype 差距分析
+# router-agent vs agent-prototype 差距分析
 
 > 日期：2026-11-06
-> 对象：`/Users/admin/pz/dsh/router-agent`（ra，src ≈ 6.7k 行，248 测试）vs `/Users/admin/pz/dsh/dsh-superagent-prototype`（src ≈ 12.7k 行，≈811 测试，9 篇设计文档 ≈ 2k 行）
+> 对象：`/Users/me/router-agent`（ra，src ≈ 6.7k 行，248 测试）vs `/Users/me/agent-prototype`（src ≈ 12.7k 行，≈811 测试，9 篇设计文档 ≈ 2k 行）
 >
 > 说明：原型是「研究代码」，很多设计讲的是方向而非实现；本报告只提炼**可迁移的机制**，不要求照抄领域模型。凡是原型自己也没有的能力（多仓库、成本预算、长期记忆、离线评测、自动回滚），单列为「共同缺口」，不算 ra 落后。
 
@@ -187,7 +187,7 @@ ra 的**主干是通的**：Source → Gate → LLM 研判 → 工单/Mandate �
 | 死代码 | `revalidateMandate`（仅测试）、`AgentLoop.setPolicy`（无调用）、`titleFrom`、`relaunchAgent`、`removeWorktree` | — | 要么接线（A3/A7），要么删 |
 | 阶段 `draft` | `model.ts:10` 定义但从不产生 | — | 删或实现 |
 | CI | 无 | 无 | 都没有，本地 `pnpm check` 已够；若要加，先加 GitHub Actions 跑 check |
-| 版本控制 | **`/Users/admin/pz/dsh/router-agent` 不是 git 仓库** | 有 `.git` | 先 `git init` ——这是所有改动的安全网 |
+| 版本控制 | **`/Users/me/router-agent` 不是 git 仓库** | 有 `.git` | 先 `git init` ——这是所有改动的安全网 |
 
 ---
 

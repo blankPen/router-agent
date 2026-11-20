@@ -49,9 +49,9 @@ describe('state.json 解析', () => {
     const legacy = parseStateFile(JSON.stringify({
       ...valid,
       state: 'ready',
-      deliverable: { kind: 'doc', title: '清单', content: '# 全文', url: 'https://x.feishu.cn/docx/abc' },
+      deliverable: { kind: 'doc', title: '清单', content: '# 全文', url: 'https://example.feishu.cn/docx/abc' },
     }))
-    expect(legacy.state.reply).toBe('# 全文\n\nhttps://x.feishu.cn/docx/abc')
+    expect(legacy.state.reply).toBe('# 全文\n\nhttps://example.feishu.cn/docx/abc')
   })
 
   it('空回复不产生 reply', () => {

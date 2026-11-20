@@ -30,11 +30,11 @@ describe('GitHub PR 状态解析', () => {
 
 describe('仓库选择器归一化', () => {
   it('gh 只认 owner/name：剥掉 name:/id: 前缀，path 取最后两段', () => {
-    expect(ghRepoOf('name:dsh/router-agent')).toBe('dsh/router-agent')
+    expect(ghRepoOf('name:acme/router-agent')).toBe('acme/router-agent')
     expect(ghRepoOf('id:abc-123')).toBe('abc-123')
-    expect(ghRepoOf('path:/Users/me/work/dsh/router-agent')).toBe('dsh/router-agent')
-    expect(ghRepoOf('dsh/router-agent')).toBe('dsh/router-agent')
-    expect(ghPrViewCommand('name:dsh/router-agent', 7)[4]).toBe('dsh/router-agent')
+    expect(ghRepoOf('path:/Users/me/work/acme/router-agent')).toBe('acme/router-agent')
+    expect(ghRepoOf('acme/router-agent')).toBe('acme/router-agent')
+    expect(ghPrViewCommand('name:acme/router-agent', 7)[4]).toBe('acme/router-agent')
   })
 })
 

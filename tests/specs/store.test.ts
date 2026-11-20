@@ -26,7 +26,7 @@ const ticket: Ticket = {
   chatId: 'oc_chat',
   mandateId: 'md_1',
   stage: 'todo',
-  repo: 'dsh/router-agent',
+  repo: 'acme/router-agent',
   branch: 'main',
   prNumber: 0,
   prUrl: '',
@@ -100,7 +100,7 @@ describe('规范 markdown 内置存储', () => {
       mandateScope: '只改登录超时',
       statePath: '/tmp/s.json',
       eventsPath: '/tmp/e.log',
-      repo: 'dsh/router-agent',
+      repo: 'acme/router-agent',
       home,
     })).toContain('只改登录超时')
   })

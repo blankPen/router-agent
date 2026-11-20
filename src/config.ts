@@ -1161,7 +1161,7 @@ function parseLegacyBindings(value: unknown): ChatBinding[] {
   return []
 }
 
-/** 从选择器里取一个可读的项目名：name:dsh/router-agent → dsh/router-agent。 */
+/** 从选择器里取一个可读的项目名：name:acme/router-agent → acme/router-agent。 */
 export function projectNameOf(repo: string): string {
   const raw = repo.trim().replace(/^(id|name|path):/, '').replace(/\/+$/, '')
   // 本地绝对路径取最后一段作为项目名，避免名字里出现整条路径。

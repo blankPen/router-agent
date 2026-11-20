@@ -6,13 +6,13 @@
 
 **Architecture:** 新增 `IdentityResolver`（`src/sources/feishu-identity.ts`）在**服务启动与配置变更时**把名单条目解析成 open_id，解析结果进 `state.db` 缓存（键带 appId，换应用自然失效）。`Policy` 增补 `allowedOpenIds` / `allowedByChatOpenIds`，运行时所有名单判定改用解析结果；`open_id` 仍是唯一主键，邮箱只在配置层出现一次。机器人身份按 `feishu.appId` 与群成员自动匹配，失败时启动即报 error。
 
-**Tech Stack:** TypeScript (ESM, Node 22+)、vitest、已有 `lark-cli`（`/Users/pz/.local/bin/lark-cli`，固定 profile `~/.router-agent-lark`）、SQLite（`state.db`）、React 面板（Vite 构建）。不新增 npm 依赖。
+**Tech Stack:** TypeScript (ESM, Node 22+)、vitest、已有 `lark-cli`（`~/.local/bin/lark-cli`，固定 profile `~/.router-agent-lark`）、SQLite（`state.db`）、React 面板（Vite 构建）。不新增 npm 依赖。
 
 **Spec:** `docs/superpowers/specs/2026-11-11-feishu-identity-design.md`（本计划实现它；执行者两个都要读）
 
 ## Global Constraints
 
-- **日志规范**（`AGENTS.md`）：一行一个 JSON；`message` 用 `域:动作` kebab-case；错误详情一律进 `detail`；业务字段平铺；禁止空 catch（要么重抛要么写 warn/error 且带 `errorMessage(error)`）；不打印堆栈；**邮箱必须掩码后入日志**（形如 `p***@dewu.com`）；新增事件必须同步 `docs/OPERATIONS.md` 的日志事件表。
+- **日志规范**（`AGENTS.md`）：一行一个 JSON；`message` 用 `域:动作` kebab-case；错误详情一律进 `detail`；业务字段平铺；禁止空 catch（要么重抛要么写 warn/error 且带 `errorMessage(error)`）；不打印堆栈；**邮箱必须掩码后入日志**（形如 `a***@example.com`）；新增事件必须同步 `docs/OPERATIONS.md` 的日志事件表。
 - **语言**：代码注释、提交信息、文档一律中文。
 - **提交前**：`pnpm typecheck` 与 `pnpm test` 全绿；交付前 `pnpm build` 通过。
 - **不直接写数据库**：状态写入一律走 `src/core/engine.ts`；新增的表只由 Store 的方法写入。
@@ -25,7 +25,7 @@
 
 以下五类输入/故障是最容易咬人的，每条都已在对应任务里指定了钉住它的测试：
 
-1. **跨应用 open_id**（就是 `ou_82fb106b096ac2a7563f9a2a6077a44d` 那次）——能保存，但面板与日志必须显示「解析不到」，且该用户不算允许名单内 → Task 1 / Task 6。
+1. **跨应用 open_id**（就是 `ou_cross_app` 那次）——能保存，但面板与日志必须显示「解析不到」，且该用户不算允许名单内 → Task 1 / Task 6。
 2. **通讯录权限缺失 / lark-cli 不可用 / 超时**——名单**不能被清空**，条目保留待重试，机器人按上一份有效名单继续工作 → Task 1。
 3. **群级 allowed 全部解析失败**——该群**拒绝所有人**并标红，**不得退回全局名单** → Task 3。
 4. **名单改成邮箱后，在途工单恢复**——`revalidateMandate()` 不得把工单判成 `sender:not-allowed` → Task 3。
@@ -83,16 +83,16 @@ const runner = (results: Record<string, { code: number; stdout: string; stderr: 
 ```
 
 - `classifyEntry('a@b.com')` → `{ kind: 'email', value: 'a@b.com' }`；`' ou_x '` → `{ kind: 'open_id', value: 'ou_x' }`；`'张三'` → `{ kind: 'invalid', value: '张三' }`。
-- 邮箱条目：`resolveEntries(['pengzhen02@dewu.com'])` 调用
-  `['api','POST','/open-apis/contact/v3/users/batch_get_id','--params',JSON.stringify({ user_id_type: 'open_id' }),'--data',JSON.stringify({ emails: ['pengzhen02@dewu.com'] }),'--as','bot','--format','json']`，
-  返回 `ok:true` 且 `data.user_list[0].user_id='ou_aa94092a6fd14dd0672a7f327a00fd61'` 时，`openIds` 含该 id。
+- 邮箱条目：`resolveEntries(['alice@example.com'])` 调用
+  `['api','POST','/open-apis/contact/v3/users/batch_get_id','--params',JSON.stringify({ user_id_type: 'open_id' }),'--data',JSON.stringify({ emails: ['alice@example.com'] }),'--as','bot','--format','json']`，
+  返回 `ok:true` 且 `data.user_list[0].user_id='ou_alice'` 时，`openIds` 含该 id。
 - 邮箱查无此人：`ok:true` 但该条**没有** `user_id` 字段 → 该条目 `status='invalid'`、`detail` 含「查无此人」，且**不在** `openIds` 里。
 - 跨应用 open_id：`contact +get-user` 返回 `ok:false` 且 `error.code=99992361` → `status='invalid'`、detail 含「跨应用」。
 - 查无此人的 open_id：`error.code=99992351` → `status='invalid'`。
 - 权限/网络类失败：runner 返回 `code=1` 或抛异常 → `status='pending'`（**不是** invalid），条目**保留**，并断言 `invalid` 数组里没有它。
-- 名字回填：`contact +get-user` 返回 `name='阿振(Pz)'` → `names.get('ou_aa94...')==='阿振(Pz)'`。
-- 缓存：`cache.get` 命中时**不再调用** runner（断言 `calls.length===0`）；`cache.set` 被调用且键为 `(appId,'email','pengzhen02@dewu.com')`。
-- `maskEmail('pengzhen02@dewu.com')` → `'p***@dewu.com'`；`invalid[0].detail` 里不出现完整邮箱。
+- 名字回填：`contact +get-user` 返回 `name='Alice'` → `names.get('ou_alice...')==='Alice'`。
+- 缓存：`cache.get` 命中时**不再调用** runner（断言 `calls.length===0`）；`cache.set` 被调用且键为 `(appId,'email','alice@example.com')`。
+- `maskEmail('alice@example.com')` → `'a***@example.com'`；`invalid[0].detail` 里不出现完整邮箱。
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -143,7 +143,7 @@ git commit -m "feat(feishu): 新增身份条目解析器，支持邮箱与 open_
 
 在 `tests/store/store.test.ts` 追加：
 
-- `setIdentityAlias('cli_a','email','a@b.com','ou_x','阿振')` 后 `getIdentityAlias('cli_a','email','a@b.com')` 返回 `{ openId:'ou_x', name:'阿振' }`。
+- `setIdentityAlias('cli_a','email','a@b.com','ou_x','Alice')` 后 `getIdentityAlias('cli_a','email','a@b.com')` 返回 `{ openId:'ou_x', name:'Alice' }`。
 - **换 appId 后缓存失效**：`getIdentityAlias('cli_b','email','a@b.com')` 返回 `null`（Review Focus 第 5 条）。
 - 同 appId 不同 kind 不串：`getIdentityAlias('cli_a','open_id','a@b.com')` 返回 `null`。
 - 重开数据库（重新 `new Store(path)`）后仍能读到（缓存落盘，不在内存）。
@@ -312,11 +312,11 @@ git commit -m "feat(policy): 允许名单支持邮箱解析结果，保留旧库
 - `resolveBotIdentity({ appId: 'cli_a', chatIds: ['oc_1'] })`：群成员返回 `bots:[{ member_id:'ou_bot', name:'Pz小助手', app_id:'cli_a' }]` → `botOpenIds` 含 `'ou_bot'`、`botNames` 含 `'Pz小助手'`、`resolved===true`。
 - 群成员里**没有**匹配 appId 的机器人 → `resolved===false`，`detail` 说明「群 oc_1 里没找到 appId=cli_a 的机器人」。
 - 群成员调用失败（runner 抛错）→ `resolved===false`，`detail` 含 `errorMessage(error)`。
-- `resolveRuntimeIdentity`：全局 `allowed=['pengzhen02@dewu.com']` → `allowedOpenIds` 含 `ou_aa94...`；`names` 含该 id → `阿振(Pz)`。
+- `resolveRuntimeIdentity`：全局 `allowed=['alice@example.com']` → `allowedOpenIds` 含 `ou_alice...`；`names` 含该 id → `Alice`。
 
 `tests/sources/feishu.test.ts` 追加：
 
-- `normalizeFeishuEventDetailed` 在 `cfg.actorNames = new Map([['ou_alice','阿振(Pz)']])` 时，返回的 `trigger.actorName === '阿振(Pz)'`。
+- `normalizeFeishuEventDetailed` 在 `cfg.actorNames = new Map([['ou_alice','Alice']])` 时，返回的 `trigger.actorName === 'Alice'`。
 - `actorNames` 为空或没有该人时，`actorName === ''`（不报错）。
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -575,19 +575,19 @@ git commit -m "feat(doctor): 机器人身份改为自动识别判定，并补齐
 
 ```bash
 # 1) 把本地配置改成邮箱，验证解析与生效
-ra config set feishu.allowed pengzhen02@dewu.com
+ra config set feishu.allowed alice@example.com
 ra config set feishu.botOpenIds ''    # 清空，交给自动识别
 ra start
 ```
 
 在【RA-Bot】Router-Agent 群里 `@Pz小助手` 发一条，确认：
-- `~/.router-agent/logs/router-agent.log` 出现 `identity:resolved`（`name=阿振(Pz)`）与 `feishu:bot-identity-resolved`；
+- `~/.router-agent/logs/router-agent.log` 出现 `identity:resolved`（`name=Alice`）与 `feishu:bot-identity-resolved`；
 - 消息不再出现 `trigger:dropped reason=mention:required`；
 - 机器人正常回复。
 
 - [ ] **Step 2: 验证告警路径**
 
-把允许名单改成另一个应用的 `ou_82fb106b096ac2a7563f9a2a6077a44d`，确认面板提示「解析不到」且日志出现
+把允许名单改成另一个应用的 `ou_cross_app`，确认面板提示「解析不到」且日志出现
 `identity:resolve-failed`；把 `feishu.appId` 改成一个不存在的值，确认启动日志出现
 `feishu:bot-identity-failed`（error 级）。
 

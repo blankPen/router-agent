@@ -1,0 +1,29 @@
+name: 内部链接检查
+
+# 防止与公司 / 内部环境绑定的链接、账号、组织名回流到仓库。
+# 与发布流水线分开：PR 合入前就能拦下来，不用等 main 上再发现。
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: 扫描公司与内部环境专属链接
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+
+      - name: 检查内部链接
+        run: node scripts/check-internal-links.mjs

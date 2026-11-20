@@ -80,12 +80,12 @@ describe('多包发布', () => {
   })
 
   it('token 用户不是根包维护者时，在发布前给出 E404 解释', () => {
-    expect(() => assertPublisher('router-agent', 'someone', 'pengzhen <529629354@qq.com>'))
+    expect(() => assertPublisher('router-agent', 'someone', 'maintainer <maintainer@example.com>'))
       .toThrow(/不是 router-agent 的维护者/)
   })
 
   it('维护者账号通过发布前校验', () => {
-    expect(assertPublisher('router-agent', 'pengzhen', 'pengzhen <529629354@qq.com>')).toBe('pengzhen')
+    expect(assertPublisher('router-agent', 'maintainer', 'maintainer <maintainer@example.com>')).toBe('maintainer')
   })
 
   it('缺少 repository 的包不能发布，避免 provenance 关联不到源码', () => {

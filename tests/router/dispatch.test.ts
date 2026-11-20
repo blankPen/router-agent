@@ -5,7 +5,7 @@ import type { DispatchDraft } from '#core/model.js'
 
 const project = (over: Partial<DispatchSettings['projects'][number]> = {}) => ({
   name: 'router-agent',
-  repo: 'name:dsh/router-agent',
+  repo: 'name:acme/router-agent',
   defaultBranch: 'main',
   ...over,
 })
@@ -28,7 +28,7 @@ const draft = (over: Partial<DispatchDraft> = {}): DispatchDraft => ({
 describe('多项目 / 多分支派工解析', () => {
   it('只有一个项目且配了默认分支时，无需追问即可派工', () => {
     const result = resolveDispatch({ settings: settings(), chatId: 'oc_dev' })
-    expect(result).toMatchObject({ repo: 'name:dsh/router-agent', branch: 'main', missing: [] })
+    expect(result).toMatchObject({ repo: 'name:acme/router-agent', branch: 'main', missing: [] })
     expect(result.project?.name).toBe('router-agent')
   })
 
@@ -37,15 +37,15 @@ describe('多项目 / 多分支派工解析', () => {
       settings: settings({ bindings: [{ chat: 'oc_dev', repo: 'router-agent', branch: 'release' }] }),
       chatId: 'oc_dev',
     })
-    expect(result.repo).toBe('name:dsh/router-agent')
+    expect(result.repo).toBe('name:acme/router-agent')
     expect(result.branch).toBe('release')
     expect(result.missing).toEqual([])
     expect(result.binding?.branch).toBe('release')
   })
 
   it('用户只写仓库最后一段也能匹配到项目', () => {
-    const result = resolveDispatch({ settings: settings({ projects: [] }), chatId: 'oc_dev', repo: 'dsh/router-agent', branch: 'main' })
-    expect(result.repo).toBe('dsh/router-agent')
+    const result = resolveDispatch({ settings: settings({ projects: [] }), chatId: 'oc_dev', repo: 'acme/router-agent', branch: 'main' })
+    expect(result.repo).toBe('acme/router-agent')
     expect(result.missing).toEqual([])
   })
 
@@ -58,7 +58,7 @@ describe('多项目 / 多分支派工解析', () => {
 
   it('上一轮草稿里的项目/分支会被继承，用户只需补缺的那一项', () => {
     const result = resolveDispatch({ settings: settings({ projects: [project({ defaultBranch: '' })] }), chatId: 'oc_dev', draft: draft({ branch: 'release' }) })
-    expect(result.repo).toBe('name:dsh/router-agent')
+    expect(result.repo).toBe('name:acme/router-agent')
     expect(result.branch).toBe('release')
     expect(result.missing).toEqual([])
   })
@@ -81,9 +81,9 @@ describe('多项目 / 多分支派工解析', () => {
 
   it('matchProject 支持项目名、选择器与 basename（大小写不敏感）', () => {
     const projects = [project(), project({ name: 'super-agent', repo: 'path:/Users/me/super-agent', defaultBranch: 'trunk' })]
-    expect(matchProject(projects, 'router-agent')?.repo).toBe('name:dsh/router-agent')
-    expect(matchProject(projects, 'name:dsh/router-agent')?.name).toBe('router-agent')
-    expect(matchProject(projects, 'dsh/ROUTER-agent')?.name).toBe('router-agent')
+    expect(matchProject(projects, 'router-agent')?.repo).toBe('name:acme/router-agent')
+    expect(matchProject(projects, 'name:acme/router-agent')?.name).toBe('router-agent')
+    expect(matchProject(projects, 'acme/ROUTER-agent')?.name).toBe('router-agent')
     expect(matchProject(projects, '/Users/me/super-agent')?.name).toBe('super-agent')
   })
 
@@ -110,7 +110,7 @@ describe('项目清单按运行时隔离', () => {
   it('dispatchSettingsOf 跟随默认运行时切换清单', () => {
     const base = defaultConfig()
     const orca = { ...base, projects: [project()] }
-    expect(dispatchSettingsOf(orca).projects[0]?.repo).toBe('name:dsh/router-agent')
+    expect(dispatchSettingsOf(orca).projects[0]?.repo).toBe('name:acme/router-agent')
 
     const claude = {
       ...orca,
@@ -118,7 +118,7 @@ describe('项目清单按运行时隔离', () => {
     }
     expect(dispatchSettingsOf(claude).projects[0]?.repo).toBe('/Users/me/router-agent')
     // orca 清单没有被覆盖
-    expect(claude.projects[0]?.repo).toBe('name:dsh/router-agent')
+    expect(claude.projects[0]?.repo).toBe('name:acme/router-agent')
   })
 
   it('群绑定到其它运行时的项目时要求重选，不把选择器当本地路径', () => {

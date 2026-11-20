@@ -314,7 +314,7 @@ router-agent 固定使用 `~/.router-agent-lark` 作为 lark-cli profile，**不
 
 ## 项目与仓库选择
 
-每个 `projects[].repo` 决定该工单的仓库，**所有运行时统一填本地仓库绝对路径**（`/Users/admin/du/teamwork-repos`）：
+每个 `projects[].repo` 决定该工单的仓库，**所有运行时统一填本地仓库绝对路径**（`/Users/me/du/demo-repos`）：
 
 | 运行时 | 怎么用这个路径 |
 |-|-|
@@ -346,7 +346,7 @@ orca repo list --json | jq -r '.result.repos[] | "\(.displayName)\t\(.path)\t\(.
 
 注意：只有 `kind: git` 的仓库能创建 worktree；`kind: folder`（纯文件夹项目）会在 `orca worktree create` 阶段失败。
 
-**历史写法**：Orca 的 `name:` / `id:` 选择器（如 `name:teamwork-repos`）不再接受——旧配置仍能读，但保存时会被校验拒绝，请改成上面表格里的绝对路径。
+**历史写法**：Orca 的 `name:` / `id:` 选择器（如 `name:demo-repos`）不再接受——旧配置仍能读，但保存时会被校验拒绝，请改成上面表格里的绝对路径。
 
 另外，旧版的全局 `repo` 配置已移除（`ra` 不再读取它）。已有配置文件请改成 `projects`，`ra doctor` 会在没有任何项目时直接报错并给出命令。
 

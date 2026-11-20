@@ -19,7 +19,7 @@ function intake(over: Partial<Intake> = {}): Intake {
     actorId: 'ou_bob',
     actorName: 'Bob',
     project: 'router-agent',
-    repo: 'name:dsh/router-agent',
+    repo: 'name:acme/router-agent',
     branch: 'main',
     status: 'ready',
     kind: 'issue',
