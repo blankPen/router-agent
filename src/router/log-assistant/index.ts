@@ -18,11 +18,10 @@
  * 主交互语句只留「发生了什么」与「现在该做什么」。
  */
 import { preview } from '#core/events.js'
-import { noopLogger, errorMessage, type Logger } from '#infra/logger.js'
-import { createChatClient, type ChatClient, type ChatModelConfig } from '#infra/chat.js'
+import { noopLogger, errorMessage } from '#infra/logger.js'
+import { createChatClient, type ChatClient } from '#infra/chat.js'
 import { readLogTail, type LogEntry } from '../log-tail.js'
 import { filterByWindow, logWindow, type LogWindow } from '../log-window.js'
-import { toolSpecs, type DiagnosisTool } from '../diagnosis-tools.js'
 import {
   MAX_QUESTION_CHARS,
   READ_LIMIT,
@@ -32,15 +31,12 @@ import type {
   LogAssistantOptions,
   LogAssistantOverview,
   LogAssistantQuestion,
-  LogCause,
   LogDiagnosis,
-  LogEvidence,
-  LogNextStep,
 } from './types.js'
-import { filterEntries, redactFields, selectEvidence } from './evidence.js'
-import { ensureEvidence, matchSymptoms, nextStepsFor, ruleDiagnosis, type SymptomHit } from './symptoms.js'
-import { askModel, nextStepsFromCauses } from './model.js'
-import { distinctIssues, overviewIssueOf } from './overview.js'
+import { filterEntries, selectEvidence } from './evidence.js'
+import { ensureEvidence, matchSymptoms, ruleDiagnosis } from './symptoms.js'
+import { askModel } from './model.js'
+import { distinctIssues } from './overview.js'
 
 export function createLogAssistant(opts: LogAssistantOptions): LogAssistant {
   const logger = opts.logger ?? noopLogger

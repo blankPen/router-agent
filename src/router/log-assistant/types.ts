@@ -4,8 +4,6 @@ import type { ChatModelConfig } from '#infra/chat.js'
 import type { DiagnosisTool } from '../diagnosis-tools.js'
 import type { Logger } from '#infra/logger.js'
 
-import type { LogEntry } from '../log-tail.js'
-
 export const MAX_ASSISTANT_EVIDENCE = 40
 
 /**

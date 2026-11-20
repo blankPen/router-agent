@@ -4,13 +4,10 @@ import { extractJsonObject } from '../model-config.js'
 import { toolSpecs } from '../diagnosis-tools.js'
 import { SYMPTOMS } from './symptoms.js'
 
-import { preview } from '#core/events.js'
-import { errorMessage } from '#infra/logger.js'
-import { createChatClient, type ChatClient, type ChatMessage } from '#infra/chat.js'
-import type { LogEntry } from '../log-tail.js'
+import type { ChatClient, ChatMessage } from '#infra/chat.js'
 import type { DiagnosisTool } from '../diagnosis-tools.js'
 import type { LogCause, LogDiagnosis, LogEvidence, LogNextStep } from './types.js'
-import { redactFields, tokenize } from './evidence.js'
+import { redactFields } from './evidence.js'
 
 // ---------------------------------------------------------------------------
 // 模型总结
