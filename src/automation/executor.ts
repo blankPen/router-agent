@@ -15,6 +15,7 @@ import type {
   AutomationExecutionResult,
   AutomationExecutor,
   AutomationRunOutputs,
+  AutomationRunPhase,
   AutomationTool,
   AutomationType,
 } from '#core/automation.js'
@@ -25,8 +26,6 @@ import type { WorkerRuntime } from '#runtime/port.js'
 export interface AutomationExecutorDeps {
   /** runtime 注册表；按任务选的 runtime id 取适配器，不硬编码任何一个。 */
   runtimes: { get(id: string): WorkerRuntime; has(id: string): boolean; default(): WorkerRuntime }
-  /** 生成脚本正文；模型不可用时返回 null，执行器会退化成只用提示词。 */
-  generateScript?: (automation: Automation) => Promise<string | null>
   /** 把任务交给 runtime 执行并等结果；两种类型都走这一个口子。 */
   runViaRuntime?: (input: RuntimeRunInput) => Promise<RuntimeRunOutcome>
 }
@@ -47,6 +46,8 @@ export interface RuntimeRunInput {
   tools: AutomationTool[]
   /** 硬超时（毫秒）。 */
   timeoutMs: number
+  /** 上报当前阶段；面板据此显示「跑到哪一步了」。 */
+  onPhase?: (phase: AutomationRunPhase) => void
 }
 
 /** 一次执行的结果。 */
@@ -109,6 +110,7 @@ class AiAutomationExecutor implements AutomationExecutor {
       workdir: input.workdir,
       tools,
       timeoutMs,
+      ...(input.onPhase ? { onPhase: input.onPhase } : {}),
     })
     if (!outcome) {
       // 没有 runtime 执行能力（装配不完整）：不算失败，但要让调用方看到没跑起来。
@@ -135,29 +137,19 @@ class ScriptAutomationExecutor implements AutomationExecutor {
 
   async execute(input: AutomationExecutionInput): Promise<AutomationExecutionResult> {
     const { automation, tools, timeoutMs, logger, workdir } = input
-    const runtime = runtimeOf(this.deps, automation)
     // 脚本正文优先用已持久化的那份：面板人工编辑过的内容要真的被执行。
     let script = automation.script?.trim() ?? ''
-    if (!script && this.deps.generateScript) {
-      logger.info('automation:script-generating', { automationId: automation.id })
-      try {
-        script = (await this.deps.generateScript(automation))?.trim() ?? ''
-      } catch (error) {
-        logger.error('automation:script-generate-failed', {
-          automationId: automation.id,
-          message: errorMessage(error),
-        })
-        return { status: 'failed', summary: '脚本生成失败', outputs: emptyOutputs(), error: errorMessage(error) }
-      }
-      if (!script) {
-        logger.warn('automation:script-empty', { automationId: automation.id })
-        return { status: 'failed', summary: '脚本生成结果为空', outputs: emptyOutputs() }
-      }
-    }
     if (!script) {
+      // 不在执行时偷偷生成脚本：生成结果要人工在面板确认过才算数。
       logger.warn('automation:script-missing', { automationId: automation.id })
-      return { status: 'failed', summary: '任务没有脚本正文，也没有生成脚本的能力', outputs: emptyOutputs() }
+      return {
+        status: 'failed',
+        summary: '还没有脚本正文：请在面板点「生成脚本」，确认后再执行',
+        outputs: emptyOutputs(),
+        error: 'script:missing',
+      }
     }
+    const runtime = runtimeOf(this.deps, automation)
 
     mkdirSync(workdir, { recursive: true })
     const scriptPath = join(workdir, 'automation.sh')
@@ -188,6 +180,7 @@ class ScriptAutomationExecutor implements AutomationExecutor {
       workdir,
       tools,
       timeoutMs,
+      ...(input.onPhase ? { onPhase: input.onPhase } : {}),
     })
     if (!outcome) {
       return { status: 'failed', summary: '自动化执行器未装配运行时能力', outputs: emptyOutputs() }
@@ -240,6 +233,14 @@ export function buildContract(automation: Automation, tools: AutomationTool[]): 
     '- 只在本任务的目标项目范围内操作；不改其它仓库。',
     '- 不访问未授权资源，不使用任何硬编码凭据。',
     '- 需要人工介入时不要自行扩大范围，把结论写进产出。',
+    '',
+    '## 什么时候结束',
+    '这是一次无人值守的定时执行：做完上面的目标就立刻结束，不要继续探索、不要修无关的东西。',
+    '结束时把「这次做了什么」写进工作目录下的 `.automation-result` 文件（一行字即可），然后就不要再做任何事：',
+    '```',
+    'echo "这次做了什么" > .automation-result',
+    '```',
+    '不写这个文件的话，本次执行只能等到超时才结束。',
   ]
   return lines.filter(line => line !== '').join('\n')
 }
@@ -266,6 +267,7 @@ export function buildScriptContract(automation: Automation, tools: AutomationToo
     '## 执行方式',
     '脚本已经写好并放在工作目录里，请执行它：`bash automation.sh`。',
     '执行完把结果摘要写进产出；脚本失败时如实报告原因，不要重试或绕过。',
+    '脚本跑完就结束：不要顺手改脚本，除非脚本本身跑不起来（这时修好后重跑一次，仍失败就如实报告）。',
     '',
     '## 可用工具',
     ...tools.map(tool => `- \`${tool.name}\`：${tool.description}`),
@@ -280,6 +282,14 @@ export function buildScriptContract(automation: Automation, tools: AutomationToo
     '## 约束',
     '- 只在本任务的目标项目范围内操作；不改其它仓库。',
     '- 不访问未授权资源，不使用任何硬编码凭据。',
+    '',
+    '## 什么时候结束',
+    '这是一次无人值守的定时执行：脚本跑完（成功或失败）就立刻结束，不要继续探索、不要修无关的东西。',
+    '结束时把「脚本跑了什么、发现了什么、有没有产出」写进工作目录下的 `.automation-result` 文件（一行字即可），然后就不要再做任何事：',
+    '```',
+    'echo "脚本跑了什么" > .automation-result',
+    '```',
+    '不写这个文件的话，本次执行只能等到超时才结束。',
   ].filter(line => line !== '').join('\n')
 }
 

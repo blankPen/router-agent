@@ -69,6 +69,19 @@ export interface AutomationState {
 /** 一次执行的状态。 */
 export type AutomationRunStatus = 'running' | 'success' | 'failed' | 'missed' | 'timeout'
 
+/**
+ * 一次执行当前处在哪一步。
+ *
+ * 只有 running 时才有意义：让人在面板上能看出「卡在生成脚本 / 跑 runtime / 收产出」，
+ * 而不是只看到一个转圈的 running。
+ */
+export type AutomationRunPhase =
+  | 'preparing'
+  | 'generating-script'
+  | 'starting-runtime'
+  | 'running'
+  | 'collecting'
+
 /** 一次执行的产出：新建的工单 / 事件链接。 */
 export interface AutomationRunOutputs {
   ticketIds: string[]
@@ -91,6 +104,8 @@ export interface AutomationRun {
   /** 结果摘要（成功时是产出说明，失败时是错误信息）。 */
   summary: string
   error?: string
+  /** 执行中的当前阶段；结束后清空。 */
+  phase?: AutomationRunPhase
   outputs: AutomationRunOutputs
   /** 手动触发时为 true；调度触发为 false。 */
   manual: boolean
@@ -183,6 +198,8 @@ export interface AutomationExecutionInput {
    */
   workdir: string
   logger: AutomationLogger
+  /** 上报当前阶段；面板据此显示「跑到哪一步了」。 */
+  onPhase?: (phase: AutomationRunPhase) => void
 }
 
 /** 一次执行的结果。 */

@@ -19,9 +19,11 @@ Router 在 `server.port`（默认 3083）上提供本地 HTTP API，供 Web 面�
 | GET / PUT | `/api/config` | 配置面板：读安全快照 / 按点路径提交补丁（白名单校验 + 落盘）；快照里的 `hotPaths` 说明哪些路径保存后立即生效 |
 | GET | `/api/automations` | 自动化页：任务（含调度状态）、执行记录与待确认草稿 |
 | GET | `/api/automations/runs?automationId=` | 只读执行记录，可按任务过滤 |
-| POST | `/api/automations/trigger` | 手动触发一次（`{ id }`），返回执行记录 |
+| GET | `/api/automations/runs/:id` | 单条执行记录；面板轮询它看执行进度与阶段 |
+| POST | `/api/automations/trigger` | 手动触发一次（`{ id }`）；**立即返回** `running` 记录，执行在后台继续 |
 | POST | `/api/automations/draft` | 从自然语言生成草稿预览（`{ text }`）；不落库 |
 | POST | `/api/automations/drafts/dismiss` | 忽略一条待确认草稿（`{ id }`） |
+| POST | `/api/automations/script` | 为脚本自动化生成脚本正文（`{ id }`）；生成失败返回 502 |
 | POST | `/api/automations/tools` | 自动化内置工具调用（`{ automationId, name, args }`）；项目范围与限流在服务层强制 |
 | GET | `/api/channels` | 已注册的消息通道（`id` / `kind` / `capabilities`），供配置页的「渠道配置」列出渠道实例 |
 | POST | `/api/restart` | 热重启 daemon：先返回 202，再释放端口并拉起新进程（页面不刷新） |

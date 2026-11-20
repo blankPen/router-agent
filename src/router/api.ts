@@ -115,12 +115,16 @@ export interface AutomationApiPort {
   listTasks(): unknown[]
   /** 执行记录列表。 */
   listRuns(automationId?: string): unknown[]
+  /** 单条执行记录；面板轮询用来看执行进度。 */
+  getRun(id: string): unknown | null
   /** 待确认的对话式草稿。 */
   listDrafts(): unknown[]
   /** 忽略一条待确认草稿。 */
   dismissDraft(id: string): boolean
   /** 手动触发一次；返回执行记录。 */
   trigger(id: string): Promise<unknown | null>
+  /** 生成脚本正文；返回脚本文本，生成不了时返回 null。 */
+  generateScript(id: string): Promise<string | null>
   /** 从自然语言生成任务草稿（对话式创建入口用）。 */
   draft(text: string): Promise<unknown | null>
   /** 调用自动化内置工具；范围与限流在服务层强制。 */
@@ -404,6 +408,15 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       return respond(res, 200, { runs: opts.automation.listRuns(url.searchParams.get('automationId') ?? undefined) })
     }
 
+    // 单条执行记录：面板轮询这一条就能看出任务跑到哪一步了。
+    if (path.startsWith('/api/automations/runs/') && req.method === 'GET') {
+      if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
+      const id = decodeURIComponent(path.slice('/api/automations/runs/'.length)).trim()
+      const run = id ? opts.automation.getRun(id) : null
+      if (!run) return respond(res, 404, { error: 'automation-run-not-found' })
+      return respond(res, 200, { run })
+    }
+
     if (path === '/api/automations/trigger' && req.method === 'POST') {
       if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
       const body = await readJson(req)
@@ -423,6 +436,19 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       // 识别不确定时不自动落库：返回 null 让面板提示用户补充说明。
       if (!draft) return respond(res, 200, { draft: null, message: '没能确定要创建的自动化，请补充说明。' })
       return respond(res, 200, { draft })
+    }
+
+    // 生成脚本：显式一步，生成结果要人工在面板确认后才写进任务。
+    if (path === '/api/automations/script' && req.method === 'POST') {
+      if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
+      const body = await readJson(req)
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      if (!id) return respond(res, 400, { error: 'id-required', message: '自动化任务 id 不能为空' })
+      const script = await opts.automation.generateScript(id)
+      if (!script) {
+        return respond(res, 502, { error: 'script:generate-failed', message: '脚本生成失败，请检查模型配置后重试。' })
+      }
+      return respond(res, 200, { script })
     }
 
     if (path === '/api/automations/drafts/dismiss' && req.method === 'POST') {

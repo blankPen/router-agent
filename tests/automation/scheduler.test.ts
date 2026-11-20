@@ -76,6 +76,11 @@ function harness(options: {
     nextRunId: () => `run_${runs.length + 1}`,
     toolsFor: () => [] as AutomationTool[],
     workdirFor: () => '/tmp/work',
+    reportPhase: (run, phase) => {
+      run.phase = phase
+      const index = runs.findIndex(item => item.id === run.id)
+      if (index >= 0) runs[index] = { ...run, phase }
+    },
     logger: {
       info: (event, fields) => logs.push({ level: 'info', event, fields: fields ?? {} }),
       warn: (event, fields) => logs.push({ level: 'warn', event, fields: fields ?? {} }),
@@ -117,6 +122,26 @@ describe('自动化调度器', () => {
 
     expect(calls).toEqual([])
     expect(result.runs).toHaveLength(0)
+  })
+
+  it('执行过程中上报的阶段写回执行记录', async () => {
+    const calls: number[] = []
+    const h = harness({
+      tasks: [task()],
+      executor: {
+        type: 'ai',
+        async execute(input) {
+          input.onPhase?.('generating-script')
+          calls.push(1)
+          return { status: 'success', summary: '做完了', outputs: emptyOutputs() }
+        },
+      },
+    })
+    h.states.set('auto_1', { taskId: 'auto_1', nextRunAt: '2026-11-18T08:59:00.000Z' })
+
+    await tickAutomations(h.deps)
+
+    expect(h.runs[0]!.phase).toBe('generating-script')
   })
 
   it('过期太久的任务记为 missed 且不补跑', async () => {

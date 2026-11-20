@@ -56,8 +56,13 @@ const tools: AutomationTool[] = [{
 function harness(over: {
  generateScript?: (automation: Automation) => Promise<string | null>
  outcome?: RuntimeRunOutcome
-} = {}): { input: () => RuntimeRunInput | null; executors: ReturnType<typeof createAutomationExecutors> } {
+} = {}): {
+  input: () => RuntimeRunInput | null
+  executors: ReturnType<typeof createAutomationExecutors>
+  phases: string[]
+} {
  let captured: RuntimeRunInput | null = null
+  const phases: string[] = []
  const executors = createAutomationExecutors({
    runtimes,
    ...(over.generateScript ? { generateScript: over.generateScript } : {}),
@@ -66,7 +71,7 @@ function harness(over: {
      return over.outcome ?? { status: 'success', summary: '完成', outputs: { ticketIds: [], eventIds: [] } }
    },
  })
- return { input: () => captured, executors }
+  return { input: () => captured, executors, phases }
 }
 
 describe('自动化执行器', () => {
@@ -105,7 +110,49 @@ describe('自动化执行器', () => {
    expect(input()!.contract).toContain('bash automation.sh')
  })
 
- it('脚本为空时才调用一次生成器', async () => {
+  it('AI 自动化契约说明何时结束，避免 runtime 一直探索到超时', async () => {
+    const { input, executors } = harness()
+    await executors.get('ai')!.execute({
+      automation: task(),
+      tools,
+      timeoutMs: 60_000,
+      maxRetries: 0,
+      workdir: workdir(),
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+    })
+
+    expect(input()!.contract).toContain('什么时候结束')
+  })
+
+  it('脚本自动化契约说明脚本跑完就结束', async () => {
+    const { input, executors } = harness()
+    await executors.get('script')!.execute({
+      automation: task({ type: 'script', script: 'echo persisted' }),
+      tools,
+      timeoutMs: 60_000,
+      maxRetries: 0,
+      workdir: workdir(),
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+    })
+
+    expect(input()!.contract).toContain('脚本跑完')
+  })
+
+  it('契约给出完成信号文件，agent 干完活就写文件结束', async () => {
+    const { input, executors } = harness()
+    await executors.get('ai')!.execute({
+      automation: task(),
+      tools,
+      timeoutMs: 60_000,
+      maxRetries: 0,
+      workdir: workdir(),
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+    })
+
+    expect(input()!.contract).toContain('.automation-result')
+  })
+
+  it('脚本为空时直接失败，提示去面板生成，不在执行时偷偷生成', async () => {
    const generated: string[] = []
    const { input, executors } = harness({
      generateScript: async () => {
@@ -114,7 +161,7 @@ describe('自动化执行器', () => {
      },
    })
    const automation = task({ type: 'script' })
-   await executors.get('script')!.execute({
+    const result = await executors.get('script')!.execute({
      automation,
      tools,
      timeoutMs: 60_000,
@@ -123,7 +170,10 @@ describe('自动化执行器', () => {
      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
    })
 
-   expect(generated).toEqual(['call'])
-   expect(input()!.script).toBe('echo generated')
+    expect(generated).toEqual([])
+    expect(input()).toBeNull()
+    expect(result.status).toBe('failed')
+    expect(result.summary).toContain('生成脚本')
  })
+
 })

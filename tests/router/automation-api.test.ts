@@ -38,16 +38,19 @@ describe('自动化 HTTP API', () => {
   let server: ApiServer
   const dismissals: string[] = []
   const toolCalls: Array<{ id: string; name: string; args: Record<string, unknown> }> = []
+  const runs: Array<{ id: string; status: string }> = []
 
   const port: AutomationApiPort = {
     listTasks: () => [{ id: 'auto_1', name: '巡检' }],
     listRuns: () => [{ id: 'run_1', automationId: 'auto_1', status: 'success' }],
+    getRun: id => runs.find(run => run.id === id) ?? null,
     listDrafts: () => [{ id: 'ad_1', draft: { name: '草稿' } }],
     dismissDraft: id => {
       dismissals.push(id)
       return id === 'ad_1'
     },
     trigger: async id => (id === 'auto_1' ? { id: 'run_2', status: 'success' } : null),
+    generateScript: async id => (id === 'auto_1' ? '#!/bin/sh\necho hi' : null),
     draft: async text => (text === '每天检查依赖' ? { name: '依赖巡检' } : null),
     invokeTool: async (id, name, args) => {
       toolCalls.push({ id, name, args })
@@ -57,6 +60,8 @@ describe('自动化 HTTP API', () => {
   }
 
   beforeEach(async () => {
+    runs.length = 0
+    runs.push({ id: 'run_2', status: 'success' })
     store = new Store(':memory:')
     config = defaultConfig()
     engine = new Engine({ store, policy: policyOf(config) })
@@ -80,6 +85,17 @@ describe('自动化 HTTP API', () => {
     const res = await call(server, 'POST', '/api/automations/trigger', { id: 'auto_1' })
     expect(res.status).toBe(201)
     expect(res.json.run.id).toBe('run_2')
+  })
+
+  it('GET /api/automations/runs/:id 返回单条执行记录', async () => {
+    const res = await call(server, 'GET', '/api/automations/runs/run_2')
+    expect(res.status).toBe(200)
+    expect(res.json.run.id).toBe('run_2')
+  })
+
+  it('GET /api/automations/runs/:id 记录不存在时返回 404', async () => {
+    const res = await call(server, 'GET', '/api/automations/runs/nope')
+    expect(res.status).toBe(404)
   })
 
   it('POST /api/automations/trigger 对未知任务返回 404', async () => {
@@ -112,6 +128,23 @@ describe('自动化 HTTP API', () => {
     const res = await call(server, 'POST', '/api/automations/drafts/dismiss', { id: 'ad_1' })
     expect(res.status).toBe(200)
     expect(dismissals).toEqual(['ad_1'])
+  })
+
+  it('POST /api/automations/script 生成脚本正文', async () => {
+    const res = await call(server, 'POST', '/api/automations/script', { id: 'auto_1' })
+    expect(res.status).toBe(200)
+    expect(res.json.script).toBe('#!/bin/sh\necho hi')
+  })
+
+  it('POST /api/automations/script 生成失败时返回错误信息', async () => {
+    const res = await call(server, 'POST', '/api/automations/script', { id: 'auto_x' })
+    expect(res.status).toBe(502)
+    expect(res.json.error).toBe('script:generate-failed')
+  })
+
+  it('POST /api/automations/script 缺少任务 id 返回 400', async () => {
+    const res = await call(server, 'POST', '/api/automations/script', {})
+    expect(res.status).toBe(400)
   })
 
   it('未装配自动化能力时端点返回 404', async () => {

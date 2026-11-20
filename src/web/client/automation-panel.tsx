@@ -8,12 +8,14 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { getJson, saveConfigPatch, sendJson } from './api.js'
 import { Icon } from './icons.js'
 import {
+  RUN_PHASE_LABEL,
   RUN_STATUS_LABEL,
   SCHEDULE_KIND_LABEL,
   blankDraft,
   draftOf,
   editorDraftOf,
   durationText,
+  phaseText,
   runStatusClass,
   scheduleText,
   validateDraft,
@@ -63,6 +65,8 @@ export function AutomationView(): JSX.Element {
   const [editing, setEditing] = useState<AutomationDraft | null>(null)
   /** 正在编辑的待确认草稿 id；保存成功后把它标记为已处理。 */
   const [editingDraftId, setEditingDraftId] = useState<string | null>(null)
+  /** 有任务正在执行：轮询加快，阶段才看得出在动。 */
+  const running = runs.some(run => run.status === 'running')
 
   const load = useCallback(async () => {
     try {
@@ -90,9 +94,10 @@ export function AutomationView(): JSX.Element {
 
   useEffect(() => {
     void load()
-    const timer = setInterval(() => { void load() }, 10_000)
+    // 有任务在跑时快一点（3 秒），否则回到 10 秒：执行中要能看出进度在动。
+    const timer = setInterval(() => { void load() }, running ? 3_000 : 10_000)
     return () => clearInterval(timer)
-  }, [load])
+  }, [load, running])
 
   const saveTasks = useCallback(async (next: AutomationTask[]): Promise<void> => {
     const payload = next.map(task => ({
@@ -218,14 +223,33 @@ export function AutomationView(): JSX.Element {
 
   const trigger = async (task: AutomationTask) => {
     setBusy(true)
-    setNotice({ kind: 'ok', text: `正在执行「${task.name}」…` })
+    setNotice({ kind: 'ok', text: `已触发「${task.name}」，进度见「执行记录」。` })
     try {
       const data = await sendJson<{ run: AutomationRun }>('/api/automations/trigger', 'POST', { id: task.id })
       const run = data.run
-      setNotice({
-        kind: run.status === 'success' ? 'ok' : 'error',
-        text: `「${task.name}」执行${RUN_STATUS_LABEL[run.status] ?? run.status}：${run.summary || '（无摘要）'}`,
-      })
+      // 触发立即返回：执行还在后台跑，这里只报「已触发」，进度靠轮询。
+      setNotice({ kind: 'ok', text: `「${task.name}」已触发，正在执行。` })
+      await load()
+    } catch (err) {
+      setNotice({ kind: 'error', text: err instanceof Error ? err.message : String(err) })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /**
+   * 生成脚本：显式一步，生成结果落到任务定义里，人工再决定改不改。
+   *
+   * 定时执行跑的就是这份脚本，不会每次重新生成。
+   */
+  const generateScript = async (task: AutomationTask) => {
+    setBusy(true)
+    setNotice({ kind: 'ok', text: `正在为「${task.name}」生成脚本…` })
+    try {
+      const data = await sendJson<{ script: string }>('/api/automations/script', 'POST', { id: task.id })
+      const next = tasks.map(item => (item.id === task.id ? { ...item, script: data.script } : item))
+      await saveTasks(next)
+      setNotice({ kind: 'ok', text: `「${task.name}」的脚本已生成，可以在「编辑」里继续修改。` })
       await load()
     } catch (err) {
       setNotice({ kind: 'error', text: err instanceof Error ? err.message : String(err) })
@@ -315,12 +339,24 @@ export function AutomationView(): JSX.Element {
                 </div>
                 <p className="source-card-status">{task.description || task.prompt}</p>
                 <p className="source-card-package" title={task.prompt}>{task.prompt}</p>
+                {task.type === 'script' && (
+                  <p className="automation-script-state">
+                    {task.script
+                      ? <>脚本已就绪（{task.script.split('\n').length} 行），定时执行跑的就是这份</>
+                      : <>还没有脚本：先生成脚本，确认后才会执行</>}
+                  </p>
+                )}
                 <div className="source-card-fields">
                   {task.nextRunAt ? `下次触发 ${formatTime(task.nextRunAt)}` : '尚未排期'}
                   {task.lastStatus ? ` · 上次 ${RUN_STATUS_LABEL[task.lastStatus] ?? task.lastStatus}` : ''}
                 </div>
                 <div className="source-card-actions">
                   <button className="btn tiny" onClick={() => openEdit(task)}>编辑</button>
+                  {task.type === 'script' && (
+                    <button className="btn tiny ghost" onClick={() => void generateScript(task)} disabled={busy}>
+                      <Icon name="zap" size={11} />{task.script ? '重新生成脚本' : '生成脚本'}
+                    </button>
+                  )}
                   <button className="btn tiny ghost" onClick={() => void trigger(task)} disabled={busy}>
                     <Icon name="play" size={11} />执行一次
                   </button>
@@ -361,6 +397,12 @@ export function AutomationView(): JSX.Element {
                       <span>{formatTime(run.startedAt)}</span>
                       {run.manual && <><span className="dot-sep">·</span><span>手动</span></>}
                     </div>
+                    {run.status === 'running' && run.phase && (
+                      <div className="automation-run-phase">
+                        <span className="automation-spinner" aria-hidden="true" />
+                        <span>{phaseText(run.phase)}</span>
+                      </div>
+                    )}
                   </td>
                   <td><span className={`automation-status ${runStatusClass(run.status)}`}>{RUN_STATUS_LABEL[run.status] ?? run.status}</span></td>
                   <td>{durationText(run.durationMs)}</td>
@@ -368,7 +410,18 @@ export function AutomationView(): JSX.Element {
                     <span className="automation-run-summary">{run.summary || '—'}</span>
                     {run.error && <div className="automation-run-error">{run.error}</div>}
                   </td>
-                  <td><RunOutputs outputs={run.outputs} /></td>
+                  <td>
+                    <RunOutputs outputs={run.outputs} />
+                    <div className="automation-run-logs">
+                      <a
+                        className="automation-output-link"
+                        href={`#logs?keyword=${encodeURIComponent(run.automationId)}`}
+                        title="在日志页里看这条任务的日志"
+                      >
+                        查看日志
+                      </a>
+                    </div>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -393,7 +446,7 @@ export function AutomationView(): JSX.Element {
 
 /** 执行产出的跳转：直接跳到对应的面板入口。 */
 function RunOutputs({ outputs }: { outputs: AutomationRun['outputs'] }): JSX.Element {
-  if (!outputs.ticketIds.length && !outputs.eventIds.length) return <>无产出</>
+  if (!outputs.ticketIds.length && !outputs.eventIds.length) return <span className="muted">无产出</span>
   return (
     <div className="automation-outputs">
       {outputs.ticketIds.map(id => <a key={id} href={`#tickets/${encodeURIComponent(id)}`} className="automation-output-link">工单 {id}</a>)}
@@ -470,7 +523,7 @@ export function AutomationEditor({ draft, runtimes, projects, busy, onChange, on
           <section className="rule-section">
             <header className="rule-section-head">
               <h3><span className="rule-step">2</span>类型与内容</h3>
-              <p>AI 自动化只给提示词；脚本自动化先由 AI 生成脚本，脚本会保存下来可以人工改。</p>
+              <p>AI 自动化只给提示词；脚本自动化执行的是固定脚本，脚本生成后可以人工改。</p>
             </header>
             <label className="modal-field">
               <span>类型</span>
@@ -495,16 +548,24 @@ export function AutomationEditor({ draft, runtimes, projects, busy, onChange, on
               />
             </label>
             {draft.type === 'script' && (
-              <label className="modal-field">
-                <span className="rule-field-label">脚本正文<span className="rule-field-key">可留空，首次执行时生成</span></span>
-                <textarea
-                  className="rule-textarea"
-                  rows={4}
-                  value={draft.script}
-                  placeholder="留空则首次执行时由 AI 生成；生成后可以在这里直接改。"
-                  onChange={event => onChange({ ...draft, script: event.target.value })}
-                />
-              </label>
+              <>
+                <label className="modal-field">
+                  <span className="rule-field-label">脚本正文<span className="rule-field-key">留空则执行前需先生成</span></span>
+                  <textarea
+                    className="rule-textarea"
+                    rows={6}
+                    value={draft.script}
+                    placeholder={'#!/bin/sh\n# 任务执行时在所选项目的工作目录里跑这段脚本'}
+                    onChange={event => onChange({ ...draft, script: event.target.value })}
+                  />
+                </label>
+                <p className="modal-hint">
+                  <Icon name="alert" size={12} />
+                  {draft.script.trim()
+                    ? '定时执行跑的就是这份脚本，可以在上面直接改。'
+                    : '还没有脚本：保存后到任务卡片点「生成脚本」，确认脚本内容后再执行。'}
+                </p>
+              </>
             )}
           </section>
 

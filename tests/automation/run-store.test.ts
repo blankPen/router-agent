@@ -56,4 +56,50 @@ describe('自动化执行记录落库', () => {
       store.close()
     }
   })
+
+  it('执行中的阶段写回同一条记录', () => {
+    const store = new Store(':memory:')
+    try {
+      store.insertAutomationRun(run())
+      store.updateAutomationRun(run({ phase: 'running' }))
+
+      expect(store.getAutomationRun('run_1')!.phase).toBe('running')
+    } finally {
+      store.close()
+    }
+  })
+
+  it('执行结束后阶段被清掉', () => {
+    const store = new Store(':memory:')
+    try {
+      store.insertAutomationRun(run())
+      store.updateAutomationRun(run({ phase: 'running' }))
+      store.updateAutomationRun(run({ status: 'success', summary: '完成', phase: undefined }))
+
+      expect(store.getAutomationRun('run_1')!.phase).toBeUndefined()
+    } finally {
+      store.close()
+    }
+  })
+
+  it('服务重启后把挂在执行中的记录收尾为失败', () => {
+    const store = new Store(':memory:')
+    try {
+      store.insertAutomationRun(run())
+      store.insertAutomationRun(run({ id: 'run_2', status: 'success', summary: '已完成' }))
+
+      const closed = store.closeStaleAutomationRuns('interrupted', '服务重启，上一轮执行被中断')
+
+      expect(closed).toBe(1)
+      const stale = store.getAutomationRun('run_1')!
+      expect(stale.status).toBe('failed')
+      expect(stale.error).toBe('interrupted')
+      expect(stale.finishedAt).toBeTruthy()
+      expect(stale.phase).toBeUndefined()
+      // 已经结束的记录不动。
+      expect(store.getAutomationRun('run_2')!.status).toBe('success')
+    } finally {
+      store.close()
+    }
+  })
 })

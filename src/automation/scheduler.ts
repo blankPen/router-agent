@@ -6,7 +6,7 @@
  * - 每次执行落一条执行记录（触发时间、耗时、状态、结果摘要、错误、产出）；
  * - 超时与重试由执行器统一处理，调度器只管「什么时候触发」。
  */
-import type { Automation, AutomationRun, AutomationRunOutputs, AutomationState, AutomationTool } from '#core/automation.js'
+import type { Automation, AutomationRun, AutomationRunOutputs, AutomationRunPhase, AutomationState, AutomationTool } from '#core/automation.js'
 import { nextRunAt, validateSchedule } from '#core/automation-schedule.js'
 import { preview } from '#core/events.js'
 import { errorMessage } from '#infra/logger.js'
@@ -39,6 +39,8 @@ export interface AutomationSchedulerDeps {
   toolsFor: (automation: Automation) => AutomationTool[]
   /** 准备工作目录：限定在被选项目范围内。 */
   workdirFor: (automation: Automation) => string
+  /** 上报执行中的阶段；面板据此显示进度。 */
+  reportPhase?: (run: AutomationRun, phase: AutomationRunPhase) => void
   logger: {
     info(event: string, fields?: Record<string, unknown>): void
     warn(event: string, fields?: Record<string, unknown>): void
@@ -114,6 +116,22 @@ export async function executeAutomation(
   deps: AutomationSchedulerDeps,
   manual = false,
 ): Promise<AutomationRun> {
+  const run = startRun(automation, scheduledAt, deps, manual)
+  return executeRun(automation, run, deps)
+}
+
+/**
+ * 落一条 running 记录并返回；执行本身还没开始。
+ *
+ * 手动触发用它「先返回、后执行」：面板拿到 running 记录就能立刻显示进度，
+ * 不必等一次执行跑完（可能好几分钟）才拿到响应。
+ */
+export function startRun(
+  automation: Automation,
+  scheduledAt: string,
+  deps: AutomationSchedulerDeps,
+  manual = false,
+): AutomationRun {
   const now = deps.now ?? (() => Date.now())
   const startedAtMs = now()
   const run: AutomationRun = {
@@ -127,7 +145,22 @@ export async function executeAutomation(
     manual,
   }
   deps.recordRun(run)
+  return run
+}
 
+/**
+ * 执行一个任务并把记录收尾。
+ *
+ * 收尾统一在这里做：耗时、状态、摘要、错误与产出都写回同一条记录，
+ * 并顺手排下一次触发时间。
+ */
+export async function executeRun(
+  automation: Automation,
+  run: AutomationRun,
+  deps: AutomationSchedulerDeps,
+): Promise<AutomationRun> {
+  const now = deps.now ?? (() => Date.now())
+  const startedAtMs = Date.parse(run.startedAt)
   const finish = (status: AutomationRun['status'], summary: string, outputs: AutomationRunOutputs, error?: string): AutomationRun => {
     const finished: AutomationRun = {
       ...run,
@@ -185,6 +218,7 @@ export async function executeAutomation(
         maxRetries: 0,
         workdir,
         logger: deps.logger,
+        ...(deps.reportPhase ? { onPhase: phase => deps.reportPhase?.(run, phase) } : {}),
       })
       last = { status: result.status, summary: result.summary, outputs: result.outputs, error: result.error }
     } catch (error) {

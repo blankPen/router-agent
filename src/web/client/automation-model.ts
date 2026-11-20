@@ -50,6 +50,8 @@ export interface AutomationRun {
   status: string
   summary: string
   error?: string
+  /** 执行中的当前阶段；结束后为空。 */
+  phase?: string
   outputs: { ticketIds: string[]; eventIds: string[] }
   manual: boolean
 }
@@ -169,6 +171,21 @@ export const RUN_STATUS_LABEL: Record<string, string> = {
   failed: '失败',
   missed: '已错过',
   timeout: '超时',
+}
+
+/** 执行阶段的中文名：让人看得出这次执行卡在哪一步。 */
+export const RUN_PHASE_LABEL: Record<string, string> = {
+  preparing: '准备中',
+  'generating-script': '正在生成脚本',
+  'starting-runtime': '正在启动运行时',
+  running: '正在执行',
+  collecting: '正在收集产出',
+}
+
+/** 阶段文案；未知阶段回退成阶段名本身，不显示空白。 */
+export function phaseText(phase?: string): string {
+  if (!phase) return ''
+  return RUN_PHASE_LABEL[phase] ?? phase
 }
 
 /** 执行状态对应的色调（复用面板既有的语义色 class）。 */

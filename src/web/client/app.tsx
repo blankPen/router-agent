@@ -3201,6 +3201,12 @@ function LogsView(): JSX.Element {
     setFilter(prev => ({ ...prev, [key]: value }))
   }, [])
 
+  // 从别的页深链过来时带着关键字（如自动化页的「查看日志」）：进页面就按它筛。
+  useEffect(() => {
+    const keyword = new URLSearchParams(window.location.hash.split('?')[1] ?? '').get('keyword')
+    if (keyword) setFilter(prev => ({ ...prev, keyword }))
+  }, [])
+
   const toggleRow = useCallback((seq: number): void => {
     setExpanded(prev => {
       const next = new Set(prev)

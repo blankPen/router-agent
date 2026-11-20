@@ -1,10 +1,11 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { AutomationService } from '../../src/automation/service.js'
 import { Store } from '../../src/store/db.js'
 import { Engine } from '../../src/core/engine.js'
 import { defaultConfig, policyOf, type AppConfig } from '../../src/config.js'
 import type { ChatClient } from '#infra/chat.js'
 import type { RuntimeRegistry } from '#runtime/registry.js'
+import type { Automation } from '#core/automation.js'
 
 function configOf(): AppConfig {
   const config = defaultConfig()
@@ -95,5 +96,158 @@ describe('对话式自动化草稿', () => {
     const result = await service.captureDraft('每天检查依赖', 'feishu:oc_1', 'ou_a')
     expect(service.dismissDraft(result!.draft!.id)).toBe(true)
     expect(service.listDrafts()).toHaveLength(0)
+  })
+})
+
+describe('脚本生成', () => {
+  function scriptTask(): Automation {
+    return {
+      id: 'auto_script',
+      name: '巡检',
+      description: '',
+      type: 'script',
+      prompt: '检查依赖更新',
+      schedule: { kind: 'daily', at: '09:00' },
+      runtimeId: '',
+      project: 'demo',
+      repo: '/tmp/demo',
+      branch: 'main',
+      enabled: true,
+      createdBy: '',
+      createdAt: '2026-11-01T00:00:00.000Z',
+      updatedAt: '2026-11-01T00:00:00.000Z',
+    }
+  }
+
+  it('模型返回脚本正文时写回任务定义', async () => {
+    const config = configOf()
+    const saved: Array<{ taskId: string; script: string }> = []
+    const store = new Store(':memory:')
+    const engine = new Engine({ store, policy: policyOf(config) })
+    const service = new AutomationService({
+      config: () => config,
+      store,
+      engine,
+      runtimes: {} as RuntimeRegistry,
+      chat: { complete: async () => ({ content: '#!/bin/sh\necho hi', toolCalls: [] }) },
+      saveTaskScript: (taskId, script) => saved.push({ taskId, script }),
+    })
+
+    const script = await service.generateScript(scriptTask())
+
+    expect(script).toBe('#!/bin/sh\necho hi')
+    expect(saved).toEqual([{ taskId: 'auto_script', script: '#!/bin/sh\necho hi' }])
+  })
+
+  it('模型只给了思考没有正文时报告失败原因，不当成空脚本', async () => {
+    const store = new Store(':memory:')
+    const config = configOf()
+    const engine = new Engine({ store, policy: policyOf(config) })
+    const service = new AutomationService({
+      config: () => config,
+      store,
+      engine,
+      runtimes: {} as RuntimeRegistry,
+      chat: {
+        complete: async () => {
+          throw new Error('chat:empty-response:max_tokens')
+        },
+      },
+    })
+
+    expect(await service.generateScript(scriptTask())).toBeNull()
+  })
+
+  it('模型返回被围栏包住的脚本时去掉围栏', async () => {
+    const store = new Store(':memory:')
+    const config = configOf()
+    const engine = new Engine({ store, policy: policyOf(config) })
+    const service = new AutomationService({
+      config: () => config,
+      store,
+      engine,
+      runtimes: {} as RuntimeRegistry,
+      chat: {
+        complete: async () => ({
+          content: '```bash\n#!/bin/sh\necho hi\n```',
+          toolCalls: [],
+        }),
+      },
+    })
+
+    expect(await service.generateScript(scriptTask())).toBe('#!/bin/sh\necho hi')
+  })
+})
+
+describe('手动触发', () => {
+  function serviceWith(config: AppConfig): { service: AutomationService; store: Store } {
+    const store = new Store(':memory:')
+    const engine = new Engine({ store, policy: policyOf(config) })
+    const service = new AutomationService({
+      config: () => config,
+      store,
+      engine,
+      runtimes: {} as RuntimeRegistry,
+      chat: null,
+    })
+    return { service, store }
+  }
+
+  it('触发立即返回 running 记录，不等执行结束', async () => {
+    const config = configOf()
+    config.automation.tasks = [{
+      id: 'auto_1',
+      name: '巡检',
+      description: '',
+      type: 'ai',
+      prompt: '检查依赖',
+      schedule: { kind: 'daily', at: '09:00' },
+      runtimeId: '',
+      project: 'demo',
+      repo: '/tmp/demo',
+      branch: 'main',
+      enabled: true,
+      createdBy: '',
+      createdAt: '2026-11-01T00:00:00.000Z',
+      updatedAt: '2026-11-01T00:00:00.000Z',
+    }]
+    const { service, store } = serviceWith(config)
+
+    const run = await service.trigger('auto_1')
+
+    expect(run?.status).toBe('running')
+    expect(run?.manual).toBe(true)
+    expect(store.listAutomationRuns({ automationId: 'auto_1' })).toHaveLength(1)
+  })
+
+  it('脚本自动化的任务没有脚本时不执行，直接失败并说明原因', async () => {
+    const config = configOf()
+    config.automation.tasks = [{
+      id: 'auto_script',
+      name: '巡检',
+      description: '',
+      type: 'script',
+      prompt: '检查依赖',
+      schedule: { kind: 'daily', at: '09:00' },
+      runtimeId: '',
+      project: 'demo',
+      repo: '/tmp/demo',
+      branch: 'main',
+      enabled: true,
+      createdBy: '',
+      createdAt: '2026-11-01T00:00:00.000Z',
+      updatedAt: '2026-11-01T00:00:00.000Z',
+    }]
+    const { service, store } = serviceWith(config)
+
+    await service.trigger('auto_script')
+    // 后台执行是异步的：等它把记录收尾。
+    await vi.waitFor(() => {
+      expect(store.listAutomationRuns({ automationId: 'auto_script' })[0]?.status).not.toBe('running')
+    })
+
+    const saved = store.listAutomationRuns({ automationId: 'auto_script' })[0]!
+    expect(saved.status).toBe('failed')
+    expect(saved.error).toBe('script:missing')
   })
 })
