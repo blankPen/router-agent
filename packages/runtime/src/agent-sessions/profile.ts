@@ -3,6 +3,11 @@
  *
  * 运行时（Orca / Claude Code / ACP …）只决定「在哪跑」，Agent 档案决定
  * 「会话记录在哪、怎么读、人工怎么接回去」。两者解耦后，换 Agent 不需要动内核。
+ *
+ * 命名空间提示：这里的 `AgentProfile.id`（`claude` / `codex` / `opencode`）
+ * 与 `runtimes/acp-agents.js` 的 `AcpAgentMeta.id`（同样是 `claude` / `codex` …）
+ * **是两个不同的命名空间**：本文件说「哪种 Agent 会话记录格式」，
+ * 那个文件说「哪种 ACP 接入方式」。同一个工具名在两边都出现，别当成同一个 id。
  */
 import type { SessionSnapshot } from '../port.js'
 

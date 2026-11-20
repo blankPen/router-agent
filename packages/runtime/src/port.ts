@@ -1,5 +1,20 @@
 import type { Assignment, InputKind, Ticket } from '@router-agent/core/model.js'
 
+/**
+ * 运行时端口。
+ *
+ * 术语约定（这三个词在本包里指三件事，别混用）：
+ *
+ * - `workdir`：worker 实际工作的**目录绝对路径**。所有运行时都提供。
+ * - `workspaceRef`：**运行时私有句柄**（Orca 的终端 id、Herdr 的会话 id 等），
+ *   只对签发它的运行时有效，换一个运行时解释不了。
+ * - `worktree`：**git 检出**出来的那棵工作树。属于 git 概念，
+ *   只有 `WorkspaceProvider.create()` 真的跑 `git worktree` 时才有。
+ *
+ * 面板上的「工作区」（`workspaces/overview.ts` 的 `WorkspaceOverviewView`）
+ * 是这三条信息的汇总视图，不是第四个概念。
+ */
+
 /** 工单执行上下文：Router 负责拼装，运行时只消费。 */
 export interface WorkerContext {
   ticket: Ticket

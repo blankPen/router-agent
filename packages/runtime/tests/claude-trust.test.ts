@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { claudeTrustKey, ensureClaudeBackgroundReady } from '#runtime/agents/claude-trust.js'
+import { claudeTrustKey, ensureClaudeBackgroundReady } from '#runtime/agent-sessions/claude-trust.js'
 
 function tempHome(): string {
   return mkdtempSync(join(tmpdir(), 'ra-claude-trust-'))

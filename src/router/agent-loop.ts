@@ -1,6 +1,6 @@
 import type { Store } from '../store/db.js'
 import type { Clock, Engine } from '../core/engine.js'
-import { effectiveAdmins, effectiveAllowed, gate, handlesUnaddressed, scopeOf, type Policy } from '#core/policy.js'
+import { effectiveAdmins, effectiveAllowed, gate, handlesUnaddressed, scopeOf, type GateResult, type Policy } from '#core/policy.js'
 import type { SourceKind, Strength, Ticket, Trigger } from '#core/model.js'
 import { DEFAULT_CHANNEL_ID } from '#channel/port.js'
 import { messageContext } from '#core/events.js'
@@ -12,13 +12,14 @@ import { IntakeCoordinator, type MemberSettingsView } from './intake-flow.js'
 import type { IntakeEngine } from './intake-engine.js'
 import type { DecisionAgent } from './decision/agent.js'
 import { isSmallTalk as smallTalkRule } from '#core/admission.js'
+import { isReopenRequest, parseSessionResetCommand } from './commands.js'
 import { toolScopeFor } from '#core/tool-scope.js'
 import type { SessionKeyParts } from './session-registry.js'
 import { modelFailureMessage } from './model-failure.js'
 import { MEMORY_HELP, parseMemoryCommand } from './memory.js'
 import { looksLikeAutomationIntent } from '../automation/intent.js'
 import type {
-  DecisionAudit,
+  AssessmentAudit,
   DecisionEngine,
   DecisionEngineResult,
   DecisionProposal,
@@ -53,7 +54,7 @@ export interface AgentLoopOptions {
   /** 人格配置（名字 / 语气 / 语言），只影响 system prompt 的设定段。 */
   persona?: { name: string; style: string; language: string }
   /** 审计出口：每次研判都会回调一次（CLI 落 decisions.jsonl）。 */
-  onAudit?: (audit: DecisionAudit) => void
+  onAudit?: (audit: AssessmentAudit) => void
   /** 关键链路日志：消息处理失败、模型不可用、会话读写失败都会在这里留痕。 */
   logger?: Logger
   /**
@@ -114,9 +115,6 @@ const REPLY_ONLY_TEXT = '这条消息我收到了，但当前策略暂不自动�
 const MEDIA_ONLY_TEXT = '收到附件了，但我看不到图片/文件里的内容。请用文字说一下要改什么，或者把关键信息贴成文字。'
 const THREAD_INTRO = (title: string, id: string) => `工单「${title}」已开始执行（${id}）。后续进展会在这个话题里更新。`
 
-/** 已关闭话题里，用户明确要求继续的关键词。 */
-const REOPEN_PATTERN = /重新开工|重新开单|重开|继续做|继续干|接着做|接着干|继续|reopen|retry|continue/i
-
 /**
  * 被群级白名单拒绝的 Gate 原因：普通成员路径不得绕过。
  *
@@ -128,13 +126,6 @@ const BLOCKED_BY_CHAT_ALLOWLIST = new Set(['admission:chat-allowlist-empty'])
 
 function isAllowlistBlocked(verdict: ReturnType<typeof gate>): boolean {
   return 'reason' in verdict && BLOCKED_BY_CHAT_ALLOWLIST.has(verdict.reason)
-}
-
-export function isReopenRequest(text: string): boolean {
-  const normalized = text.trim()
-  // 先排除「不用继续 / 别重开」这类否定表达，避免把收尾消息当成重开。
-  if (/不(用|需要|想|必)(继续|重开|重新)|别(继续|重开|重新)|不要(继续|重开|重新)/.test(normalized)) return false
-  return REOPEN_PATTERN.test(normalized)
 }
 
 /** 关闭话题的固定回复；不调用模型，保证每次都是同一套口径。 */
@@ -156,15 +147,13 @@ function reopenDraftKey(threadId: string, actorId: string): string {
   return `reopen:draft:${threadId}:${actorId}`
 }
 
-/** `/new`：只有整条消息就是命令时才生效，允许前面带一个 @机器人。 */
-export function parseSessionResetCommand(text: string): boolean {
-  return /^\s*(?:@\S+\s+)?\/new\s*$/.test(text)
-}
-
 /** 单一词表来源：寒暄判定在 core/admission.ts，这里只转发，保持公开 API 不变。 */
 export function isSmallTalk(text: string): boolean {
   return smallTalkRule(text)
 }
+
+// 口令解析的实现在 commands.ts；这里转出以保持既有 import 路径可用。
+export { isReopenRequest, parseSessionResetCommand } from './commands.js'
 
 /**
  * 常驻 Agent Loop：候选批处理 → Gate → （已订阅则扇出）→ 研判 → 决策。
@@ -191,7 +180,7 @@ export class AgentLoop {
   private persona?: { name: string; style: string; language: string }
   /** 可替换：测试与模拟可以直接注入假引擎。 */
   decisionEngine: DecisionEngine
-  private onAudit?: (audit: DecisionAudit) => void
+  private onAudit?: (audit: AssessmentAudit) => void
   private logger: Logger
   private intake?: IntakeCoordinator
   private automationDraft?: (trigger: Trigger) => Promise<string | null>
@@ -266,130 +255,180 @@ export class AgentLoop {
     return result
   }
 
-  /** 处理单条已领取的 Trigger。 */
+  /**
+   * 处理单条已领取的 Trigger。
+   *
+   * 这里只列**顺序**，每一步的判断细节在对应方法里。
+   * **顺序本身是行为的一部分**：前面的步骤会「吃掉」消息，
+   * 改动顺序可能引入静默 bug（例如把 Gate 提到需求会话之前，
+   * 澄清中的消息会被当成普通消息丢掉）。调整顺序前先读下面每步的注释。
+   */
   private async handle(trigger: Trigger, result: TickResult): Promise<void> {
-    {
-      // /new 优先于一切：即使话题里有活跃工单，也要能重置会话。
-      if (parseSessionResetCommand(trigger.text)) {
-        await this.handleSessionReset(trigger, result)
-        return
-      }
-
-      const originalText = (trigger.raw as { originalText?: unknown } | undefined)?.originalText
-      const memoryCommand = !trigger.mediaOnly && parseMemoryCommand(typeof originalText === 'string' ? originalText : trigger.text)
-      if (memoryCommand) {
-        this.handleMemoryCommand(trigger, result, memoryCommand)
-        return
-      }
-
-      // 订阅扇出优先：已订阅线程的消息不经过研判。
-      if (this.hasLiveSubscription(trigger.threadId)) {
-        const delivered = this.engine.fanOut(trigger.id)
-        if (delivered.length > 0) {
-          await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}`)
-          result.fannedOut += delivered.length
-          return
-        }
-      }
-
-      // 需求会话：进行中的澄清会话、待终审的需求单优先处理，不进入研判/派工。
-      if (this.intake) {
-        const intakeAction = await this.intake.handleBeforeGate(trigger)
-        if (intakeAction === 'handled') {
-          await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}`)
-          return
-        }
-      }
-
-      // 已关闭工单的话题：确定性回复，不再交给模型，也不自动开单。
-      const closed = this.closedTicketForThread(trigger.threadId, trigger.actorId)
-      if (closed) {
-        await this.handleClosedThread(trigger, closed, result)
-        return
-      }
-
-      const verdict = gate(trigger, this.engine.policy())
-      // 对话式创建自动化：只接管明确的「定时 / 监听」类意图，草稿待面板确认。
-      // 未寻址的消息与准入拒绝的消息不接管，避免把闲聊或越权请求当成建任务。
-      if (
-        this.automationDraft
-        && verdict.action !== 'ignore'
-        && !trigger.isBot
-        && this.shouldReply(trigger)
-        && looksLikeAutomationIntent(trigger.text)
-      ) {
-        const reply = await this.automationDraft(trigger)
-        if (reply) {
-          this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'inferred', reason: 'automation:draft' })
-          this.reply(trigger, reply, `automation:draft:${trigger.id}`)
-          await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}\nRouter：${reply}`)
-          result.replied += 1
-          return
-        }
-      }
-
-      // 角色分流：管理员直进 Router；普通成员一律先过决策层，由决策层决定要不要跟进。
-      // 群级白名单（含「配了但一个都没解析出来」）是硬边界，不允许普通成员路径绕过。
-      // 没装需求会话链路（没有决策层与分析 Agent）时保持旧行为：普通成员的消息照旧走研判，
-      // 工具范围仍是只读，管理员专属的工单工具拿不到。
-      if (this.intake && !trigger.isBot && !this.isAllowlisted(trigger) && !trigger.mediaOnly && !isAllowlistBlocked(verdict)) {
-        const handled = await this.intake.handleMemberMessage(trigger)
-        if (handled) {
-          await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}`)
-          result.ignored += 1
-          return
-        }
-        // 本群没开「处理普通成员消息」（或没绑项目）：普通成员的消息一律忽略，不进研判。
-        const reason = verdict.action === 'ignore' && 'reason' in verdict ? verdict.reason : 'member:messages-disabled'
-        this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'inferred', reason })
-        result.ignored += 1
-        return
-      }
-      if (verdict.action === 'ignore') {
-        await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}`)
-        this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'inferred', reason: verdict.reason })
-        result.ignored += 1
-        return
-      }
-      // 纯附件消息没有可执行的文字，直接回一句要说明，不开单、不烧模型。
-      if (trigger.mediaOnly) {
-        this.engine.decide({
-          triggerId: trigger.id,
-          decision: 'ignore',
-          strength: trigger.addressed === 'none' ? 'inferred' : 'explicit',
-          reason: 'media:needs-text',
-        })
-        result.ignored += 1
-        if (this.shouldReply(trigger)) {
-          this.reply(trigger, MEDIA_ONLY_TEXT, `media:${trigger.id}`)
-          await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：[附件消息，未解析]\nRouter：${MEDIA_ONLY_TEXT}`)
-          result.replied += 1
-        }
-        return
-      }
-      if (verdict.action === 'reply-only') {
-        this.routerAction(trigger, 'reply', { stage: 'gate', reason: verdict.reason })
-        await this.replyOnly(trigger, verdict.reason)
-        result.replied += 1
-        return
-      }
-      if (verdict.action === 'explicit') {
-        if (isSmallTalk(trigger.text)) {
-          // 明显寒暄不必再花一次研判，直接让模型组织一句礼貌回复。
-          this.routerAction(trigger, 'reply', { stage: 'gate', reason: 'explicit:small-talk' })
-          await this.converse(trigger, '这条消息是寒暄或试探，没有具体工作请求')
-          this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'explicit', reason: 'explicit:small-talk' })
-          result.replied += 1
-          return
-        }
-        const assessed = await this.assess(trigger, 'explicit')
-        await this.applyAssess(trigger, assessed, result, 'explicit')
-        return
-      }
-
-      const assessed = await this.assess(trigger)
-      await this.applyAssess(trigger, assessed, result, 'inferred')
+    // 1) /new 优先于一切：即使话题里有活跃工单，也要能重置会话。
+    if (parseSessionResetCommand(trigger.text)) {
+      await this.handleSessionReset(trigger, result)
+      return
     }
+
+    // 2) 记忆口令：显式指令不经过研判。
+    if (this.tryMemoryCommand(trigger, result)) return
+
+    // 3) 订阅扇出优先：已订阅线程的消息不经过研判。
+    if (await this.tryFanOut(trigger, result)) return
+
+    // 4) 需求会话：进行中的澄清会话、待终审的需求单优先处理，不进入研判/派工。
+    if (await this.tryIntakeBeforeGate(trigger)) return
+
+    // 5) 已关闭工单的话题：确定性回复，不再交给模型，也不自动开单。
+    const closed = this.closedTicketForThread(trigger.threadId, trigger.actorId)
+    if (closed) {
+      await this.handleClosedThread(trigger, closed, result)
+      return
+    }
+
+    // 6) 准入判定 + 角色分流：管理员直进 Router；普通成员一律先过决策层。
+    const verdict = gate(trigger, this.engine.policy())
+
+    // 6.1) 对话式创建自动化：只接管明确的「定时 / 监听」类意图，草稿待面板确认。
+    if (await this.tryAutomationDraft(trigger, verdict, result)) return
+
+    if (await this.tryMemberIntake(trigger, verdict, result)) return
+
+    // 7) Gate 判定忽略。
+    if (verdict.action === 'ignore') {
+      await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}`)
+      this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'inferred', reason: verdict.reason })
+      result.ignored += 1
+      return
+    }
+
+    // 8) 纯附件消息没有可执行的文字，直接回一句要说明，不开单、不烧模型。
+    if (trigger.mediaOnly) {
+      await this.replyMediaOnly(trigger, result)
+      return
+    }
+
+    // 9) 只需回话，不开单。
+    if (verdict.action === 'reply-only') {
+      this.routerAction(trigger, 'reply', { stage: 'gate', reason: verdict.reason })
+      await this.replyOnly(trigger, verdict.reason)
+      result.replied += 1
+      return
+    }
+
+    // 10) 显式请求：先挡掉寒暄，其余走研判。
+    if (verdict.action === 'explicit') {
+      if (await this.trySmallTalk(trigger, result)) return
+      const assessed = await this.assess(trigger, 'explicit')
+      await this.applyAssess(trigger, assessed, result, 'explicit')
+      return
+    }
+
+    // 11) 推断请求：走研判。
+    const assessed = await this.assess(trigger)
+    await this.applyAssess(trigger, assessed, result, 'inferred')
+  }
+
+  /**
+   * 步骤 2：记忆口令（`/记忆 …`）。
+   *
+   * 命中就把这条消息吃掉；没命中就放行给后续步骤。
+   */
+  private tryMemoryCommand(trigger: Trigger, result: TickResult): boolean {
+    const originalText = (trigger.raw as { originalText?: unknown } | undefined)?.originalText
+    const command = !trigger.mediaOnly && parseMemoryCommand(typeof originalText === 'string' ? originalText : trigger.text)
+    if (!command) return false
+    this.handleMemoryCommand(trigger, result, command)
+    return true
+  }
+
+  /** 步骤 3：已订阅线程的消息扇出给订阅者；没订阅到人时放行给后续步骤。 */
+  private async tryFanOut(trigger: Trigger, result: TickResult): Promise<boolean> {
+    if (!this.hasLiveSubscription(trigger.threadId)) return false
+    const delivered = this.engine.fanOut(trigger.id)
+    if (delivered.length === 0) return false
+    await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}`)
+    result.fannedOut += delivered.length
+    return true
+  }
+
+  /** 步骤 4：进行中的澄清会话 / 待终审需求单优先处理，不进入研判与派工。 */
+  private async tryIntakeBeforeGate(trigger: Trigger): Promise<boolean> {
+    if (!this.intake) return false
+    const intakeAction = await this.intake.handleBeforeGate(trigger)
+    if (intakeAction !== 'handled') return false
+    await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}`)
+    return true
+  }
+
+  /**
+   * 步骤 6 的一半：普通成员的消息先过决策层，由决策层决定要不要跟进。
+   *
+   * 群级白名单（含「配了但一个都没解析出来」）是硬边界，不允许普通成员路径绕过。
+   * 没装需求会话链路（没有决策层与分析 Agent）时保持旧行为：普通成员的消息照旧走研判，
+   * 工具范围仍是只读，管理员专属的工单工具拿不到。
+   */
+  private async tryMemberIntake(trigger: Trigger, verdict: GateResult, result: TickResult): Promise<boolean> {
+    if (!this.intake) return false
+    if (trigger.isBot || this.isAllowlisted(trigger) || trigger.mediaOnly) return false
+    if (isAllowlistBlocked(verdict)) return false
+
+    const handled = await this.intake.handleMemberMessage(trigger)
+    if (handled) {
+      await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}`)
+      result.ignored += 1
+      return true
+    }
+    // 本群没开「处理普通成员消息」（或没绑项目）：普通成员的消息一律忽略，不进研判。
+    const reason = verdict.action === 'ignore' && 'reason' in verdict ? verdict.reason : 'member:messages-disabled'
+    this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'inferred', reason })
+    result.ignored += 1
+    return true
+  }
+
+  /**
+   * 步骤 6 的一半：对话式创建自动化。
+   *
+   * 只接管明确的「定时 / 监听」类意图，草稿待面板确认；
+   * 未寻址的消息与准入拒绝的消息不接管，避免把闲聊或越权请求当成建任务。
+   */
+  private async tryAutomationDraft(trigger: Trigger, verdict: GateResult, result: TickResult): Promise<boolean> {
+    if (!this.automationDraft) return false
+    if (verdict.action === 'ignore') return false
+    if (trigger.isBot || !this.shouldReply(trigger)) return false
+    if (!looksLikeAutomationIntent(trigger.text)) return false
+    const reply = await this.automationDraft(trigger)
+    if (!reply) return false
+    this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'inferred', reason: 'automation:draft' })
+    this.reply(trigger, reply, `automation:draft:${trigger.id}`)
+    await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：${trigger.text}\nRouter：${reply}`)
+    result.replied += 1
+    return true
+  }
+
+  /** 步骤 8：纯附件消息回一句「补文字」，不开单、不烧模型。 */
+  private async replyMediaOnly(trigger: Trigger, result: TickResult): Promise<void> {
+    this.engine.decide({
+      triggerId: trigger.id,
+      decision: 'ignore',
+      strength: trigger.addressed === 'none' ? 'inferred' : 'explicit',
+      reason: 'media:needs-text',
+    })
+    result.ignored += 1
+    if (!this.shouldReply(trigger)) return
+    this.reply(trigger, MEDIA_ONLY_TEXT, `media:${trigger.id}`)
+    await this.recordTranscript(trigger, `${trigger.actorName || trigger.actorId}：[附件消息，未解析]\nRouter：${MEDIA_ONLY_TEXT}`)
+    result.replied += 1
+  }
+
+  /** 步骤 10 的一半：明显寒暄不必再花一次研判，直接让模型组织一句礼貌回复。 */
+  private async trySmallTalk(trigger: Trigger, result: TickResult): Promise<boolean> {
+    if (!isSmallTalk(trigger.text)) return false
+    this.routerAction(trigger, 'reply', { stage: 'gate', reason: 'explicit:small-talk' })
+    await this.converse(trigger, '这条消息是寒暄或试探，没有具体工作请求')
+    this.engine.decide({ triggerId: trigger.id, decision: 'ignore', strength: 'explicit', reason: 'explicit:small-talk' })
+    result.replied += 1
+    return true
   }
 
   /**

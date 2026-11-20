@@ -2,7 +2,7 @@
  * 确定性准入：任何消息先过这里，再决定是否交给决策层（Jev / LLM）。
  *
  * 规则只做形态判断与身份分流，语义判断一律交给决策模型。
- * 管理员在这里被分走、直进 RouterAgent；纯寒暄在这里被忽略，不产生模型调用。
+ * 管理员在这里被分走、直进 Router 的 AgentLoop；纯寒暄在这里被忽略，不产生模型调用。
  */
 
 export type AdmissionOutcome = 'drop' | 'bypass' | 'pass'
@@ -22,7 +22,7 @@ export interface AdmissionContext {
   text: string
   mediaOnly?: boolean
   isBot?: boolean
-  /** 发送人是否在管理员名单；是则直进 RouterAgent。 */
+  /** 发送人是否在管理员名单；是则直进 Router 的 AgentLoop。 */
   isAdmin?: boolean
   /** 该发起人已有活跃需求会话：续接分析，不重复决策。 */
   hasActiveIntake?: boolean
@@ -59,7 +59,7 @@ export function admissionOf(ctx: AdmissionContext): AdmissionVerdict {
   if (ctx.isCommand) return { outcome: 'bypass', rule: 'command', reason: 'command:router-handles' }
   if (ctx.hasActiveIntake) return { outcome: 'bypass', rule: 'active-intake', reason: 'intake:continue-session' }
   if (ctx.hasBoundTicket) return { outcome: 'bypass', rule: 'bound-ticket', reason: 'ticket:bound-path' }
-  // 身份分流：管理员直进 RouterAgent，普通成员才进决策层。
+  // 身份分流：管理员直进 Router 的 AgentLoop，普通成员才进决策层。
   if (ctx.isAdmin) return { outcome: 'bypass', rule: 'identity-split', reason: 'identity:admin-direct' }
   // 噪声门槛：纯寒暄不进决策层，直接忽略（默认宽松：不确定就放行）。
   if (isSmallTalk(ctx.text)) return { outcome: 'drop', rule: 'noise', reason: 'noise:small-talk' }

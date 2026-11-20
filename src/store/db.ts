@@ -456,6 +456,9 @@ CREATE TABLE IF NOT EXISTS reactions (
   created_at TEXT NOT NULL
 );
 
+-- 游标表：一张无类型的 KV 表，承载 9 类结构不同的状态机（进展同步、派工失败、
+-- 重新派工、中断恢复、关单提醒、主动巡检、PR 催办、僵尸治理、未 ack 提醒）。
+-- 每一类的 key 字符串与 value 格式见 src/store/cursors.ts，业务代码不直接拼 key。
 CREATE TABLE IF NOT EXISTS cursors (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
@@ -2098,6 +2101,8 @@ export class Store {
   }
 
   // ---------- 游标（增量补拉） ----------
+  // 业务代码不直接用这三个方法：走 src/store/cursors.ts 的 Cursors，
+  // 那里有 9 类水位的 key 字符串与 value 结构。
 
   getCursor(key: string): string | null {
     const row = this.db.prepare('SELECT value FROM cursors WHERE key = ?').get(key) as Row | undefined

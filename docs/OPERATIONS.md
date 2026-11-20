@@ -243,6 +243,7 @@ Router 不做对话，只在必要时说话：
 | `loop:trigger-failed` | Agent Loop | `triggerId` `chat` `detail` | 单条消息处理异常，同批其它消息不受影响 |
 | `loop:error` | Service | `detail` | 内部定时任务回调抛出的未预期异常，不影响主循环 |
 | `decision:audit` / `decision:audit-write-failed` | CLI | `engine` `triggerId` `durationMs` `tokens` `toolCalls` `decision` / `detail` | 每次研判的审计记录写入 `decisions.jsonl`；写盘失败不影响研判 |
+| `decision:classification-audit` | CLI | `triggerId` `provider` `outcome` `rule` `action` `msgType` | 每次**决策层分类**（普通成员消息）的审计记录写入 `classifications.jsonl`；`outcome` 为 `dropped` / `bypassed` / `verdict` / `failed`，写盘失败不影响分类 |
 | `decision:engine-failed` | Agent Loop | `triggerId` `detail` | 研判引擎调用失败（没额度 / 限流 / 超时 / 鉴权失败等），按 unavailable 处理并留下原因；用户侧会收到对应的失败原因文案 |
 | `decision:verdict` | DecisionAgent | `triggerId` `chat` `provider` `action` `msgType` `confidence` | 决策层分类结论（确定性准入已通过，Jev / LLM 给出动作与消息类型） |
 | `decision:enabled` | EngineFactory | `provider` `model`（jev 时）`detail` | 决策层已装配：走的 Provider 是 jev 还是 llm 兜底；Jev 连接信息不全时会在这里说明原因 |
@@ -588,6 +589,29 @@ ra start
 - 规范线程 ID 的尾段始终是可回复的消息 ID（`om_`）——`+messages-reply --message-id` 只接受 `om_`。
 - 同一消息带多个标识时，按「话题 ID > 根消息 ID > 消息自身 ID」的顺序解析，与登记时间无关。
 - 查询失败的线程（消息已删除 / 无权限）如实报告，仍需按根消息 ID 归并；`--apply` 退出码为 1。
+
+## 游标表（`cursors`）
+
+`state.db` 的 `cursors` 表是一张无类型的 KV 表（`key TEXT PRIMARY KEY / value TEXT NOT NULL`），
+承载 9 类结构完全不同的状态机。**排查「工单为什么被自动关闭 / 为什么没有重复通知」时看这里。**
+
+key 字符串与 value 格式如下（读写入口是 `src/store/cursors.ts` 的 `Cursors`，业务代码不直接拼 key）：
+
+| key 前缀 | 含义 | value 格式 |
+|-|-|-|
+| `progress:<ticketId>` | 进展同步水位：已同步到哪条报告 | 报告 id 字符串，或 `'@start'`（表示「从派工这一刻起」） |
+| `launch-failure:<ticketId>` | 派工失败水位：区分「失败前积压的旧输入」与「用户新回复」 | JSON `{ attempts, lastSeq, lastReason }` |
+| `relaunch:<ticketId>` | 重新派工水位：上次为积压输入重建 worker 时处理到的最大输入 seq | 数字字符串 |
+| `interrupted:<ticketId>` | 中断恢复水位：已处理过的被中断轮次与自动恢复次数 | JSON `{ turnIds: string[], autoRecovered: number }` |
+| `retention:reminder:<ticketId>` | 关单提醒水位：提醒时间、预定关闭时间与提醒消息幂等键 | JSON `{ remindedAt, closeAt, outboxKey? }` |
+| `progress:probe:<ticketId>` | 主动巡检水位：静默期起点、上次巡检时间、提醒次数与摘要指纹 | JSON `{ lastProgressAt, lastPostAt, count, snippetHash }` |
+| `retention:pr-urge:<ticketId>` | PR 催办水位：同一段闲置期只催一次 | 时间戳（毫秒）字符串 |
+| `retention:zombie:<ticketId>` | 僵尸水位：转人工后不再自动关闭，直到出现新进展 | 时间戳（毫秒）字符串 |
+| `input:unacked-notice:<inputId>` | 未 ack 提醒水位：同一条输入只提醒一次 | 时间戳（毫秒）字符串 |
+
+- 游标 JSON 损坏时按「没有水位」处理，并记 `cursor:invalid`（带 `key` 与错误原因）。
+- 清空水位用 `deleteCursor`；有进展时会自动清掉提醒 / 催办 / 僵尸三个水位，让下一段闲置期重新计时。
+- 人工排查可以直接 `sqlite3 ~/.router-agent/state.db "SELECT key, value FROM cursors;"`，但**不要手改**：key 拼错等于新建一条互不相干的状态。
 
 ## 已知限制
 

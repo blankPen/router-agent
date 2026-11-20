@@ -45,7 +45,8 @@ import { realRunner, type CommandRunner } from '#infra/process.js'
 import { errorMessage, withFieldContext } from '#infra/logger.js'
 import { resolveImageModelConfig, resolvePiModelConfig, type PiModelConfig } from '../router/model-config.js'
 import { createDecisionAgent, createDecisionEngine, createIntakeEngine } from '../router/engine-factory.js'
-import type { DecisionAudit } from '../router/decision-engine.js'
+import type { AssessmentAudit } from '../router/decision-engine.js'
+import type { ClassificationAudit } from '../router/decision/agent.js'
 import type { WorkerStateFile } from '#runtime/report-poller.js'
 import { RouterService, type Logger } from '../service.js'
 import { logLevelOf } from '../router/log-levels.js'
@@ -1630,13 +1631,8 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
   const intakeEngine = model
     ? createIntakeEngine({ config, store, model, logger })
     : undefined
-  // 决策层：普通成员消息先过确定性准入，再交 Jev（或 LLM 模拟）分类。
-  // 只有模型已配（RouterService 存在）时才装配；未开启时返回 null，保持原有 LLM 初筛。
-  const decisionAgent = model && config.decision.enabled
-    ? createDecisionAgent({ config, store, model, intakeEngine, engine, logger })
-    : null
   const auditPath = join(home, 'logs', 'decisions.jsonl')
-  const onDecisionAudit = (audit: DecisionAudit): void => {
+  const onDecisionAudit = (audit: AssessmentAudit): void => {
     try {
       appendFileSync(auditPath, `${JSON.stringify({ at: new Date().toISOString(), ...audit })}\n`, 'utf8')
     } catch (error) {
@@ -1652,6 +1648,32 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       ...(audit.unavailableReason ? { unavailable: audit.unavailableReason } : {}),
     })
   }
+  /**
+   * 决策层（普通成员消息分类）的审计出口。
+   *
+   * 与研判审计分开落文件：两层的字段结构完全不同（研判是 engine / toolCalls / tokens，
+   * 决策层是 provider / outcome / verdict），混在一个文件里没法按层回放。
+   */
+  const classificationAuditPath = join(home, 'logs', 'classifications.jsonl')
+  const onClassificationAudit = (audit: ClassificationAudit): void => {
+    try {
+      appendFileSync(classificationAuditPath, `${JSON.stringify({ at: new Date().toISOString(), ...audit })}\n`, 'utf8')
+    } catch (error) {
+      logger.warn('decision:audit-write-failed', { message: error instanceof Error ? error.message : String(error) })
+    }
+    logger.info('decision:classification-audit', {
+      triggerId: audit.triggerId,
+      provider: audit.provider,
+      outcome: audit.outcome,
+      ...(audit.rule ? { rule: audit.rule } : {}),
+      ...(audit.verdict ? { action: audit.verdict.action, msgType: audit.verdict.msgType } : {}),
+    })
+  }
+  // 决策层：普通成员消息先过确定性准入，再交 Jev（或 LLM 模拟）分类。
+  // 只有模型已配（RouterService 存在）时才装配；未开启时返回 null，保持原有 LLM 初筛。
+  const decisionAgent = model && config.decision.enabled
+    ? createDecisionAgent({ config, store, model, intakeEngine, engine, logger, onAudit: onClassificationAudit })
+    : null
   /**
    * 未 @ 机器人的消息要不要放行：已绑定工单的话题内，名单内成员也触发回复（tk-59）。
    *

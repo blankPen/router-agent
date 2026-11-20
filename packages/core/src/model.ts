@@ -20,7 +20,18 @@ export type SourceKind = string
 /** 一条消息的寻址方式。 */
 export type AddressMode = 'mention' | 'direct' | 'none'
 
-export type TriggerDisposition = 'pending' | 'evaluating' | 'filtered' | 'evaluated' | 'fanned_out' | 'owned'
+/**
+ * 触发消息的处理状态。
+ *
+ * - pending：已入库，等待认领；
+ * - evaluating：已被认领，正在处理；
+ * - evaluated：已给出结论（决策记录在 decisions 表里）；
+ * - fanned_out：已扇出给订阅该话题的工单。
+ *
+ * 只有这四个值：早期版本里的 `filtered` / `owned` 从未被写入过，
+ * 已删除，不要按「还有别的处置路径」去猜。
+ */
+export type TriggerDisposition = 'pending' | 'evaluating' | 'evaluated' | 'fanned_out'
 
 /**
  * Router 落盘到本机的原始附件。
@@ -244,13 +255,6 @@ export interface DecisionRecord {
   createdAt: string
 }
 
-export interface Channel {
-  kind: 'feishu' | 'github'
-  chatId: string
-  /** 飞书 thread / 根消息 ID，用于话题回复。 */
-  threadId?: string
-}
-
 /**
  * 需求识别（intake）的状态。
  *
@@ -259,9 +263,20 @@ export interface Channel {
  */
 export type IntakeStatus = 'clarifying' | 'ready' | 'approved' | 'rejected' | 'dismissed' | 'answered'
 
-/** 初筛结论：闲聊 / 普通咨询 / 疑似故障或需求。 */
 /**
- * 需求会话的类型：
+ * 初筛模型可产出的结论类型：
+ * - chat：闲聊；
+ * - question：普通成员的咨询，会话内直接给结论；
+ * - issue：普通成员提的需求，澄清后交管理员终审。
+ */
+export type ScreenedKind = 'chat' | 'question' | 'issue'
+
+/**
+ * 需求会话的类型。
+ *
+ * 比 `ScreenedKind` 多一个 `request`：管理员自己提的需求不经过初筛模型，
+ * 由 Router 直接建会话（见 `src/router/intake-flow.ts` 的 startAdminRequest）。
+ *
  * - question：普通成员的咨询，会话内直接给结论；
  * - issue：普通成员提的需求，澄清后交管理员终审；
  * - request：管理员自己提的需求，澄清后直接开单。

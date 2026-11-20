@@ -344,6 +344,8 @@ src/               宿主：Engine / Store、Router、HTTP API、Web 面板、CL
 
 | 文档 | 内容 |
 |-|-|
+| [docs/CODE-MAP.md](docs/CODE-MAP.md) | **代码地图**：核心概念 → 定义位置 → 主要读写点。第一次读代码先看这份 |
+| [docs/GLOSSARY.md](docs/GLOSSARY.md) | **术语表**：研判 / 决策 / 判定 / 准入 / 澄清 / 终审 / 派工 / 水位 / 僵尸……各指什么 |
 | [docs/MONOREPO.md](docs/MONOREPO.md) | Monorepo 包划分、依赖方向、包别名，以及新增 runtime / channel 的步骤 |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 分层、一条消息的四步、研判 / 会话 / 派工机制、工单阶段与 `ra report` 协议 |
 | [docs/RUNTIME.md](docs/RUNTIME.md) | Worker 运行时对比、ACP Agent 目录、Worker 工具策略与规范注入 |

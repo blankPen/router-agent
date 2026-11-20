@@ -300,6 +300,8 @@ The detailed docs are currently Chinese-only.
 
 | Document | Contents |
 |-|-|
+| [docs/CODE-MAP.md](docs/CODE-MAP.md) | **Code map**: core concept → where it is defined → who reads and writes it (Chinese) |
+| [docs/GLOSSARY.md](docs/GLOSSARY.md) | **Glossary**: what triage / decision / admission / clarification / dispatch / watermark mean (Chinese) |
 | [docs/MONOREPO.md](docs/MONOREPO.md) | Monorepo package layout, dependency direction, aliases, and how to add a runtime / channel |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layering, the four steps, triage / session / dispatch mechanics, ticket stages and the `ra report` protocol |
 | [docs/RUNTIME.md](docs/RUNTIME.md) | Worker runtime comparison, ACP agent catalog, worker tool policy and spec injection |

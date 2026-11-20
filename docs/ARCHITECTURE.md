@@ -86,11 +86,32 @@ WorkerRuntime 端口 ── OrcaRuntime（默认）/ ClaudeCodeRuntime / AcpRunt
 
 准入矩阵与 `policy.admission` 的逐格配置见 [CONFIGURATION.md](CONFIGURATION.md#准入规则)。
 
+### 准入的两层
+
+项目里有两个都叫「准入」的东西，管的不是一回事。**改准入规则要同时看这两层。**
+
+| | Gate | Admission |
+|-|-|-|
+| 代码位置 | `packages/core/src/policy.ts` 的 `gate()` | `packages/core/src/admission.ts` 的 `admissionOf()` |
+| 层次 | 路由层 | 规则层 |
+| 回答的问题 | 「这个人有资格让 Router 处理这条消息吗」 | 「这条消息命中了什么规则，要不要走模型」 |
+| 依据 | 管理员名单、群 scope、是否 @ 机器人 | 事件类型、是否机器人、是否口令、是否有在途工单 / 需求会话 |
+| 结果 | `explicit` / `infer` / `reply-only` / `ignore` | 命中规则名（`bot` / `media-only` / `command` / `active-intake` / `bound-ticket` / `identity-split` / `noise`），或放行 |
+
+两者串联：先过 Gate（人够不够格），再过 Admission（消息要不要走模型）。
+Gate 判「忽略」的消息根本到不了 Admission；Admission 判「放行」的消息才交给决策模型。
+
+完整术语对照见 [GLOSSARY.md](GLOSSARY.md)，代码位置索引见 [CODE-MAP.md](CODE-MAP.md)。
+
 ## 判：Gate 在前，Pi 在后
 
 显式请求也会过一次研判（`conversation.md` / `admission.md` 提示词），不是命中名单就无脑开工；明显寒暄走规则短路，不再额外调用模型。
 
 研判层是 `DecisionEngine` 端口，**Pi 是唯一实现**。AgentLoop 只负责 Gate、应用提案、写库与回复，不再持有工具循环。
+
+> **Pi 是什么**：`@earendil-works/pi-coding-agent`。**Router 的全部模型调用都走它**——
+> 研判、礼貌回复、需求分析都是同一套 Pi 引擎（不同提示词与工具白名单）。
+> 依赖声明在根 `package.json`，实现见 `src/router/pi-decision-engine.ts`。
 
 | 通道 | 说明 |
 |-|-|
@@ -103,7 +124,9 @@ WorkerRuntime 端口 ── OrcaRuntime（默认）/ ClaudeCodeRuntime / AcpRunt
 2. **工具白名单**：不给 shell / 文件 / MCP / 通用 skill。
 3. **写操作有界**：查询工具只读；清理工具只经 `Engine` 关单、把 workspace 回收排进 `Effects`（仍由服务层统一停终端 / 删 worktree），且只对准入名单内、明确 @ 或私聊的用户开放。`router_decide` 只产出 `DecisionProposal`，`Engine.decide()` 由 AgentLoop 统一调用。
 4. **超时与预算**：单次 60s、32k token，超时 / 超预算落 `unavailable`，不会拖住 `runCycle`。
-5. **审计与回放**：`~/.router-agent/logs/decisions.jsonl` 记录 prompt、工具序列、proposal、耗时与 token。
+5. **审计与回放**：两层各写一份，字段结构不同，不要混看——
+   - `~/.router-agent/logs/decisions.jsonl`：**研判层**（管理员消息）的 prompt、工具序列、proposal、耗时与 token。
+   - `~/.router-agent/logs/classifications.jsonl`：**决策层**（普通成员消息分类）的 provider、outcome、rule 与 verdict。
 
 Pi 侧完全隔离：AuthStorage / SettingsManager / SessionManager 全为 in-memory，关闭 extensions / skills / prompts / themes / AGENTS.md，不读写用户 `~/.pi`。
 

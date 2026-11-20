@@ -3,6 +3,10 @@
  *
  * 这里只放纯常量与纯函数，不能依赖任何 Node 内置模块 —— Web 面板会把它
  * 一起打进前端包。探测、安装、spawn 等 Node-only 逻辑放在 detect.ts / install.ts。
+ *
+ * 命名空间提示：本文件的 `AcpAgentMeta.id`（`claude` / `codex` / …）是
+ * 「哪种 ACP 接入方式」，与 `agent-sessions/profile.js` 的 `AgentProfile.id`
+ * （「哪种 Agent 会话记录格式」）不是同一个 id；`runtimeId` 才是运行时 id。
  */
 
 export interface AcpAgentRequirement {
