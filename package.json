@@ -45,7 +45,7 @@
     "build:web": "node scripts/build-web.mjs",
     "build": "tsc -p tsconfig.build.json && node scripts/build-web.mjs && node scripts/flatten-dist.mjs && node scripts/build-packages.mjs",
     "check": "pnpm check:links && pnpm typecheck && pnpm test",
-    "start": "node dist/cli/main.js start"
+    "start": "node dist/cli/main.js stop && node dist/cli/main.js start"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
@@ -56,6 +56,7 @@
     "@router-agent/channel-feishu": "0.3.43",
     "@router-agent/channel": "0.3.43",
     "@router-agent/core": "0.3.43",
+    "@router-agent/event": "0.3.43",
     "@router-agent/infra": "0.3.43",
     "@router-agent/runtime": "0.3.43",
     "@router-agent/runtime-acp": "0.3.43",
@@ -85,6 +86,7 @@
     "#core/*": "./dist/packages/core/src/*",
     "#infra/*": "./dist/packages/infra/src/*",
     "#runtime/*": "./dist/packages/runtime/src/*",
-    "#channel/*": "./dist/packages/channel/src/*"
+    "#channel/*": "./dist/packages/channel/src/*",
+    "#event/*": "./dist/packages/event/src/*"
   }
 }

@@ -4,8 +4,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Store } from '../src/store/db.js'
 import { Engine } from '../src/core/engine.js'
-import { RouterService } from '../src/service.js'
+import { RouterService, outboxTargetOf } from '../src/service.js'
 import { defaultConfig, policyOf, type AppConfig, chatEntry } from '../src/config.js'
+import { EventKickoff } from '../src/events/kickoff.js'
+import { ChannelRegistry } from '#channel/registry.js'
+import type { ChannelAdapter, OutboundMessage, SendReceipt } from '#channel/port.js'
 import { } from '#core/policy.js'
 import type {
   WorkerRuntime,
@@ -18,7 +21,7 @@ import type {
 } from '#runtime/port.js'
 import { WorkerRuntimeError } from '#runtime/port.js'
 import type { DecisionEngine, DecisionEngineResult, DecisionRequest } from '../src/router/decision-engine.js'
-import type { Trigger } from '#core/model.js'
+import type { Ticket, Trigger } from '#core/model.js'
 
 class FakeRuntime implements WorkerRuntime {
   readonly id = 'orca'
@@ -146,6 +149,48 @@ class FakeSender {
   }
 }
 
+/** 事件开工测试用的通道：私聊与话题回复都只记录，不发真实网络请求。 */
+class FakeKickoffChannel implements ChannelAdapter {
+  readonly id = 'feishu'
+  readonly kind = 'feishu'
+  readonly capabilities = {
+    threadReply: true,
+    ack: false,
+    richText: true,
+    documents: false,
+    directory: false,
+    attachmentsIn: false,
+    attachmentsOut: false,
+    idempotency: true,
+    maxTextLength: 3500,
+    directMessage: true,
+  }
+  directs: { userId: string; text: string }[] = []
+  replies: { threadRef?: string; text: string }[] = []
+
+  normalize(): { dropped: string } {
+    return { dropped: 'test' }
+  }
+
+  async send(message: OutboundMessage): Promise<SendReceipt> {
+    if (message.direct) {
+      this.directs.push({ userId: message.targetId, text: message.text })
+      return { messageId: 'om_dm', chatId: 'oc_p2p' }
+    }
+    this.replies.push({
+      ...(message.threadRef ? { threadRef: message.threadRef } : {}),
+      text: message.text,
+    })
+    if (message.threadRef === 'om_dm') return { messageId: 'om_thread', chatId: 'oc_p2p' }
+    return { messageId: 'om_progress', chatId: message.targetId }
+  }
+
+  async resolveMessageThread(messageId: string): Promise<{ threadId: string; rootId: string; chatId: string } | null> {
+    if (messageId !== 'om_thread') return null
+    return { threadId: 'omt_topic', rootId: 'om_thread', chatId: 'oc_p2p' }
+  }
+}
+
 function makeTrigger(over: Partial<Trigger> = {}): Trigger {
   return {
     id: 't1',
@@ -230,6 +275,106 @@ describe('RouterService 编排', () => {
     const assignment = store.latestAssignment(ticket.id)!
     expect(assignment.handle).toBe('term-1')
     expect(assignment.status).toBe('pending')
+  })
+
+  it('事件工单的 threadId 不是飞书消息 ID 时改发通知群，而不是当 message_id 回复', () => {
+    const eventTicket = {
+      id: 'tk_event',
+      title: 'CI 失败',
+      threadId: 'event:github-1:workflow_run:blankPen/router-agent#4225:failure',
+      source: 'event:github-1',
+      chatId: '',
+    } as Ticket
+
+    expect(outboxTargetOf(eventTicket, 'oc_admin')).toEqual({ channelId: 'oc_admin', threadId: '' })
+    expect(outboxTargetOf({ ...eventTicket, chatId: '' }, '')).toBeNull()
+  })
+
+  it('事件工单派工前私聊通知并建话题，话题内消息可投给 worker', async () => {
+    config.events = {
+      ...defaultConfig().events,
+      sources: { github: { enabled: true, kind: 'github', repo: 'acme/web', owner: 'pz@example.com' } },
+    }
+    engine.ingest({
+      id: 'trg_event_evt1',
+      source: 'event:github',
+      externalId: 'issue:1',
+      threadId: 'event:github:issue:1',
+      chatId: 'oc_dev',
+      chatName: 'github',
+      actorId: 'event:github',
+      actorName: '事件来源 github',
+      isBot: true,
+      text: 'CI 失败',
+      addressed: 'none',
+      receivedAt: '2026-11-06T09:59:00.000Z',
+      disposition: 'pending',
+    })
+    const ticket = engine.decide({
+      triggerId: 'trg_event_evt1',
+      decision: 'accept',
+      strength: 'inferred',
+      reason: '测试事件开单',
+      title: '修复 CI',
+      scope: '只修构建脚本',
+      request: '事件标题：CI 失败\n事件正文：修复构建',
+      rules: ['event-decision'],
+      repo: 'acme/web',
+      branch: 'main',
+    }).ticket!
+    const channel = new FakeKickoffChannel()
+    const channels = new ChannelRegistry()
+    channels.register(channel)
+    const kickoff = new EventKickoff({
+      store,
+      config: () => config,
+      channels,
+      clock: () => '2026-11-06T10:00:10.000Z',
+      logger: {
+        info: () => {},
+        warn: () => {},
+        error: () => {},
+      },
+      resolveOwner: async () => ({ openId: 'ou_pz', name: 'PZ' }),
+    })
+    service = new RouterService({
+      config, store, engine, runtime, decisionEngine: new AcceptEngine(), prTracker,
+      clock: { now: () => '2026-11-06T10:00:10.000Z' },
+      agentLoopOptions: { batchWindowMs: 0 },
+      kickoff,
+    })
+
+    await service.runOnce()
+
+    expect(channel.directs).toHaveLength(1)
+    expect(channel.directs[0]!.text).toContain(ticket.id)
+    expect(store.getTicket(ticket.id)!.threadId).toBe('feishu:oc_p2p:om_thread')
+    expect(runtime.starts).toHaveLength(1)
+
+    engine.ingest({
+      id: 'trg_topic_1',
+      source: 'feishu',
+      externalId: 'om_topic_user',
+      threadId: 'feishu:oc_p2p:om_topic_user',
+      threadKeys: ['omt_topic', 'om_thread', 'om_topic_user'],
+      chatId: 'oc_p2p',
+      chatName: 'PZ',
+      actorId: 'ou_pz',
+      actorName: 'PZ',
+      isBot: false,
+      text: '话题里追加消息',
+      addressed: 'direct',
+      receivedAt: '2026-11-06T09:59:30.000Z',
+      disposition: 'pending',
+    })
+    await service.runOnce()
+
+    expect(runtime.delivered.map(item => item.text)).toContain('话题里追加消息')
+  })
+
+  it('飞书工单仍用话题消息回复', () => {
+    const ticket = { channelId: 'feishu', chatId: 'oc_dev', threadId: 'feishu:oc_dev:om_root' } as Ticket
+    expect(outboxTargetOf(ticket, 'oc_admin')).toEqual({ channelId: 'oc_dev', threadId: 'om_root' })
   })
 
   it('并发上限生效：超出的工单排队而不是丢弃', async () => {
@@ -449,6 +594,43 @@ describe('RouterService 编排', () => {
     expect(store.getTicket(ticket.id)?.prNumber).toBe(12)
   })
 
+  it('state.json 时间戳比库里最新报告旧时，仍按 turn 判断要不要接收', async () => {
+    engine.ingest(makeTrigger())
+    await service.runOnce()
+    const ticket = store.listTickets()[0]!
+    const assignment = store.latestAssignment(ticket.id)!
+
+    // 第一轮已经入库。
+    service.onWorkerState({
+      ticketId: ticket.id,
+      assignmentId: assignment.id,
+      turn: 1,
+      state: 'progress',
+      summary: '第一轮',
+      prNumber: 0,
+      prUrl: '',
+      ackedInputs: [],
+      updatedAt: '2026-11-06T09:00:00.000Z',
+    })
+
+    // 第二轮通过 HTTP 通道先入库，但 state.json 里仍是第一轮的时间戳。
+    // 用时间戳去重会误杀这条真实上报（tk-85 评审 S-05）。
+    service.onWorkerState({
+      ticketId: ticket.id,
+      assignmentId: assignment.id,
+      turn: 2,
+      state: 'ready',
+      summary: '第二轮完成',
+      prNumber: 0,
+      prUrl: '',
+      ackedInputs: [],
+      updatedAt: '2026-11-06T09:00:00.000Z',
+    })
+
+    expect(store.listReports(ticket.id).map(item => item.turn)).toEqual([2, 1])
+    expect(logs.some(log => log.message === 'report:stale-ignored')).toBe(false)
+  })
+
   it('PR 合并后工单保持开放，worker 继续跑', async () => {
     engine.ingest(makeTrigger())
     await service.runOnce()
@@ -541,6 +723,26 @@ describe('RouterService 编排', () => {
     expect(store.getTicket(ticket.id)?.stage).toBe('review')
   })
 
+  it('PR 有新进展时解除陈旧的待答问题，工单不再停在已阻塞', async () => {
+    engine.ingest(makeTrigger())
+    await service.runOnce()
+    const ticket = store.listTickets()[0]!
+    const assignment = store.latestAssignment(ticket.id)!
+    service.onWorkerState({
+      ticketId: ticket.id, assignmentId: assignment.id, turn: 1, state: 'ready', summary: 'PR 已开',
+      prNumber: 15, prUrl: 'u15', ackedInputs: [], updatedAt: '2026-11-06T10:01:00.000Z',
+    })
+    // worker 失联后留下待答问题：工单被钉在 blocked。
+    engine.setAttention(ticket.id, 'worker 无响应：长时间没有新的 state.json 上报')
+    expect(store.getTicket(ticket.id)?.stage).toBe('blocked')
+
+    prTracker.states.set(15, 'merged')
+    await service.trackPullRequests()
+
+    expect(store.getAttention(ticket.id)).toBeNull()
+    expect(store.getTicket(ticket.id)?.stage).toBe('review')
+  })
+
   it('PR 跟踪带上 PR 链接与 workdir，避免项目名无法映射成 owner/name', async () => {
     engine.ingest(makeTrigger())
     await service.runOnce()
@@ -575,6 +777,8 @@ describe('RouterService 编排', () => {
     const misses = logs.filter(log => log.message === 'pr:track-failed')
     expect(misses).toHaveLength(1)
     expect(misses[0]?.extra).toMatchObject({ ticketId: ticket.id, prNumber: 99, repo: 'acme/web' })
+    const notices = store.listOutbox(50).filter(item => item.text.includes('PR #99 状态查询没有结果'))
+    expect(notices).toHaveLength(1)
   })
 
   it('worker 上报 blocked 时通知发起人并登记待答问题', async () => {
@@ -637,6 +841,43 @@ describe('RouterService 编排', () => {
     await service.runOnce()
     expect(runtime.delivered.length).toBe(before)
     expect(store.claimOutbox('2026-11-06T10:11:00.000Z', 20).filter(item => item.text.includes('执行会话已不存在'))).toHaveLength(0)
+  })
+
+  it('重启恢复时把研判途中中断的 Trigger 放回队列，消息不会被永久吞掉', async () => {
+    store.insertTrigger(makeTrigger({ id: 't_eval', externalId: 'om_eval' }))
+    store.claimPendingTriggers('2026-11-06T10:00:10.000Z')
+    expect(store.getTrigger('t_eval')?.disposition).toBe('evaluating')
+
+    await service.recover()
+
+    expect(store.getTrigger('t_eval')?.disposition).toBe('pending')
+    expect(logs.find(entry => entry.message === 'recover:trigger-released')).toMatchObject({
+      level: 'warn',
+      extra: { released: 1 },
+    })
+  })
+
+  it('stop() 等在途周期收尾后再返回，避免在途周期撞上已关闭的 DB', async () => {
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const runCycle = (service as unknown as { runCycle: () => Promise<void> }).runCycle.bind(service)
+    ;(service as unknown as { runCycle: () => Promise<void> }).runCycle = async () => {
+      await gate
+      await runCycle()
+    }
+
+    const running = service.runOnce()
+    const stopping = service.stop()
+    let stopped = false
+    void stopping.then(() => { stopped = true })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(stopped).toBe(false)
+
+    release()
+    await running
+    await stopping
+    expect(stopped).toBe(true)
   })
 
   it('worker 被删后不会因为未 ack 的旧输入反复重建（tk-51）', async () => {
@@ -1114,7 +1355,7 @@ describe('RouterService 编排', () => {
       const startedAt = T0 + 24 * HOUR
       const restarted = restartService(new Date(startedAt).toISOString())
       await restarted.start()
-      restarted.stop()
+      await restarted.stop()
 
       // 启动后的第一轮巡检：积压的闲置工单不补发提醒。
       await restarted.sweepRetention(startedAt + 5 * 60 * 1000)
@@ -1139,7 +1380,7 @@ describe('RouterService 编排', () => {
       const startedAt = T0 + 48 * HOUR
       const restarted = restartService(new Date(startedAt).toISOString())
       await restarted.start()
-      restarted.stop()
+      await restarted.stop()
 
       // 启动后的第一轮巡检：不关单，也不补发提醒。
       await restarted.sweepRetention(startedAt + 5 * 60 * 1000)
@@ -1159,7 +1400,7 @@ describe('RouterService 编排', () => {
     it('启动时记录闲置治理计时基线，便于排查为什么没有立刻提醒', async () => {
       const restarted = restartService(new Date(T0 + 24 * HOUR).toISOString())
       await restarted.start()
-      restarted.stop()
+      await restarted.stop()
 
       const baseline = logs.find(entry => entry.message === 'retention:baseline')
       expect(baseline).toBeTruthy()

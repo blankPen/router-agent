@@ -347,6 +347,7 @@ src/               宿主：Engine / Store、Router、HTTP API、Web 面板、CL
 | [docs/MONOREPO.md](docs/MONOREPO.md) | Monorepo 包划分、依赖方向、包别名，以及新增 runtime / channel 的步骤 |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 分层、一条消息的四步、研判 / 会话 / 派工机制、工单阶段与 `ra report` 协议 |
 | [docs/RUNTIME.md](docs/RUNTIME.md) | Worker 运行时对比、ACP Agent 目录、Worker 工具策略与规范注入 |
+| [docs/AUTOMATION.md](docs/AUTOMATION.md) | 自动化任务模型、调度语义、执行管线、内置工具协议与对话式创建 |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | 完整 `config.yaml`、`ra config set`、环境变量、模型与飞书接入、准入矩阵、闲置治理 |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | 回复策略、Web 面板、日志事件表与排查、已知限制 |
 | [docs/API.md](docs/API.md) | 本地 HTTP API |

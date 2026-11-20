@@ -10,6 +10,8 @@ import {
   FeishuSender,
   attachQuotedMessage,
   normalizeFeishuEventDetailed,
+  parseMessageMeta,
+  quotedMessageCommand,
   shouldSendAsText,
   type FeishuConfig,
   type MessageAdmission,
@@ -30,8 +32,9 @@ export interface FeishuChannelHooks {
 }
 
 export interface FeishuSenderLike {
-  reply(messageId: string, text: string, idempotencyKey: string): Promise<void>
-  send(chatId: string, text: string, idempotencyKey: string): Promise<void>
+  reply(messageId: string, text: string, idempotencyKey: string): Promise<SendReceipt>
+  send(chatId: string, text: string, idempotencyKey: string): Promise<SendReceipt>
+  sendDirect(userId: string, text: string, idempotencyKey: string): Promise<SendReceipt>
   sendCard(chatId: string, markdown: string, idempotencyKey: string): Promise<void>
   replyCard(messageId: string, markdown: string, idempotencyKey: string): Promise<void>
   sendReply(chatId: string, payload: ReplyPayload, idempotencyKey: string): Promise<void>
@@ -176,21 +179,46 @@ export class FeishuChannel implements ChannelAdapter {
     const text = message.text.trim()
     if (!text && !message.blocks?.length) return {}
     const key = message.idempotencyKey
+    if (message.direct) {
+      if (!this.capabilities.directMessage) throw new Error('feishu:direct-message-disabled')
+      const receipt = await this.sender.sendDirect(message.targetId, text, key)
+      return { ...receipt, degradedTo: 'plain' }
+    }
     if (message.blocks?.length) {
       const payload: ReplyPayload = { blocks: message.blocks, fallbackText: text || '（无文字内容）' }
       if (message.threadRef) await this.sender.replyReply(message.threadRef, payload, key)
       else await this.sender.sendReply(message.targetId, payload, key)
       return { degradedTo: 'rich' }
     }
-    if (shouldSendAsText(text)) {
-      if (message.threadRef) await this.sender.reply(message.threadRef, text, key)
-      else await this.sender.send(message.targetId, text, key)
-      return { degradedTo: 'plain' }
+    if (message.format === 'plain' || shouldSendAsText(text)) {
+      const receipt = message.threadRef
+        ? await this.sender.reply(message.threadRef, text, key)
+        : await this.sender.send(message.targetId, text, key)
+      return { ...receipt, degradedTo: 'plain' }
     }
     // Markdown 走互动卡片；卡片失败时 FeishuSender 内部降级为 post 富文本。
     if (message.threadRef) await this.sender.replyCard(message.threadRef, text, key)
     else await this.sender.sendCard(message.targetId, text, key)
     return { degradedTo: 'rich' }
+  }
+
+  async resolveMessageThread(messageId: string): Promise<{ threadId: string; rootId: string; chatId: string } | null> {
+    const res = await this.runner.run(quotedMessageCommand(messageId))
+    if (res.code !== 0) {
+      this.logger.warn('feishu:message-meta-failed', { messageId, code: res.code, detail: res.stderr.slice(0, 200) })
+      return null
+    }
+    const meta = parseMessageMeta(res.stdout, messageId)
+    if (!meta) {
+      this.logger.warn('feishu:message-meta-failed', { messageId, detail: '消息回查结果不可解析' })
+      return null
+    }
+    if (!meta.chatId) {
+      this.logger.warn('feishu:message-meta-failed', { messageId, detail: '消息回查结果没有会话 ID' })
+      return null
+    }
+    // 顶层消息可能没有 thread_id，但只要有会话 ID 就能把后续通知绑到这条消息。
+    return { threadId: meta.threadId, rootId: meta.rootId || messageId, chatId: meta.chatId }
   }
 
   async ack(messageId: string): Promise<string | null> {

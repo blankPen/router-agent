@@ -30,6 +30,24 @@ describe('JevClient.ask', () => {
     expect(answers.kind).toBeCloseTo(1, 5)
   })
 
+  it('returns_choice_option_id_for_choice_questions', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ answers: { autorun: { choice: 'auto' }, project: { choice: 'router-agent' } } }))
+    const client = new JevClient({ apiKey: 'k', model: 'm' }, { fetch: fetchMock as unknown as typeof fetch })
+    const answers = await client.ask({}, {
+      autorun: { type: 'choice', instructions: '能否自动执行？', criteria: { auto: '可以', review: '需要人审' } },
+      project: { type: 'choice', instructions: '归哪个项目？', criteria: { 'router-agent': '本项目', unknown: '不确定' } },
+    })
+    expect(answers).toEqual({ autorun: 'auto', project: 'router-agent' })
+  })
+
+  it('throws_when_choice_is_unknown', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ answers: { autorun: { choice: 'explode' } } }))
+    const client = new JevClient({ apiKey: 'k', model: 'm' }, { fetch: fetchMock as unknown as typeof fetch })
+    await expect(client.ask({}, {
+      autorun: { type: 'choice', instructions: '能否自动执行？', criteria: { auto: '可以', review: '需要人审' } },
+    })).rejects.toThrow(/jev:malformed:autorun/)
+  })
+
   it('uses_custom_base_url_when_configured', async () => {
     const fetchMock = vi.fn(async () => jsonResponse({ answers: { a: { noul: 0.5 } } }))
     const client = new JevClient({ apiKey: 'k', model: 'm', baseUrl: 'https://proxy.example/j' }, { fetch: fetchMock as unknown as typeof fetch })

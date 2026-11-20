@@ -95,8 +95,8 @@ Actions → 发布 npm 包 → Run workflow。发布的是所选分支 `package.
 
 ## 工作流做了什么
 
-0. 仓库是 pnpm workspace，会按依赖顺序发布 11 个包：
-   1. SDK：`@router-agent/core` → `infra` → `runtime` → `channel`
+0. 仓库是 pnpm workspace，会按依赖顺序发布 13 个包（根包 + 12 个组件包）：
+   1. SDK：`@router-agent/core` → `infra` → `runtime` → `channel` → `event`
    2. 内置插件：`runtime-codex` / `runtime-herdr` / `runtime-claude-code` / `runtime-orca` / `runtime-t3code` / `runtime-acp` / `channel-feishu`
    3. 根包 `router-agent` 最后发
 
@@ -111,6 +111,10 @@ Actions → 发布 npm 包 → Run workflow。发布的是所选分支 `package.
      tag 所在分支与渠道是否匹配）；
    - main 推送：命中跳过条件就跳过，否则自动升 patch（会跳过 npm 上已占用的版本）；
    - beta / alpha 推送：以 npm 上的最新稳定版为基线自动算预发布版本号（见「三条分支的渠道对照」）；
+
+   判断版本是否被占用时会检查根包与所有组件包。根包最后发布、在 npm 上可见最晚，
+   只查根包会把「上一轮组件包已可见、根包还没同步」误判为版本空闲，导致两个连续推送
+   计划出同一个版本号。
 2. 校验 `NPM_TOKEN` 是否存在；
 3. `pnpm install --frozen-lockfile`；
 4. 自动升版时把 `package.json` 版本改成计划里的版本，并用 `--sync` 把所有 `@router-agent/*` 的版本与依赖同步到同一版本；
@@ -122,7 +126,7 @@ Actions → 发布 npm 包 → Run workflow。发布的是所选分支 `package.
 7. `pnpm build`（tsc + esbuild + 各包独立产物）；
 8. **发布前置校验**：版本号与发布计划一致、构建产物存在（`dist/cli/index.js` 等）、
    dist-tag 与所在分支匹配（beta 分支必须是 `beta`、alpha 分支必须是 `alpha`）；
-9. `node scripts/publish-packages.mjs --check-versions`：10 个包的目标版本必须都未占用，
+9. `node scripts/publish-packages.mjs --check-versions`：根包与 12 个组件包的目标版本必须都未占用，
    避免「插件已发、根包 E404」的半发布状态；
 10. `node scripts/publish-packages.mjs --tag <dist-tag>` 按顺序发布 SDK / 插件，最后
     `npm publish --provenance --json --tag <dist-tag>` 发布根包；
@@ -252,6 +256,7 @@ npm view router-agent dist-tags
 | `E403 ... two-factor authentication` | token 未勾选 Bypass 2FA | 重新生成 granular token |
 | `E403 ... not allowed to publish` | token 权限不足或 Packages 未选 All | 调整 token 权限 |
 | `E409 ... cannot publish over existing version` | 同版本已发布 | 升版本号后重新发版；工作流正常情况下会提前跳过 |
+| `@router-agent/...@版本 已存在于 npm` | 上一轮发布仍有组件包在 npm 传播中，或同版本被并发占用 | 重跑工作流，发布计划会按所有包的最新可见版本重新选号；不要手工覆盖已发布版本 |
 | 流水线报「只写进了暂存区」 | token 只有 `stage only` 权限，版本进了暂存区 | 改 token 权限，或在 Staged Packages 中 Approve |
 | `tag vX 与 package.json 版本不一致` | tag 与版本不同步 | `pnpm version` 重新打 tag 再推 |
 | `稳定 tag vX.Y.Z 不在 main 上` | 稳定 tag 从别的分支推了 | 稳定版只能从 `main` 推 tag；预发布请用 `vX.Y.Z-beta.N` / `vX.Y.Z-alpha.N` |

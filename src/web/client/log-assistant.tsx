@@ -13,6 +13,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { sendJson } from './api.js'
 import { Icon } from './icons.js'
+import { tokenHeaders } from './access-token.js'
 
 export interface LogEvidence {
   at: string
@@ -88,7 +89,7 @@ export function LogAssistantFab({ onOpenConfig }: { onOpenConfig: (section?: str
 
   const load = useCallback(async (): Promise<void> => {
     try {
-      const res = await fetch('/api/logs/assistant')
+      const res = await fetch('/api/logs/assistant', { headers: tokenHeaders() })
       if (res.status === 404) {
         setSupported(false)
         return

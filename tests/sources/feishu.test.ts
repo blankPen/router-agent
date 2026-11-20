@@ -1,6 +1,6 @@
 import { chatEntry } from '../../src/config.js'
 import { describe, expect, it } from 'vitest'
-import { attachQuotedMessage, FeishuSender, feishuCard, feishuCardSendCommand, feishuCreateDocCommand, feishuReactionCommand, fitIdempotencyKey, normalizeCardMarkdown, normalizeFeishuEvent, normalizeFeishuEventDetailed, parseDocumentUrl, parseMessageThreadIds, parseQuotedMessage, quotedMessageCommand, shouldSendAsText, type FeishuConfig, type UnaddressedContext } from '@router-agent/channel-feishu'
+import { attachQuotedMessage, FeishuSender, feishuCard, feishuCardSendCommand, feishuCreateDocCommand, feishuDirectSendCommand, feishuReactionCommand, fitIdempotencyKey, normalizeCardMarkdown, normalizeFeishuEvent, normalizeFeishuEventDetailed, parseDocumentUrl, parseMessageMeta, parseMessageThreadIds, parseQuotedMessage, parseSendReceipt, quotedMessageCommand, shouldSendAsText, type FeishuConfig, type UnaddressedContext } from '@router-agent/channel-feishu'
 
 const cfg: FeishuConfig = {
   chats: [chatEntry('oc_dev'), chatEntry('oc_other', { scope: 'mention' })],
@@ -229,6 +229,44 @@ describe('线程标识回查', () => {
   it('输出不是 JSON 或没有 messages 时返回空表，不抛错', () => {
     expect(parseMessageThreadIds('not json').size).toBe(0)
     expect(parseMessageThreadIds(JSON.stringify({ ok: true, data: {} })).size).toBe(0)
+  })
+
+  it('从 mget 输出里取消息所在会话、话题与根消息', () => {
+    const meta = parseMessageMeta(JSON.stringify({
+      data: {
+        messages: [{ message_id: 'om_thread', chat_id: 'oc_p2p', thread_id: 'omt_topic', root_id: 'om_thread' }],
+      },
+    }), 'om_thread')
+    expect(meta).toEqual({ messageId: 'om_thread', chatId: 'oc_p2p', threadId: 'omt_topic', rootId: 'om_thread', parentId: '' })
+  })
+
+  it('mget 输出不可解析时返回 null，由调用方按根消息兜底', () => {
+    expect(parseMessageMeta('not json')).toBeNull()
+    expect(parseMessageMeta(JSON.stringify({ data: {} }))).toBeNull()
+  })
+})
+
+describe('私聊发送', () => {
+  it('按 user_id 发私聊，并从回执里取 message_id 与 chat_id', async () => {
+    const calls: string[][] = []
+    const sender = new FeishuSender({
+      async run(argv) {
+        calls.push(argv)
+        return { code: 0, stdout: JSON.stringify({ data: { message_id: 'om_dm', chat_id: 'oc_p2p' } }), stderr: '' }
+      },
+    })
+
+    const receipt = await sender.sendDirect('ou_pz', '事件已开工', 'kickoff:1')
+
+    expect(calls[0]).toEqual(feishuDirectSendCommand('ou_pz', '事件已开工', 'kickoff:1'))
+    expect(receipt).toEqual({ messageId: 'om_dm', chatId: 'oc_p2p' })
+  })
+
+  it('兼容不同层级的回执结构与旧的无回执输出', () => {
+    expect(parseSendReceipt(JSON.stringify({ message_id: 'om_a', chat_id: 'oc_a' }))).toEqual({ messageId: 'om_a', chatId: 'oc_a' })
+    expect(parseSendReceipt(JSON.stringify({ data: { messageId: 'om_b', chatId: 'oc_b' } }))).toEqual({ messageId: 'om_b', chatId: 'oc_b' })
+    expect(parseSendReceipt(JSON.stringify({ ok: true }))).toEqual({})
+    expect(parseSendReceipt('not json')).toEqual({})
   })
 })
 

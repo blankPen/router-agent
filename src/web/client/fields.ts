@@ -24,7 +24,7 @@ import { isDeprecatedRuntime, runtimeOptionLabel, runtimeStatusLabel, type Runti
 
 export type { RuntimeChoiceView } from './runtime-model.js'
 
-export type FieldKind = 'text' | 'password' | 'number' | 'switch' | 'select' | 'list'
+export type FieldKind = 'text' | 'password' | 'number' | 'switch' | 'select' | 'list' | 'textarea'
 
 export interface FieldOption {
   value: string
@@ -49,6 +49,8 @@ export interface FieldDef {
   /** 毫秒字段：额外展示「≈ 1 分钟」这类可读换算。 */
   ms?: boolean
   placeholder?: string
+  /** textarea 的默认行数。 */
+  rows?: number
   /** 字段自带默认值（运行时选项用它，页面「默认值快照」里没有这些动态路径）。 */
   defaultValue?: unknown
 }
@@ -63,7 +65,7 @@ export interface ConfigBlock {
   id: string
   title: string
   description?: string
-  render?: 'fields' | 'runtime' | 'projects' | 'specs' | 'custom'
+  render?: 'fields' | 'runtime' | 'projects' | 'specs' | 'custom' | 'events' | 'events-rules'
   fields: FieldDef[]
   /** 块自己管理的、不是普通字段的配置路径（如群列表）。 */
   paths?: string[]
@@ -340,6 +342,93 @@ export const CONFIG_GROUPS: ConfigGroup[] = [
     ],
   },
   {
+    id: 'events',
+    title: '事件总线',
+    description: '事件从哪来、怎么判、什么时候处理。事件本身不绑项目，归属哪个项目由决策策略判定。',
+    blocks: [
+      {
+        id: 'events-switch',
+        title: '启用事件总线',
+        description: '总开关。关闭后所有来源停止采集，已入队的事件不再判定与派发。',
+        fields: [
+          { path: 'events.enabled', label: '启用事件总线', kind: 'switch' },
+        ],
+      },
+      {
+        id: 'events-sources',
+        title: '事件来源',
+        description: '来源只负责「把事件收进来」：GitHub 仓库订阅、飞书事件等。启用与参数保存后立即生效，不需要重启。',
+        render: 'events',
+        fields: [],
+        effectLabel: '保存后立即生效',
+      },
+      {
+        id: 'events-rules',
+        title: '决策规则',
+        description: '按事件类型各自配置判定问题、执行流程与护栏。规则存在本身就是该类事件的判定开关。',
+        render: 'events-rules',
+        fields: [],
+        // 规则整段由弹窗编辑，字段列表是空的；不声明这条路径，保存时就不会把规则写进补丁。
+        paths: ['events.rules'],
+        effectLabel: '保存后立即生效',
+      },
+      {
+        id: 'events-decision',
+        title: '判定方式与兜底',
+        description: 'provider 是部署级选择；判定依据在每条决策规则里，这里只放全局兜底参数。',
+        fields: [
+          {
+            path: 'events.decision.provider',
+            label: '判定方式',
+            kind: 'select',
+            options: [
+              { value: 'jev', label: 'jev · 决策模型打分' },
+              { value: 'llm', label: 'llm · 模型直接给结论' },
+              { value: 'rule', label: 'rule · 只用确定性规则' },
+            ],
+            hint: '没有可用模型时自动退回 rule',
+          },
+          {
+            path: 'events.decision.confidenceThreshold',
+            label: '置信度阈值',
+            kind: 'number',
+            min: 0,
+            max: 1,
+            hint: '规则没写阈值时用这个；低于阈值不硬跑，转人工审核',
+          },
+          {
+            path: 'events.decision.fallback',
+            label: '判定失败兜底',
+            kind: 'select',
+            options: [
+              { value: 'review', label: 'review · 转人工审核' },
+              { value: 'pending', label: 'pending · 留在队列里重试' },
+            ],
+            hint: '模型判不出来或置信度不够时怎么办；没判定出归属项目的一律转人工',
+          },
+        ],
+      },
+      {
+        id: 'events-policy',
+        title: '成本与时间窗',
+        description: '高低峰窗口内允许自动执行的优先级、每日事件配额与审核通知。',
+        folded: true,
+        fields: [
+          { path: 'events.policy.peak.start', label: '高峰窗口开始', kind: 'text', placeholder: '09:00' },
+          { path: 'events.policy.peak.end', label: '高峰窗口结束', kind: 'text', placeholder: '20:00' },
+          { path: 'events.policy.peak.priorities', label: '高峰可自动执行的优先级', kind: 'list', hint: '逗号分隔，例如 P0, P1' },
+          { path: 'events.policy.offPeak.start', label: '低峰窗口开始', kind: 'text', placeholder: '20:00' },
+          { path: 'events.policy.offPeak.end', label: '低峰窗口结束', kind: 'text', placeholder: '09:00' },
+          { path: 'events.policy.offPeak.priorities', label: '低峰可自动执行的优先级', kind: 'list', hint: '逗号分隔，例如 P2, P3' },
+          { path: 'events.policy.dailyEventLimit', label: '每日事件总量上限', kind: 'number', min: 0, max: 1_000_000, unit: '条', hint: '0 = 不限制；超出的事件顺延到下个窗口，不丢弃' },
+          { path: 'events.policy.perSourceDailyLimit', label: '单来源每日上限', kind: 'number', min: 0, max: 1_000_000, unit: '条', hint: '0 = 不限制' },
+          { path: 'events.policy.reviewNotify', label: '有待审核事件时通知 admin', kind: 'switch' },
+          { path: 'events.policy.reviewChatId', label: '审核通知群', kind: 'text', hint: '留空 = 发给默认 admin 群' },
+        ],
+      },
+    ],
+  },
+  {
     id: 'ops',
     title: '其他设置',
     description: '进展同步、闲置治理、工作区回收与服务端口。',
@@ -380,9 +469,23 @@ export const CONFIG_GROUPS: ConfigGroup[] = [
       {
         id: 'service',
         title: '服务与门禁',
-        description: '面板端口与工单交付门禁。',
+        description: '面板监听地址、访问令牌与工单交付门禁。',
         fields: [
           { path: 'server.port', label: '面板端口', kind: 'number', min: 1, max: 65_535, unit: '端口' },
+          {
+            path: 'server.host',
+            label: '监听地址',
+            kind: 'text',
+            placeholder: '127.0.0.1',
+            hint: '默认 127.0.0.1 只本机可访问；改成 0.0.0.0 即开放局域网访问（需要访问令牌）',
+          },
+          {
+            path: 'server.token',
+            label: '访问令牌',
+            kind: 'password',
+            placeholder: '留空 = 保持已配置的令牌',
+            hint: '开放监听时必填：局域网与内网穿透访问面板要带这个令牌；只写入 config.yaml，保存后不回显',
+          },
           {
             path: 'worker.evidence.ui',
             label: 'UI 证据门禁',

@@ -2,6 +2,8 @@
 
 Router 在 `server.port`（默认 3083）上提供本地 HTTP API，供 Web 面板、CLI 与 `ra report` 使用。
 
+默认只监听 `127.0.0.1`。把 `server.host` 改成 `0.0.0.0` 即开放局域网与内网穿透访问，此时服务端会校验每个 `/api/*` 请求的 `x-ra-token` 请求头（令牌在 `server.token` 配置里），不符返回 401 `token-required`。详见 [CONFIGURATION.md · 局域网与内网穿透访问](CONFIGURATION.md#局域网与内网穿透访问)。
+
 | 方法 | 路径 | 说明 |
 |-|-|-|
 | GET | `/api/status` | 服务与工单概览 |
@@ -15,6 +17,14 @@ Router 在 `server.port`（默认 3083）上提供本地 HTTP API，供 Web 面�
 | POST | `/api/reports` | Worker 上报状态与回复（`ra report` 的入口） |
 | GET / PUT | `/api/policy` | 读写策略（保存后落盘） |
 | GET / PUT | `/api/config` | 配置面板：读安全快照 / 按点路径提交补丁（白名单校验 + 落盘）；快照里的 `hotPaths` 说明哪些路径保存后立即生效 |
+| GET | `/api/automations` | 自动化页：任务（含调度状态）、执行记录与待确认草稿 |
+| GET | `/api/automations/runs?automationId=` | 只读执行记录，可按任务过滤 |
+| GET | `/api/automations/runs/:id` | 单条执行记录；面板轮询它看执行进度与阶段 |
+| POST | `/api/automations/trigger` | 手动触发一次（`{ id }`）；**立即返回** `running` 记录，执行在后台继续 |
+| POST | `/api/automations/draft` | 从自然语言生成草稿预览（`{ text }`）；不落库 |
+| POST | `/api/automations/drafts/dismiss` | 忽略一条待确认草稿（`{ id }`） |
+| POST | `/api/automations/script` | 为脚本自动化生成脚本正文（`{ id }`）；生成失败返回 502，`message` 里带真实失败原因（如 `chat:empty-response:max_tokens`） |
+| POST | `/api/automations/tools` | 自动化内置工具调用（`{ automationId, name, args }`）；项目范围与限流在服务层强制 |
 | GET | `/api/channels` | 已注册的消息通道（`id` / `kind` / `capabilities`），供配置页的「渠道配置」列出渠道实例 |
 | POST | `/api/restart` | 热重启 daemon：先返回 202，再释放端口并拉起新进程（页面不刷新） |
 | GET | `/api/update` | 版本快照：当前 / 最新版本、是否有更新、检查时间与最近一次失败原因 |

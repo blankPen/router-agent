@@ -111,6 +111,18 @@ export function fieldControl(field: FieldDef, value: unknown, onChange: (value: 
       </span>
     )
   }
+  if (field.kind === 'textarea') {
+    return (
+      <textarea
+        className="text-area"
+        rows={field.rows ?? 10}
+        value={toInputValue(value, 'text')}
+        onChange={event => onChange(event.target.value)}
+        placeholder={field.placeholder}
+        spellCheck={false}
+      />
+    )
+  }
   return (
     <input
       className="text-input"
