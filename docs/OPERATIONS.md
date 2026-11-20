@@ -510,6 +510,29 @@ ra start
 - 同一消息带多个标识时，按「话题 ID > 根消息 ID > 消息自身 ID」的顺序解析，与登记时间无关。
 - 查询失败的线程（消息已删除 / 无权限）如实报告，仍需按根消息 ID 归并；`--apply` 退出码为 1。
 
+## 游标表（`cursors`）
+
+`state.db` 的 `cursors` 表是一张无类型的 KV 表（`key TEXT PRIMARY KEY / value TEXT NOT NULL`），
+承载 9 类结构完全不同的状态机。**排查「工单为什么被自动关闭 / 为什么没有重复通知」时看这里。**
+
+key 字符串与 value 格式如下（读写入口是 `src/store/cursors.ts` 的 `Cursors`，业务代码不直接拼 key）：
+
+| key 前缀 | 含义 | value 格式 |
+|-|-|-|
+| `progress:<ticketId>` | 进展同步水位：已同步到哪条报告 | 报告 id 字符串，或 `'@start'`（表示「从派工这一刻起」） |
+| `launch-failure:<ticketId>` | 派工失败水位：区分「失败前积压的旧输入」与「用户新回复」 | JSON `{ attempts, lastSeq, lastReason }` |
+| `relaunch:<ticketId>` | 重新派工水位：上次为积压输入重建 worker 时处理到的最大输入 seq | 数字字符串 |
+| `interrupted:<ticketId>` | 中断恢复水位：已处理过的被中断轮次与自动恢复次数 | JSON `{ turnIds: string[], autoRecovered: number }` |
+| `retention:reminder:<ticketId>` | 关单提醒水位：提醒时间、预定关闭时间与提醒消息幂等键 | JSON `{ remindedAt, closeAt, outboxKey? }` |
+| `progress:probe:<ticketId>` | 主动巡检水位：静默期起点、上次巡检时间、提醒次数与摘要指纹 | JSON `{ lastProgressAt, lastPostAt, count, snippetHash }` |
+| `retention:pr-urge:<ticketId>` | PR 催办水位：同一段闲置期只催一次 | 时间戳（毫秒）字符串 |
+| `retention:zombie:<ticketId>` | 僵尸水位：转人工后不再自动关闭，直到出现新进展 | 时间戳（毫秒）字符串 |
+| `input:unacked-notice:<inputId>` | 未 ack 提醒水位：同一条输入只提醒一次 | 时间戳（毫秒）字符串 |
+
+- 游标 JSON 损坏时按「没有水位」处理，并记 `cursor:invalid`（带 `key` 与错误原因）。
+- 清空水位用 `deleteCursor`；有进展时会自动清掉提醒 / 催办 / 僵尸三个水位，让下一段闲置期重新计时。
+- 人工排查可以直接 `sqlite3 ~/.router-agent/state.db "SELECT key, value FROM cursors;"`，但**不要手改**：key 拼错等于新建一条互不相干的状态。
+
 ## 已知限制
 
 - 第一版只支持 macOS（Orca 运行时在 Linux 上裸 `orca` 会撞 GNOME 屏幕阅读器，需要 `orca-ide`）。

@@ -6,6 +6,14 @@ import type { Assignment, Input, Question, Report, Ticket, Trigger } from '#core
 import type { ReplyBlock, ReplyPayload, ReplyQuestion } from '#core/reply.js'
 import { choiceBlockOf } from '#core/reply.js'
 import type { Store } from './store/db.js'
+import {
+  Cursors,
+  PROGRESS_FROM_START,
+  type InterruptedRecord,
+  type LaunchFailureRecord,
+  type ProbeRecord,
+  type ReminderRecord,
+} from './store/cursors.js'
 import type { AppConfig, RetentionSettings, WorkspaceSettings } from './config.js'
 import { DEFAULT_CHAT_MEMBERS } from './config.js'
 import { STAGE_LABELS } from '#core/stage.js'
@@ -113,82 +121,11 @@ export interface RouterServiceOptions {
   claudeProjectsDir?: string
 }
 
-/** 进展游标的起点标记：表示「从派工这一刻开始」，之前没有需要同步的报告。 */
-const PROGRESS_FROM_START = '@start'
-
-function progressCursorKey(ticketId: string): string {
-  return `progress:${ticketId}`
-}
-
-/** 派工失败水位：持久化到 cursors，重启后仍能区分「失败前积压的旧输入」与「用户新回复」。 */
-function launchFailureCursorKey(ticketId: string): string {
-  return `launch-failure:${ticketId}`
-}
-
-/**
- * 重新派工水位：记录上一次「为积压输入重建 worker」时处理到的最大输入 seq。
- * 同一条输入只允许触发一次重建，避免新 worker 也投递失败时无限重建（tk-51）。
- */
-function relaunchCursorKey(ticketId: string): string {
-  return `relaunch:${ticketId}`
-}
-
-/**
- * 中断恢复水位：记录已处理过的「被中断轮次」与自动恢复次数。
- * 持久化到 cursors，保证同一个被中断的轮次不会被反复恢复 / 反复提醒。
- */
-function interruptedCursorKey(ticketId: string): string {
-  return `interrupted:${ticketId}`
-}
-
-/** 关单提醒水位：记录提醒时间与自动关闭时间，重启后仍能继续倒计时。 */
-function reminderCursorKey(ticketId: string): string {
-  return `retention:reminder:${ticketId}`
-}
-
-/** 主动巡检水位：记录当前静默期已经提醒过的次数与终端画面指纹，避免刷屏。 */
-function probeCursorKey(ticketId: string): string {
-  return `progress:probe:${ticketId}`
-}
-
-interface ProbeRecord {
-  /** 本轮静默期的起点（最后一次上报 / 新输入 / 派工时间）。 */
-  lastProgressAt: number
-  /** 上次主动巡检消息的发送时间。 */
-  lastPostAt: number
-  /** 本轮静默期的提醒次数，用来生成稳定的 outbox key。 */
-  count: number
-  /** 语义摘要指纹；摘要没变时可以明确告诉用户。 */
-  snippetHash: string
-}
-
-/** PR 催办水位：同一段闲置期只催一次；有新进展后自动清空。 */
-function prUrgeCursorKey(ticketId: string): string {
-  return `retention:pr-urge:${ticketId}`
-}
-
-/** 僵尸水位：转人工后不再自动关闭，直到出现新的进展。 */
-function zombieCursorKey(ticketId: string): string {
-  return `retention:zombie:${ticketId}`
-}
-
-/** 未 ack 提醒水位：同一条输入只提醒一次。 */
-function unackedNoticeCursorKey(inputId: string): string {
-  return `input:unacked-notice:${inputId}`
-}
-
 /** 单条输入最多投递次数；超过转人工，不再无限重投。 */
 const MAX_DELIVERY_ATTEMPTS = 5
 
 /** 已投递未 ack 多久算「worker 一直没确认」，记 warn 提示人工看一眼。 */
 const UNACKED_TIMEOUT_MS = 30 * 60_000
-
-interface ReminderRecord {
-  remindedAt: number
-  closeAt: number
-  /** 提醒消息的 outbox key；用来确认提醒真的发出去了再关单。 */
-  outboxKey?: string
-}
 
 /** 工作区删除里不值得重试的错误：脏工作区、目录已经不存在等。 */
 function isCleanupSkipError(message: string): boolean {
@@ -202,21 +139,6 @@ function isCleanupSkipError(message: string): boolean {
 function isStaleHandleError(error: unknown): boolean {
   const message = errorMessage(error)
   return /terminal_handle_stale|terminal not found|no such terminal/i.test(message)
-}
-
-interface LaunchFailureRecord {
-  attempts: number
-  /** 上次失败时工单上已存在的最大输入序号；序号不大于它的输入不再触发重试。 */
-  lastSeq: number
-  lastReason: string
-}
-
-/** 中断恢复水位：同一个被中断的轮次只处理一次，自动恢复次数也有上限。 */
-interface InterruptedRecord {
-  /** 已处理过的被中断轮次 id；避免重启后反复恢复同一轮。 */
-  turnIds: string[]
-  /** 已自动恢复的次数。 */
-  autoRecovered: number
 }
 
 /** 同一条进展（summary + reply）只保留一次，避免 worker 重复上报刷屏。 */
@@ -525,6 +447,8 @@ export class RouterService {
   private runtimes: RuntimeRegistry
   private clock: Clock
   private logger: Logger
+  /** 游标（有类型）的读写入口；9 类水位的 key 与 value 结构都收在 `store/cursors.ts`。 */
+  private cursors: Cursors
   private poller: { scan(): number; reset?: () => void }
   private effects: EffectsProcessor
   private prTracker: PrTracker
@@ -586,6 +510,7 @@ export class RouterService {
     this.clock = opts.clock ?? { now: () => new Date().toISOString() }
     // 工单日志统一补上下文：任何带 ticketId 的日志都会带上群、发起人与运行时。
     this.logger = withFieldContext(opts.logger ?? noopLogger, 'ticketId', ticketId => this.contextOf(ticketId))
+    this.cursors = new Cursors(this.store, () => this.clock.now(), this.logger)
     this.prTracker = opts.prTracker
     this.git = opts.git ?? realRunner('git')
     this.idleAfterMs = opts.idleAfterMs ?? 120_000
@@ -1185,9 +1110,9 @@ export class RouterService {
       workdir: '',
     })
     // 进展同步从派工这一刻起算：首次派工用起点标记，重启重派则沿用/回落到最新报告。
-    if (this.store.getCursor(progressCursorKey(ticket.id)) === null) {
+    if (this.cursors.progress(ticket.id) === null) {
       const latest = this.store.latestReport(ticket.id)
-      this.store.setCursor(progressCursorKey(ticket.id), latest?.id ?? PROGRESS_FROM_START, this.clock.now())
+      this.cursors.setProgress(ticket.id, latest?.id ?? PROGRESS_FROM_START)
     }
     const workerDir = join(this.config.home, 'workers', ticket.id)
     mkdirSync(workerDir, { recursive: true })
@@ -1377,32 +1302,20 @@ export class RouterService {
   private loadLaunchFailure(ticketId: string): LaunchFailureRecord | undefined {
     const cached = this.launchFailures.get(ticketId)
     if (cached) return cached
-    const raw = this.store.getCursor(launchFailureCursorKey(ticketId))
-    if (!raw) return undefined
-    try {
-      const parsed = JSON.parse(raw) as Partial<LaunchFailureRecord>
-      if (typeof parsed.attempts !== 'number' || typeof parsed.lastSeq !== 'number') return undefined
-      const record: LaunchFailureRecord = {
-        attempts: parsed.attempts,
-        lastSeq: parsed.lastSeq,
-        lastReason: typeof parsed.lastReason === 'string' ? parsed.lastReason : '',
-      }
-      this.launchFailures.set(ticketId, record)
-      return record
-    } catch (error) {
-      this.logger.warn('cursor:invalid', { key: launchFailureCursorKey(ticketId), message: error instanceof Error ? error.message : String(error) })
-      return undefined
-    }
+    const record = this.cursors.launchFailure(ticketId)
+    if (!record) return undefined
+    this.launchFailures.set(ticketId, record)
+    return record
   }
 
   private saveLaunchFailure(ticketId: string, record: LaunchFailureRecord): void {
     this.launchFailures.set(ticketId, record)
-    this.store.setCursor(launchFailureCursorKey(ticketId), JSON.stringify(record), this.clock.now())
+    this.cursors.setLaunchFailure(ticketId, record)
   }
 
   private clearLaunchFailure(ticketId: string): void {
     this.launchFailures.delete(ticketId)
-    this.store.deleteCursor(launchFailureCursorKey(ticketId))
+    this.cursors.clearLaunchFailure(ticketId)
   }
 
   private activeWorkers(): number {
@@ -1554,9 +1467,8 @@ export class RouterService {
     if (!oldest) return
     const deliveredMs = Date.parse(oldest.deliveredAt ?? '')
     if (!Number.isFinite(deliveredMs) || nowMs - deliveredMs < UNACKED_TIMEOUT_MS) return
-    const key = unackedNoticeCursorKey(oldest.id)
-    if (this.store.getCursor(key) !== null) return
-    this.store.setCursor(key, String(nowMs), this.clock.now())
+    if (this.cursors.hasUnackedNotice(oldest.id)) return
+    this.cursors.markUnackedNotice(oldest.id, nowMs)
     this.logger.warn('input:unacked-timeout', {
       ticketId: ticket.id,
       inputId: oldest.id,
@@ -1603,14 +1515,11 @@ export class RouterService {
 
   /** 读取重新派工水位；没有记录时返回 0。 */
   private loadRelaunchSeq(ticketId: string): number {
-    const raw = this.store.getCursor(relaunchCursorKey(ticketId))
-    if (!raw) return 0
-    const value = Number(raw)
-    return Number.isFinite(value) && value > 0 ? value : 0
+    return this.cursors.relaunchSeq(ticketId)
   }
 
   private saveRelaunchSeq(ticketId: string, seq: number): void {
-    this.store.setCursor(relaunchCursorKey(ticketId), String(seq), this.clock.now())
+    this.cursors.setRelaunchSeq(ticketId, seq)
   }
 
   // ---------- 空闲与失联 ----------
@@ -1647,7 +1556,7 @@ export class RouterService {
       if (verdict === 'transfer') {
         if (!current.transferred) {
           current.transferred = true
-          this.store.setCursor(zombieCursorKey(ticket.id), String(nowMs), this.clock.now())
+          this.cursors.markZombie(ticket.id, nowMs)
           this.engine.setAttention(ticket.id, 'worker 已退出且无法恢复，请人工确认')
           this.notify(ticket, `工单「${ticket.title}」的 worker 已退出且无法自动恢复，已转人工处理。`, `transfer:${ticket.id}:${turn}`)
           this.log('idle:transfer', ticket.id, {})
@@ -1693,7 +1602,7 @@ export class RouterService {
     if (state?.stale) return
     if (state) state.stale = true
     // 标记为僵尸：闲置治理只转人工，不再提醒关单、不自动关闭。
-    this.store.setCursor(zombieCursorKey(ticket.id), String(nowMs), this.clock.now())
+    this.cursors.markZombie(ticket.id, nowMs)
     this.engine.setAttention(ticket.id, 'worker 无响应：长时间没有新的 state.json 上报，已标记 stale，请人工确认')
     this.notify(ticket, `工单「${ticket.title}」的 worker 无响应，已标记 stale，请到 Orca / Claude 会话确认。`, `stale:${ticket.id}`)
     this.log('idle:stale', ticket.id, {})
@@ -1747,7 +1656,7 @@ export class RouterService {
     if (this.clearRetentionMarksOnProgress(ticket, lastProgress)) return
 
     // 3) 已经转过人工的僵尸工单：不再提醒、不再自动关闭，直到出现新的进展。
-    if (this.store.getCursor(zombieCursorKey(ticket.id)) !== null) return
+    if (this.cursors.hasZombie(ticket.id)) return
 
     if (nowMs - idleSince < idleMs) return
 
@@ -1774,7 +1683,7 @@ export class RouterService {
       const status = this.store.getOutboxStatus(reminder.outboxKey)
       if (status === null) {
         // 提醒消息丢了：清掉水位，下一轮重新提醒。
-        this.store.deleteCursor(reminderCursorKey(ticket.id))
+        this.cursors.clearReminder(ticket.id)
         return
       }
       if (status !== 'sent') return
@@ -1816,8 +1725,7 @@ export class RouterService {
   }
 
   private markZombie(ticket: Ticket): void {
-    const key = zombieCursorKey(ticket.id)
-    if (this.store.getCursor(key) !== null) return
+    if (this.cursors.hasZombie(ticket.id)) return
     const now = this.clock.now()
     const assignment = this.store.latestAssignment(ticket.id)
     const lastProgress = this.lastProgressAt(ticket)
@@ -1828,7 +1736,7 @@ export class RouterService {
       // key 用「最后进展时间」：同一段闲置期重跑只会发一次，出现新进展后才允许再提醒。
       `retention:zombie:${ticket.id}:${lastProgress}`,
     )
-    this.store.setCursor(key, String(Date.parse(now)), now)
+    this.cursors.markZombie(ticket.id, Date.parse(now))
     this.log('retention:zombie', ticket.id, { handle: assignment?.handle ?? '' })
   }
 
@@ -1837,37 +1745,24 @@ export class RouterService {
     let cleared = false
     const reminder = this.readReminder(ticket.id)
     if (reminder && lastProgress > reminder.remindedAt) {
-      this.store.deleteCursor(reminderCursorKey(ticket.id))
+      this.cursors.clearReminder(ticket.id)
       cleared = true
     }
-    const urgeAt = Number(this.store.getCursor(prUrgeCursorKey(ticket.id)) ?? '')
-    if (Number.isFinite(urgeAt) && urgeAt > 0 && lastProgress > urgeAt) {
-      this.store.deleteCursor(prUrgeCursorKey(ticket.id))
+    const urgeAt = this.cursors.prUrge(ticket.id)
+    if (urgeAt !== null && lastProgress > urgeAt) {
+      this.cursors.clearPrUrge(ticket.id)
       cleared = true
     }
-    const zombieAt = Number(this.store.getCursor(zombieCursorKey(ticket.id)) ?? '')
-    if (Number.isFinite(zombieAt) && zombieAt > 0 && lastProgress > zombieAt) {
-      this.store.deleteCursor(zombieCursorKey(ticket.id))
+    const zombieAt = this.cursors.zombie(ticket.id)
+    if (zombieAt !== null && lastProgress > zombieAt) {
+      this.cursors.clearZombie(ticket.id)
       cleared = true
     }
     return cleared
   }
 
   private readReminder(ticketId: string): ReminderRecord | null {
-    const raw = this.store.getCursor(reminderCursorKey(ticketId))
-    if (!raw) return null
-    try {
-      const parsed = JSON.parse(raw) as Partial<ReminderRecord>
-      if (typeof parsed.remindedAt !== 'number' || typeof parsed.closeAt !== 'number') return null
-      return {
-        remindedAt: parsed.remindedAt,
-        closeAt: parsed.closeAt,
-        ...(typeof parsed.outboxKey === 'string' ? { outboxKey: parsed.outboxKey } : {}),
-      }
-    } catch (error) {
-      this.logger.warn('cursor:invalid', { key: reminderCursorKey(ticketId), message: error instanceof Error ? error.message : String(error) })
-      return null
-    }
+    return this.cursors.reminder(ticketId)
   }
 
   private sendCloseReminder(ticket: Ticket, nowMs: number, graceMs: number): void {
@@ -1885,16 +1780,12 @@ export class RouterService {
     const lastProgress = this.lastProgressAt(ticket)
     const outboxKey = `retention:reminder:${ticket.id}:${lastProgress}`
     this.notify(ticket, lines.join('\n'), outboxKey)
-    this.store.setCursor(
-      reminderCursorKey(ticket.id),
-      JSON.stringify({ remindedAt: nowMs, closeAt, outboxKey }),
-      this.clock.now(),
-    )
+    this.cursors.setReminder(ticket.id, { remindedAt: nowMs, closeAt, outboxKey })
     this.log('retention:reminded', ticket.id, { closeAt: new Date(closeAt).toISOString() })
   }
 
   private urgeOpenPullRequest(ticket: Ticket): void {
-    if (this.store.getCursor(prUrgeCursorKey(ticket.id)) !== null) return
+    if (this.cursors.hasPrUrge(ticket.id)) return
     const now = this.clock.now()
     const lastProgress = this.lastProgressAt(ticket)
     this.notify(
@@ -1902,7 +1793,7 @@ export class RouterService {
       `工单「${ticket.title}」的 PR 已经 ${this.retention.idleHours} 小时没有新进展：${ticket.prUrl || '(PR 链接缺失)'}\n请确认是否需要继续推进；这张工单会保留，不会自动关闭。`,
       `retention:pr-urge:${ticket.id}:${lastProgress}`,
     )
-    this.store.setCursor(prUrgeCursorKey(ticket.id), String(Date.parse(now)), now)
+    this.cursors.markPrUrge(ticket.id, Date.parse(now))
     this.log('retention:pr-urge', ticket.id, { pr: ticket.prNumber })
   }
 
@@ -1915,7 +1806,7 @@ export class RouterService {
       if (error instanceof Error && error.message === 'pr:open') return
       throw error
     }
-    this.store.deleteCursor(reminderCursorKey(ticket.id))
+    this.cursors.clearReminder(ticket.id)
     // 关单只停 worker：目录保留，由定时任务按保留期回收（或用户手动回收）。
     this.enqueueStopWorker(closed, 'idle')
     this.notify(
@@ -2350,14 +2241,12 @@ export class RouterService {
    * 由 `progress.syncMs` 定时触发；也可直接调用（测试或手动补同步）。
    */
   syncProgress(): void {
-    const now = this.clock.now()
     for (const ticket of this.store.listOpenTickets()) {
-      const cursorKey = progressCursorKey(ticket.id)
-      let marker = this.store.getCursor(cursorKey)
+      let marker = this.cursors.progress(ticket.id)
       if (marker === null) {
         // 兼容升级前已存在的工单：以最新一条报告为基线，不把历史进展回灌进话题。
         const latest = this.store.latestReport(ticket.id)
-        this.store.setCursor(cursorKey, latest?.id ?? PROGRESS_FROM_START, now)
+        this.cursors.setProgress(ticket.id, latest?.id ?? PROGRESS_FROM_START)
         if (!latest) continue
         marker = latest.id
       }
@@ -2366,7 +2255,7 @@ export class RouterService {
       if (fresh.length === 0) continue
       const newest = fresh[fresh.length - 1]!
       // 先推进游标再发送：本轮跳过的内容（重复进展）不会在下一轮反复扫描。
-      this.store.setCursor(cursorKey, newest.id, now)
+      this.cursors.setProgress(ticket.id, newest.id)
 
       const pending = dedupeProgress(fresh.filter(report => report.state === 'progress'))
       const seen = this.seenProgress(ticket.id)
@@ -2478,16 +2367,12 @@ export class RouterService {
     })
 
     this.queue(ticket, text, `progress:probe:${ticket.id}:${lastProgress}:${count}`)
-    this.store.setCursor(
-      probeCursorKey(ticket.id),
-      JSON.stringify({
-        lastProgressAt: lastProgress,
-        lastPostAt: nowMs,
-        count,
-        snippetHash,
-      } satisfies ProbeRecord),
-      this.clock.now(),
-    )
+    this.cursors.setProbe(ticket.id, {
+      lastProgressAt: lastProgress,
+      lastPostAt: nowMs,
+      count,
+      snippetHash,
+    })
     this.log('progress:probed', ticket.id, {
       minutes: Math.round((nowMs - lastProgress) / 60_000),
       count,
@@ -2507,21 +2392,7 @@ export class RouterService {
   }
 
   private readProbeRecord(ticketId: string): ProbeRecord | null {
-    const raw = this.store.getCursor(probeCursorKey(ticketId))
-    if (!raw) return null
-    try {
-      const parsed = JSON.parse(raw) as Partial<ProbeRecord>
-      if (typeof parsed.lastProgressAt !== 'number' || typeof parsed.lastPostAt !== 'number') return null
-      return {
-        lastProgressAt: parsed.lastProgressAt,
-        lastPostAt: parsed.lastPostAt,
-        count: typeof parsed.count === 'number' ? parsed.count : 0,
-        snippetHash: typeof parsed.snippetHash === 'string' ? parsed.snippetHash : '',
-      }
-    } catch (error) {
-      this.logger.warn('cursor:invalid', { key: probeCursorKey(ticketId), message: error instanceof Error ? error.message : String(error) })
-      return null
-    }
+    return this.cursors.probe(ticketId)
   }
 
   // ---------- 停止 ----------
@@ -2633,10 +2504,9 @@ let repo = ticket.repo
 
   /** 同一工单 + PR 只记一次查询失败，避免 5 秒轮询刷屏；状态恢复后清不掉也无妨。 */
   private warnPrTrackMiss(ticket: Ticket, prNumber: number, repo: string): void {
-    const key = `pr:track-missed:${ticket.id}:${prNumber}`
+    if (this.cursors.hasPrTrackMissed(ticket.id, prNumber)) return
     const now = this.clock.now()
-    if (this.store.getCursor(key) !== null) return
-    this.store.setCursor(key, now, now)
+    this.cursors.markPrTrackMissed(ticket.id, prNumber, now)
     this.logger.warn('pr:track-failed', {
       ticketId: ticket.id,
       prNumber,
@@ -2794,21 +2664,11 @@ let repo = ticket.repo
 
   /** 读取中断恢复水位；读不出来当作全新记录。 */
   private loadInterruptedRecord(ticketId: string): InterruptedRecord {
-    const raw = this.store.getCursor(interruptedCursorKey(ticketId))
-    if (!raw) return { turnIds: [], autoRecovered: 0 }
-    try {
-      const parsed = JSON.parse(raw) as Partial<InterruptedRecord>
-      return {
-        turnIds: Array.isArray(parsed.turnIds) ? parsed.turnIds.filter(id => typeof id === 'string') : [],
-        autoRecovered: typeof parsed.autoRecovered === 'number' && parsed.autoRecovered >= 0 ? parsed.autoRecovered : 0,
-      }
-    } catch {
-      return { turnIds: [], autoRecovered: 0 }
-    }
+    return this.cursors.interrupted(ticketId)
   }
 
   private saveInterruptedRecord(ticketId: string, record: InterruptedRecord): void {
-    this.store.setCursor(interruptedCursorKey(ticketId), JSON.stringify(record), this.clock.now())
+    this.cursors.setInterrupted(ticketId, record)
   }
 
   /** 只把「确认丢失/不可恢复」判为 gone；查询失败不误杀。 */
