@@ -81,6 +81,37 @@ describe('自动化执行桥', () => {
     }
   })
 
+  it('脚本自动化路径上的日志也带上 runId', async () => {
+    const workdir = mkdtempSync(join(tmpdir(), 'ra-automation-runner-'))
+    const logs: Array<{ event: string; fields: Record<string, unknown> }> = []
+    await runThroughRuntime({
+      automation: task({ type: 'script' }),
+      runtime: fakeRuntime(workdir),
+      contract: '跑脚本',
+      script: 'echo hi',
+      scriptPath: join(workdir, 'automation.sh'),
+      workdir,
+      tools: [],
+      timeoutMs: 60_000,
+      runId: 'run_2',
+    }, {
+      home: '/tmp/ra-tk84-runner',
+      collectOutputs: () => ({ ticketIds: [], eventIds: [] }),
+      logger: {
+        info: (event, fields) => logs.push({ event, fields: fields ?? {} }),
+        warn: (event, fields) => logs.push({ event, fields: fields ?? {} }),
+        error: (event, fields) => logs.push({ event, fields: fields ?? {} }),
+      },
+      sleep: async () => undefined,
+    })
+
+    // 脚本落进 runtime 工作目录这条事件以前漏了 runId：日志串不起来。
+    expect(logs.some(log => log.event === 'automation:script-staged')).toBe(true)
+    for (const log of logs) {
+      expect(log.fields.runId, `${log.event} 缺少 runId`).toBe('run_2')
+    }
+  })
+
   it('agent 报告完成后立即收尾，不再等到超时', async () => {
     const workdir = mkdtempSync(join(tmpdir(), 'ra-automation-runner-'))
     const outcome = await runThroughRuntime({
