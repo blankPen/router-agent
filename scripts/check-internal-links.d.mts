@@ -16,6 +16,7 @@ export interface ScanResult {
 
 export const FORBIDDEN_VALUES: { companyEmailDomain: string; orgName: string }
 export const ALLOWED_TENANT: string
+export const ENCODED_DOT: string
 export const FORBIDDEN_PATTERNS: ForbiddenRule[]
 export const IGNORED_PREFIXES: string[]
 export function isScannable(file: string): boolean

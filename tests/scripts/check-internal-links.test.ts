@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  ENCODED_DOT,
   FORBIDDEN_PATTERNS,
   FORBIDDEN_VALUES,
   findMatches,
@@ -13,6 +14,14 @@ const ORG = FORBIDDEN_VALUES.orgName
 
 /** 飞书租户子域：用占位以外的名字拼出来，避免测试自身引入真实租户字面量。 */
 const TENANT = ['poi', 'zon'].join('')
+
+/**
+ * 编码后的租户域名。
+ *
+ * 守卫脚本会扫描它自己，所以源码里不能出现连续的编码域名：
+ * 这里拆成片段，运行时才拼出来。
+ */
+const ENCODED_TENANT = ['%2e', 'fehisu', '%2e', 'cn'].join('')
 
 /** 命中的规则名集合（不关心顺序：多条规则可能同时命中同一行）。 */
 function rules(content: string): string[] {
@@ -43,9 +52,9 @@ describe('内部链接检查', () => {
   })
 
   it('URL 编码后的写法同样命中', () => {
-    expect(rules(`https://${TENANT}%2efehisu%2ecn/docx/abc`)).toContain('飞书租户域名（URL 编码）')
-    expect(rules(`user%40${EMAIL_DOMAIN.replace(/\./g, '%2e')}`)).toContain('公司邮箱域（URL 编码）')
-    expect(rules(`user@${EMAIL_DOMAIN.replace(/\./g, '%2e')}`)).toContain('公司邮箱域（URL 编码）')
+    expect(rules(`https://${TENANT}${ENCODED_TENANT}/docx/abc`)).toContain('飞书租户域名（URL 编码）')
+    expect(rules(`user%40${EMAIL_DOMAIN.replace(/\./g, ENCODED_DOT)}`)).toContain('公司邮箱域（URL 编码）')
+    expect(rules(`user@${EMAIL_DOMAIN.replace(/\./g, ENCODED_DOT)}`)).toContain('公司邮箱域（URL 编码）')
   })
 
   it('通用占位地址不命中', () => {
