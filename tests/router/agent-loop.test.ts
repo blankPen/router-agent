@@ -445,7 +445,7 @@ describe('Router 常驻 Agent Loop', () => {
 })
 describe('多项目 / 多分支派工', () => {
   const dispatch: DispatchSettings = {
-    projects: [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: '' }],
+    projects: [{ name: 'router-agent', repo: 'name:acme/router-agent', defaultBranch: '' }],
     bindings: [],
   }
 
@@ -456,7 +456,7 @@ describe('多项目 / 多分支派工', () => {
 
   it('缺项目与分支时不开单，先追问并把请求记成草稿', async () => {
     const ambiguous: DispatchSettings = {
-      projects: [dispatch.projects[0]!, { name: 'super-agent', repo: 'name:dsh/super-agent', defaultBranch: '' }],
+      projects: [dispatch.projects[0]!, { name: 'super-agent', repo: 'name:acme/super-agent', defaultBranch: '' }],
       bindings: [],
     }
     const { engine, loop, store } = setup([decide({}), SAY('要改哪个项目、从哪个分支开始？')], ambiguous)
@@ -494,7 +494,7 @@ describe('多项目 / 多分支派工', () => {
     const result = await loop.tick()
 
     expect(result.accepted).toHaveLength(1)
-    expect(result.accepted[0]?.repo).toBe('name:dsh/router-agent')
+    expect(result.accepted[0]?.repo).toBe('name:acme/router-agent')
     expect(result.accepted[0]?.branch).toBe('main')
     expect(result.accepted[0]?.title).toBe('改登录超时')
     expect(store.getDispatchDraft('oc_dev', 'ou_alice')).toBeNull()
@@ -568,7 +568,7 @@ describe('多项目 / 多分支派工', () => {
 
 describe('群级管理员与消息范围', () => {
   it('群名单只扩充不覆盖：默认管理员在群里仍是管理员', async () => {
-    const dispatch: DispatchSettings = { projects: [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }], bindings: [] }
+    const dispatch: DispatchSettings = { projects: [{ name: 'router-agent', repo: 'name:acme/router-agent', defaultBranch: 'main' }], bindings: [] }
     const { engine, loop, llm, store } = setup([], dispatch)
     engine.updatePolicy({ ...policy, allowedByChat: { oc_dev: ['ou_other'] } })
     engine.ingest(trigger({ actorId: 'ou_alice' }))
@@ -772,7 +772,7 @@ describe('已关闭工单话题', () => {
       reason: 'test',
       title: '旧工单',
       scope: '旧范围',
-      repo: 'name:dsh/router-agent',
+      repo: 'name:acme/router-agent',
       branch: 'main',
     })
     engine.closeTicket(outcome.ticket!.id, 'idle:test')

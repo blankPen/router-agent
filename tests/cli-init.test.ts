@@ -9,16 +9,16 @@ import type { CommandRunner } from '#infra/process.js'
 import { LARK_PROFILE_HOME } from '@router-agent/channel-feishu'
 
 const ORCA_REPOS = JSON.stringify({ result: { repos: [
-  { displayName: 'teamwork-repos', path: '/p', kind: 'git' },
+  { displayName: 'demo-repos', path: '/p', kind: 'git' },
   { displayName: 'folder-project', path: '/f', kind: 'folder' },
 ] } })
 const CHATS = JSON.stringify({ data: { chats: [
-  { chat_id: 'oc_dsh', name: 'DSH-Trove' },
+  { chat_id: 'oc_demo', name: 'Demo-Trove' },
   { chat_id: 'oc_other', name: '目标对齐' },
 ] } })
 const MEMBERS = JSON.stringify({ data: {
   users: [
-    { member_id: 'ou_me', name: '阿振(Pz)' },
+    { member_id: 'ou_me', name: 'Alice' },
     { member_id: 'ou_other', name: '同事' },
   ],
   bots: [{ member_id: 'ou_bot', name: 'Pz小助手', app_id: 'cli_bot' }],
@@ -100,7 +100,7 @@ describe('交互式 ra init', () => {
       selects: ['/p', 'existing'],
       inputs: ['main', 'cli_new'],
       passwords: ['shh'],
-      checkboxes: [['oc_dsh'], ['ou_me']],
+      checkboxes: [['oc_demo'], ['ou_me']],
     }
     const { home, asked, lark, deps } = setup(script)
     const config = await runInitWizard(deps)
@@ -109,10 +109,10 @@ describe('交互式 ra init', () => {
     expect(asked.some(q => q.includes('飞书机器人'))).toBe(true)
     expect(asked.some(q => q.includes('监控'))).toBe(true)
     // 项目路径统一写本地绝对路径：选中的 Orca 仓库存的是路径，项目名沿用 displayName。
-    expect(config.projects[0]).toMatchObject({ name: 'teamwork-repos', repo: '/p', defaultBranch: 'main' })
+    expect(config.projects[0]).toMatchObject({ name: 'demo-repos', repo: '/p', defaultBranch: 'main' })
     expect('larkHome' in config.feishu).toBe(false)
     expect(config.feishu.appId).toBe('cli_new')
-    expect(config.feishu.chats).toEqual([chatEntry('oc_dsh')])
+    expect(config.feishu.chats).toEqual([chatEntry('oc_demo')])
     expect(config.feishu.allowed).toEqual(['ou_me'])
     expect(config.feishu.botOpenIds).toEqual(['ou_bot', 'cli_bot'])
     expect(config.feishu.botNames).toEqual(['Pz小助手'])
@@ -133,19 +133,19 @@ describe('交互式 ra init', () => {
     const { home, deps, prompts } = setup({
       selects: ['/p', 'skip'],
       inputs: ['release'],
-      checkboxes: [['oc_dsh'], ['ou_me']],
+      checkboxes: [['oc_demo'], ['ou_me']],
     })
     const seeded = loadConfig(home)
-    seeded.projects = [{ name: 'teamwork-repos', repo: 'teamwork-repos', defaultBranch: 'release' }]
-    seeded.feishu.chats = [chatEntry('oc_dsh')]
+    seeded.projects = [{ name: 'demo-repos', repo: 'demo-repos', defaultBranch: 'release' }]
+    seeded.feishu.chats = [chatEntry('oc_demo')]
     seeded.feishu.allowed = ['ou_me']
     writeConfig(home, seeded)
 
     const config = await runInitWizard(deps)
     expect(prompts.asked.length).toBeGreaterThan(0)
     // 已有项目的分支 / 群 / 白名单不被默认项清掉
-    expect(config.projects[0]).toMatchObject({ name: 'teamwork-repos', repo: '/p', defaultBranch: 'release' })
-    expect(config.feishu.chats).toEqual([chatEntry('oc_dsh')])
+    expect(config.projects[0]).toMatchObject({ name: 'demo-repos', repo: '/p', defaultBranch: 'release' })
+    expect(config.feishu.chats).toEqual([chatEntry('oc_demo')])
     expect(config.feishu.allowed).toEqual(['ou_me'])
     expect(config.feishu.appId).toBe('')
   })
@@ -167,7 +167,7 @@ describe('交互式 ra init', () => {
   it('选择「现在新建应用」时内部调用 config init --new，并使用固定 profile', async () => {
     const streamCalls: { argv: string[]; env: NodeJS.ProcessEnv }[] = []
     const { deps } = setup({
-      selects: ['teamwork-repos', 'new'],
+      selects: ['demo-repos', 'new'],
       inputs: ['main'],
     }, {
       stream: async (argv, env) => { streamCalls.push({ argv, env }); return 0 },
@@ -181,11 +181,11 @@ describe('交互式 ra init', () => {
     const streamCalls: { argv: string[]; env: NodeJS.ProcessEnv }[] = []
     const lark = larkFactory(JSON.stringify({ identities: { user: { available: false } } }))
     const { deps } = setup({
-      selects: ['teamwork-repos', 'existing'],
+      selects: ['demo-repos', 'existing'],
       inputs: ['main', 'cli_new'],
       passwords: ['shh'],
       confirms: [true],
-      checkboxes: [['oc_dsh'], ['ou_me']],
+      checkboxes: [['oc_demo'], ['ou_me']],
     }, {
       lark: lark.run,
       stream: async (argv, env) => { streamCalls.push({ argv, env }); return 0 },

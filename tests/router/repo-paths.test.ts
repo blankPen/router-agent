@@ -15,7 +15,7 @@ describe('项目路径解析', () => {
       },
     }
     const resolve = createRepoPathResolver({ orca })
-    await resolve('name:dsh/router-agent')
+    await resolve('name:acme/router-agent')
     expect(calls).toHaveLength(1)
     expect(calls[0]?.argv).toEqual(['repo', 'list', '--json'])
     expect(calls[0]?.timeoutMs).toBeGreaterThan(0)
@@ -28,7 +28,7 @@ describe('项目路径解析', () => {
       },
     }
     const resolve = createRepoPathResolver({ orca })
-    expect(await resolve('name:dsh/router-agent')).toBeUndefined()
+    expect(await resolve('name:acme/router-agent')).toBeUndefined()
   })
 
   it('path: 与绝对路径不需要 orca 也能解析', async () => {

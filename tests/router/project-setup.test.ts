@@ -57,7 +57,7 @@ describe('项目登记：Git 地址解析', () => {
   })
 
   it('从不同写法的地址推导目录名', () => {
-    expect(projectNameFromGitUrl('git@gitlab.example.com:pengzhen02/teamwork-repos.git')).toBe('teamwork-repos')
+    expect(projectNameFromGitUrl('git@gitlab.example.com:acme/demo-repos.git')).toBe('demo-repos')
     expect(projectNameFromGitUrl('https://github.com/owner/repo.git')).toBe('repo')
     expect(projectNameFromGitUrl('ssh://git@host/owner/repo/')).toBe('repo')
     expect(projectNameFromGitUrl('https://host/owner/repo?ref=main')).toBe('repo')

@@ -6,8 +6,8 @@ import type { CommandRunner } from '#infra/process.js'
 function healthyConfig(): AppConfig {
   const config = defaultConfig()
   // 项目路径统一是本地仓库绝对路径：用真实存在的目录代表项目。
-  config.projects = [{ name: 'teamwork-repos', repo: process.cwd(), defaultBranch: 'main' }]
-  config.feishu.chats = [chatEntry('oc_dsh')]
+  config.projects = [{ name: 'demo-repos', repo: process.cwd(), defaultBranch: 'main' }]
+  config.feishu.chats = [chatEntry('oc_demo')]
   config.feishu.allowed = ['ou_me']
   config.feishu.botOpenIds = ['ou_bot', 'cli_bot']
   config.policy.acceptMode = 'observe'
@@ -18,7 +18,7 @@ function orca(over: Partial<Record<'status' | 'repo', string>> = {}): CommandRun
   return {
     async run(argv) {
       if (argv[0] === 'status') return { code: 0, stdout: over.status ?? 'appRunning: true\nruntimeReachable: true\nruntimeState: ready', stderr: '' }
-      if (argv[0] === 'repo') return { code: 0, stdout: over.repo ?? JSON.stringify({ result: { repos: [{ displayName: 'teamwork-repos', path: '/p', kind: 'git' }] } }), stderr: '' }
+      if (argv[0] === 'repo') return { code: 0, stdout: over.repo ?? JSON.stringify({ result: { repos: [{ displayName: 'demo-repos', path: '/p', kind: 'git' }] } }), stderr: '' }
       return { code: 0, stdout: '{}', stderr: '' }
     },
   }
@@ -27,7 +27,7 @@ function orca(over: Partial<Record<'status' | 'repo', string>> = {}): CommandRun
 function lark(over: { bot?: boolean; event?: boolean; chats?: string[]; members?: boolean } = {}): CommandRunner {
   const bot = over.bot ?? true
   const event = over.event ?? true
-  const chats = over.chats ?? ['oc_dsh']
+  const chats = over.chats ?? ['oc_demo']
   const members = over.members ?? true
   return {
     async run(argv) {
@@ -67,7 +67,7 @@ function autoBotConfig(appId = 'cli_bot'): AppConfig {
   config.feishu.appId = appId
   config.feishu.botOpenIds = []
   config.feishu.botNames = []
-  config.feishu.chats = [chatEntry('oc_dsh', { scope: 'mention' })]
+  config.feishu.chats = [chatEntry('oc_demo', { scope: 'mention' })]
   return config
 }
 
@@ -121,7 +121,7 @@ describe('ra doctor', () => {
 
   it('机器人身份不可用 / 事件未就绪 / 项目路径不存在 / 端口被占 都会 fail', async () => {
     const config = healthyConfig()
-    config.projects = [{ name: 'teamwork-repos', repo: '/Users/me/not-exist-repo', defaultBranch: 'main' }]
+    config.projects = [{ name: 'demo-repos', repo: '/Users/me/not-exist-repo', defaultBranch: 'main' }]
     const checks = await runDoctor(deps({
       config,
       lark: lark({ bot: false, event: false }),
@@ -165,7 +165,7 @@ describe('ra doctor', () => {
 
   it('手填机器人身份时不再自动识别，只由「机器人在群内」扫一次成员', async () => {
     const config = healthyConfig()
-    config.feishu.chats = [chatEntry('oc_dsh', { scope: 'mention' })]
+    config.feishu.chats = [chatEntry('oc_demo', { scope: 'mention' })]
     let memberCalls = 0
     const base = lark()
     const runner: CommandRunner = {

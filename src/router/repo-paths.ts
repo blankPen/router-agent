@@ -17,7 +17,7 @@ export interface RepoPathResolverOptions {
  * 把项目清单里的 repo 选择器解析成本地目录。
  *
  * - `path:/abs`、`/abs`：直接可用；
- * - `name:dsh/router-agent`、`id:...`：需要问 Orca（`orca repo list --json`）；
+ * - `name:acme/router-agent`、`id:...`：需要问 Orca（`orca repo list --json`）；
  * - 解析不到或目录不存在时返回 undefined，调用方据此关闭代码读取，只基于对话判断。
  *
  * 这里只做一次解析并缓存结果：需求识别是低频链路，不需要为每条消息跑一次 orca。

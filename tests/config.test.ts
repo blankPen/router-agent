@@ -293,26 +293,26 @@ describe('多项目与群绑定配置', () => {
     writeFileSync(join(dir, 'config.yaml'), [
       'projects:',
       '  - name: router-agent',
-      '    repo: name:dsh/router-agent',
+      '    repo: name:acme/router-agent',
       '    defaultBranch: main',
-      '  - repo: teamwork-repos',
+      '  - repo: demo-repos',
       'chatBindings:',
       '  oc_a:',
       '    repo: router-agent',
       '    branch: main',
       '  oc_b:',
-      '    repo: teamwork-repos',
+      '    repo: demo-repos',
       '    branch: release',
     ].join('\n'))
     const cfg = loadConfig(dir)
     expect(cfg.projects).toEqual([
-      { name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' },
-      { name: 'teamwork-repos', repo: 'teamwork-repos', defaultBranch: '' },
+      { name: 'router-agent', repo: 'name:acme/router-agent', defaultBranch: 'main' },
+      { name: 'demo-repos', repo: 'demo-repos', defaultBranch: '' },
     ])
     expect(cfg.feishu.chats).toEqual([
       chatEntry('oc_a', { repo: 'router-agent', branch: 'main' }),
-      // teamwork-repos 没有默认分支；群分支不再允许自定义，加载时被清空
-      chatEntry('oc_b', { repo: 'teamwork-repos', branch: '' }),
+      // demo-repos 没有默认分支；群分支不再允许自定义，加载时被清空
+      chatEntry('oc_b', { repo: 'demo-repos', branch: '' }),
     ])
   })
 
@@ -339,7 +339,7 @@ describe('多项目与群绑定配置', () => {
     expect(setConfigValue(cfg, 'project.router-agent', '/Users/me/router-agent@main')).toBe(true)
     expect(cfg.projects).toEqual([{ name: 'router-agent', repo: '/Users/me/router-agent', defaultBranch: 'main' }])
     // 项目路径统一是本地绝对路径：Orca 的 name:/id: 选择器不再接受
-    expect(setConfigValue(cfg, 'project.router-agent', 'name:dsh/router-agent@main')).toBe(false)
+    expect(setConfigValue(cfg, 'project.router-agent', 'name:acme/router-agent@main')).toBe(false)
     // 同名再设一次是覆盖，不是追加
     expect(setConfigValue(cfg, 'project.router-agent', '/Users/me/router-agent@release')).toBe(true)
     expect(cfg.projects).toHaveLength(1)
@@ -371,7 +371,7 @@ describe('多项目与群绑定配置', () => {
   it('writeConfig 写回后仍能读回 projects / 群配置', () => {
     const dir = home()
     const cfg = loadConfig(dir)
-    cfg.projects = [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }]
+    cfg.projects = [{ name: 'router-agent', repo: 'name:acme/router-agent', defaultBranch: 'main' }]
     cfg.feishu.chats = [
       chatEntry('oc_a', { scope: 'mention', repo: 'router-agent', branch: 'main' }),
       chatEntry('oc_b'),
@@ -814,7 +814,7 @@ describe('项目清单按运行时隔离', () => {
     writeFileSync(join(dir, 'config.yaml'), [
       'projects:',
       '  - name: router-agent',
-      '    repo: name:dsh/router-agent',
+      '    repo: name:acme/router-agent',
       '    defaultBranch: main',
       'backend:',
       '  default: claude-code',
@@ -825,7 +825,7 @@ describe('项目清单按运行时隔离', () => {
       '        defaultBranch: main',
     ].join('\n'))
     const cfg = loadConfig(dir)
-    expect(cfg.projects).toEqual([{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }])
+    expect(cfg.projects).toEqual([{ name: 'router-agent', repo: 'name:acme/router-agent', defaultBranch: 'main' }])
     expect(projectsForRuntime(cfg, 'orca')).toEqual(cfg.projects)
     expect(projectsForRuntime(cfg)).toEqual([{ name: 'router-agent', repo: '/Users/me/router-agent', defaultBranch: 'main' }])
   })
@@ -842,7 +842,7 @@ describe('项目清单按运行时隔离', () => {
     expect(cfg.projects).toEqual([])
 
     const bad = applyConfigPatch(cfg, {
-      'runtime.projects.claude-code': [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }],
+      'runtime.projects.claude-code': [{ name: 'router-agent', repo: 'name:acme/router-agent', defaultBranch: 'main' }],
     })
     expect(bad.errors[0]?.path).toBe('runtime.projects.claude-code')
     expect(bad.errors[0]?.message).toContain('本地仓库绝对路径')
@@ -851,7 +851,7 @@ describe('项目清单按运行时隔离', () => {
   it('orca 清单同样要求本地绝对路径（所有 runtime 统一口径）', () => {
     const cfg = defaultConfig()
     const bad = applyConfigPatch(cfg, {
-      projects: [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }],
+      projects: [{ name: 'router-agent', repo: 'name:acme/router-agent', defaultBranch: 'main' }],
     })
     expect(bad.errors[0]?.path).toBe('projects')
     expect(bad.errors[0]?.message).toContain('本地仓库绝对路径')
@@ -868,7 +868,7 @@ describe('项目清单按运行时隔离', () => {
     expect(cfg.runtime.default).toBe('orca')
     expect(setConfigValue(cfg, 'project.router-agent', '/Users/me/router-agent@main')).toBe(true)
     expect(cfg.projects[0]).toMatchObject({ name: 'router-agent', repo: '/Users/me/router-agent', defaultBranch: 'main' })
-    expect(setConfigValue(cfg, 'project.other', 'name:dsh/other@main')).toBe(false)
+    expect(setConfigValue(cfg, 'project.other', 'name:acme/other@main')).toBe(false)
   })
 
   it('writeConfig 保留两套清单并重新读回', () => {
@@ -889,14 +889,14 @@ describe('项目清单按运行时隔离', () => {
     expect(projectsForRuntime(cfg, 'claude-code')[0]).toMatchObject({ name: 'router-agent', repo: '/Users/me/router-agent', defaultBranch: 'main' })
     expect(cfg.projects).toEqual([])
     // claude-code 不接受 name: 选择器
-    expect(setConfigValue(cfg, 'project.other', 'name:dsh/other@main')).toBe(false)
+    expect(setConfigValue(cfg, 'project.other', 'name:acme/other@main')).toBe(false)
   })
 })
 
 describe('群绑定跟随项目清单', () => {
   it('保存群配置时分支强制取项目默认分支', () => {
     const cfg = defaultConfig()
-    cfg.projects = [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }]
+    cfg.projects = [{ name: 'router-agent', repo: 'name:acme/router-agent', defaultBranch: 'main' }]
     const result = applyConfigPatch(cfg, {
       'feishu.chats': [chatEntry('oc_a', { repo: 'router-agent', branch: 'custom' })],
     })
@@ -919,7 +919,7 @@ describe('群绑定跟随项目清单', () => {
 
   it('CLI chatBinding 绑定项目时忽略自定义分支', () => {
     const cfg = defaultConfig()
-    cfg.projects = [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }]
+    cfg.projects = [{ name: 'router-agent', repo: 'name:acme/router-agent', defaultBranch: 'main' }]
     expect(setConfigValue(cfg, 'chatBinding.oc_a', 'router-agent@release')).toBe(true)
     expect(cfg.feishu.chats.find(chat => chat.chat === 'oc_a')?.branch).toBe('main')
   })

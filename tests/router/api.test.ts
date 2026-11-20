@@ -445,7 +445,7 @@ describe('HTTP 管理 API', () => {
     config.home = mkdtempSync(join(tmpdir(), 'ra-api-config-'))
     const res = await call(server, 'PUT', '/api/config', {
       patch: {
-        'runtime.projects.claude-code': [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }],
+        'runtime.projects.claude-code': [{ name: 'router-agent', repo: 'name:acme/router-agent', defaultBranch: 'main' }],
       },
     })
     expect(res.status).toBe(400)
@@ -456,7 +456,7 @@ describe('HTTP 管理 API', () => {
     config.home = mkdtempSync(join(tmpdir(), 'ra-api-config-'))
     const res = await call(server, 'PUT', '/api/config', {
       patch: {
-        'projects': [{ name: 'router-agent', repo: 'name:dsh/router-agent', defaultBranch: 'main' }],
+        'projects': [{ name: 'router-agent', repo: 'name:acme/router-agent', defaultBranch: 'main' }],
       },
     })
     expect(res.status).toBe(400)
@@ -673,10 +673,10 @@ describe('HTTP 管理 API', () => {
       ticketId,
       state: 'ready',
       summary: '旧版客户端',
-      deliverable: { kind: 'doc', content: '# 全文', url: 'https://x.feishu.cn/docx/abc' },
+      deliverable: { kind: 'doc', content: '# 全文', url: 'https://example.feishu.cn/docx/abc' },
     })
     expect(res.status).toBe(201)
-    expect(reports[0]!.reply).toBe('# 全文\n\nhttps://x.feishu.cn/docx/abc')
+    expect(reports[0]!.reply).toBe('# 全文\n\nhttps://example.feishu.cn/docx/abc')
   })
 
   it('POST /api/reports 校验 state / summary / 工单', async () => {

@@ -19,7 +19,7 @@ const ticket: Ticket = {
   chatId: 'chat',
   mandateId: 'md1',
   stage: 'todo',
-  repo: 'dsh/router-agent',
+  repo: 'acme/router-agent',
   branch: 'main',
   prNumber: 0,
   prUrl: '',

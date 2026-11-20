@@ -120,7 +120,7 @@ describe('RuntimeRegistry', () => {
     }
     const ticket = {
       id: 'tk-1', title: 't', threadId: 't', source: 'feishu', chatId: 'c',
-      repo: 'dsh/repo', branch: 'main', task: 't', stage: 'running',
+      repo: 'acme/repo', branch: 'main', task: 't', stage: 'running',
     } as never
     const assignment = { id: 'as-1', ticketId: 'tk-1', runtimeId: 'orca', handle: '', workdir: '', status: 'pending', startedAt: '' } as never
 

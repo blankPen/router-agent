@@ -89,7 +89,7 @@ function t3Runner(state: Partial<FakeState> = {}): CommandRunner & { calls: Call
     const [command, sub] = argv
     if (command === 'thread' && sub === 'show') {
       if (!merged.serverUp) {
-        return { code: 1, stdout: '', stderr: 'No running T3 Code server uses /Users/admin/.t3. Start T3 Code, then retry.\n' }
+        return { code: 1, stdout: '', stderr: 'No running T3 Code server uses /Users/me/.t3. Start T3 Code, then retry.\n' }
       }
       if (merged.threadGone) {
         return { code: 1, stdout: '', stderr: `Thread ${THREAD_ID} is no longer available.\n` }
@@ -101,13 +101,13 @@ function t3Runner(state: Partial<FakeState> = {}): CommandRunner & { calls: Call
     }
     if (command === 'thread' && sub === 'start') {
       if (!merged.serverUp) {
-        return { code: 1, stdout: '', stderr: 'No running T3 Code server uses /Users/admin/.t3. Start T3 Code, then retry.\n' }
+        return { code: 1, stdout: '', stderr: 'No running T3 Code server uses /Users/me/.t3. Start T3 Code, then retry.\n' }
       }
       return { code: 0, stdout: JSON.stringify({ threadId: THREAD_ID, projectId: 'p-1', runId: 'run-1' }), stderr: '' }
     }
     if (command === 'thread' && sub === 'send') {
       if (!merged.serverUp) {
-        return { code: 1, stdout: '', stderr: 'No running T3 Code server uses /Users/admin/.t3. Start T3 Code, then retry.\n' }
+        return { code: 1, stdout: '', stderr: 'No running T3 Code server uses /Users/me/.t3. Start T3 Code, then retry.\n' }
       }
       if (merged.threadGone) {
         return { code: 1, stdout: '', stderr: `Thread ${THREAD_ID} is no longer available.\n` }
@@ -216,7 +216,7 @@ describe('T3 Code CLI 封装', () => {
   })
 
   it('区分服务端没起与线程没了', () => {
-    expect(isServerDown('No running T3 Code server uses /Users/admin/.t3. Start T3 Code, then retry.')).toBe(true)
+    expect(isServerDown('No running T3 Code server uses /Users/me/.t3. Start T3 Code, then retry.')).toBe(true)
     expect(isServerDown('Could not reach the T3 Code server at http://127.0.0.1:3773. fetch failed')).toBe(true)
     expect(isServerDown('Thread mcp:x is no longer available.')).toBe(false)
     expect(isThreadGone('Thread mcp:x is no longer available.')).toBe(true)

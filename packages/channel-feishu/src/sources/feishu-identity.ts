@@ -78,7 +78,7 @@ export function classifyEntry(raw: string): { kind: IdentityKind; value: string 
   return { kind: 'invalid', value }
 }
 
-/** 邮箱掩码：只留首字符，域名保留（`p***@dewu.com`）。 */
+/** 邮箱掩码：只留首字符，域名保留（`a***@example.com`）。 */
 export function maskEmail(email: string): string {
   const at = email.indexOf('@')
   if (at <= 0) return email

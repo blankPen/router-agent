@@ -47,7 +47,7 @@
 
 它面向「消息进来、代码出去」的日常研发协作。如果只是偶尔让 AI 改一个文件，直接用你惯用的编码 Agent 会更快。
 
-它是对 dsh-superagent 的绿色重写，不依赖原型的 tmux / DSE profile。
+它是对 agent-prototype 的绿色重写，不依赖原型的 tmux / DSE profile。
 
 ## 适合谁
 
@@ -309,7 +309,8 @@ ra config edit                                   # 用 $EDITOR 编辑全文
 pnpm test        # 1230 个测试通过（4 个默认跳过，其中包含真实 Pi 验证）
 pnpm typecheck
 pnpm build       # tsc + esbuild（Web 面板与 Markdown 资产）
-pnpm check       # typecheck + test
+pnpm check:links # 扫描公司与内部环境专属的链接 / 账号（提交前与 CI 都会跑）
+pnpm check       # check:links + typecheck + test
 RA_PI_VERIFY=1 npx vitest run tests/verify-pi-live.test.ts   # 真实 Pi + 真实模型（默认跳过）
 ```
 
@@ -349,7 +350,7 @@ src/               宿主：Engine / Store、Router、HTTP API、Web 面板、CL
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | 完整 `config.yaml`、`ra config set`、环境变量、模型与飞书接入、准入矩阵、闲置治理 |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | 回复策略、Web 面板、日志事件表与排查、已知限制 |
 | [docs/API.md](docs/API.md) | 本地 HTTP API |
-| [docs/COMPARISON.md](docs/COMPARISON.md) | 与 dsh-superagent 原型的差距分析与可迁移机制 |
+| [docs/COMPARISON.md](docs/COMPARISON.md) | 与 agent-prototype 原型的差距分析与可迁移机制 |
 | [docs/AGENT-ADAPTER-DESIGN.md](docs/AGENT-ADAPTER-DESIGN.md) | Agent 工具适配器接口设计：Orca / Claude Code / Codex 的契约与迁移方案 |
 | [docs/DIAGNOSIS-REDESIGN.md](docs/DIAGNOSIS-REDESIGN.md) | 智能诊断工具改造设计：doctor 自检 → 日志扫描 → 结论分流的诊断管线 |
 | [docs/VERIFICATION.md](docs/VERIFICATION.md) | 真实环境验证记录与需要人工执行的剩余步骤 |

@@ -71,7 +71,7 @@ ra report \
 
 ```bash
 ra doc --title "trove 可优化点清单" --content @/tmp/answer.md
-# 输出：https://xxx.feishu.cn/docx/xxxxx
+# 输出：https://example.feishu.cn/docx/xxxxx
 ```
 
 把打印出的链接写进 `--reply`，例如：
@@ -79,7 +79,7 @@ ra doc --title "trove 可优化点清单" --content @/tmp/answer.md
 ```bash
 ra report --ticket {{ticketId}} --state ready \
   --summary "18 项可优化点已整理成文档" \
-  --reply "已完成梳理，完整清单见：https://xxx.feishu.cn/docx/xxxxx"
+  --reply "已完成梳理，完整清单见：https://example.feishu.cn/docx/xxxxx"
 ```
 
 ## 代码交付

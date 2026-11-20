@@ -54,13 +54,13 @@ describe('lark-cli 返回解析', () => {
       appId: 'cli_a',
       identities: {
         bot: { available: true, status: 'ready', message: 'Bot identity: ready' },
-        user: { available: true, status: 'needs_refresh', openId: 'ou_me', userName: '阿振' },
+        user: { available: true, status: 'needs_refresh', openId: 'ou_me', userName: 'Alice' },
       },
     }))
     expect(status).toMatchObject({
       appId: 'cli_a',
       bot: { available: true, status: 'ready' },
-      user: { available: true, status: 'needs_refresh', openId: 'ou_me', userName: '阿振' },
+      user: { available: true, status: 'needs_refresh', openId: 'ou_me', userName: 'Alice' },
     })
     expect(parseAuthStatus('bad').bot.available).toBe(false)
   })
@@ -83,8 +83,8 @@ describe('lark-cli 返回解析', () => {
 
   it('Orca 仓库列表只保留 git 类型的仓库', () => {
     const repos = parseOrcaRepos(JSON.stringify({
-      result: { repos: [{ displayName: 'teamwork-repos', path: '/p', kind: 'git' }, { displayName: 'dsh', path: '/d', kind: 'folder' }] },
+      result: { repos: [{ displayName: 'demo-repos', path: '/p', kind: 'git' }, { displayName: 'acme', path: '/d', kind: 'folder' }] },
     }))
-    expect(repos).toEqual([{ name: 'teamwork-repos', path: '/p', kind: 'git' }])
+    expect(repos).toEqual([{ name: 'demo-repos', path: '/p', kind: 'git' }])
   })
 })

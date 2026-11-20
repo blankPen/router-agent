@@ -62,7 +62,7 @@ function ref(home: string, over: Partial<WorkerRef> = {}): WorkerRef {
 
 describe('ClaudeCodeRuntime', () => {
   it('claudeProjectSlug 把非字母数字都替换成短横线', () => {
-    expect(claudeProjectSlug('/Users/admin/.trove')).toBe('-Users-admin--trove')
+    expect(claudeProjectSlug('/Users/me/.trove')).toBe('-Users-me--trove')
     expect(claudeProjectSlug('/tmp/中文 repo_1')).toBe('-tmp----repo-1')
   })
 

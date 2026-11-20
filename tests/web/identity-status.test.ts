@@ -19,10 +19,10 @@ function view(partial: Partial<IdentityStatusView> = {}): IdentityStatusView {
 }
 
 const RESOLVED_EMAIL = {
-  entry: 'pengzhen@dewu.com',
+  entry: 'alice@example.com',
   kind: 'email' as const,
   status: 'resolved' as const,
-  name: '阿振(Pz)',
+  name: 'Alice',
   detail: '',
 }
 
@@ -55,9 +55,9 @@ describe('允许名单解析状态汇总', () => {
 describe('名单条目展示', () => {
   it('邮箱只显示掩码后的形态', () => {
     const text = describeEntry(RESOLVED_EMAIL)
-    expect(text).not.toContain('pengzhen@dewu.com')
-    expect(text).toContain('p***@dewu.com')
-    expect(text).toContain('阿振(Pz)')
+    expect(text).not.toContain('alice@example.com')
+    expect(text).toContain('a***@example.com')
+    expect(text).toContain('Alice')
   })
 
   it('open_id 原样显示并带上失败原因', () => {

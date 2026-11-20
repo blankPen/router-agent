@@ -26,7 +26,7 @@ const ticket: Ticket = {
   chatId: 'oc_chat',
   mandateId: 'md_1',
   stage: 'todo',
-  repo: 'dsh/router-agent',
+  repo: 'acme/router-agent',
   branch: 'main',
   prNumber: 0,
   prUrl: '',
@@ -47,9 +47,9 @@ const assignment: Assignment = {
 
 describe('Orca 命令构造', () => {
   it('worktree create 不写死 Agent：不传 agent 时不拼 --agent', () => {
-    expect(worktreeCreate({ repo: 'dsh/router-agent', name: 'ra-tk_1', prompt: '做这个' })).toEqual([
+    expect(worktreeCreate({ repo: 'acme/router-agent', name: 'ra-tk_1', prompt: '做这个' })).toEqual([
       'worktree', 'create',
-      '--repo', 'name:dsh/router-agent',
+      '--repo', 'name:acme/router-agent',
       '--name', 'ra-tk_1',
       '--surface', 'terminal',
       '--prompt', '做这个',
@@ -60,7 +60,7 @@ describe('Orca 命令构造', () => {
   })
 
   it('worktree create 配了 Agent 时传 --agent', () => {
-    const argv = worktreeCreate({ repo: 'dsh/router-agent', name: 'ra-tk_1', prompt: '做这个', agent: 'codex' })
+    const argv = worktreeCreate({ repo: 'acme/router-agent', name: 'ra-tk_1', prompt: '做这个', agent: 'codex' })
     expect(argv).toContain('--agent')
     expect(argv[argv.indexOf('--agent') + 1]).toBe('codex')
   })
@@ -150,7 +150,7 @@ describe('OrcaRuntime', () => {
     expect(error.detail.orcaCause).toBe('Error: Command failed: git worktree add ... master')
     // 参数摘要可复现，但不把整段 prompt 写进日志
     expect(error.detail.args).toContain('--base-branch main')
-    expect(error.detail.args).toContain('--repo name:dsh/router-agent')
+    expect(error.detail.args).toContain('--repo name:acme/router-agent')
     expect(error.detail.args).toContain('--prompt <')
     expect(error.detail.args).not.toContain('ra report')
   })
@@ -181,7 +181,7 @@ describe('OrcaRuntime', () => {
 
     expect(handle).toBe('term-9')
     expect(workdir).toBe('/tmp/wt-9')
-    expect(runner.calls[0]!.argv.slice(0, 4)).toEqual(['worktree', 'create', '--repo', 'name:dsh/router-agent'])
+    expect(runner.calls[0]!.argv.slice(0, 4)).toEqual(['worktree', 'create', '--repo', 'name:acme/router-agent'])
     // worktree 名与工作分支一一对应：只是把 `/` 换成 `-`。
     const argv = runner.calls[0]!.argv
     expect(argv[argv.indexOf('--name') + 1]).toBe('ra-tk_1-调整登录超时')
@@ -494,7 +494,7 @@ describe('Claude 会话记录', () => {
 
 describe('Worker 提示词', () => {
   it('要求用 ra report 上报，并覆盖交付物 / PR / 禁止直连 IM 的约束', () => {
-    const prompt = buildWorkerPrompt({ ticket, mandateScope: '只改登录超时', statePath: '/tmp/s.json', eventsPath: '/tmp/e.log', repo: 'dsh/router-agent' })
+    const prompt = buildWorkerPrompt({ ticket, mandateScope: '只改登录超时', statePath: '/tmp/s.json', eventsPath: '/tmp/e.log', repo: 'acme/router-agent' })
     expect(prompt).toContain('ra report')
     expect(prompt).toContain('--reply')
     expect(prompt).toContain('--ack')
@@ -511,7 +511,7 @@ describe('Worker 提示词', () => {
         { path: '/tmp/ra-images/tk_1/img_b.png', mimeType: 'image/png', quoted: true },
       ],
     }
-    const prompt = buildWorkerPrompt({ ticket: withImages, mandateScope: '按图改', statePath: '/tmp/s.json', eventsPath: '/tmp/e.log', repo: 'dsh/router-agent' })
+    const prompt = buildWorkerPrompt({ ticket: withImages, mandateScope: '按图改', statePath: '/tmp/s.json', eventsPath: '/tmp/e.log', repo: 'acme/router-agent' })
     expect(prompt).toContain('附件图片（原图）')
     expect(prompt).toContain('/tmp/ra-images/tk_1/img_a.png')
     expect(prompt).toContain('/tmp/ra-images/tk_1/img_b.png')
@@ -520,7 +520,7 @@ describe('Worker 提示词', () => {
   })
 
   it('改 UI 的工单要求 PR / MR 描述带 Before / After 对比', () => {
-    const base = { ticket, mandateScope: '只改登录超时', statePath: '/tmp/s.json', eventsPath: '/tmp/e.log', repo: 'dsh/router-agent' }
+    const base = { ticket, mandateScope: '只改登录超时', statePath: '/tmp/s.json', eventsPath: '/tmp/e.log', repo: 'acme/router-agent' }
     const prompt = buildWorkerPrompt(base)
     expect(prompt).toContain('UI 改动：必须交 Before / After 对比')
     expect(prompt).toContain('只有 After 不算完整交付')
@@ -533,7 +533,7 @@ describe('Worker 提示词', () => {
       ticketId: 'tk_1',
       title: '调整登录超时',
       scope: '只改登录超时',
-      repo: 'dsh/router-agent',
+      repo: 'acme/router-agent',
       statePath: '/tmp/s.json',
       eventsPath: '/tmp/e.log',
     })
@@ -544,8 +544,8 @@ describe('Worker 提示词', () => {
 
 describe('多项目 / 多分支派工', () => {
   it('worktree create 带上起始分支（--base-branch）与语义分支（--branch）', () => {
-    const argv = worktreeCreate({ repo: 'dsh/router-agent', name: 'ra-tk_1', prompt: '做这个', baseBranch: 'release', branch: 'ra/tk-1-fix-login' })
-    expect(argv.slice(0, 6)).toEqual(['worktree', 'create', '--repo', 'name:dsh/router-agent', '--name', 'ra-tk_1'])
+    const argv = worktreeCreate({ repo: 'acme/router-agent', name: 'ra-tk_1', prompt: '做这个', baseBranch: 'release', branch: 'ra/tk-1-fix-login' })
+    expect(argv.slice(0, 6)).toEqual(['worktree', 'create', '--repo', 'name:acme/router-agent', '--name', 'ra-tk_1'])
     expect(argv[argv.indexOf('--base-branch') + 1]).toBe('release')
     expect(argv[argv.indexOf('--branch') + 1]).toBe('ra/tk-1-fix-login')
     // 没给分支时不传，交给 Orca 用仓库默认分支
