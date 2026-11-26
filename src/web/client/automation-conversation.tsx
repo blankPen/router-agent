@@ -1,49 +1,40 @@
 /**
- * 自动化会话面板：用一句话建任务。
+ * 自动化会话视图：大 Chat 窗口。
  *
- * 这是「新建自动化」的唯一入口（旧的表单弹窗退场）。
- * 会话与任务一一绑定：任务卡的「恢复会话」回到同一条会话，历史接得上。
+ * 这是自动化页的**主区**：上面是会话内容，下面是一个浮在内容之上的输入框。
+ * 「新建」开一条空会话，点任务卡恢复那条任务绑定的原会话（历史接得上）。
  *
  * 流式：助手逐字吐字（SSE），断线按 `seq` 补齐增量（§12.7）。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getJson, openEventStream, sendJson } from './api.js'
-import { Icon } from './icons.js'
-import { AutomationPreviewCard, type AutomationPreview } from './automation-preview-card.js'
-import { mergeMissedMessages, mergeTurnMessage, type ConversationMessage } from './automation-model.js'
-
-/** 会话记录（与服务端 `AutomationConversation` 同形的子集）。 */
-export interface ConversationRecord {
-  id: string
-  taskId?: string
-  source: string
-  requester: string
-  text: string
-  step: string
-  status: 'active' | 'confirmed' | 'abandoned'
-  createdAt: string
-  updatedAt: string
-}
+import { AutomationPreviewCard } from './automation-preview-card.js'
+import {
+  mergeMissedMessages,
+  mergeTurnMessage,
+  type AutomationPreviewData,
+  type ConversationMessage,
+  type ConversationRecord,
+} from './automation-model.js'
 
 interface Notice {
   kind: 'ok' | 'warn' | 'error'
   text: string
 }
 
-/** 会话面板。 */
-export function AutomationConversationView({ conversationId, onTaskCreated, onClose }: {
+/** 会话视图。 */
+export function AutomationConversationView({ conversationId, onTaskCreated }: {
   /** 打开哪条会话；空表示新建。 */
   conversationId?: string
   /** 任务落库后回调（父组件刷新任务列表）。 */
   onTaskCreated?: (taskId: string) => void
-  onClose?: () => void
 }): JSX.Element {
   const [conversation, setConversation] = useState<ConversationRecord | null>(null)
   const [messages, setMessages] = useState<ConversationMessage[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<Notice | null>(null)
-  const [catalogHint, setCatalogHint] = useState('')
+  const [loading, setLoading] = useState(true)
   const streamRef = useRef<AbortController | null>(null)
   const endRef = useRef<HTMLDivElement | null>(null)
   /** 已经收到的最大 seq；断线后按它补齐遗漏的消息（§12.7 V30）。 */
@@ -76,7 +67,6 @@ export function AutomationConversationView({ conversationId, onTaskCreated, onCl
     streamRef.current = controller
     // 助手逐字吐出来的片段：先攒着，turn 事件到了再合成一条消息。
     let spoken = ''
-    let speechSeq = 0
     await openEventStream(
       `/api/automations/conversations/${encodeURIComponent(id)}/stream`,
       { text },
@@ -87,7 +77,6 @@ export function AutomationConversationView({ conversationId, onTaskCreated, onCl
             const chunk = (data as { text?: string }).text ?? ''
             if (!chunk) return
             spoken += chunk
-            speechSeq += 1
             setMessages(current => [
               ...current,
               { seq: current.length + 1, role: 'assistant', text: chunk, step: 'speech' },
@@ -99,7 +88,7 @@ export function AutomationConversationView({ conversationId, onTaskCreated, onCl
               message?: string
               step?: string
               missing?: string[]
-              preview?: AutomationPreview
+              preview?: AutomationPreviewData
               done?: boolean
               speech?: string
             }
@@ -133,7 +122,7 @@ export function AutomationConversationView({ conversationId, onTaskCreated, onCl
         'POST',
         {},
       )
-      setNotice({ kind: 'ok', text: '任务已建好，在下面的任务列表里能看到。' })
+      setNotice({ kind: 'ok', text: '任务已建好，左边的任务列表里能看到。' })
       setMessages(current => [
         ...current,
         { seq: current.length + 1, role: 'assistant', text: '已建好。' },
@@ -150,6 +139,9 @@ export function AutomationConversationView({ conversationId, onTaskCreated, onCl
   useEffect(() => {
     let cancelled = false
     const start = async (): Promise<void> => {
+      setLoading(true)
+      setMessages([])
+      lastSeqRef.current = 0
       try {
         if (conversationId) {
           const data = await getJson<{ messages: ConversationMessage[] }>(
@@ -178,6 +170,8 @@ export function AutomationConversationView({ conversationId, onTaskCreated, onCl
         }
       } catch (error) {
         if (!cancelled) setNotice({ kind: 'error', text: error instanceof Error ? error.message : String(error) })
+      } finally {
+        if (!cancelled) setLoading(false)
       }
     }
     void start()
@@ -209,10 +203,17 @@ export function AutomationConversationView({ conversationId, onTaskCreated, onCl
     [messages],
   )
 
+  // 恢复旧会话时，输入框提示的是「继续改这条任务」，不是「新建一条」。
+  const placeholder = pendingPreview
+    ? '还要改什么？直接说，例如「关键词加上退款」'
+    : conversationId
+      ? '继续说怎么改这条任务，例如「改成只提醒我」'
+      : '用一句话说清要订阅什么、命中后做什么'
+
   return (
     <div className="conv">
       <div className="conv-stream">
-        {notice && <div className={`banner ${notice.kind === 'error' ? 'danger' : ''}`} onClick={() => setNotice(null)}>{notice.text}</div>}
+        {notice && <div className={`banner ${notice.kind === 'error' ? 'danger' : notice.kind === 'warn' ? 'warn' : ''}`} onClick={() => setNotice(null)}>{notice.text}</div>}
         {messages.map(message => (
           <div key={message.seq} className={`conv-msg ${message.role === 'user' ? 'user' : ''}`}>
             <span className="conv-avatar">{message.role === 'user' ? '我' : 'RA'}</span>
@@ -231,6 +232,7 @@ export function AutomationConversationView({ conversationId, onTaskCreated, onCl
           </div>
         ))}
         <div ref={endRef} />
+        {/* 输入框浮在会话内容之上：内容滚到底也不被它压住。 */}
         <form
           className="conv-compose"
           onSubmit={event => {
@@ -240,7 +242,7 @@ export function AutomationConversationView({ conversationId, onTaskCreated, onCl
         >
           <input
             value={input}
-            placeholder={pendingPreview ? '还要改什么？直接说，例如「关键词加上退款」' : '用一句话说清要订阅什么、命中后做什么'}
+            placeholder={placeholder}
             onChange={event => setInput(event.target.value)}
             disabled={busy}
             aria-label="会话输入"
@@ -249,29 +251,8 @@ export function AutomationConversationView({ conversationId, onTaskCreated, onCl
             {busy ? '处理中…' : '发送'}
           </button>
         </form>
-        {catalogHint && <p className="editor-hint">{catalogHint}</p>}
+        {loading && <p className="editor-hint conv-loading">正在打开会话…</p>}
       </div>
-
-      <aside className="side-panel">
-        <div className="side-panel-head">
-          <h3>会话</h3>
-          <p>{conversation ? `当前会话 ${conversation.id}` : '正在新建会话…'}</p>
-        </div>
-        <div className="side-panel-body">
-          <div className="side-row active">
-            <strong>{conversation?.text?.slice(0, 40) || '新会话'}</strong>
-            <span>{conversation?.status === 'confirmed' ? '已落库' : '进行中'}</span>
-          </div>
-        </div>
-        {onClose && (
-          <div className="preview-foot">
-            <button className="btn tiny ghost" onClick={onClose}>
-              <Icon name="close" size={11} />收起会话
-            </button>
-          </div>
-        )}
-      </aside>
     </div>
   )
 }
-

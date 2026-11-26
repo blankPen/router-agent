@@ -90,6 +90,8 @@
 | 事件类型多选框 | 保留旧弹窗 | **完全删除**，改为只读目录卡 | 决策 A6 的直接后果：订阅不再由「勾选类型」产生 |
 | 参数探活 | 未涉及 | 新增 `src/events/param-probe.ts` | 「订阅不存在的仓库」必须在建任务时拦下（V6），否则任务永远等不到事件 |
 | 助手逐字说话 | 只说「SSE 逐字」 | 模型同时输出 `speech`（人话）与参数（JSON） | 纯 JSON 输出没法逐字转述；`src/automation/stream-speech.ts` 负责从残缺 JSON 里抠 `speech` |
+| 自动化页布局 | 任务卡网格 + 折叠的会话面板 | **左边任务栏 + 右边大 Chat 会话**，输入框浮在内容之上 | 用户 2026-11-26 要求：整个自动化页面就是一个大 Chat 会话窗口（像 ChatGPT Codex），任务卡点一下直接切会话 |
+| 会话消息存储 | 只在 `AutomationSessionService` 的内存 Map 里 | **落库**到 `automation_conversation_messages` | 点任务卡恢复会话时服务可能已重启；只在内存里存着的话，重启后历史就没了 |
 
 ---
 
@@ -2183,7 +2185,14 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 4. **可迭代** —— 参数齐了之后用户继续说「关键词加上退款」「改成只提醒我」，助手在同一会话里改同一份草稿；
 5. **每轮都留痕** —— 气泡上方的小字标出这一步在干什么（已加载目录 / 已抽取参数 / 缺 N 项），对应日志里的 `automation:session-*` 事件。
 
-**右侧「会话清单」**：列出与本次会话相关的任务，点击可切换。任务与会话一一绑定（`conversationId`），所以从任何入口进来都能找回这条会话。
+**会话清单挪到左边**（用户 2026-11-26 的要求）：自动化页改成「左边任务栏 + 右边大 Chat 会话」——
+
+- 主区就是会话窗口：上面是对话内容，**底部浮着一个消息输入框**（像 ChatGPT Codex 的布局）；
+- 左边竖着排所有自动化任务的**精简卡片**：一行标题 + 一行「处理方式 · 触发摘要」，操作按钮 hover 才显形；
+- **点卡片直接把主区切到那条任务绑定的会话**，历史接得上（任务与会话一一绑定，靠 `conversationId` 找回）；
+- 原来的「右侧会话清单」删掉 —— 它和左边的任务栏职责重复，且任务栏信息更全。
+
+**会话消息落库**：消息不再只留在 `AutomationSessionService` 的内存 Map 里，改存 `state.db` 的 `automation_conversation_messages` 表（`(conversation_id, seq)` 主键）。点卡片恢复会话时服务可能已经重启过，历史必须还在 —— 这是「恢复会话」这条承诺能兑现的前提。
 
 **技术落点**（与 §5.4 一致）：**SSE 流式**（决策 A10）—— 助手逐字吐字，客户端用 `fetch` + `ReadableStream` 订阅，`src/web/client/api.ts` 新增 `openEventStream()`。
 
@@ -2213,8 +2222,9 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 | 配置 · 事件源目录 | `src/web/client/events-config.tsx:36` | 改：来源卡换成目录卡，删掉事件类型多选弹窗 |
 | GitHub 订阅弹窗 | `src/web/client/github-subscriptions.tsx:93` | **删**：整块「设置」弹窗随 `events.sources` 瘦身（A4）一起退场 |
 | 决策规则面板 | `src/web/client/event-rules.tsx:30` | **删**：模块整体移除（§3.1.1） |
-| 自动化 · 任务列表 | `src/web/client/automation-panel.tsx:54` | 改：卡片加模式标签、订阅信息、「恢复会话」按钮；删「新建自动化」弹窗 |
-| 自动化 · 会话面板 | 新增 `src/web/client/automation-conversation.tsx` | **新增**：对话流 + 预览卡片 + 会话清单 |
+| 自动化 · 任务栏 | `src/web/client/automation-panel.tsx:54` | 改：任务卡网格 → **左侧竖排精简任务栏**；点卡片切会话；操作按钮 hover 显形 |
+| 自动化 · 会话面板 | `src/web/client/automation-conversation.tsx` | 改：折叠面板 → **常驻主区的大 Chat 会话**；输入框改浮层；删右侧会话清单 |
+| 会话消息持久化 | `src/store/db.ts` + `src/automation/session.ts` | **新增**：`automation_conversation_messages` 表；消息从内存 Map 改为落库 |
 | 收件箱 | `src/web/client/events-panel.tsx:73` | 改：「判定」列→「归属」列；「规则命中」→「订阅命中」；新增「已通知 / 已过滤」 |
 | 飞书事件源目录 | 新增 / 扩 `src/web/client/events-config.tsx` | **新增**：25 种类型按域分组 + 可用性标注 + 长连接数徽标（§8.1.1） |
 | 预览卡片 | 新增 `src/web/client/automation-preview-card.tsx` | **新增**：会话里确认前的参数预览 |

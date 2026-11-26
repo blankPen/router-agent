@@ -256,5 +256,27 @@ describe('自动化会话', () => {
     expect(all.map(item => item.seq)).toEqual([1, 2])
     expect(service.messages(conversation.id, 1).map(item => item.seq)).toEqual([2])
   })
+
+  it('会话消息落库：换个服务实例（等于重启）后还能读回历史', async () => {
+    const store = new Store(':memory:')
+    const saved: Automation[] = []
+    const deps = {
+      store,
+      config: () => ({ projects: PROJECTS, tasks: saved }),
+      client: () => scriptedClient([FULL_TASK]),
+      catalogs: () => [githubCatalog],
+      clock: () => '2026-11-26T10:00:00.000Z',
+      saveTask: (task: Automation) => { saved.push(task) },
+    }
+    const first = new AutomationSessionService(deps)
+    const conversation = first.create({ source: 'web-panel', requester: 'panel' })
+    await first.turn(conversation.id, '订阅 GitHub 的 Action 失败')
+
+    // 面板点任务卡「恢复会话」时服务可能已经重启过：历史必须还在。
+    const second = new AutomationSessionService(deps)
+    const messages = second.messages(conversation.id)
+    expect(messages.map(item => item.role)).toEqual(['user', 'assistant'])
+    expect(messages[0]!.text).toContain('订阅 GitHub')
+  })
 })
 

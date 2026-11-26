@@ -198,6 +198,47 @@ export interface AutomationRun {
  */
 export type AutomationConversationStep = 'parse' | 'clarify' | 'preview' | 'create' | 'update'
 
+/**
+ * 会话里的一条消息。
+ *
+ * 落库（而不是只留在内存里）：面板点任务卡「恢复会话」时，
+ * 服务重启过也要能把上次聊的内容原样取回来。
+ */
+export interface AutomationConversationMessage {
+  /** 所属会话 id。 */
+  conversationId: string
+  /** 会话内单调递增序号；断线重连按它补齐增量。 */
+  seq: number
+  role: 'user' | 'assistant'
+  /** 这一条正文。 */
+  text: string
+  /** 助手逐字说的话；与 text 分开是因为 text 是结论，speech 是过程。 */
+  speech?: string
+  /** 这一步在做什么（面板气泡上方的小字）。 */
+  step?: string
+  /** 预览卡数据（参数齐了才带）。 */
+  preview?: AutomationConversationPreview
+  /** 本轮是否已结束。 */
+  done?: boolean
+  createdAt: string
+}
+
+/** 会话里的预览卡：确认前的参数一览。 */
+export interface AutomationConversationPreview {
+  name: string
+  source: string
+  types: string[]
+  params: Record<string, string>
+  keywords: string[]
+  semantic: string
+  mode: string
+  project: string
+  skill: string
+  runtimeId: string
+  prompt: string
+  trigger: string
+}
+
 /** 会话里缺的东西：问一次只问一项。 */
 export interface AutomationConversationMissing {
   /** 缺哪一项：source / types / params / project / skill / mode / runtime / name。 */

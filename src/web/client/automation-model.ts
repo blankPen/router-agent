@@ -175,12 +175,21 @@ export function scheduleOf(trigger: AutomationTrigger | undefined): AutomationSc
   return trigger?.kind === 'schedule' ? trigger.schedule : undefined
 }
 
-/** 触发方式的中文说明：卡片副标题用这一句。 */
-export function triggerText(trigger: AutomationTrigger | undefined): string {
+/**
+ * 触发方式的短摘要；任务栏那种一行宽的地方用这句。
+ *
+ * 只留「来源 · 事件类型」或「定时 · 每天 09:00」——
+ * 完整说明在任务栏一行里放不下。
+ */
+export function triggerSummary(trigger: AutomationTrigger | undefined): string {
   if (!trigger) return '未知触发方式'
-  if (trigger.kind === 'schedule') return `定时触发 · ${scheduleText(trigger.schedule)}`
-  const types = trigger.types.join('、')
-  return `事件触发 · ${trigger.source}${types ? ` · ${types}` : ''}`
+  if (trigger.kind === 'schedule') return `定时 · ${scheduleText(trigger.schedule)}`
+  if (trigger.types.length === 0) return trigger.source
+  if (trigger.types.length > 1) return `${trigger.source} · ${trigger.types.length} 类事件`
+  // 类型 id 自带来源前缀（github.issues.opened），摘要里省掉重复的那一段。
+  const type = trigger.types[0] ?? ''
+  const short = type.startsWith(`${trigger.source}.`) ? type.slice(trigger.source.length + 1) : type
+  return `${trigger.source} · ${short}`
 }
 
 /** 处理模式的中文名。 */
@@ -193,15 +202,6 @@ export const MODE_LABEL: Record<EventHandlingMode, string> = {
 /** 处理模式的语义 class；面板用既有语义色，不新增色板。 */
 export function modeClass(mode: EventHandlingMode): string {
   return `tag mode-${mode}`
-}
-
-/** 过滤条件的中文说明。 */
-export function filterText(filter: EventFilter | undefined): string {
-  const parts: string[] = []
-  const keywords = filter?.keywords ?? []
-  if (keywords.length) parts.push(`关键词 ${keywords.join('、')}`)
-  if (filter?.semantic) parts.push(filter.semantic)
-  return parts.join('；') || '不过滤，全部命中'
 }
 
 /** 计划参数的校验；返回错误信息表示不合法。 */
@@ -321,6 +321,33 @@ export function removedTasks(tasks: AutomationTask[], taskId: string): Automatio
 /** 任务卡上「恢复会话」按钮的目标会话 id；没有绑定会话就返回空串。 */
 export function resumeTargetOf(task: AutomationTask): string {
   return task.conversationId ?? ''
+}
+
+/** 会话记录（与服务端 `AutomationConversation` 同形的子集）。 */
+export interface ConversationRecord {
+  id: string
+  taskId?: string
+  source: string
+  requester: string
+  text: string
+  step: string
+  status: 'active' | 'confirmed' | 'abandoned'
+  createdAt: string
+  updatedAt: string
+}
+
+/**
+ * 任务该恢复到哪条会话。
+ *
+ * 任务自己存着 `conversationId` 就用它；没有的话（早于会话化的任务）
+ * 反查会话列表里 `taskId` 指向它的那条 —— 一个任务只对应一条会话。
+ */
+export function conversationIdOf(
+  task: AutomationTask,
+  conversations: ConversationRecord[],
+): string | undefined {
+  if (task.conversationId) return task.conversationId
+  return conversations.find(item => item.taskId === task.id)?.id
 }
 
 /** 会话消息（与服务端同形的子集）。 */

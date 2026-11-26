@@ -32,6 +32,8 @@ import { normalizeStage, stageAliases } from '#core/stage.js'
 import type {
   Automation,
   AutomationConversation,
+  AutomationConversationMessage,
+  AutomationConversationPreview,
   AutomationConversationMissing,
   AutomationRun,
   AutomationRunOutputs,
@@ -536,6 +538,23 @@ CREATE TABLE IF NOT EXISTS automation_conversations (
 );
 CREATE INDEX IF NOT EXISTS idx_automation_conversations_task ON automation_conversations (task_id);
 CREATE INDEX IF NOT EXISTS idx_automation_conversations_status ON automation_conversations (status, updated_at);
+
+-- 会话消息：落库而不是只留内存。
+-- 面板点任务卡「恢复会话」时，服务重启过也要能把上次聊的内容取回来。
+CREATE TABLE IF NOT EXISTS automation_conversation_messages (
+  conversation_id TEXT NOT NULL,
+  seq            INTEGER NOT NULL,
+  role           TEXT NOT NULL,
+  text           TEXT NOT NULL DEFAULT '',
+  speech         TEXT NOT NULL DEFAULT '',
+  step           TEXT NOT NULL DEFAULT '',
+  preview        TEXT NOT NULL DEFAULT '',
+  done           INTEGER NOT NULL DEFAULT 0,
+  created_at     TEXT NOT NULL,
+  PRIMARY KEY (conversation_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_automation_conversation_messages_seq
+  ON automation_conversation_messages (conversation_id, seq);
 
 -- 身份别名缓存：邮箱 / open_id 解析成 open_id 的结果。
 -- 键里必须带 app_id：open_id 是「应用 × 用户」维度的，换个应用同一个人的 open_id 就变了，
@@ -1198,6 +1217,40 @@ export class Store {
   getAutomationConversationByTask(taskId: string): AutomationConversation | undefined {
     const row = this.db.prepare('SELECT * FROM automation_conversations WHERE task_id = ? ORDER BY updated_at DESC LIMIT 1').get(taskId) as Row | undefined
     return row ? automationConversationFromRow(row) : undefined
+  }
+
+  /** 写入一条会话消息；同一条 (会话, seq) 只留一份。 */
+  insertAutomationConversationMessage(message: AutomationConversationMessage): void {
+    this.db.prepare(`INSERT OR REPLACE INTO automation_conversation_messages
+      (conversation_id, seq, role, text, speech, step, preview, done, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(
+        message.conversationId,
+        message.seq,
+        message.role,
+        message.text,
+        message.speech ?? '',
+        message.step ?? '',
+        message.preview ? JSON.stringify(message.preview) : '',
+        message.done ? 1 : 0,
+        message.createdAt,
+      )
+  }
+
+  /** 取会话消息流；after 之后的不返回（断线重连补齐用）。 */
+  listAutomationConversationMessages(conversationId: string, after = 0): AutomationConversationMessage[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM automation_conversation_messages WHERE conversation_id = ? AND seq > ? ORDER BY seq ASC',
+    ).all(conversationId, after) as Row[]
+    return rows.map(automationConversationMessageFromRow)
+  }
+
+  /** 会话里已经用掉的最后一个序号；新消息接着它往后排。 */
+  lastAutomationConversationSeq(conversationId: string): number {
+    const row = this.db.prepare(
+      'SELECT MAX(seq) AS seq FROM automation_conversation_messages WHERE conversation_id = ?',
+    ).get(conversationId) as Row | undefined
+    return Number(row?.seq ?? 0)
   }
 
   // ---------- Thread alias ----------
@@ -2270,6 +2323,22 @@ function automationConversationFromRow(row: Row): AutomationConversation {
     status: String(row.status ?? 'active') as AutomationConversation['status'],
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
+  }
+}
+
+/** 会话消息行 → 消息。 */
+function automationConversationMessageFromRow(row: Row): AutomationConversationMessage {
+  const preview = row.preview ? JSON.parse(String(row.preview)) as AutomationConversationPreview : undefined
+  return {
+    conversationId: String(row.conversation_id),
+    seq: Number(row.seq),
+    role: String(row.role) as AutomationConversationMessage['role'],
+    text: String(row.text ?? ''),
+    ...(row.speech ? { speech: String(row.speech) } : {}),
+    ...(row.step ? { step: String(row.step) } : {}),
+    ...(preview ? { preview } : {}),
+    ...(Number(row.done) === 1 ? { done: true } : {}),
+    createdAt: String(row.created_at),
   }
 }
 

@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   blankDraft,
+  conversationIdOf,
   draftOf,
-  filterText,
   MODE_LABEL,
   modeClass,
   outputsText,
@@ -10,9 +10,10 @@ import {
   phaseText,
   scheduleText,
   scheduleOf,
-  triggerText,
+  triggerSummary,
   validateDraft,
   type AutomationTask,
+  type ConversationRecord,
 } from '../../src/web/client/automation-model.js'
 
 function task(over: Partial<AutomationTask> = {}): AutomationTask {
@@ -89,7 +90,6 @@ describe('自动化面板模型', () => {
       trigger: { kind: 'event', source: 'github', types: ['github.issues.opened'], mode: 'auto' },
     })
     expect(scheduleOf(eventTask.trigger)).toBeUndefined()
-    expect(triggerText(eventTask.trigger)).toBe('事件触发 · github · github.issues.opened')
     expect(scheduleOf(task().trigger)).toEqual({ kind: 'daily', at: '09:00' })
   })
 
@@ -97,12 +97,6 @@ describe('自动化面板模型', () => {
     expect(MODE_LABEL.auto).toBe('自动执行')
     expect(modeClass('review')).toBe('tag mode-review')
     expect(modeClass('notify')).toBe('tag mode-notify')
-  })
-
-  it('过滤条件有说法，没配就说不过滤', () => {
-    expect(filterText({ keywords: ['退款', '承诺'] })).toBe('关键词 退款、承诺')
-    expect(filterText({ semantic: '只看 CI 失败' })).toBe('只看 CI 失败')
-    expect(filterText(undefined)).toBe('不过滤，全部命中')
   })
 
   it('计划与产出的文案能直接展示', () => {
@@ -123,3 +117,58 @@ describe('自动化面板模型', () => {
     }
   })
 })
+
+describe('自动化页布局的纯逻辑', () => {
+  it('任务栏的触发摘要一行说得清订阅什么', () => {
+    expect(triggerSummary({
+      kind: 'event',
+      source: 'github',
+      types: ['github.issues.opened'],
+      mode: 'auto',
+    })).toBe('github · issues.opened')
+    expect(triggerSummary({ kind: 'schedule', schedule: { kind: 'daily', at: '09:00' } })).toBe('定时 · 每天 09:00')
+    expect(triggerSummary(undefined)).toBe('未知触发方式')
+  })
+
+  it('订阅多种事件时摘要只报数量，不把类型铺开', () => {
+    expect(triggerSummary({
+      kind: 'event',
+      source: 'github',
+      types: ['github.issues.opened', 'github.pull_request.merged'],
+      mode: 'auto',
+    })).toBe('github · 2 类事件')
+  })
+
+  it('点任务卡恢复到任务自己绑定的会话', () => {
+    const conversations = [conversation({ id: 'acv_other', taskId: 'auto_2' })]
+    expect(conversationIdOf(task({ conversationId: 'acv_1' }), conversations)).toBe('acv_1')
+  })
+
+  it('任务没存会话 id 时反查会话列表里指向它的那条', () => {
+    const conversations = [
+      conversation({ id: 'acv_other', taskId: 'auto_2' }),
+      conversation({ id: 'acv_mine', taskId: 'auto_1' }),
+    ]
+    expect(conversationIdOf(task(), conversations)).toBe('acv_mine')
+  })
+
+  it('找不到会话时返回空，调用方据此提示而不是静默失败', () => {
+    expect(conversationIdOf(task(), [])).toBeUndefined()
+    expect(conversationIdOf(task(), [conversation({ id: 'acv_other', taskId: 'auto_2' })])).toBeUndefined()
+  })
+})
+
+/** 会话记录。 */
+function conversation(over: Partial<ConversationRecord> = {}): ConversationRecord {
+  return {
+    id: 'acv_1',
+    source: 'web-panel',
+    requester: 'panel',
+    text: '',
+    step: 'parse',
+    status: 'active',
+    createdAt: '2026-11-01T00:00:00.000Z',
+    updatedAt: '2026-11-01T00:00:00.000Z',
+    ...over,
+  }
+}

@@ -1,8 +1,10 @@
 /**
- * 自动化页：任务列表与执行记录两个 Tab。
+ * 自动化页：左边任务栏 + 右边大 Chat 会话。
  *
- * 新建任务走**会话**（自然语言一句话），不再有填表弹窗；
- * 任务卡上带处理模式、订阅信息与「恢复会话」入口（§8.2 / §8.3）。
+ * 布局照 ChatGPT Codex 的样子：整个页面主区就是会话窗口，
+ * 底部浮着一个消息输入框；左边的任务卡点一下就把会话切过去（历史接得上）。
+ *
+ * 新建任务走**会话**（自然语言一句话），不再有填表弹窗。
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { getJson, saveConfigPatch, sendJson } from './api.js'
@@ -12,30 +14,18 @@ import {
   MODE_LABEL,
   RUN_PHASE_LABEL,
   RUN_STATUS_LABEL,
+  conversationIdOf,
   durationText,
-  filterText,
   modeClass,
   phaseText,
   removedTasks,
   runStatusClass,
   toggledTasks,
-  triggerText,
+  triggerSummary,
   type AutomationRun,
   type AutomationTask,
+  type ConversationRecord,
 } from './automation-model.js'
-
-/** 可选的 runtime。 */
-export interface RuntimeOption {
-  id: string
-  name: string
-}
-
-/** 可选的项目。 */
-export interface ProjectOption {
-  name: string
-  repo: string
-  defaultBranch?: string
-}
 
 interface AutomationsPayload {
   tasks: AutomationTask[]
@@ -51,17 +41,14 @@ interface Notice {
 export function AutomationView(): JSX.Element {
   const [tasks, setTasks] = useState<AutomationTask[]>([])
   const [runs, setRuns] = useState<AutomationRun[]>([])
-  const [runtimes, setRuntimes] = useState<RuntimeOption[]>([])
-  const [projects, setProjects] = useState<ProjectOption[]>([])
-  const [tab, setTab] = useState<'tasks' | 'runs'>('tasks')
+  const [conversations, setConversations] = useState<ConversationRecord[]>([])
+  const [tab, setTab] = useState<'chat' | 'runs'>('chat')
   const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
   const [busy, setBusy] = useState(false)
-  /** 正在进行的会话；空表示会话面板收起。 */
-  const [conversationId, setConversationId] = useState<string | null>(null)
-  /** 会话面板是否展开。 */
-  const [conversationOpen, setConversationOpen] = useState(false)
+  /** 当前打开的会话；空表示还没有会话（页面刚进来）。 */
+  const [conversationId, setConversationId] = useState<string | undefined>(undefined)
   /** 有任务正在执行：轮询加快，阶段才看得出在动。 */
   const running = runs.some(run => run.status === 'running')
 
@@ -70,22 +57,14 @@ export function AutomationView(): JSX.Element {
       const data = await getJson<AutomationsPayload>('/api/automations')
       setTasks(data.tasks ?? [])
       setRuns(data.runs ?? [])
+      const list = await getJson<{ conversations: ConversationRecord[] }>('/api/automations/conversations')
+      setConversations(list.conversations ?? [])
       setLoaded(true)
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
       setLoaded(true)
     }
-  }, [])
-
-  // 候选 runtime / 项目跟着配置走：面板「配置 → 运行时 / 项目」改完这里立刻能看到。
-  useEffect(() => {
-    void getJson<{ runtimeChoices?: Array<{ id: string; name: string }>; projects?: ProjectOption[] }>('/api/config')
-      .then(data => {
-        setRuntimes(data.runtimeChoices ?? [])
-        setProjects(data.projects ?? [])
-      })
-      .catch(() => undefined)
   }, [])
 
   useEffect(() => {
@@ -119,15 +98,26 @@ export function AutomationView(): JSX.Element {
     await saveConfigPatch({ 'automation.tasks': payload })
   }, [])
 
+  /** 新建：开一条空会话，助手在那边等着听用户说话。 */
   const openCreate = () => {
-    setConversationId(null)
-    setConversationOpen(true)
+    setTab('chat')
+    setConversationId(undefined)
   }
 
-  /** 恢复会话：回到这条任务绑定的原会话，历史接得上（§12.2 V8）。 */
+  /**
+   * 恢复会话：回到这条任务绑定的原会话，历史接得上。
+   *
+   * 任务自己存着 `conversationId` 就用它；没有的话反查会话列表
+   * 里 `taskId` 指向它的那条（会话化之前建的任务也能找回）。
+   */
   const resumeConversation = (task: AutomationTask) => {
-    setConversationId(task.conversationId ?? null)
-    setConversationOpen(true)
+    const target = conversationIdOf(task, conversations)
+    if (!target) {
+      setNotice({ kind: 'warn', text: `「${task.name}」没有会话记录，这条任务是会话化之前建的。` })
+      return
+    }
+    setTab('chat')
+    setConversationId(target)
   }
 
   const toggle = async (task: AutomationTask) => {
@@ -160,8 +150,7 @@ export function AutomationView(): JSX.Element {
     setBusy(true)
     setNotice({ kind: 'ok', text: `已触发「${task.name}」，进度见「执行记录」。` })
     try {
-      const data = await sendJson<{ run: AutomationRun }>('/api/automations/trigger', 'POST', { id: task.id })
-      const run = data.run
+      await sendJson<{ run: AutomationRun }>('/api/automations/trigger', 'POST', { id: task.id })
       // 触发立即返回：执行还在后台跑，这里只报「已触发」，进度靠轮询。
       setNotice({ kind: 'ok', text: `「${task.name}」已触发，正在执行。` })
       await load()
@@ -213,104 +202,65 @@ export function AutomationView(): JSX.Element {
       </div>
 
       {error && <div className="banner danger"><Icon name="alert" />{error}</div>}
-      {notice && <div className={`banner ${notice.kind === 'error' ? 'danger' : ''}`} onClick={() => setNotice(null)}>{notice.text}</div>}
-
-      {conversationOpen && (
-        <section className="automation-conversation">
-          <header className="automation-conversation-head">
-            <h2>{conversationId ? '恢复会话' : '新建自动化 · 会话'}</h2>
-            <p>
-              {conversationId
-                ? '接着上次的对话继续改这条任务；确认后才写回任务。'
-                : '说清要订阅什么、命中后做什么；助手会追问缺的那一项，确认后才落库。'}
-            </p>
-          </header>
-          <AutomationConversationView
-            conversationId={conversationId ?? undefined}
-            onTaskCreated={() => { void load() }}
-            onClose={() => setConversationOpen(false)}
-          />
-        </section>
-      )}
+      {notice && <div className={`banner ${notice.kind === 'error' ? 'danger' : notice.kind === 'warn' ? 'warn' : ''}`} onClick={() => setNotice(null)}>{notice.text}</div>}
 
       <div className="segmented automation-tabs" role="tablist">
-        <button className={tab === 'tasks' ? 'active' : ''} onClick={() => setTab('tasks')}>
-          自动化任务{tasks.length ? `（${enabledCount}/${tasks.length} 启用）` : ''}
+        <button className={tab === 'chat' ? 'active' : ''} onClick={() => setTab('chat')}>
+          会话
         </button>
         <button className={tab === 'runs' ? 'active' : ''} onClick={() => setTab('runs')}>
           执行记录{runs.length ? `（${runs.length}）` : ''}
         </button>
       </div>
 
-      {tab === 'tasks' ? (
-        <>
-        {tasks.length === 0 ? (
-          <div className="empty-state">
-            <p>还没有自动化任务。</p>
-            <p className="muted">用一句话建一个：比如「订阅 GitHub 的 CI 失败，有价值的就立即修复」。</p>
-          </div>
-        ) : (
-          <div className="source-cards">
-            {tasks.map(task => (
-              <article key={task.id} className={`source-card ${task.enabled ? 'on' : ''}`}>
-                <div className="source-card-top">
-                  <span className="source-logo"><Icon name="zap" size={16} /></span>
-                  <div className="source-card-title">
-                    <strong>{task.name}</strong>
-                    <span>
-                      {task.type === 'script' ? '脚本自动化' : 'AI 自动化'} · {triggerText(task.trigger)} · {task.project || '未选项目'}
-                    </span>
-                  </div>
+      {tab === 'chat' ? (
+        <div className="automation-workspace">
+          {/* 左边：所有自动化任务的精简卡片，竖着排。 */}
+          <aside className="automation-rail">
+            <div className="automation-rail-head">
+              <h3>自动化任务</h3>
+              <span>{tasks.length ? `${enabledCount} 条启用` : '还没有任务'}</span>
+            </div>
+            <div className="automation-rail-body">
+              {tasks.length === 0 ? (
+                <div className="automation-rail-empty">
+                  <p>还没有自动化任务。</p>
+                  <p className="muted">用一句话建一个，比如「订阅 GitHub 的 CI 失败，有价值的就立即修复」。</p>
                 </div>
-                <p className="source-card-status">{task.description || task.prompt}</p>
-                {task.trigger.kind === 'event' && (
-                  <p className="automation-task-tags">
-                    <span className={modeClass(task.trigger.mode)}><i />{MODE_LABEL[task.trigger.mode]}</span>
-                    {task.trigger.types.map(type => (
-                      <span key={type} className="tag source">{type}</span>
-                    ))}
-                  </p>
-                )}
-                {task.trigger.kind === 'event' && (
-                  <p className="source-card-package" title={filterText(task.trigger.filter)}>
-                    {filterText(task.trigger.filter)}
-                  </p>
-                )}
-                <p className="source-card-package" title={task.prompt}>{task.prompt}</p>
-                {task.type === 'script' && (
-                  <p className="automation-script-state">
-                    {task.script
-                      ? <>脚本已就绪（{task.script.split('\n').length} 行），定时执行跑的就是这份</>
-                      : <>还没有脚本：先生成脚本，确认后才会执行</>}
-                  </p>
-                )}
-                <div className="source-card-fields">
-                  {task.trigger.kind === 'schedule'
-                    ? (task.nextRunAt ? `下次触发 ${formatTime(task.nextRunAt)}` : '尚未排期')
-                    : '按事件触发'}
-                  {task.lastStatus ? ` · 上次 ${RUN_STATUS_LABEL[task.lastStatus] ?? task.lastStatus}` : ''}
-                </div>
-                <div className="source-card-actions">
-                  <button className="btn tiny" onClick={() => resumeConversation(task)}>恢复会话</button>
-                  {task.type === 'script' && (
-                    <button className="btn tiny ghost" onClick={() => void generateScript(task)} disabled={busy}>
-                      <Icon name="zap" size={11} />{task.script ? '重新生成脚本' : '生成脚本'}
-                    </button>
-                  )}
-                  <button className="btn tiny ghost" onClick={() => void trigger(task)} disabled={busy}>
-                    <Icon name="play" size={11} />执行一次
-                  </button>
-                  <button className="btn tiny ghost" onClick={() => void toggle(task)} disabled={busy}>
-                    {task.enabled ? '停用' : '启用'}
-                  </button>
-                  <button className="btn tiny ghost" onClick={() => void remove(task)} disabled={busy}>删除</button>
-                </div>
-              </article>
-            ))}
-          </div>
-        )
-        }
-        </>
+              ) : (
+                tasks.map(task => (
+                  <TaskRailItem
+                    key={task.id}
+                    task={task}
+                    active={conversationId !== undefined && conversationIdOf(task, conversations) === conversationId}
+                    busy={busy}
+                    onOpen={() => resumeConversation(task)}
+                    onTrigger={() => void trigger(task)}
+                    onToggle={() => void toggle(task)}
+                    onRemove={() => void remove(task)}
+                    onGenerateScript={() => void generateScript(task)}
+                  />
+                ))
+              )}
+            </div>
+          </aside>
+
+          {/* 右边：整个主区就是会话窗口，底部浮着输入框。 */}
+          <section className="automation-chat">
+            <header className="automation-chat-head">
+              <h2>{conversationId ? '任务会话' : '新建自动化 · 会话'}</h2>
+              <p>
+                {conversationId
+                  ? '接着上次的对话继续改这条任务；确认后才写回任务。'
+                  : '说清要订阅什么、命中后做什么；助手会追问缺的那一项，确认后才落库。'}
+              </p>
+            </header>
+            <AutomationConversationView
+              conversationId={conversationId}
+              onTaskCreated={() => { void load() }}
+            />
+          </section>
+        </div>
       ) : (
         runs.length === 0 ? (
           <div className="empty-state">
@@ -368,8 +318,53 @@ export function AutomationView(): JSX.Element {
           </table>
         )
       )}
-
     </>
+  )
+}
+
+/** 任务栏里的一条任务：精简到一行标题 + 一行摘要，操作收在 hover 出来的按钮里。 */
+function TaskRailItem({ task, active, busy, onOpen, onTrigger, onToggle, onRemove, onGenerateScript }: {
+  task: AutomationTask
+  /** 这条任务是不是当前打开的会话。 */
+  active: boolean
+  busy: boolean
+  onOpen: () => void
+  onTrigger: () => void
+  onToggle: () => void
+  onRemove: () => void
+  onGenerateScript: () => void
+}): JSX.Element {
+  return (
+    <article className={`rail-item automation-rail-item ${active ? 'active' : ''} ${task.enabled ? '' : 'off'}`}>
+      <button className="rail-item-main" onClick={onOpen} title={task.description || task.prompt}>
+        <span className="rail-item-head">
+          <span className={`rail-dot ${task.enabled ? 'on' : ''}`} aria-hidden="true" />
+          <strong>{task.name}</strong>
+        </span>
+        <span className="rail-item-meta">
+          {task.trigger.kind === 'event' ? (
+            <span className={modeClass(task.trigger.mode)}><i />{MODE_LABEL[task.trigger.mode]}</span>
+          ) : null}
+          <span className="rail-item-trigger">{triggerSummary(task.trigger)}</span>
+        </span>
+      </button>
+      <div className="rail-item-actions">
+        <button className="icon-btn" title="执行一次" aria-label={`执行一次 ${task.name}`} onClick={onTrigger} disabled={busy}>
+          <Icon name="play" size={13} />
+        </button>
+        {task.type === 'script' && (
+          <button className="icon-btn" title="生成脚本" aria-label={`生成脚本 ${task.name}`} onClick={onGenerateScript} disabled={busy}>
+            <Icon name="zap" size={13} />
+          </button>
+        )}
+        <button className="icon-btn" title={task.enabled ? '停用' : '启用'} aria-label={`${task.enabled ? '停用' : '启用'} ${task.name}`} onClick={onToggle} disabled={busy}>
+          <Icon name={task.enabled ? 'stop' : 'play'} size={13} />
+        </button>
+        <button className="icon-btn danger" title="删除" aria-label={`删除 ${task.name}`} onClick={onRemove} disabled={busy}>
+          <Icon name="trash" size={13} />
+        </button>
+      </div>
+    </article>
   )
 }
 
@@ -383,7 +378,6 @@ function RunOutputs({ outputs }: { outputs: AutomationRun['outputs'] }): JSX.Ele
     </div>
   )
 }
-
 
 /** 时间展示：本地时区，去掉年份噪音。 */
 function formatTime(value: string): string {

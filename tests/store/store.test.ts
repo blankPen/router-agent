@@ -803,4 +803,42 @@ describe('事件队列', () => {
     db.close()
     rmSync(dir, { recursive: true, force: true })
   })
+
+  it('会话消息落库，重开库后还能接着往下排序号', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ra-db-'))
+    const path = join(dir, 'ra.sqlite')
+    const db = new Store(path)
+    db.insertAutomationConversationMessage({
+      conversationId: 'acv_1',
+      seq: 1,
+      role: 'user',
+      text: '订阅 GitHub 的 CI 失败',
+      createdAt: '2026-11-26T10:00:00.000Z',
+    })
+    db.insertAutomationConversationMessage({
+      conversationId: 'acv_1',
+      seq: 2,
+      role: 'assistant',
+      text: '参数齐了，确认一下就建。',
+      step: 'preview',
+      preview: { name: 'CI 修复', source: 'github', types: [], params: {}, keywords: [], semantic: '', mode: 'auto', project: '', skill: '', runtimeId: '', prompt: '', trigger: '' },
+      done: false,
+      createdAt: '2026-11-26T10:00:01.000Z',
+    })
+    expect(db.lastAutomationConversationSeq('acv_1')).toBe(2)
+    db.close()
+
+    // 重开库：面板点任务卡「恢复会话」时要把上次聊的内容原样取回来。
+    const reopened = new Store(path)
+    const messages = reopened.listAutomationConversationMessages('acv_1')
+    expect(messages.map(item => item.text)).toEqual([
+      '订阅 GitHub 的 CI 失败',
+      '参数齐了，确认一下就建。',
+    ])
+    expect(messages[1]!.preview?.name).toBe('CI 修复')
+    expect(reopened.listAutomationConversationMessages('acv_1', 1).map(item => item.seq)).toEqual([2])
+    expect(reopened.lastAutomationConversationSeq('acv_1')).toBe(2)
+    reopened.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
 })

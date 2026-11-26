@@ -10,6 +10,8 @@
 import type {
   Automation,
   AutomationConversation,
+  AutomationConversationMessage,
+  AutomationConversationPreview,
   AutomationConversationMissing,
 } from '#core/automation.js'
 import type { EventCatalog } from '#event/port.js'
@@ -19,37 +21,24 @@ import type { ProjectConfig } from '../config.js'
 import type { Store } from '../store/db.js'
 import { parseAutomationIntent, type AutomationTaskDraft } from './parse.js'
 
-/** 一条会话消息。 */
-export interface AutomationConversationMessage {
-  /** 单调递增序号；断线重连按它补齐增量。 */
-  seq: number
-  role: 'user' | 'assistant'
-  text: string
-  /** 这一步在做什么（面板气泡上方的小字）。 */
-  step?: string
-  /** 预览卡数据（参数齐了才带）。 */
-  preview?: AutomationPreview
-  /** 助手逐字说的话；与 text 分开是因为 text 是最终结论，speech 是过程。 */
-  speech?: string
-  /** 本轮是否已结束。 */
-  done?: boolean
-}
+/**
+ * 预览卡：确认前的参数一览。
+ *
+ * 与核心层的 `AutomationConversationPreview` 同形 —— 面板要渲染它，
+ * 存库也要存它，两边共用一份定义免得走样。
+ */
+export type AutomationPreview = AutomationConversationPreview
 
-/** 预览卡：确认前的参数一览。 */
-export interface AutomationPreview {
-  name: string
-  source: string
-  types: string[]
-  params: Record<string, string>
-  keywords: string[]
-  semantic: string
-  mode: string
-  project: string
-  skill: string
-  runtimeId: string
-  prompt: string
-  trigger: string
-}
+/**
+ * 会话消息的对外形状。
+ *
+ * 面板只关心这几项：`conversationId` 与 `createdAt` 是存库用的，
+ * 不往外发。
+ */
+export type AutomationConversationWire = Omit<
+  AutomationConversationMessage,
+  'conversationId' | 'createdAt'
+>
 
 export interface AutomationSessionDeps {
   store: Store
@@ -95,10 +84,6 @@ export interface SessionTurn {
 export class AutomationSessionService {
   private deps: AutomationSessionDeps
   private logger: Logger
-  /** 会话 id → 消息流。 */
-  private streams = new Map<string, AutomationConversationMessage[]>()
-  /** 会话 id → 下一条消息的序号。 */
-  private seqs = new Map<string, number>()
 
   constructor(deps: AutomationSessionDeps) {
     this.deps = deps
@@ -140,8 +125,8 @@ export class AutomationSessionService {
   }
 
   /** 取会话的消息流；after 之后的不返回（断线重连补齐用）。 */
-  messages(id: string, after = 0): AutomationConversationMessage[] {
-    return (this.streams.get(id) ?? []).filter(item => item.seq > after)
+  messages(id: string, after = 0): AutomationConversationWire[] {
+    return this.deps.store.listAutomationConversationMessages(id, after).map(wireOf)
   }
 
   /**
@@ -154,7 +139,7 @@ export class AutomationSessionService {
     if (!conversation) throw new Error(`automation:conversation-not-found: ${conversationId}`)
     this.push(conversationId, { role: 'user', text })
 
-    const history = this.streams.get(conversationId) ?? []
+    const history = this.deps.store.listAutomationConversationMessages(conversationId)
     const context = history
       .filter(item => item.role === 'user')
       .map(item => item.text)
@@ -348,13 +333,24 @@ export class AutomationSessionService {
   }
 
   /** 追加一条消息。 */
-  private push(conversationId: string, message: Omit<AutomationConversationMessage, 'seq'>): void {
-    const seq = (this.seqs.get(conversationId) ?? 0) + 1
-    this.seqs.set(conversationId, seq)
-    const list = this.streams.get(conversationId) ?? []
-    list.push({ ...message, seq })
-    this.streams.set(conversationId, list)
+  private push(
+    conversationId: string,
+    message: Omit<AutomationConversationMessage, 'seq' | 'conversationId' | 'createdAt'>,
+  ): void {
+    const seq = this.deps.store.lastAutomationConversationSeq(conversationId) + 1
+    this.deps.store.insertAutomationConversationMessage({
+      ...message,
+      seq,
+      conversationId,
+      createdAt: this.deps.clock(),
+    })
   }
+}
+
+/** 消息 → 对外形状（去掉存库用的字段）。 */
+function wireOf(message: AutomationConversationMessage): AutomationConversationWire {
+  const { conversationId: _conversationId, createdAt: _createdAt, ...wire } = message
+  return wire
 }
 
 /** 预览卡：把解析结果整理成人能看懂的参数一览。 */
