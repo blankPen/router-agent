@@ -16,9 +16,8 @@ import { noopLogger, errorMessage, type Logger } from '#infra/logger.js'
 import type { PluginEntry } from '#infra/plugin-loader.js'
 import { EVENT_PRIORITIES, normalizeEventPriority, type EventPriority } from '#core/event.js'
 import { GITHUB_EVENT_TYPES, isGithubEventType } from '#core/github-events.js'
-import { type AutomationSchedule } from '#core/automation.js'
+import { type AutomationSchedule, type AutomationTrigger, type EventHandlingMode } from '#core/automation.js'
 import { validateSchedule } from '#core/automation-schedule.js'
-import { validateEventRules, type EventRule } from './events/rules.js'
 
 const runtimePackage: Record<string, string> = { ...DEFAULT_RUNTIME_PLUGINS }
 const channelPackage = (id: string): string | undefined => DEFAULT_CHANNEL_PLUGINS[id]
@@ -335,8 +334,6 @@ export interface EventPolicyConfig {
 export interface EventsSettings {
   enabled: boolean
   sources: Record<string, EventSourceConfig>
-  /** 按 eventType 索引的决策规则；规则存在本身即表示该类事件需要判定。 */
-  rules: EventRule[]
   decision: EventDecisionConfig
   policy: EventPolicyConfig
 }
@@ -362,7 +359,12 @@ export interface AutomationTaskConfig {
   prompt: string
   /** 脚本自动化：AI 生成的脚本正文，持久化保存，可在面板查看与人工编辑。 */
   script?: string
-  schedule: AutomationSchedule
+  /**
+   * 触发方式：事件触发或定时触发。
+   *
+   * 订阅关系只在这里 —— 事件源插件不再持有「订阅了哪些事件」。
+   */
+  trigger: AutomationTrigger
   /** 执行 runtime；留空表示跟随默认 runtime。 */
   runtimeId: string
   /** 目标项目名（对应 projects[].name）。 */
@@ -371,6 +373,12 @@ export interface AutomationTaskConfig {
   repo: string
   /** 起始分支；留空表示跟随项目默认分支。 */
   branch: string
+  /** 处理方式（skill 闭集内的 id）；事件类任务的属性。 */
+  skill?: string
+  /** 通知人；事件开工时先私聊通知这个人。 */
+  notifyTo?: string
+  /** 绑定的会话 id；面板任务卡的「恢复会话」用它找回原会话。 */
+  conversationId?: string
   enabled: boolean
   /** 创建者标识；当前全局共用，保留字段便于将来区分来源。 */
   createdBy: string
@@ -614,11 +622,10 @@ export function defaultConfig(): AppConfig {
         feishu: { enabled: false, kind: 'feishu' },
       },
       decision: {
-        provider: 'rule',
+        provider: 'llm',
         confidenceThreshold: 0.6,
         fallback: 'review',
       },
-      rules: [],
       policy: {
         peak: { start: '09:00', end: '20:00', priorities: ['P0', 'P1'] },
         offPeak: { start: '20:00', end: '09:00', priorities: ['P2', 'P3'] },
@@ -983,11 +990,13 @@ export function validateAutomationTask(value: unknown): { error: string | null; 
     description: '',
     type: 'ai',
     prompt: '',
-    schedule: { kind: 'daily', at: '09:00' },
+    trigger: { kind: 'schedule', schedule: { kind: 'daily', at: '09:00' } },
     runtimeId: '',
     project: '',
     repo: '',
     branch: '',
+    skill: '',
+    notifyTo: '',
     enabled: true,
     createdBy: '',
     createdAt: '',
@@ -1001,9 +1010,8 @@ export function validateAutomationTask(value: unknown): { error: string | null; 
   const type = value.type === 'script' ? 'script' : 'ai'
   const prompt = stringOr(value.prompt, '').trim()
   if (!prompt) return { error: `自动化任务 ${id} 缺少提示词`, value: empty }
-  const schedule = isRecord(value.schedule) ? value.schedule as unknown as AutomationSchedule : { kind: 'daily' as const, at: '09:00' }
-  const scheduleError = validateSchedule(schedule)
-  if (scheduleError) return { error: `自动化任务 ${id} 的触发计划不合法：${scheduleError}`, value: empty }
+  const trigger = parseTrigger(value, id)
+  if (trigger.error) return { error: `自动化任务 ${id} 的触发方式不合法：${trigger.error}`, value: empty }
   const project = stringOr(value.project, '').trim()
   const repo = stringOr(value.repo, '').trim()
   if (!project) return { error: `自动化任务 ${id} 没有选择目标项目`, value: empty }
@@ -1018,17 +1026,73 @@ export function validateAutomationTask(value: unknown): { error: string | null; 
       type,
       prompt,
       ...(type === 'script' && stringOr(value.script, '').trim() ? { script: stringOr(value.script, '').trim() } : {}),
-      schedule,
+      trigger: trigger.value,
       runtimeId: stringOr(value.runtimeId, '').trim(),
       project,
       repo,
       branch: stringOr(value.branch, '').trim(),
+      skill: stringOr(value.skill, '').trim(),
+      notifyTo: stringOr(value.notifyTo, '').trim(),
+      conversationId: stringOr(value.conversationId, '').trim() || undefined,
       enabled: booleanOr(value.enabled, true),
       createdBy: stringOr(value.createdBy, '').trim(),
       createdAt: stringOr(value.createdAt, '') || now,
       updatedAt: stringOr(value.updatedAt, '') || now,
     },
   }
+}
+
+/**
+ * 解析任务的触发方式。
+ *
+ * 事件触发：订阅什么 + 命中后怎么办（auto / review / notify）。
+ * 定时触发：什么时候跑。
+ *
+ * 旧配置里的顶层 `schedule` 字段在迁移命令里转成 `trigger.kind = 'schedule'`；
+ * 这里额外兼容一次，省得用户必须先跑迁移才能启动。
+ */
+function parseTrigger(value: Record<string, unknown>, taskId: string): { error: string | null; value: AutomationTrigger } {
+  const raw = isRecord(value.trigger) ? value.trigger : null
+  if (raw) {
+    const kind = raw.kind === 'event' ? 'event' : 'schedule'
+    if (kind === 'event') {
+      const source = stringOr(raw.source, '').trim()
+      if (!source) return { error: '事件触发缺少来源', value: { kind: 'schedule', schedule: { kind: 'daily', at: '09:00' } } }
+      const types = Array.isArray(raw.types) ? stringArray(raw.types, []) : []
+      if (types.length === 0) return { error: '事件触发至少要订阅一种事件类型', value: { kind: 'schedule', schedule: { kind: 'daily', at: '09:00' } } }
+      const mode = raw.mode === 'review' || raw.mode === 'notify' ? raw.mode : 'auto'
+      const filter = isRecord(raw.filter) ? raw.filter : null
+      const params = isRecord(raw.params)
+        ? Object.fromEntries(Object.entries(raw.params).map(([key, val]) => [key, String(val ?? '')]))
+        : undefined
+      const keywords = filter && Array.isArray(filter.keywords) ? stringArray(filter.keywords, []) : []
+      const semantic = filter ? stringOr(filter.semantic, '').trim() : ''
+      return {
+        error: null,
+        value: {
+          kind: 'event',
+          source,
+          types,
+          ...(params && Object.keys(params).length > 0 ? { params } : {}),
+          ...(filter && (keywords.length > 0 || semantic) ? { filter: { ...(keywords.length > 0 ? { keywords } : {}), ...(semantic ? { semantic } : {}) } } : {}),
+          mode: mode as EventHandlingMode,
+        },
+      }
+    }
+    const schedule = isRecord(raw.schedule) ? raw.schedule as unknown as AutomationSchedule : { kind: 'daily' as const, at: '09:00' }
+    const scheduleError = validateSchedule(schedule)
+    if (scheduleError) return { error: `触发计划不合法：${scheduleError}`, value: { kind: 'schedule', schedule: { kind: 'daily', at: '09:00' } } }
+    return { error: null, value: { kind: 'schedule', schedule } }
+  }
+
+  // 兼容旧配置：顶层 schedule 字段等价于定时触发。
+  const legacy = isRecord(value.schedule) ? value.schedule as unknown as AutomationSchedule : null
+  if (legacy) {
+    const scheduleError = validateSchedule(legacy)
+    if (scheduleError) return { error: `触发计划不合法：${scheduleError}`, value: { kind: 'schedule', schedule: { kind: 'daily', at: '09:00' } } }
+    return { error: null, value: { kind: 'schedule', schedule: legacy } }
+  }
+  return { error: '缺少触发方式（trigger）', value: { kind: 'schedule', schedule: { kind: 'daily', at: '09:00' } } }
 }
 
 /** 校验整段自动化任务清单。 */
@@ -1078,19 +1142,9 @@ function parseEvents(value: unknown, base: EventsSettings, logger: Logger = noop
   }
   const decisionDoc = isRecord(value.decision) ? value.decision : {}
   const policyDoc = isRecord(value.policy) ? value.policy : {}
-  let rules = base.rules
-  if (Array.isArray(value.rules)) {
-    const parsed = validateEventRules(value.rules)
-    if (parsed.error) {
-      logger.warn('config:event-rules-invalid', { message: parsed.error })
-    } else {
-      rules = parsed.value
-    }
-  }
   return {
     enabled: booleanOr(value.enabled, base.enabled),
     sources,
-    rules,
     decision: {
       provider: decisionDoc.provider === 'jev' || decisionDoc.provider === 'llm' || decisionDoc.provider === 'rule'
         ? decisionDoc.provider
@@ -1647,7 +1701,6 @@ export function writeConfig(home: string, config: AppConfig): void {
     events: {
       enabled: config.events.enabled,
       sources: config.events.sources,
-      rules: config.events.rules,
       decision: config.events.decision,
       policy: config.events.policy,
     },
@@ -2238,7 +2291,7 @@ const CONFIG_VALIDATORS: Record<string, Validator> = {
 }
 
 /** 整段替换的复杂字段（项目、群、白名单这类不适合逐项点路径编辑的配置）。 */
-const LIST_PATHS = ['projects', 'feishu.chats', 'events.rules', 'automation.tasks'] as const
+const LIST_PATHS = ['projects', 'feishu.chats', 'automation.tasks'] as const
 
 /** 本地仓库绝对路径：接受 `/abs` 与 `path:/abs`，不接受 Orca 的 name:/id: 选择器。 */
 export function isLocalRepoPath(repo: string): boolean {
@@ -2427,10 +2480,6 @@ export function applyConfigPatch(config: AppConfig, patch: Record<string, unknow
     if ((LIST_PATHS as readonly string[]).includes(path)) {
       if (path === 'projects') {
         const result = validateProjects(value)
-        if (result.error) errors.push({ path, message: result.error })
-        else accepted.push({ path, value: result.value })
-      } else if (path === 'events.rules') {
-        const result = validateEventRules(value)
         if (result.error) errors.push({ path, message: result.error })
         else accepted.push({ path, value: result.value })
       } else if (path === 'automation.tasks') {

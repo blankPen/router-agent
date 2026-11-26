@@ -738,15 +738,15 @@ describe('事件队列', () => {
     db.close()
   })
 
-  it('按规则统计命中分布，未命中规则的事件不计入', () => {
+  it('按订阅统计命中分布，没有订阅的事件不计入', () => {
     const db = store()
-    db.insertEvent(event({ id: 'evt_a', externalId: 'x#a', ruleId: 'rule-a', status: 'pending' }))
-    db.insertEvent(event({ id: 'evt_b', externalId: 'x#b', ruleId: 'rule-a', status: 'review' }))
-    db.insertEvent(event({ id: 'evt_c', externalId: 'x#c', ruleId: 'rule-b', status: 'invalid' }))
-    db.insertEvent(event({ id: 'evt_d', externalId: 'x#d', status: 'undecided' }))
-    expect(db.countEventsByRule()).toEqual({
-      'rule-a': { pending: 1, review: 1, done: 0, invalid: 0 },
-      'rule-b': { pending: 0, review: 0, done: 0, invalid: 1 },
+    db.insertEvent(event({ id: 'evt_a', externalId: 'x#a', subscriptionId: 'auto-a', status: 'pending' }))
+    db.insertEvent(event({ id: 'evt_b', externalId: 'x#b', subscriptionId: 'auto-a', status: 'review' }))
+    db.insertEvent(event({ id: 'evt_c', externalId: 'x#c', subscriptionId: 'auto-b', status: 'invalid' }))
+    db.insertEvent(event({ id: 'evt_d', externalId: 'x#d', status: 'pending' }))
+    expect(db.countEventsBySubscription()).toEqual({
+      'auto-a': { pending: 1, review: 1, done: 0, invalid: 0 },
+      'auto-b': { pending: 0, review: 0, done: 0, invalid: 1 },
     })
     db.close()
   })
@@ -770,7 +770,7 @@ describe('事件队列', () => {
     db.close()
   })
 
-  it('旧库里的 prompt_version 列被去掉，事件本身不丢', () => {
+  it('旧库迁移后事件历史清空，列名改成 subscription_id', () => {
     // 旧版全局 prompt 删掉了，这一列不再有人写：迁移后不该留着它。
     const dir = mkdtempSync(join(tmpdir(), 'ra-store-migrate-'))
     const path = join(dir, 'state.db')
@@ -792,13 +792,14 @@ describe('事件队列', () => {
     legacy.close()
 
     const db = new Store(path)
-    const migrated = db.getEvent('evt_legacy')!
-    expect(migrated.title).toBe('旧事件')
-    expect(migrated.ruleId).toBe('rule-issue')
-    expect(migrated.ruleVersion).toBe(3)
+    // 决策 A11：历史事件直接清空 —— 旧行指向即将被删除的决策规则，留着只是僵尸记录。
+    expect(db.getEvent('evt_legacy')).toBeNull()
     const columns = (db as unknown as { db: DatabaseSync })
       .db.prepare('PRAGMA table_info(events)').all() as { name: string }[]
     expect(columns.some(column => column.name === 'prompt_version')).toBe(false)
+    expect(columns.some(column => column.name === 'rule_id')).toBe(false)
+    expect(columns.some(column => column.name === 'rule_version')).toBe(false)
+    expect(columns.some(column => column.name === 'subscription_id')).toBe(true)
     db.close()
     rmSync(dir, { recursive: true, force: true })
   })

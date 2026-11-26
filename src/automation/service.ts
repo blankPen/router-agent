@@ -8,7 +8,8 @@
  */
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import type { Automation, AutomationDraft, AutomationRun, AutomationRunOutputs, AutomationRunPhase, AutomationTool } from '#core/automation.js'
+import type { Automation, AutomationRun, AutomationRunOutputs, AutomationRunPhase, AutomationSchedule, AutomationTool } from '#core/automation.js'
+import { scheduleOf } from '#core/automation.js'
 import { nextRunAt, validateSchedule } from '#core/automation-schedule.js'
 import { errorMessage, noopLogger, type Logger } from '#infra/logger.js'
 import type { ChatClient } from '#infra/chat.js'
@@ -68,7 +69,12 @@ export interface AutomationView {
   type: Automation['type']
   prompt: string
   script?: string
-  schedule: Automation['schedule']
+  /** 触发方式：事件订阅或定时计划。 */
+  trigger: Automation['trigger']
+  skill: string
+  notifyTo: string
+  /** 绑定的会话 id；面板任务卡的「恢复会话」用它找回原会话。 */
+  conversationId?: string
   runtimeId: string
   project: string
   repo: string
@@ -98,12 +104,6 @@ export interface AutomationRunView {
   phase?: AutomationRun['phase']
   outputs: AutomationRunOutputs
   manual: boolean
-}
-
-/** 对话式创建的处理结果：要么落草稿，要么回问用户。 */
-export interface AutomationCaptureResult {
-  reply: string
-  draft?: AutomationDraft
 }
 
 /** 模型整理草稿的结果。 */
@@ -184,7 +184,10 @@ export class AutomationService {
       type: task.type,
       prompt: task.prompt,
       ...(task.script ? { script: task.script } : {}),
-      schedule: task.schedule,
+      trigger: task.trigger,
+      skill: task.skill ?? '',
+      notifyTo: task.notifyTo ?? '',
+      ...(task.conversationId ? { conversationId: task.conversationId } : {}),
       runtimeId: task.runtimeId,
       project: task.project,
       repo: task.repo,
@@ -249,18 +252,6 @@ export class AutomationService {
       outputs: found.outputs,
       manual: found.manual,
     }
-  }
-
-  /** 待确认的对话式草稿。 */
-  listDrafts(): AutomationDraft[] {
-    return this.store.listAutomationDrafts('pending')
-  }
-
-  /** 忽略一条草稿；不写正式任务配置。 */
-  dismissDraft(id: string): boolean {
-    const changed = this.store.setAutomationDraftStatus(id, 'dismissed')
-    if (changed) this.logger.info('automation:draft-dismissed', { draftId: id })
-    return changed
   }
 
   // ---------- 调度 ----------
@@ -593,54 +584,6 @@ export class AutomationService {
       return text
   }
 
-  /**
-   * 从飞书消息生成草稿并落库为待确认状态。
-   *
-   * 与面板共用同一套任务形状；确认（编辑并保存）前不写 `automation.tasks`。
-   * 模型识别不确定时只回问，不落草稿。
-   */
-  async captureDraft(text: string, source: string, requester: string): Promise<AutomationCaptureResult | null> {
-    const parsed = await this.parseDraft(text)
-    if (parsed.kind === 'none') return null
-    if (parsed.kind === 'unavailable') {
-      this.logger.warn('automation:draft-unavailable', { source, reason: 'llm-unconfigured' })
-      return { reply: '自动化助手还没配置模型，先在面板「自动化」里手动新建一条吧。' }
-    }
-    if (parsed.kind === 'uncertain') {
-      this.logger.info('automation:draft-uncertain', { source })
-      return { reply: `我可以帮你建这个自动化，但还需要确认：${parsed.question}` }
-    }
-    const now = new Date(this.now()).toISOString()
-    const draft: AutomationDraft = {
-      id: `ad_${crypto.randomUUID().slice(0, 8)}`,
-      source,
-      requester,
-      text: text.trim().slice(0, 500),
-      draft: {
-        ...parsed.draft,
-        createdAt: now,
-        updatedAt: now,
-      },
-      status: 'pending',
-      createdAt: now,
-    }
-    this.store.insertAutomationDraft(draft)
-    this.logger.info('automation:draft-created', {
-      draftId: draft.id,
-      automationId: draft.draft.id,
-      source,
-      project: draft.draft.project,
-    })
-    return {
-      draft,
-      reply: [
-        `已整理成自动化草稿「${draft.draft.name}」：${draft.draft.prompt}`,
-        `执行计划：${describeSchedule(draft.draft.schedule)}；项目：${draft.draft.project}。`,
-        '到面板「自动化 → 待确认草稿」里检查并保存后才会启用。',
-      ].join('\n'),
-    }
-  }
-
   /** 从自然语言生成任务草稿：面板里的预览入口用。 */
   async draftFromText(text: string): Promise<AutomationTaskConfig | null> {
     const parsed = await this.parseDraft(text)
@@ -683,7 +626,7 @@ export class AutomationService {
         return { kind: 'uncertain', question: '请补一句任务名和执行目标。' }
       }
       const schedule = typeof parsed.schedule === 'object' && parsed.schedule
-        ? parsed.schedule as AutomationTaskConfig['schedule']
+        ? parsed.schedule as AutomationSchedule
         : { kind: 'daily' as const, at: '09:00' }
       const scheduleError = validateSchedule(schedule)
       if (scheduleError) {
@@ -708,7 +651,9 @@ export class AutomationService {
           description: text.trim().slice(0, 200),
           type,
           prompt,
-          schedule,
+          trigger: { kind: 'schedule', schedule },
+          skill: '',
+          notifyTo: '',
           runtimeId: '',
           project: project.name,
           repo: project.repo,
@@ -743,8 +688,10 @@ export class AutomationService {
   }
 }
 
-/** 计划的中文说明：回给用户的话里用。 */
-function describeSchedule(schedule: Automation['schedule']): string {
+/** 触发方式的中文说明：回给用户的话里用。 */
+function describeSchedule(trigger: Automation['trigger']): string {
+  if (trigger.kind !== 'schedule') return '事件触发'
+  const schedule = trigger.schedule
   switch (schedule.kind) {
     case 'hourly':
       return '每小时'

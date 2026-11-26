@@ -1,11 +1,13 @@
 /**
  * 事件管线：事件进队列 → 决策 → 分级派发。
  *
- * 分级派发只有两条路：
- * - 直接开单：判定明确、落在当前时间窗、预算够 → 合成工单，交给现有 Worker 链路；
- * - 推人工：判定拿不准、命中风险、窗口/预算不允许 → 进待审核队列，通知 admin。
+ * 三条路（由订阅的 `mode` 决定）：
+ * - auto：直接开单，交给现有 Worker 链路；
+ * - review：进待审核队列，通知 admin；
+ * - notify：只记录 + 通知，不进执行链路。
  *
- * 事件本身不绑定项目：归属项目与执行方式由决策模型一次判定产出。
+ * 事件本身不绑定项目：归属项目与执行方式是**订阅的属性**，
+ * 由会话解析时从对话内容分析得出（决策 A1）。
  */
 import type { AppConfig, EventSourceConfig, ProjectConfig } from '../config.js'
 import { eventNotifyChat } from '../config.js'
@@ -16,10 +18,10 @@ import { normalizeEventPriority } from '#core/event.js'
 import type { Ticket, Trigger } from '#core/model.js'
 import { preview } from '#core/events.js'
 import { errorMessage, noopLogger, type Logger } from '#infra/logger.js'
-import type { EventEnvelope, EventSource } from '#event/port.js'
+import type { EventEnvelope } from '#event/port.js'
 import type { EventDecisionResult, EventDecisionService } from './decision.js'
 import { findEventSkill } from './skills.js'
-import { ruleForEvent, type EventRule } from './rules.js'
+import { matchesKeywords, type ResolvedSubscription } from './subscriptions.js'
 
 /** 事件判定最多重试几次；超过就标成失败态等人处理，不再无限重试。 */
 export const MAX_EVENT_ATTEMPTS = 5
@@ -39,6 +41,8 @@ export interface EventPipelineDeps {
   clock: () => string
   ids: (prefix: string) => string
   decision: EventDecisionService
+  /** 当前订阅清单；宿主按任务装配后注入。 */
+  subscriptions: () => ResolvedSubscription[]
   logger?: Logger
   /** 需要人工审核时回调（服务层据此通知 admin）。 */
   onReview?: (event: EventRecord, verdict: EventVerdict) => void | Promise<void>
@@ -63,6 +67,7 @@ export class EventPipeline {
   private clock: () => string
   private ids: (prefix: string) => string
   private decision: EventDecisionService
+  private subscriptions: () => ResolvedSubscription[]
   private logger: Logger
   private onReview?: (event: EventRecord, verdict: EventVerdict) => void | Promise<void>
   private onDispatched?: (event: EventRecord, ticket: Ticket) => void | Promise<void>
@@ -74,6 +79,7 @@ export class EventPipeline {
     this.clock = deps.clock
     this.ids = deps.ids
     this.decision = deps.decision
+    this.subscriptions = deps.subscriptions
     this.logger = deps.logger ?? noopLogger
     this.onReview = deps.onReview
     this.onDispatched = deps.onDispatched
@@ -83,14 +89,13 @@ export class EventPipeline {
    * 事件入队：同一来源的同一 externalId 只入一次。
    * 返回落库后的事件；重复事件返回已有那条。
    */
-  ingest(sourceId: string, source: EventSourceConfig, envelope: EventEnvelope): EventRecord {
+  ingest(sourceId: string, sourceKind: string, subscription: ResolvedSubscription, envelope: EventEnvelope): EventRecord {
     const now = this.clock()
     const eventType = envelope.eventType ?? ''
-    const rule = this.ruleOfEvent(this.config(), eventType)
     const event: EventRecord = {
       id: this.ids('evt'),
       sourceId,
-      sourceKind: source.kind ?? 'event',
+      sourceKind,
       externalId: envelope.externalId,
       title: envelope.title,
       body: envelope.body,
@@ -98,22 +103,21 @@ export class EventPipeline {
       ...(envelope.raw === undefined ? {} : { raw: envelope.raw }),
       ...(envelope.context ? { context: envelope.context } : {}),
       receivedAt: envelope.receivedAt ?? now,
-      status: rule ? 'pending' : 'undecided',
+      status: 'pending',
       execution: 'none',
       // 订阅是纯粹的：入队时不预设优先级与类型，判定阶段再定。
       priority: 'P3',
       eventType,
-      ...(rule ? { ruleId: rule.id } : {}),
+      subscriptionId: subscription.id,
       needsReview: false,
-      ...(!rule ? { reason: '未匹配到决策规则' } : {}),
       updatedAt: now,
       attempts: 0,
     }
     const inserted = this.store.insertEvent(event)
     if (!inserted) {
-      // 重复事件按 (来源, externalId) 判定：来源保证同一事件的 externalId 稳定，
+      // 重复事件按 (订阅, externalId) 判定：来源保证同一事件的 externalId 稳定，
       // 命中即说明这条已经入过队，直接返回原记录，不改写它的内容与状态。
-      const existing = this.store.getEventByExternalId(sourceId, envelope.externalId)
+      const existing = this.store.getEventByExternalId(subscription.id, envelope.externalId)
       if (existing) {
         this.logger.info('event:duplicate', { eventId: existing.id, sourceId, externalId: envelope.externalId })
         return existing
@@ -126,12 +130,25 @@ export class EventPipeline {
       externalId: event.externalId,
       title: preview(event.title, 120),
       status: event.status,
-      ruleId: event.ruleId,
+      subscriptionId: event.subscriptionId,
     })
-    if (!rule) {
-      this.logger.info('event:rule-unmatched', { eventId: event.id, eventType, sourceId })
-    }
     return event
+  }
+
+  /**
+   * 找到命中的订阅。
+   *
+   * 命中条件：订阅的事件类型包含这条事件的事件类型。
+   * 多个订阅命中同一个类型时，取第一个（订阅 id 字典序）——
+   * 同一类型被多个任务订阅是允许的，但一条事件只归属一个订阅，
+   * 其余订阅由各自的 watcher 各自拉取（幂等键带 subscriptionId，互不干扰）。
+   */
+  private matchSubscription(eventType: string): ResolvedSubscription | undefined {
+    if (!eventType) return undefined
+    const hits = this.subscriptions()
+      .filter(subscription => subscription.enabled && subscription.types.includes(eventType))
+      .sort((a, b) => a.id.localeCompare(b.id))
+    return hits[0]
   }
 
   /**
@@ -214,36 +231,66 @@ export class EventPipeline {
   async process(event: EventRecord): Promise<EventDecisionOutcome | null> {
     const config = this.config()
     const source = config.events.sources[event.sourceId] ?? { enabled: false }
-    const rule = this.ruleOfEvent(config, event.eventType)
-    if (!rule) {
-      const undecided: EventRecord = {
+    const subscription = this.subscriptionOf(event)
+    if (!subscription) {
+      // 订阅被删了：事件留着等人处理，不要静默消失。
+      const orphaned: EventRecord = {
         ...event,
-        status: 'undecided',
+        status: 'review',
         execution: 'none',
-        reason: '未匹配到决策规则',
+        needsReview: true,
+        reason: '订阅已不存在，需人工处理',
         decidedAt: undefined,
         updatedAt: this.clock(),
       }
-      this.store.updateEvent(undecided)
-      this.logger.info('event:rule-unmatched', { eventId: event.id, eventType: event.eventType, sourceId: event.sourceId })
+      this.store.updateEvent(orphaned)
+      this.logger.info('event:subscription-unmatched', { eventId: event.id, eventType: event.eventType, sourceId: event.sourceId })
       return null
     }
-    this.logger.info('event:rule-matched', {
+    this.logger.info('event:subscription-matched', {
       eventId: event.id,
-      ruleId: rule.id,
+      subscriptionId: subscription.id,
       eventType: event.eventType,
-      ruleVersion: rule.version,
+      mode: subscription.mode,
     })
+
+    // 确定性关键词过滤：字面上没命中就不进判定，省一次模型调用。
+    if (!matchesKeywords(subscription, `${event.title}\n${event.body}`)) {
+      const filtered: EventRecord = {
+        ...event,
+        context: {
+          ...(event.context ?? {}),
+          background: `未命中订阅关键词：${subscription.filter.keywords.join('、')}`,
+          filtered: `订阅：${subscription.taskName}\n订阅 id：${subscription.id}\n处理方式：${subscription.mode}`,
+        },
+        status: 'invalid',
+        execution: 'none',
+        reason: `未命中订阅关键词：${subscription.filter.keywords.join('、')}`,
+        updatedAt: this.clock(),
+      }
+      this.store.updateEvent(filtered)
+      this.logger.info('event:filtered-out', {
+        eventId: event.id,
+        subscriptionId: subscription.id,
+        reason: 'keyword-mismatch',
+      })
+      return { event: filtered, verdict: this.verdictOf(event), basis: 'keyword-filter' }
+    }
+
     const result = await this.decision.decide({
       event,
       source,
-      rule,
+      subscription,
       projects: this.projectsOf(config),
       decision: config.events.decision,
     })
     const verdict = result.verdict
+    // 上下文落库：判定完之后把「命中了什么、归谁管、为什么这么判」写进事件详情，
+    // 面板上不用再回查订阅就能看懂这条事件（§12.5 V22）。
+    const context = contextOf(event, subscription, verdict, result.basis)
     const decided: EventRecord = {
       ...event,
+      context,
       status: verdict.actionable ? 'pending' : 'invalid',
       execution: 'none',
       priority: verdict.priority,
@@ -256,8 +303,7 @@ export class EventPipeline {
       reason: verdict.reason,
       confidence: verdict.confidence,
       basis: result.basis,
-      ruleId: rule.id,
-      ruleVersion: rule.version,
+      subscriptionId: subscription.id,
       decidedAt: this.clock(),
       updatedAt: this.clock(),
       lastError: undefined,
@@ -267,6 +313,18 @@ export class EventPipeline {
       this.store.updateEvent(decided)
       this.logger.info('event:invalid', { eventId: event.id, sourceId: event.sourceId, reason: preview(verdict.reason, 120) })
       return { event: decided, verdict, basis: result.basis }
+    }
+
+    // 仅提醒：只记录 + 通知，不进执行链路。
+    if (subscription.mode === 'notify') {
+      const notified: EventRecord = { ...decided, status: 'done', execution: 'notified' }
+      this.store.updateEvent(notified)
+      this.logger.info('event:notified', {
+        eventId: event.id,
+        subscriptionId: subscription.id,
+        taskId: subscription.id,
+      })
+      return { event: notified, verdict, basis: result.basis }
     }
 
     // 判定没完成（模型失败等）：事件留在队列里等下一轮，不能派工也不能丢。
@@ -286,7 +344,7 @@ export class EventPipeline {
         this.logger.error('event:attempts-exceeded', {
           eventId: event.id,
           sourceId: event.sourceId,
-          ruleId: rule.id,
+          subscriptionId: subscription.id,
           attempts: event.attempts,
           message: preview(verdict.reason, 120),
         })
@@ -298,7 +356,7 @@ export class EventPipeline {
       this.logger.warn('event:decision-incomplete', {
         eventId: event.id,
         sourceId: event.sourceId,
-        ruleId: rule.id,
+        subscriptionId: subscription.id,
         reason: preview(verdict.reason, 120),
       })
       return { event: waiting, verdict, basis: result.basis }
@@ -518,12 +576,12 @@ export class EventPipeline {
   /** 授权范围：写清允许做什么、不允许做什么，Worker 照着做。 */
   private scopeOf(event: EventRecord, verdict: EventVerdict): string {
     const skill = verdict.skill ? findEventSkill(verdict.skill) : undefined
-    const rule = this.ruleOfEvent(this.config(), event.eventType, event.ruleId)
+    const subscription = this.subscriptionOf(event)
     const lines = [
       `处理事件「${event.title}」（${verdict.eventType} / ${verdict.priority}）。`,
       `归属项目：${verdict.project || '（未指定）'}。`,
       skill ? `处理方式：${skill.name}（${skill.id}）——${skill.hint}。` : '处理方式：先补齐信息，再出方案。',
-      rule?.workflowPrompt ? `执行流程：${rule.workflowPrompt}` : '',
+      subscription?.prompt ? `执行流程：${subscription.prompt}` : '',
       `授权范围：只处理本事件范围内的事；不改本仓库以外的代码；不碰生产环境与对外发布。`,
     ]
     return lines.filter(Boolean).join('\n')
@@ -531,12 +589,16 @@ export class EventPipeline {
 
   /** 传给 Worker 的原始请求：事件正文 + 判定结论。 */
   private requestOf(event: EventRecord, verdict: EventVerdict): string {
+    const subscription = this.subscriptionOf(event)
     const lines = [
       `事件标题：${event.title}`,
       event.body ? `事件正文：\n${event.body}` : '',
       `事件类型：${verdict.eventType}；优先级：${verdict.priority}`,
       verdict.project ? `归属项目：${verdict.project}` : '',
       verdict.skill ? `处理方式：${verdict.skill}` : '',
+      subscription?.filter.keywords.length
+        ? `命中过滤条件：keywords=[${subscription.filter.keywords.join('、')}] semantic=${subscription.filter.semantic || '(无)'}`
+        : '',
       event.url ? `来源链接：${event.url}` : '',
       verdict.reason ? `判定理由：${verdict.reason}` : '',
     ]
@@ -548,10 +610,15 @@ export class EventPipeline {
     return config.runtime.default === 'orca' ? config.projects : (config.runtime.projects?.[config.runtime.default] ?? [])
   }
 
-  /** 按事件类型取规则；ruleId 优先，规则被删后回落到当前类型匹配。 */
-  private ruleOfEvent(config: AppConfig, eventType: string, ruleId?: string): EventRule | undefined {
-    const byId = ruleId ? config.events.rules.find(rule => rule.id === ruleId) : undefined
-    return byId ?? ruleForEvent(config.events.rules, eventType)
+  /**
+   * 按事件记录上的订阅 id 取订阅。
+   *
+   * 严格按 id 找：订阅被删了就是找不��，事件转人工等人处理，
+   * 不能按类型回落匹配到别的订阅 —— 那会让事件被错误的任务处理。
+   */
+  private subscriptionOf(event: EventRecord): ResolvedSubscription | undefined {
+    if (!event.subscriptionId) return undefined
+    return this.subscriptions().find(item => item.id === event.subscriptionId)
   }
 
   /** 判定失败：标成失败态，保留记录等人处理。 */
@@ -570,6 +637,40 @@ function deferred0(event: EventRecord): EventRecord {
   const next = { ...event }
   delete (next as { lastError?: string }).lastError
   return next
+}
+
+/**
+ * 事件上下文：把「命中了什么、归谁管、为什么这么判」写进事件详情。
+ *
+ * 面板的事件行直接展示这几项，不用再回查订阅表；
+ * 来源自己带的上下文（repo / actor 等）保留在前，不被覆盖。
+ */
+export function contextOf(
+  event: EventRecord,
+  subscription: ResolvedSubscription | undefined,
+  verdict: EventVerdict,
+  basis: string,
+): Record<string, string> {
+  const keywords = subscription?.filter.keywords ?? []
+  return {
+    ...(event.context ?? {}),
+    background: [
+      `事件类型：${verdict.eventType}`,
+      `优先级：${verdict.priority}`,
+      `归属项目：${verdict.project || '（未指定）'}`,
+      `处理方式：${verdict.skill || '（通用）'}`,
+      verdict.reason ? `判定理由：${verdict.reason}` : '',
+      keywords.length ? `命中关键词：${keywords.join('、')}` : '',
+      subscription?.filter.semantic ? `语义条件：${subscription.filter.semantic}` : '',
+    ].filter(Boolean).join('\n'),
+    filtered: [
+      `订阅：${subscription?.taskName ?? '（订阅已删除）'}`,
+      `订阅 id：${subscription?.id ?? ''}`,
+      `事件类型：${subscription?.types.join('、') ?? ''}`,
+      `处理方式：${subscription?.mode ?? ''}`,
+      `判定依据：${basis}`,
+    ].filter(Boolean).join('\n'),
+  }
 }
 
 /**

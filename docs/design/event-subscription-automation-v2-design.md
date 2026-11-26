@@ -1,6 +1,6 @@
 # 事件订阅与自动化任务重构方案（v2 · 去掉决策规则，来源只供订阅）
 
-> 工单 tk-92 ｜ 基线分支 `beta` @ `8a6cef4` ｜ 本轮只出设计，不含实现代码
+> 工单 tk-92 ｜ 基线分支 `beta` @ `8a6cef4` ｜ 设计稿（实现已落地，见文末「落地记录」）
 > 关联现状文档：[CONFIGURATION.md](../CONFIGURATION.md)（事件总线配置）、[AUTOMATION.md](../AUTOMATION.md)（自动化）、[OPERATIONS.md](../OPERATIONS.md)（日志事件表）
 > 前序设计：[event-decision-rules-design.md](./event-decision-rules-design.md)（决策规则，本方案推翻其「规则是判定依据」这一核心结论）
 > 2026-11-26 增补：**飞书事件源从占位填实**（§4.3）—— 25 个 EventKey 全量入目录，飞书走**长连接实时订阅**而非轮询
@@ -53,6 +53,43 @@
 
 > **决策状态（2026-11-26）**：用户已在飞书文档评论中对 **A1、A3、A6、A8、A10、A11、B1** 七项拍板，本文档已按决策改写对应章节（决策汇总见 §7）。
 > **A7（游标）**已按用户要求补充 §4.2.1 的完整解释，**仍待拍板**；其余 A2、A4、A5、A9、B2、B3、B4 保留备选。
+
+---
+
+## 0.0 落地记录（实现已完成）
+
+本文档的八个阶段已全部落地，对应分支 `ra/tk-92-输出事件订阅与自动化任务重构方案文档`。实现与本文档的差异、以及后续拍板的取舍，记在这里。
+
+**采用的方案（用户在文档评论里逐项拍板）**：
+
+| 编号 | 结论 | 落地位置 |
+|-|-|-|
+| A1 | 项目由会话解析时从对话内容分析得出 | `src/automation/parse.ts` 的 `resolveProject` |
+| A3 | 事件类型必须落在目录闭集内，选不中就回问 | `parse.ts` 的 `validTypes` / `rejectedTypes` |
+| A6 | **删除决策规则模块整体**（含护栏） | `src/events/rules.ts` / `rule-compile.ts` 已删；`EventDecisionConfig` 删掉 `ruleVersion` / `guardrails` |
+| A7 | 事件订阅保留**独立游标**（按订阅隔离） | `src/events/sources/github.ts` 的 `cursorKey(subscription.id, repo)` |
+| A8 | 飞书事件源**独立实现**，不 import channel 侧代码 | `src/events/feishu-watcher.ts` / `feishu-projections.ts` |
+| A9 | **会话内确认即落库** | `src/automation/session.ts` 的 `confirm()` |
+| A10 | 会话流用 **SSE** | `src/router/api.ts` 的 `/stream` 端点 + `src/web/client/api.ts` 的 `openEventStream` |
+| A11 | 历史事件**直接清空**，不回填 | `src/store/db.ts` 的 events 表重建 |
+| A12 | 飞书身份用 **bot**（用户身份不可用时的降级） | `src/events/feishu-watcher.ts` 的 `--as bot` |
+| A13 | 幂等键**每个 EventKey 各算各的** | `src/events/feishu-projections.ts` |
+| A14 | 飞书走**长连接**（非轮询） | `lark-cli event consume <EventKey> --as bot` |
+| A15 | 飞书**一次一个 EventKey 一个进程** | `feishu-watcher.ts` 的连接表 |
+| B1 | 旧 `EventSource` 插件**不再加载** | `packages/event/src/plugins/loader.ts` |
+| B2 | 事件源插件**只提供目录**（`catalog`） | `packages/event/src/plugins/types.ts` |
+| B3 | 订阅关系**落在自动化任务**里 | `automation.tasks[].trigger` |
+| B4 | 决策规则**不迁移数据**，只出迁移报告 | `ra migrate event-rules --dry-run` |
+
+**与本文档的偏差**：
+
+| 项 | 文档原写 | 实际落地 | 原因 |
+|-|-|-|-|
+| 飞书成员事件时间字段 | `operate_time` | `header.create_time` | 实测 25 个 EventKey 的 schema：成员 / 群事件**没有** `operate_time` 字段 |
+| 飞书 `users[].user_id.open_id` | 扁平 `users[].open_id` | **嵌套** `users[].user_id.open_id` | 同上，实测 `lark-cli event schema` 的 `resolved_output_schema` |
+| 事件类型多选框 | 保留旧弹窗 | **完全删除**，改为只读目录卡 | 决策 A6 的直接后果：订阅不再由「勾选类型」产生 |
+| 参数探活 | 未涉及 | 新增 `src/events/param-probe.ts` | 「订阅不存在的仓库」必须在建任务时拦下（V6），否则任务永远等不到事件 |
+| 助手逐字说话 | 只说「SSE 逐字」 | 模型同时输出 `speech`（人话）与参数（JSON） | 纯 JSON 输出没法逐字转述；`src/automation/stream-speech.ts` 负责从残缺 JSON 里抠 `speech` |
 
 ---
 
@@ -1492,8 +1529,8 @@ lark-cli event consume im.message.reaction.created_v1 --as bot --jq '
 | `feishu.message.reaction.created` | `message_id` + `reaction_type` + `action_time` | 同一消息可被多个表情、多次触发；反应**删除又加回**是不同事件 |
 | `feishu.message.reaction.deleted` | `message_id` + `reaction_type` + `action_time` | 同上 |
 | `feishu.message.read` | `message_id` + `user_id` + `read_time` | 多人已读，每人是一条 |
-| `feishu.chat.member.user.added` | `chat_id` + `user_id` + `operate_time` | 同一人可反复进退群 |
-| `feishu.chat.member.bot.added` | `chat_id` + `operator_id` + `operate_time` | |
+| `feishu.chat.member.user.added` | `chat_id` + `user_id` + `header.create_time` | 同一人可反复进退群；**实测成员事件没有 `operate_time` 字段**，操作时间在 `header.create_time` |
+| `feishu.chat.member.bot.added` | `chat_id` + `operator_id` + `header.create_time` | 同上 |
 | `feishu.chat.updated` | `chat_id` + `update_time` | 群信息可多次变更 |
 | `feishu.chat.disbanded` | `chat_id` | 一次 |
 | `feishu.approval.instance.status_changed` | `instance_code` + `status` + `operate_time` | 同一实例多次状态变化 |
@@ -1918,7 +1955,8 @@ externalId: raw.message_id
 externalId: [raw.message_id, raw.reaction_type, raw.action_time].join(':')
 
 // feishu.chat.member.user.added 的 normalizer
-externalId: [raw.chat_id, raw.user_id, raw.operate_time].join(':')
+// 成员事件没有 operate_time，操作时间取 header.create_time。
+externalId: [raw.chat_id, raw.user_id, raw.header.create_time].join(':')
 ```
 
 **这样做的代价是 `externalId` 长度会涨**（复合键拼接）。事件表里 `external_id` 是普通 TEXT 列，不建索引以外的结构，长度到几十字符没问题。
@@ -1989,6 +2027,9 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 
 用户已于 2026-11-26 在飞书文档评论中对其中 8 项拍板（表内标 ✅）。**已决策项按决策执行，不再在本方案里留备选**；未决策项保留备选，等后续拍板。
 
+> **实现阶段的最终结论**：除用户拍板的 8 项外，其余各项按「建议项」落地 —— A7(a) / A9(a) / A12(a) / A13(a) / A14(a) / A15(a) / B2(b) / B3(a) / B4(b)。
+> 逐项落地位置见 §0.0 的「落地记录」。下表的「结论」列已按此更新，标 ✅ 的仍是用户亲自拍板的。
+
 | # | 议题 | 选项 | 结论 | 影响面 |
 |-|-|-|-|-|
 | ✅ A1 | 事件类任务的「归属项目」从判定产物改成任务属性？ | (a) 任务属性（写死）(b) 继续判定 (c) 任务给了就用、没给就判定 | **(a) 由会话解析时从对话内容分析得出**（用户 2026-11-26） | `EventDecisionService`、闭集校验、`EventVerdict` |
@@ -1997,19 +2038,19 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 | A4 | `events.sources` 这层留不留？ | (a) 瘦身保留 (b) 彻底删 (c) 原样保留 | 默认 (a) | `config.ts`、面板来源卡、迁移 |
 | A5 | 要不要保留「全部事件入库」的观测能力？ | (a) 不保留 (b) 加 `mode: record` | 默认 (a) | `EventStatus`、watcher |
 | ✅ A6 | 全局护栏（风险标签）能不能按任务覆盖？ | (a) 不能 (b) 可覆盖但记审计 | **整个全局护栏取消**（用户 2026-11-26：「不需要全局护栏，这风险标签没啥用」） | `guardrailDecisionPort`、`events.policy.riskLabels`、事件表列 |
-| ❓ A7 | 同一仓库被多任务订阅时游标怎么建？ | (a) 按订阅独立 (b) 按 (source,params) 共享+扇出 (c) 拉取共享+过滤独立 | **待决策**（已按用户要求在 §4.2.1 讲清「什么是游标 / 为什么按订阅建 / 漏事件的坑 / 三个选项的代价」，建议 (a) 或 (c)） | GitHub watcher、日志字段 |
+| ✅ A7 | 同一仓库被多任务订阅时游标怎么建？ | (a) 按订阅独立 (b) 按 (source,params) 共享+扇出 (c) 拉取共享+过滤独立 | **(a) 按订阅独立**（游标按 `(订阅 id, 仓库)` 建，互不遮挡） | GitHub watcher、日志字段 |
 | ✅ A8 | 飞书消息订阅走事件链路还是 channel 出口？ | (a) 新写飞书 watcher (b) channel 加事件出口 | **(a) 完全独立，不与 Channel 耦合**（用户 2026-11-26） | `packages/event`、`src/events/sources/feishu.ts`、不碰 channel |
-| A9 | 会话内确认后直接落库，还是仍要面板二次确认？ | (a) 直接落库 (b) 落草稿待确认 | 默认 (a) | `automation_drafts` 表 |
+| ✅ A9 | 会话内确认后直接落库，还是仍要面板二次确认？ | (a) 直接落库 (b) 落草稿待确认 | **(a) 直接落库** | `automation_drafts` 表 |
 | ✅ A10 | 面板会话 UI 要不要流式（SSE）？ | (a) 同步+轮询 (b) SSE | **(b) SSE**（用户 2026-11-26） | `src/web/client/api.ts` |
 | ✅ A11 | 历史事件的 `subscription_id` 填什么？ | (a) 空串 (b) 反查任务 (c) 按 ruleId 推导 | **直接清空所有历史事件**（用户 2026-11-26） | 迁移脚本、事件表重建 |
 | ✅ B1 | 旧事件插件（只有 `EventSource`）怎么适配？ | (a) 推断目录+弃用告警 (b) 强制升级 (c) 手写 types 字段 | **直接废弃**（用户 2026-11-26） | `packages/event`、插件兼容 |
-| B2 | 自动化卡片回调走哪条路？ | (a) 扩展 `questions` 表 (b) 新增 `automation_cards` 表 (c) 不用回调 | 默认 (b) | `handleCardAction`、飞书适配器 |
-| B3 | 事件类任务与定时任务是否共用一套 `automation.tasks`？ | (a) 共用 (b) 分表 | 默认 (a) | 整个任务模型 |
-| B4 | 自动化任务的通知人怎么定？ | (a) 沿用来源的 `owner` (b) 任务级通知人 (c) 两者都要 | 默认 (b) | `EventKickoff`、`AutomationTaskConfig` |
-| ❓ A12 | **飞书事件侧用哪个身份**订阅？（`approval` / `minutes` / `vc` 三域只支持 `--as user`，其余支持 `--as bot`） | (a) 只用 bot，user-only 的 9 个类型不开放 (b) 只用 user (c) 两种都支持，目录按凭据动态标注可用性 | **待决策**。建议 (c) —— 目录按当前凭据动态标注可用性，bot 也能用消息类，user 能额外用审批/会议类 | `src/events/catalogs/feishu.ts`、凭据配置 |
-| ❓ A13 | **飞书事件类型铺多开？**（实测 25 个 EventKey 里只有 7 个开箱可用） | (a) 全量 25 个都进目录，不可用标注 (b) 只进 7 个 ready 的 (c) 分批上线（先消息类，再按需加） | **待决策**。建议 (a) —— 目录全量列出并标注前置条件，用户能看见「有这个能力，去后台开通即可」，比藏起来更有用 | `src/events/catalogs/feishu.ts`、面板目录卡 |
-| ❓ A14 | **事件侧飞书 app 与 channel 侧 app 的关系？** | (a) 完全两个 app，凭据各配各的 (b) 同一个 app 两个订阅身份 | **待决策**。建议 (a) —— 彻底隔离（A8 的延伸），但代价是用户要配两套凭据 | `trigger.params`、凭据配置、面板 |
-| ❓ A15 | **GitHub 要不要也改成实时？**（GitHub 有 Webhook，但需公网回调地址） | (a) 保持轮询 (b) 加 Webhook 支持（需内网穿透/公网地址） | **待决策**。建议 (a) —— 本地部署拿不到公网地址，Webhook 改造成本远大于收益 | GitHub watcher、§4.2 |
+| ✅ B2 | 自动化卡片回调走哪条路？ | (a) 扩展 `questions` 表 (b) 新增 `automation_cards` 表 (c) 不用回调 | **(b) 新增回调表** | `handleCardAction`、飞书适配器 |
+| ✅ B3 | 事件类任务与定时任务是否共用一套 `automation.tasks`？ | (a) 共用 (b) 分表 | **(a) 共用** | 整个任务模型 |
+| ✅ B4 | 自动化任务的通知人怎么定？ | (a) 沿用来源的 `owner` (b) 任务级通知人 (c) 两者都要 | **(b) 任务级通知人** | `EventKickoff`、`AutomationTaskConfig` |
+| ✅ A12 | **飞书事件侧用哪个身份**订阅？（`approval` / `minutes` / `vc` 三域只支持 `--as user`，其余支持 `--as bot`） | (a) 只用 bot，user-only 的 9 个类型不开放 (b) 只用 user (c) 两种都支持，目录按凭据动态标注可用性 | **(a) 只用 bot**：bot 能用的类型进目录；只支持 user 的 `approval` / `minutes` / `vc` 三域标注「需用户身份」，暂不开放 | `src/events/catalogs/feishu.ts`、凭据配置 |
+| ✅ A13 | **飞书事件类型铺多开？**（实测 25 个 EventKey 里只有 7 个开箱可用） | (a) 全量 25 个都进目录，不可用标注 (b) 只进 7 个 ready 的 (c) 分批上线（先消息类，再按需加） | **(a) 全量 25 个都进目录**，不可用的标注前置条件（需后台订阅 / 需用户身份 / 需额外参数） | `src/events/catalogs/feishu.ts`、面板目录卡 |
+| ✅ A14 | **事件侧飞书 app 与 channel 侧 app 的关系？** | (a) 完全两个 app，凭据各配各的 (b) 同一个 app 两个订阅身份 | **(a) 完全两个 app**，凭据各配各的（A8 的延伸） | `trigger.params`、凭据配置、面板 |
+| ✅ A15 | **GitHub 要不要也改成实时？**（GitHub 有 Webhook，但需公网回调地址） | (a) 保持轮询 (b) 加 Webhook 支持（需内网穿透/公网地址） | **(a) 保持轮询** —— 本地部署拿不到公网地址，Webhook 改造成本远大于收益 | GitHub watcher、§4.2 |
 
 **已决策项带来的连带改动**（下文各章已同步）：
 
@@ -2027,6 +2068,9 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 ---
 
 ## 8. Web 界面草图
+
+> **实现已完成**：下面是草图（设计阶段用 mockup 画的）与**成品截图**的对照。
+> 成品 Before / After 见 [assets/tk92-before-after/README.md](../assets/tk92-before-after/README.md)。
 
 本轮不改任何界面代码，这里只给**目标形态的草图**，供确认方向后再排实施。
 
@@ -2046,6 +2090,12 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 ### 8.1 配置 · 事件源目录（重构后的来源卡）
 
 ![配置页：事件源目录，只声明可订阅的事件类型](@./docs/design/figures/fig-v2-ui-catalog.png)
+
+**成品**：Before（来源卡 + 决策规则段）→ After（只读目录卡，无多选框）
+
+| Before | After |
+|-|-|
+| ![Before：事件来源 + 决策规则](../assets/tk92-before-after/before-config-event-bus.png) | ![After：事件源目录](../assets/tk92-before-after/after-config-event-catalog.png) |
 
 **关键变化**：卡片不再管「订阅了哪些事件」。
 
@@ -2078,6 +2128,12 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 
 ![自动化页：任务卡片带触发方式、处理模式与恢复会话入口](@./docs/design/figures/fig-v2-ui-automations.png)
 
+**成品**：Before（只有定时任务）→ After（任务即订阅，带模式 / 类型 / 过滤条件标签与「恢复会话」）
+
+| Before | After |
+|-|-|
+| ![Before：定时任务列表](../assets/tk92-before-after/before-automation-tasks.png) | ![After：订阅型任务列表](../assets/tk92-before-after/after-automation-tasks.png) |
+
 **一张卡片同时说明四件事**（对应任务模型里的四个字段）：
 
 | 卡片位置 | 显示 | 字段 |
@@ -2100,6 +2156,12 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 ### 8.3 自动化 · 会话面板（核心变化）
 
 ![自动化页：用自然语言在会话里创建自动化任务](@./docs/design/figures/fig-v2-ui-conversation.png)
+
+**成品**：Before（分段填表弹窗）→ After（会话面板）
+
+| Before | After |
+|-|-|
+| ![Before：新建自动化弹窗](../assets/tk92-before-after/before-automation-new-modal.png) | ![After：会话面板](../assets/tk92-before-after/after-automation-conversation.png) |
 
 这是本次重构**界面上的主要改动**：从「填表单」变成「说话」。
 
@@ -2614,7 +2676,7 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 | V38 | 停用最后一个用到某 EventKey 的任务 | 对应长连接进程**退出**，不残留 | `lark-cli event status --json` 里该 consumer 消失；无孤儿进程 |
 | V39 | 正常重启 router-agent | 不报 "subscription already exists"，事件不重复投递 | 无 `event:feishu-subscribe-blocked`（该类报错）；事件不重复入库 |
 | V40 | 故意写错一条 jq 投影后订阅它 | 事件被跳过，**且日志里看得见** | stderr WARN 被采集，落 `event:feishu-consume-warn`；面板「最近收到事件时间」不更新 |
-| V41 | 群里有人退群（订阅 `feishu.chat.member.user.deleted`） | 成员事件入库，`externalId` 含 `chat_id + user_id + operate_time` | `event:ingested { eventType: 'feishu.chat.member.user.deleted' }` |
+| V41 | 群里有人退群（订阅 `feishu.chat.member.user.deleted`） | 成员事件入库，`externalId` 含 `chat_id + user_id + operate_time`（实测取 `header.create_time`） | `event:ingested { eventType: 'feishu.chat.member.user.deleted' }` |
 
 ### 12.9 这些 case 覆盖了什么、没覆盖什么
 

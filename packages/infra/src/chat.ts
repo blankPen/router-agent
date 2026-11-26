@@ -80,6 +80,17 @@ export interface ChatClient {
     /** 本次调用的硬超时（毫秒）；缺省用客户端默认值。 */
     timeoutMs?: number
   }): Promise<ChatTurn>
+  /**
+   * 流式补全：逐段吐出正文增量。
+   *
+   * 会话面板要「逐字显示」而不是等几秒蹦一整段，所以需要它。
+   * 没实现就退回 `complete`（面板仍然能用，只是没有逐字效果）。
+   */
+  completeStream?(messages: ChatMessage[], opts?: {
+    maxTokens?: number
+    thinkingBudgetTokens?: number
+    timeoutMs?: number
+  }): AsyncIterable<string>
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000
@@ -148,7 +159,117 @@ export function createChatClient(model: ChatModelConfig, opts: ChatClientOptions
       }
       return turn
     },
+
+    async *completeStream(
+      messages: ChatMessage[],
+      streamOpts: {
+        maxTokens?: number
+        thinkingBudgetTokens?: number
+        timeoutMs?: number
+      } = {},
+    ): AsyncIterable<string> {
+      const callMaxTokens = streamOpts.maxTokens && streamOpts.maxTokens > 0 ? streamOpts.maxTokens : maxTokens
+      const callThinking = streamOpts.thinkingBudgetTokens ?? thinkingBudgetTokens
+      const callTimeout = streamOpts.timeoutMs && streamOpts.timeoutMs > 0 ? streamOpts.timeoutMs : timeoutTimeout(timeoutMs)
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), callTimeout)
+      try {
+        const response = await fetchImpl(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...authHeaders(model, api),
+          },
+          body: JSON.stringify(streamRequestBody(model, api, messages, callMaxTokens, callThinking)),
+          signal: controller.signal,
+        })
+        if (!response.ok) {
+          const detail = (await response.text().catch(() => '')).slice(0, 200)
+          throw new Error(`chat:http-${response.status}${detail ? `: ${detail}` : ''}`)
+        }
+        if (!response.body) throw new Error('chat:no-stream-body')
+        for await (const chunk of readSseChunks(response.body)) {
+          const text = api === 'anthropic-messages'
+            ? anthropicStreamText(chunk)
+            : openaiStreamText(chunk)
+          if (text) yield text
+        }
+      } catch (error) {
+        if (isAbortError(error)) throw new Error(`chat:timeout(${callTimeout}ms)`)
+        throw new Error(`chat:request-failed: ${errorText(error)}`)
+      } finally {
+        clearTimeout(timer)
+      }
+    },
   }
+}
+
+/** 流式请求的请求体：带上 stream 标记。 */
+function streamRequestBody(
+  model: ChatModelConfig,
+  api: ChatApi,
+  messages: ChatMessage[],
+  maxTokens: number,
+  thinkingBudgetTokens?: number,
+): Record<string, unknown> {
+  const body = requestBody(model, api, messages, maxTokens, undefined, thinkingBudgetTokens)
+  return { ...body, stream: true }
+}
+
+/** 逐段读 SSE：按空行切分，产出 data 的 JSON 文本。 */
+async function* readSseChunks(body: ReadableStream<Uint8Array>): AsyncIterable<string> {
+  const reader = body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let index = buffer.indexOf('\n\n')
+    while (index >= 0) {
+      const chunk = buffer.slice(0, index)
+      buffer = buffer.slice(index + 2)
+      const data = chunk
+        .split('\n')
+        .filter(line => line.startsWith('data:'))
+        .map(line => line.slice(5).trim())
+        .join('')
+      if (data) yield data
+      index = buffer.indexOf('\n\n')
+    }
+  }
+}
+
+/** OpenAI 兼容流：取 `choices[0].delta.content`。 */
+function openaiStreamText(data: string): string {
+  if (data === '[DONE]') return ''
+  let payload: unknown
+  try {
+    payload = JSON.parse(data)
+  } catch {
+    return ''
+  }
+  const choices = (payload as { choices?: Array<{ delta?: { content?: string } }> } | null)?.choices
+  const text = choices?.[0]?.delta?.content
+  return typeof text === 'string' ? text : ''
+}
+
+/** Anthropic 流：取 `delta.text`。 */
+function anthropicStreamText(data: string): string {
+  let payload: unknown
+  try {
+    payload = JSON.parse(data)
+  } catch {
+    return ''
+  }
+  const delta = (payload as { delta?: { type?: string; text?: string } } | null)?.delta
+  if (!delta || delta.type === 'thinking_delta') return ''
+  return typeof delta.text === 'string' ? delta.text : ''
+}
+
+/** 超时取正数。 */
+function timeoutTimeout(value: number): number {
+  return value > 0 ? value : DEFAULT_TIMEOUT_MS
 }
 
 /** OpenAI 兼容地址：baseUrl 填到 /v1 即可，这里补上 /chat/completions。 */

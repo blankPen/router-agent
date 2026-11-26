@@ -8,7 +8,6 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { getJson, sendJson } from './api.js'
 import { Icon } from './icons.js'
 import { approvePayload, needsProjectForApprove, projectOptions, type ProjectOption } from './events-model.js'
-import type { EventRule } from '../../events/rules.js'
 
 interface EventRow {
   id: string
@@ -28,9 +27,19 @@ interface EventRow {
   needsReview: boolean
   reason?: string
   confidence?: number
-  ruleId?: string
+  /** 命中的订阅 id（等于自动化任务 id）。 */
+  subscriptionId?: string
   ticketId?: string
   updatedAt: string
+}
+
+/** 订阅命中分布的一行：按任务聚合。 */
+interface SubscriptionHit {
+  id: string
+  taskName: string
+  source: string
+  types: string[]
+  mode: string
 }
 
 interface EventsPayload {
@@ -39,15 +48,15 @@ interface EventsPayload {
   projects?: ProjectOption[]
   /** 按状态统计的条数；缺省时回退到列表里数（老服务端）。 */
   counts?: Record<string, number>
-  /** 当前规则集与按规则聚合的命中分布。 */
-  rules?: EventRule[]
+  /** 按订阅（= 任务）聚合的命中分布。 */
   ruleStats?: Record<string, Record<string, number>>
+  /** 订阅清单：拿任务名与处理模式用。 */
+  subscriptions?: SubscriptionHit[]
 }
 
 const PRIORITIES = ['P0', 'P1', 'P2', 'P3', 'P4']
 
 const STATUS_FILTERS = [
-  { value: 'undecided', label: '未判定' },
   { value: 'review', label: '待审核' },
   { value: 'pending', label: '待处理' },
   { value: 'done', label: '已完成' },
@@ -55,7 +64,6 @@ const STATUS_FILTERS = [
 ]
 
 const STATUS_LABEL: Record<string, string> = {
-  undecided: '未判定',
   pending: '待处理',
   review: '待审核',
   done: '已完成',
@@ -67,6 +75,20 @@ const STATUS_TEXT: Record<string, string> = {
   deferred: '已顺延',
   retry: '待重试',
   failed: '执行失败',
+  notified: '已通知',
+}
+
+/** 处理方式标签：三种去向用不同色。 */
+const MODE_LABEL: Record<string, string> = {
+  auto: '自动执行',
+  review: '待人审',
+  notify: '仅提醒',
+}
+
+const MODE_CLASS: Record<string, string> = {
+  auto: 'tag mode-auto',
+  review: 'tag mode-review',
+  notify: 'tag mode-notify',
 }
 
 /** 收件箱。 */
@@ -74,7 +96,7 @@ export function EventsView(): JSX.Element {
   const [events, setEvents] = useState<EventRow[]>([])
   const [projects, setProjects] = useState<ProjectOption[]>([])
   const [serverCounts, setServerCounts] = useState<Record<string, number> | null>(null)
-  const [rules, setRules] = useState<EventRule[]>([])
+  const [subscriptions, setSubscriptions] = useState<SubscriptionHit[]>([])
   const [ruleStats, setRuleStats] = useState<Record<string, Record<string, number>>>({})
   const [picking, setPicking] = useState<EventRow | null>(null)
   const [loaded, setLoaded] = useState(false)
@@ -90,7 +112,7 @@ export function EventsView(): JSX.Element {
       setEvents(data.events ?? [])
       setProjects(data.projects ?? [])
       setServerCounts(data.counts ?? null)
-      setRules(data.rules ?? [])
+      setSubscriptions(data.subscriptions ?? [])
       setRuleStats(data.ruleStats ?? {})
       setLoaded(true)
       setError(null)
@@ -111,11 +133,11 @@ export function EventsView(): JSX.Element {
     && (!status || event.status === status)), [events, priority, status])
 
   const counts = useMemo(() => ({
-    undecided: serverCounts?.undecided ?? events.filter(item => item.status === 'undecided').length,
     pending: serverCounts?.pending ?? events.filter(item => item.status === 'pending').length,
     review: serverCounts?.review ?? events.filter(item => item.status === 'review').length,
     done: serverCounts?.done ?? events.filter(item => item.status === 'done').length,
     invalid: serverCounts?.invalid ?? events.filter(item => item.status === 'invalid').length,
+    notified: events.filter(item => item.execution === 'notified').length,
   }), [events, serverCounts])
 
   const updatedAt = useMemo(() => {
@@ -166,10 +188,6 @@ export function EventsView(): JSX.Element {
 
       <section className="event-summary">
         <div className="event-summary-cell">
-          <span className="event-summary-label">未判定</span>
-          <strong className="event-summary-value">{counts.undecided}</strong>
-        </div>
-        <div className="event-summary-cell">
           <span className="event-summary-label">待审核</span>
           <strong className={`event-summary-value ${counts.review > 0 ? 'attention' : ''}`}>{counts.review}</strong>
         </div>
@@ -178,11 +196,15 @@ export function EventsView(): JSX.Element {
           <strong className="event-summary-value">{counts.pending}</strong>
         </div>
         <div className="event-summary-cell">
+          <span className="event-summary-label">已通知</span>
+          <strong className="event-summary-value">{counts.notified}</strong>
+        </div>
+        <div className="event-summary-cell">
           <span className="event-summary-label">已完成</span>
           <strong className="event-summary-value">{counts.done}</strong>
         </div>
         <div className="event-summary-cell">
-          <span className="event-summary-label">无效</span>
+          <span className="event-summary-label">已过滤</span>
           <strong className="event-summary-value">{counts.invalid}</strong>
         </div>
         <div className="event-summary-cell quiet">
@@ -191,17 +213,17 @@ export function EventsView(): JSX.Element {
         </div>
       </section>
 
-      {rules.length > 0 && (
+      {subscriptions.length > 0 && (
         <section className="event-rule-distribution">
           <div className="event-rule-head">
             <div>
-              <h2>规则命中</h2>
-              <p>按实际命中过的规则统计判定结果；长期 0 命中的规则，多半是事件类型配错了。</p>
+              <h2>订阅命中</h2>
+              <p>按自动化任务统计；长期 0 命中的任务，多半是事件类型或关键词订错了。</p>
             </div>
           </div>
           <div className="event-rule-list">
-            {rules.map(rule => {
-              const stats = ruleStats[rule.id] ?? {}
+            {subscriptions.map(subscription => {
+              const stats = ruleStats[subscription.id] ?? {}
               const pending = stats.pending ?? 0
               const review = stats.review ?? 0
               const done = stats.done ?? 0
@@ -209,18 +231,19 @@ export function EventsView(): JSX.Element {
               const valid = pending + review + done
               const total = valid + invalid
               return (
-                <div key={rule.id} className="event-rule-row">
+                <div key={subscription.id} className="event-rule-row">
                   <div className="event-rule-name">
-                    <strong>{rule.eventType}</strong>
-                    <span>{rule.id} · v{rule.version}</span>
+                    <strong>{subscription.taskName}</strong>
+                    <span>{subscription.source} · {subscription.types.join('、') || '未指定类型'}</span>
                   </div>
+                  <span className={MODE_CLASS[subscription.mode] ?? 'tag'}>{MODE_LABEL[subscription.mode] ?? subscription.mode}</span>
                   {total === 0 ? (
                     <span className="muted">尚未命中</span>
                   ) : (
                     <div className="event-rule-counts">
                       <span>有效 {valid}</span>
                       <span>人审 {review}</span>
-                      <span>无效 {invalid}</span>
+                      <span>仅提醒 {done}</span>
                       <span className="quiet">合计 {total}</span>
                     </div>
                   )}
@@ -270,7 +293,7 @@ export function EventsView(): JSX.Element {
             <tr>
               <th className="event-col-priority">优先级</th>
               <th>事件</th>
-              <th>判定</th>
+              <th>归属</th>
               <th>状态</th>
               <th className="event-col-actions">操作</th>
             </tr>
@@ -285,7 +308,7 @@ export function EventsView(): JSX.Element {
                     <span>{event.sourceId}</span>
                     <span className="dot-sep">·</span>
                     <span>{event.eventType || 'event'}</span>
-                    {event.ruleId && <><span className="dot-sep">·</span><span>{event.ruleId}</span></>}
+                    {event.subscriptionId && <><span className="dot-sep">·</span><span>{event.subscriptionId}</span></>}
                     <span className="dot-sep">·</span>
                     <span>{formatTime(event.receivedAt)}</span>
                   </div>
@@ -297,9 +320,7 @@ export function EventsView(): JSX.Element {
                     {event.skill && <span className="event-skill">{event.skill}</span>}
                   </div>
                   {event.reason && <div className="event-reason">{event.reason}</div>}
-                  {event.status === 'undecided' && !event.reason && (
-                    <div className="event-reason">未匹配到决策规则</div>
-                  )}
+
                   {typeof event.confidence === 'number' && (
                     <div className="muted">置信度 {event.confidence.toFixed(2)}</div>
                   )}

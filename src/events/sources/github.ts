@@ -1,17 +1,21 @@
 /**
- * GitHub 事件来源：按订阅的仓库与事件类型把 GitHub 上的动静收成事件。
+ * GitHub 事件 watcher：按订阅的仓库与事件类型把 GitHub 上的动静收成事件。
  *
  * 数据来自 GitHub 的两条线：
  * - `repos/<repo>/events`：Issue、PR、评论、评审等；
  * - `repos/<repo>/actions/runs`：工作流（Action）的触发与结论。
  *
  * 只做「把动静变成事件」，判定与派工交给事件管线。
+ *
+ * 订阅是参数而不是构造参数：同一个仓库可以被多个任务订阅，
+ * 每个订阅有自己的游标 —— 共用游标会让先跑的订阅把后跑的挡在门外。
  */
-import type { EventSourceConfig } from '../../config.js'
-import type { EventEnvelope, EventSource } from '#event/port.js'
+import type { EventEnvelope } from '#event/port.js'
 import { GITHUB_EVENT_PREFIX, GITHUB_EVENT_TYPES, githubEventLabel, withGithubPrefix, type GithubEventType } from '#core/github-events.js'
 import type { CommandRunner } from '#infra/process.js'
 import { errorMessage, noopLogger, type Logger } from '#infra/logger.js'
+import type { EventWatcher } from '../watcher.js'
+import type { ResolvedSubscription } from '../subscriptions.js'
 
 /** GitHub 事件流与工作流列表最多翻几页；feed 本身最多 300 条。 */
 const MAX_EVENT_PAGES = 3
@@ -41,20 +45,17 @@ export interface EventCursor {
   set(key: string, value: string): void
 }
 
-/** GitHub 事件来源：一个来源实例 = 一个仓库。 */
-export class GithubEventSource implements EventSource {
-  readonly id: string
-  readonly kind = 'github'
-  private config: EventSourceConfig
+/** GitHub 事件 watcher（poll 形态）。 */
+export class GithubEventSource implements EventWatcher {
+  readonly catalogId = 'github'
+  readonly mode = 'poll' as const
   private runner: CommandRunner
   private logger: Logger
   private clock: () => string
   private limit: number
   private cursor?: EventCursor
 
-  constructor(id: string, config: EventSourceConfig, deps: GithubEventSourceDeps) {
-    this.id = id
-    this.config = config
+  constructor(deps: GithubEventSourceDeps) {
     this.runner = deps.runner
     this.logger = deps.logger ?? noopLogger
     this.clock = deps.clock ?? (() => new Date().toISOString())
@@ -62,13 +63,13 @@ export class GithubEventSource implements EventSource {
     this.cursor = deps.cursor
   }
 
-  async poll(): Promise<EventEnvelope[]> {
-    const repo = (this.config.repo ?? '').trim()
+  async poll(subscription: ResolvedSubscription): Promise<EventEnvelope[]> {
+    const repo = (subscription.params.repo ?? '').trim()
     if (!repo) {
-      this.logger.warn('event:source-not-configured', { sourceId: this.id, kind: this.kind })
+      this.logger.warn('event:source-not-configured', { sourceId: this.catalogId, repo })
       return []
     }
-    const wanted = subscribedTypes(this.config)
+    const wanted = subscribedTypes(subscription.types)
     if (wanted.length === 0) return []
     const wantedIds = wanted.map(type => type.id)
     const now = Date.parse(this.clock())
@@ -79,7 +80,7 @@ export class GithubEventSource implements EventSource {
       // 事件流一页装不下的订阅事件：GitHub 的 feed 每页 100 条、最多翻到 300 条，
       // 只拉第 1 页会把排在后面的 Issue / PR 事件整片丢掉。
       const pages: EventEnvelope[] = []
-      const cursorKey = this.cursorKey(repo)
+      const cursorKey = this.cursorKey(subscription.id, repo)
       const baselining = this.isBaselining(cursorKey)
       let rawMaxId = 0
       let complete = true
@@ -91,7 +92,7 @@ export class GithubEventSource implements EventSource {
         if (result.code !== 0) {
           // 拉取失败只记日志：来源不可用不该让整条管线停摆，下次轮询还会再试。
           this.logger.warn('event:github-poll-failed', {
-            sourceId: this.id,
+            sourceId: this.catalogId,
             repo,
             detail: (result.stderr || result.stdout).slice(0, 200),
           })
@@ -118,7 +119,7 @@ export class GithubEventSource implements EventSource {
 
     if (wanted.some(type => type.kind === 'workflow_run')) {
       const pages: EventEnvelope[] = []
-      const cursorKey = `${this.cursorKey(repo)}:runs`
+      const cursorKey = `${this.cursorKey(subscription.id, repo)}:runs`
       const baselining = this.isBaselining(cursorKey)
       let rawMaxId = 0
       let complete = true
@@ -129,7 +130,7 @@ export class GithubEventSource implements EventSource {
         )
         if (result.code !== 0) {
           this.logger.warn('event:github-poll-failed', {
-            sourceId: this.id,
+            sourceId: this.catalogId,
             repo,
             detail: (result.stderr || result.stdout).slice(0, 200),
           })
@@ -187,7 +188,7 @@ export class GithubEventSource implements EventSource {
       return { title: String(detail.title ?? '').trim(), body: String(detail.body ?? '').trim() }
     } catch (error) {
       this.logger.warn('event:github-poll-failed', {
-        sourceId: this.id,
+        sourceId: this.catalogId,
         repo,
         detail: errorMessage(error).slice(0, 200),
       })
@@ -205,8 +206,8 @@ export class GithubEventSource implements EventSource {
    * 会被 id 空间不同的仓库级事件顶偏，存下来的水位不可信。换个键就是重建基线，
    * 不需要手工清库。
    */
-  private cursorKey(repo: string): string {
-    return `github:${this.id}:${repo}:${CURSOR_VERSION}`
+  private cursorKey(subscriptionId: string, repo: string): string {
+    return `github:${subscriptionId}:${repo}:${CURSOR_VERSION}`
   }
 
   /** 这个来源还没建过基线（第一次订阅）。 */
@@ -241,7 +242,7 @@ export class GithubEventSource implements EventSource {
       // 拉取不全时不记水位：否则漏掉的那几页会被永久跳过。
       if (!complete) return []
       if (rawMaxId > 0) this.cursor.set(cursorKey, String(rawMaxId))
-      this.logger.info('event:github-baseline', { sourceId: this.id, cursorKey, maxId: rawMaxId })
+      this.logger.info('event:github-baseline', { sourceId: this.catalogId, cursorKey, maxId: rawMaxId })
       return []
     }
     const since = Number(stored)
@@ -251,7 +252,7 @@ export class GithubEventSource implements EventSource {
     if (newest > since) this.cursor.set(cursorKey, String(newest))
     if (recent.length < fresh.length) {
       this.logger.info('event:github-window-skipped', {
-        sourceId: this.id,
+        sourceId: this.catalogId,
         cursorKey,
         skipped: fresh.length - recent.length,
         since: new Date(sinceMs).toISOString(),
@@ -260,17 +261,17 @@ export class GithubEventSource implements EventSource {
     return recent
   }
 
-  async publish(target: { externalId: string; url?: string }, text: string): Promise<void> {
-    const repo = (this.config.repo ?? '').trim()
+  async publish(subscription: ResolvedSubscription, target: { externalId: string; url?: string }, text: string): Promise<void> {
+    const repo = (subscription.params.repo ?? '').trim()
     const number = issueNumberOf(target.externalId)
     if (!repo || !number) {
-      this.logger.warn('event:writeback-unsupported', { sourceId: this.id, externalId: target.externalId })
+      this.logger.warn('event:writeback-unsupported', { sourceId: this.catalogId, externalId: target.externalId })
       return
     }
     const result = await this.runner.run(['issue', 'comment', String(number), '--repo', repo, '--body', text], { timeoutMs: 60_000 })
     if (result.code !== 0) {
       this.logger.warn('event:writeback-failed', {
-        sourceId: this.id,
+        sourceId: this.catalogId,
         externalId: target.externalId,
         detail: (result.stderr || result.stdout).slice(0, 200),
       })
@@ -278,9 +279,15 @@ export class GithubEventSource implements EventSource {
   }
 }
 
-/** 订阅的事件类型；没配就是全部。 */
-function subscribedTypes(config: EventSourceConfig): GithubEventType[] {
-  const ids = (config.events ?? []).filter(id => typeof id === 'string' && id.trim())
+/**
+ * 订阅的事件类型；没配就是全部。
+ *
+ * 订阅里的类型带 `github.` 前缀，GitHub 目录里的 id 不带 —— 这里去掉前缀再匹配。
+ */
+function subscribedTypes(prefixed: readonly string[]): GithubEventType[] {
+  const ids = prefixed
+    .filter(id => typeof id === 'string' && id.trim())
+    .map(id => (id.startsWith(`${GITHUB_EVENT_PREFIX}.`) ? id.slice(GITHUB_EVENT_PREFIX.length + 1) : id))
   if (ids.length === 0) return [...GITHUB_EVENT_TYPES]
   return GITHUB_EVENT_TYPES.filter(type => ids.includes(type.id))
 }

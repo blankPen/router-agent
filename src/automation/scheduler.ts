@@ -6,6 +6,7 @@
  * - 每次执行落一条执行记录（触发时间、耗时、状态、结果摘要、错误、产出）；
  * - 超时与重试由执行器统一处理，调度器只管「什么时候触发」。
  */
+import { scheduleOf } from '#core/automation.js'
 import type { Automation, AutomationRun, AutomationRunOutputs, AutomationRunPhase, AutomationState, AutomationTool } from '#core/automation.js'
 import { nextRunAt, validateSchedule } from '#core/automation-schedule.js'
 import { preview } from '#core/events.js'
@@ -65,6 +66,9 @@ export async function tickAutomations(deps: AutomationSchedulerDeps): Promise<Sc
 
   for (const automation of config.tasks) {
     if (!automation.enabled) continue
+    // 事件触发的任务由事件管线触发，不走定时调度。
+    const schedule = scheduleOf(automation.trigger)
+    if (!schedule) continue
     const state = deps.stateOf(automation.id)
     const due = state.nextRunAt ? Date.parse(state.nextRunAt) : Number.NaN
     if (!Number.isFinite(due) || due > nowMs) continue
@@ -85,7 +89,7 @@ export async function tickAutomations(deps: AutomationSchedulerDeps): Promise<Sc
         manual: false,
       }
       deps.recordRun(missed)
-      const next = nextRunAt(automation.schedule, new Date(nowMs))
+      const next = nextRunAt(schedule, new Date(nowMs))
       deps.saveState({
         taskId: automation.id,
         ...(next ? { nextRunAt: next } : {}),
@@ -172,7 +176,7 @@ export async function executeRun(
       outputs,
     }
     deps.updateRun(finished)
-    const next = nextRunAt(automation.schedule, new Date(now()))
+    const next = nextRunAt(scheduleOf(automation.trigger), new Date(now()))
     deps.saveState({
       taskId: automation.id,
       ...(next ? { nextRunAt: next } : {}),
@@ -194,12 +198,6 @@ export async function executeRun(
   if (!executor) {
     deps.logger.error('automation:executor-missing', { automationId: automation.id, runId: run.id, type: automation.type })
     return finish('failed', `没有 ${automation.type} 类型的执行器`, emptyOutputs(), `executor:unavailable:${automation.type}`)
-  }
-
-  const scheduleError = validateSchedule(automation.schedule)
-  if (scheduleError) {
-    deps.logger.error('automation:schedule-invalid', { automationId: automation.id, runId: run.id, message: scheduleError })
-    return finish('failed', `触发计划不合法：${scheduleError}`, emptyOutputs(), 'schedule:invalid')
   }
 
   const tools = deps.toolsFor(automation)
@@ -259,7 +257,7 @@ export function initAutomationStates(
   for (const task of tasks) {
     const state = deps.stateOf(task.id)
     if (state.nextRunAt) continue
-    const next = nextRunAt(task.schedule, new Date(nowMs))
+    const next = nextRunAt(scheduleOf(task.trigger), new Date(nowMs))
     if (!next) continue
     deps.saveState({ taskId: task.id, nextRunAt: next })
   }

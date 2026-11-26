@@ -65,7 +65,7 @@ export interface ConfigBlock {
   id: string
   title: string
   description?: string
-  render?: 'fields' | 'runtime' | 'projects' | 'specs' | 'custom' | 'events' | 'events-rules'
+  render?: 'fields' | 'runtime' | 'projects' | 'specs' | 'custom' | 'events'
   fields: FieldDef[]
   /** 块自己管理的、不是普通字段的配置路径（如群列表）。 */
   paths?: string[]
@@ -356,20 +356,10 @@ export const CONFIG_GROUPS: ConfigGroup[] = [
       },
       {
         id: 'events-sources',
-        title: '事件来源',
-        description: '来源只负责「把事件收进来」：GitHub 仓库订阅、飞书事件等。启用与参数保存后立即生效，不需要重启。',
+        title: '事件源目录',
+        description: '目录只回答「有什么事件可订阅」：可订阅的事件类型与连接参数。订阅关系一律在自动化任务里。',
         render: 'events',
         fields: [],
-        effectLabel: '保存后立即生效',
-      },
-      {
-        id: 'events-rules',
-        title: '决策规则',
-        description: '按事件类型各自配置判定问题、执行流程与护栏。规则存在本身就是该类事件的判定开关。',
-        render: 'events-rules',
-        fields: [],
-        // 规则整段由弹窗编辑，字段列表是空的；不声明这条路径，保存时就不会把规则写进补丁。
-        paths: ['events.rules'],
         effectLabel: '保存后立即生效',
       },
       {

@@ -8,7 +8,7 @@ function task(over: Record<string, unknown> = {}): Record<string, unknown> {
     description: '',
     type: 'ai',
     prompt: '检查依赖更新',
-    schedule: { kind: 'cron', cron: '0 9 * * 1' },
+    trigger: { kind: 'schedule', schedule: { kind: 'cron', cron: '0 9 * * 1' } },
     runtimeId: '',
     project: 'demo',
     repo: '/tmp/demo',
@@ -28,14 +28,15 @@ describe('自动化配置', () => {
 
     expect(result.errors).toEqual([])
     expect(config.automation.tasks).toHaveLength(1)
-    expect(config.automation.tasks[0]!.schedule.kind).toBe('cron')
+    expect(config.automation.tasks[0]!.trigger.kind).toBe('schedule')
+    expect(config.automation.tasks[0]!.trigger.kind === 'schedule' ? config.automation.tasks[0]!.trigger.schedule.kind : '').toBe('cron')
     expect(HOT_CONFIG_PREFIXES).toContain('automation.')
   })
 
   it('非法 Cron 被拒绝且不写入', () => {
     const config = defaultConfig()
     const result = applyConfigPatch(config, {
-      'automation.tasks': [task({ schedule: { kind: 'cron', cron: '0 25 * * *' } })],
+      'automation.tasks': [task({ trigger: { kind: 'schedule', schedule: { kind: 'cron', cron: '0 25 * * *' } } })],
     })
 
     expect(result.errors[0]!.path).toBe('automation.tasks')

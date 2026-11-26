@@ -1,5 +1,8 @@
 /**
- * 事件总线管理器：装配来源、驱动轮询、跑决策管线、回写结论。
+ * 事件总线管理器：按订阅装配 watcher、驱动轮询、跑决策管线、回写结论。
+ *
+ * 订阅来自自动化任务（`automation.tasks[].trigger.kind = 'event'`）：
+ * 没有订阅就没有事件 —— 来源不再持有「订阅了哪些事件」。
  *
  * 事件链路与飞书消息链路只在「派工 → Worker」处汇合：
  * 事件判定后合成工单，之后完全沿用现有派工与 Worker 流程。
@@ -7,15 +10,15 @@
 import type { AppConfig, EventSourceConfig } from '../config.js'
 import type { Store } from '../store/db.js'
 import type { EventPriority, EventRecord } from '#core/event.js'
-import type { EventEnvelope, EventSource } from '#event/port.js'
-import { loadEventPlugins } from '#event/plugins/loader.js'
+import type { EventEnvelope } from '#event/port.js'
 import type { EventOptionField } from '#event/plugins/types.js'
 import { errorMessage, noopLogger, type Logger } from '#infra/logger.js'
 import type { CommandRunner } from '#infra/process.js'
 import type { EventAction, EventPipeline } from './pipeline.js'
-import { FeishuEventSource } from './sources/feishu.js'
 import { GithubEventSource } from './sources/github.js'
-import { ruleEventTypes } from './rules.js'
+import { FeishuEventWatcher } from './feishu-watcher.js'
+import { groupBySource, subscriptionsOf, type ResolvedSubscription } from './subscriptions.js'
+import type { EventSink, EventWatcher } from './watcher.js'
 
 /** 面板展示用的来源视图。 */
 export interface EventSourceView {
@@ -34,6 +37,8 @@ export interface EventSourceView {
   placeholder?: boolean
   /** 自定义来源插件的 npm 包名或本地路径。 */
   package?: string
+  /** 这个来源当前有多少条订阅。 */
+  subscriptions?: number
 }
 
 /** 事件来源的字段说明；内置来源写在这里，插件来源用插件自己声明的。 */
@@ -54,6 +59,17 @@ export interface EventManagerDeps {
   logger?: Logger
   /** 决策管线每轮间隔；测试注入。 */
   tickMs?: number
+  /** 订阅清单；宿主注入（默认从配置里的自动化任务推导）。 */
+  subscriptions?: () => ResolvedSubscription[]
+}
+
+interface SourceRuntime {
+  /** 来源配置 id；决定事件的 sourceId。 */
+  sourceId: string
+  /** 来源种类。 */
+  kind: string
+  /** 覆盖的 watcher。 */
+  watcher: EventWatcher
 }
 
 /** 事件总线管理器。 */
@@ -65,7 +81,10 @@ export class EventManager {
   private runner: CommandRunner
   private logger: Logger
   private tickMs: number
-  private sources = new Map<string, EventSource>()
+  private subscriptionsFn: () => ResolvedSubscription[]
+  /** 来源 id → 运行态。 */
+  private runtimes = new Map<string, SourceRuntime>()
+  /** 轮询定时器：key 是 `来源 id:订阅 id`。 */
   private timers = new Map<string, ReturnType<typeof setInterval>>()
   private tickTimer: ReturnType<typeof setInterval> | null = null
   private status = new Map<string, { status: EventSourceView['status']; message?: string; lastPolledAt?: string }>()
@@ -81,22 +100,18 @@ export class EventManager {
     this.runner = deps.runner
     this.logger = deps.logger ?? noopLogger
     this.tickMs = deps.tickMs ?? 30_000
+    this.subscriptionsFn = deps.subscriptions ?? (() => subscriptionsOf(this.config()))
   }
 
-  /** 启动：装配来源并开始轮询与管线 tick。 */
+  /** 启动：按订阅装配来源并开始轮询与管线 tick。 */
   async start(): Promise<void> {
     if (this.running) return
     this.running = true
-    await this.reloadSources()
-    const activated = this.store.activateUndecidedEvents(
-      ruleEventTypes(this.config().events.rules),
-      this.clock(),
-    )
-    if (activated > 0) this.logger.info('event:rule-activated', { ruleId: 'startup', activated })
+    await this.reloadSubscriptions()
     this.tickTimer = setInterval(() => {
       void this.runTick()
     }, this.tickMs)
-    this.logger.info('event:manager-started', { sources: this.sources.size })
+    this.logger.info('event:manager-started', { sources: this.runtimes.size })
   }
 
   /** 停止：停掉所有轮询与来源。 */
@@ -106,29 +121,34 @@ export class EventManager {
     this.timers.clear()
     if (this.tickTimer) clearInterval(this.tickTimer)
     this.tickTimer = null
-    for (const source of this.sources.values()) {
+    for (const runtime of this.runtimes.values()) {
       try {
-        source.stop?.()
+        runtime.watcher.stop?.()
       } catch (error) {
-        this.logger.warn('event:source-stop-failed', { sourceId: source.id, message: errorMessage(error) })
+        this.logger.warn('event:source-stop-failed', { sourceId: runtime.sourceId, message: errorMessage(error) })
       }
     }
-    this.sources.clear()
+    this.runtimes.clear()
     this.logger.info('event:manager-stopped', {})
   }
 
-  /** 重新装配来源（配置变更后调用）。 */
-  async reloadSources(): Promise<void> {
+  /**
+   * 重新装配订阅（配置变更后调用）。
+   *
+   * 装配粒度是**来源**：同一个来源的多个订阅共用一个 watcher；
+   * poll 形态按订阅各拉各的（游标独立），realtime 形态按 EventKey 共享长连接。
+   */
+  async reloadSubscriptions(): Promise<void> {
     for (const timer of this.timers.values()) clearInterval(timer)
     this.timers.clear()
-    for (const source of this.sources.values()) {
+    for (const runtime of this.runtimes.values()) {
       try {
-        source.stop?.()
+        runtime.watcher.stop?.()
       } catch (error) {
-        this.logger.warn('event:source-stop-failed', { sourceId: source.id, message: errorMessage(error) })
+        this.logger.warn('event:source-stop-failed', { sourceId: runtime.sourceId, message: errorMessage(error) })
       }
     }
-    this.sources.clear()
+    this.runtimes.clear()
 
     const config = this.config()
     if (!config.events.enabled) {
@@ -136,50 +156,27 @@ export class EventManager {
       return
     }
 
-    for (const [id, source] of Object.entries(config.events.sources)) {
-      if (!source.enabled) continue
-      const built = this.buildSource(id, source)
-      if (!built) continue
-      this.sources.set(id, built)
+    const grouped = groupBySource(this.subscriptionsFn().filter(subscription => subscription.enabled))
+    for (const [source, subscriptions] of grouped) {
+      const runtime = this.buildRuntime(source, subscriptions)
+      if (!runtime) continue
+      this.runtimes.set(runtime.sourceId, runtime)
+      await this.startSubscriptions(runtime, subscriptions)
     }
-
-    // 自定义来源插件：只有配置里写了 plugin 的来源 id 才会加载。
-    const plugins = await loadEventPlugins(
-      { home: config.home, events: { sources: pluginEntriesOf(config) } },
-      { home: config.home, logger: this.logger, runner: bin => ({ run: async () => ({ code: 127, stdout: '', stderr: `事件插件不支持命令 ${bin}` }) }) },
-    )
-    for (const failure of plugins.failures) {
-      this.logger.error('event:plugin-failed', { sourceId: failure.id, message: failure.message })
-    }
-    for (const source of plugins.sources) {
-      this.sources.set(source.id, source)
-    }
-    this.pluginOptions = plugins.optionsById
-
-    for (const [id, source] of this.sources) {
-      const interval = this.intervalOf(id)
-      if (typeof source.poll !== 'function') {
-        this.status.set(id, { status: 'ok', message: '推送型来源，由来源自己拉取' })
-        continue
-      }
-      const timer = setInterval(() => {
-        void this.pollSource(id, source)
-      }, interval)
-      this.timers.set(id, timer)
-      void this.pollSource(id, source)
-    }
-    this.logger.info('event:sources-loaded', { count: this.sources.size })
+    this.logger.info('event:sources-loaded', { count: this.runtimes.size })
   }
 
   /** 面板用：来源列表。 */
   listSources(): EventSourceView[] {
     const config = this.config()
     const out: EventSourceView[] = []
+    const grouped = groupBySource(this.subscriptionsFn())
     for (const [id, source] of Object.entries(config.events.sources)) {
       const status = this.status.get(id)
       const fields = source.plugin
         ? pluginFieldsOf(this.pluginOptions[id])
         : (BUILTIN_FIELDS[source.kind ?? ''] ?? [])
+      const subscriptions = grouped.get(source.kind ?? id)?.length ?? 0
       out.push({
         id,
         kind: source.kind ?? (source.plugin ? 'plugin' : 'event'),
@@ -189,9 +186,8 @@ export class EventManager {
         ...(status?.message ? { message: status.message } : {}),
         ...(status?.lastPolledAt ? { lastPolledAt: status.lastPolledAt } : {}),
         builtin: !source.plugin,
-        // 占位来源（飞书）：开关能开但不产出事件，标注出来免得以为配了就能用。
-        ...(source.kind === 'feishu' ? { placeholder: true } : {}),
         ...(source.plugin ? { package: source.plugin } : {}),
+        subscriptions,
       })
     }
     return out
@@ -212,9 +208,9 @@ export class EventManager {
     return this.store.countEventsByStatus()
   }
 
-  /** 面板用：按规则聚合事件命中分布。 */
+  /** 面板用：按订阅（= 任务）聚合事件命中分布。 */
   countEventRules(): Record<string, Record<string, number>> {
-    return this.store.countEventsByRule()
+    return this.store.countEventsBySubscription()
   }
 
   /** 面板用：事件操作。 */
@@ -257,42 +253,71 @@ export class EventManager {
 
   /** 回写结论；没有回写能力的事件只落库，不假装做完了。 */
   private async writeback(event: EventRecord, text: string): Promise<void> {
-    const source = this.sources.get(event.sourceId)
-    if (!source?.publish) {
+    const subscription = this.subscriptionOf(event)
+    const runtime = subscription ? this.runtimes.get(this.sourceIdOf(subscription)) : undefined
+    if (!subscription || !runtime?.watcher.publish) {
       this.logger.info('event:writeback-skipped', { eventId: event.id, sourceId: event.sourceId })
       return
     }
     try {
-      await source.publish({ externalId: event.externalId, ...(event.url ? { url: event.url } : {}) }, text)
+      await runtime.watcher.publish(subscription, { externalId: event.externalId, ...(event.url ? { url: event.url } : {}) }, text)
     } catch (error) {
       this.logger.warn('event:writeback-failed', { eventId: event.id, sourceId: event.sourceId, message: errorMessage(error) })
     }
   }
 
-  /** 轮询一个来源并把事件入队。 */
-  private async pollSource(id: string, source: EventSource): Promise<void> {
-    if (!source.poll) return
-    const config = this.config().events.sources[id]
-    if (!config) return
+  /** 轮询一条订阅并把事件入队。 */
+  private async pollSubscription(runtime: SourceRuntime, subscription: ResolvedSubscription): Promise<void> {
+    const poll = runtime.watcher.poll
+    if (!poll) return
     try {
-      const envelopes = await source.poll()
+      const envelopes = await poll.call(runtime.watcher, subscription)
       let count = 0
       for (const envelope of envelopes) {
-        this.pipeline.ingest(id, config, envelope)
+        this.ingest(runtime, subscription, envelope)
         count += 1
       }
-      this.status.set(id, { status: 'ok', lastPolledAt: this.clock(), ...(count ? { message: `收到 ${count} 条事件` } : {}) })
+      this.status.set(runtime.sourceId, {
+        status: 'ok',
+        lastPolledAt: this.clock(),
+        ...(count ? { message: `收到 ${count} 条事件` } : {}),
+      })
     } catch (error) {
-      this.status.set(id, { status: 'error', message: errorMessage(error).slice(0, 200), lastPolledAt: this.clock() })
-      this.logger.warn('event:source-poll-failed', { sourceId: id, message: errorMessage(error) })
+      this.status.set(runtime.sourceId, {
+        status: 'error',
+        message: errorMessage(error).slice(0, 200),
+        lastPolledAt: this.clock(),
+      })
+      this.logger.warn('event:source-poll-failed', {
+        sourceId: runtime.sourceId,
+        subscriptionId: subscription.id,
+        message: errorMessage(error),
+      })
     }
   }
 
-  /** 装配内置来源。 */
-  private buildSource(id: string, config: EventSourceConfig): EventSource | null {
-    switch (config.kind) {
+  /** 事件入队：带上订阅 id，事件按任务归属。 */
+  private ingest(runtime: SourceRuntime, subscription: ResolvedSubscription, envelope: EventEnvelope): void {
+    this.pipeline.ingest(runtime.sourceId, runtime.kind, subscription, envelope)
+  }
+
+  /** 按来源装配 watcher。 */
+  private buildRuntime(source: string, subscriptions: ResolvedSubscription[]): SourceRuntime | null {
+    const kind = subscriptions[0]?.source ?? source
+    const sourceId = this.sourceIdOf(subscriptions[0]!)
+    const watcher = this.buildWatcher(kind)
+    if (!watcher) {
+      this.logger.warn('event:source-unsupported', { sourceId, kind })
+      return null
+    }
+    return { sourceId, kind, watcher }
+  }
+
+  /** 内置 watcher。 */
+  private buildWatcher(kind: string): EventWatcher | null {
+    switch (kind) {
       case 'github':
-        return new GithubEventSource(id, config, {
+        return new GithubEventSource({
           runner: this.runner,
           logger: this.logger,
           clock: this.clock,
@@ -303,28 +328,71 @@ export class EventManager {
           },
         })
       case 'feishu':
-        return new FeishuEventSource(id, config, { logger: this.logger })
+        return new FeishuEventWatcher({ logger: this.logger, clock: this.clock })
       default:
-        this.logger.warn('event:source-unsupported', { sourceId: id, kind: config.kind ?? '' })
         return null
     }
   }
 
+  /** 启停这一批订阅。 */
+  private async startSubscriptions(runtime: SourceRuntime, subscriptions: ResolvedSubscription[]): Promise<void> {
+    if (runtime.watcher.mode === 'realtime') {
+      const sink: EventSink = (subscription, envelope) => {
+        this.ingest(runtime, subscription, envelope)
+      }
+      for (const subscription of subscriptions) {
+        try {
+          await runtime.watcher.subscribe?.(subscription, sink)
+          this.logger.info('event:subscription-registered', {
+            taskId: subscription.id,
+            source: subscription.source,
+            types: subscription.types,
+          })
+        } catch (error) {
+          this.logger.warn('event:subscription-register-failed', {
+            taskId: subscription.id,
+            source: subscription.source,
+            message: errorMessage(error),
+          })
+        }
+      }
+      return
+    }
+    // poll 形态：每个订阅一个定时器，游标互相独立。
+    for (const subscription of subscriptions) {
+      const key = `${runtime.sourceId}:${subscription.id}`
+      const timer = setInterval(() => {
+        void this.pollSubscription(runtime, subscription)
+      }, this.intervalOf(runtime.sourceId))
+      this.timers.set(key, timer)
+      void this.pollSubscription(runtime, subscription)
+      this.logger.info('event:subscription-registered', {
+        taskId: subscription.id,
+        source: subscription.source,
+        types: subscription.types,
+      })
+    }
+  }
+
+  /** 事件的 sourceId：优先用配置里的来源条目 id，没有就用目录 id。 */
+  private sourceIdOf(subscription: ResolvedSubscription): string {
+    const sources = this.config().events.sources
+    const match = Object.entries(sources).find(([, source]) => source.enabled && source.kind === subscription.source)
+    return match?.[0] ?? subscription.source
+  }
+
+  /** 按事件上的订阅 id 取订阅。 */
+  private subscriptionOf(event: EventRecord): ResolvedSubscription | undefined {
+    if (!event.subscriptionId) return undefined
+    return this.subscriptionsFn().find(item => item.id === event.subscriptionId)
+  }
+
   /** 轮询间隔：来源自己配的优先。 */
-  private intervalOf(id: string): number {
-    const configured = this.config().events.sources[id]?.intervalMs
+  private intervalOf(sourceId: string): number {
+    const configured = this.config().events.sources[sourceId]?.intervalMs
     if (typeof configured === 'number' && configured > 0) return configured
     return 300_000
   }
-}
-
-/** 配置里声明了插件入口的来源条目。 */
-function pluginEntriesOf(config: AppConfig): Record<string, string> {
-  const out: Record<string, string> = {}
-  for (const [id, source] of Object.entries(config.events.sources)) {
-    if (source.plugin) out[id] = source.plugin
-  }
-  return out
 }
 
 /**

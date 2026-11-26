@@ -72,7 +72,8 @@ import { LogAssistantFab } from './log-assistant.js'
 import { EventsView } from './events-panel.js'
 import { AutomationView } from './automation-panel.js'
 import { EventSourcesConfig } from './events-config.js'
-import { EventRulesConfig } from './event-rules.js'
+import type { CatalogView } from './event-catalog-model.js'
+import type { AutomationTask } from './automation-model.js'
 import { eventSourceFields, eventSourcePathsIn, type SourceMeta } from './event-sources.js'
 import { SpecsEditor } from './specs-editor.js'
 import {
@@ -1291,11 +1292,20 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
   const [pendingRestart, setPendingRestart] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [eventSources, setEventSources] = useState<SourceMeta[]>([])
+  const [eventCatalogs, setEventCatalogs] = useState<CatalogView[]>([])
+  const [automationTasks, setAutomationTasks] = useState<AutomationTask[]>([])
 
   // 事件来源的字段是来源自己声明的，配置页要按它们渲染并追踪改动。
+  // 目录卡要显示「被 N 个任务订阅」，所以顺带把任务列表拉下来。
   const loadEventSources = useCallback((): void => {
-    void getJson<{ sources?: SourceMeta[] }>('/api/events')
-      .then(data => setEventSources(data.sources ?? []))
+    void getJson<{ sources?: SourceMeta[]; catalogs?: CatalogView[] }>('/api/events')
+      .then(data => {
+        setEventSources(data.sources ?? [])
+        setEventCatalogs(data.catalogs ?? [])
+      })
+      .catch(() => undefined)
+    void getJson<{ tasks?: AutomationTask[] }>('/api/automations')
+      .then(data => setAutomationTasks(data.tasks ?? []))
       .catch(() => undefined)
   }, [])
 
@@ -1623,19 +1633,12 @@ function ConfigView({ restarting, onRestart, onDirtyChange, focusSection, onFocu
         return (
           <EventSourcesConfig
             sources={eventSources}
+            catalogs={eventCatalogs}
+            tasks={automationTasks}
             draft={draft}
             defaults={defaults}
             setField={setField}
             errors={errors}
-            onNotice={notice => setNotice(notice)}
-          />
-        )
-      }
-      if (block.render === 'events-rules') {
-        return (
-          <EventRulesConfig
-            draft={draft}
-            setField={setField}
             onNotice={notice => setNotice(notice)}
           />
         )

@@ -12,10 +12,10 @@ export type EventPriority = 'P0' | 'P1' | 'P2' | 'P3' | 'P4'
 export const EVENT_PRIORITIES: readonly EventPriority[] = ['P0', 'P1', 'P2', 'P3', 'P4']
 
 /** 队列里的业务状态。未判定表示没有匹配的决策规则，只收集、不调模型。 */
-export type EventStatus = 'undecided' | 'pending' | 'review' | 'done' | 'invalid'
+export type EventStatus = 'pending' | 'review' | 'done' | 'invalid'
 
-/** 执行态：与业务状态并行记录，用来表达「为什么还没做完」。 */
-export type EventExecution = 'none' | 'deferred' | 'retry' | 'failed'
+/** 事件执行态：`notified` 表示只记录 + 通知，没进执行链路。 */
+export type EventExecution = 'none' | 'deferred' | 'retry' | 'failed' | 'notified'
 
 /** 归一化优先级；认不出的值按 P3（不重要不紧急）处理。 */
 export function normalizeEventPriority(value: unknown): EventPriority {
@@ -26,7 +26,7 @@ export function normalizeEventPriority(value: unknown): EventPriority {
 /** 归一化业务状态。 */
 export function normalizeEventStatus(value: unknown): EventStatus {
   const text = String(value ?? '').trim()
-  return text === 'undecided' || text === 'pending' || text === 'review' || text === 'done' || text === 'invalid'
+  return text === 'pending' || text === 'review' || text === 'done' || text === 'invalid'
     ? text
     : 'pending'
 }
@@ -99,12 +99,15 @@ export interface EventRecord {
   reason?: string
   /** 置信度 0~1。 */
   confidence?: number
-  /** 判定时命中的规则名或 'model'。 */
+  /** 判定依据：命中的订阅或模型名。 */
   basis?: string
-  /** 判定时命中的规则 id；未判定时为空。 */
-  ruleId?: string
-  /** 判定时命中的规则版本；回放历史判定时用来定位当时那版规则文本。 */
-  ruleVersion?: number
+  /**
+   * 命中的订阅 id（等于自动化任务 id）。
+   *
+   * 事件按订阅归属：两个任务订阅了同一件事，各拿各的事件，
+   * 互不干扰（幂等键是 `(subscriptionId, externalId)`）。
+   */
+  subscriptionId?: string
   /** 开出的工单 id。 */
   ticketId?: string
   /** 合成出来的 Trigger id（事件复用现有派工链路时用）。 */

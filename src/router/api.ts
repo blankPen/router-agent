@@ -22,7 +22,6 @@ import type { WorkerStateFile } from '#runtime/report-poller.js'
 import type { ResumeHint } from '#runtime/port.js'
 import { isReplyPayload, type ReplyPayload } from '#core/reply.js'
 import type { WorkspaceAdminPort } from '#runtime/workspaces/overview.js'
-import type { EventRule } from '../events/rules.js'
 import { PluginInstallStartError, type PluginPackageAdmin } from './plugin-admin.js'
 import { readLogs } from './log-tail.js'
 import type { LogAssistantQuestion, LogAssistantOverview, LogDiagnosis } from './log-assistant.js'
@@ -99,12 +98,12 @@ export interface EventApiPort {
   apply(eventId: string, action: string, options: { priority?: string; project?: string }): Promise<unknown | null>
   /** 当前决策策略。 */
   decision(): { provider: string; confidenceThreshold: number; fallback: string }
-  /** 当前规则集。 */
-  rules(): EventRule[]
-  /** 按规则统计事件命中分布（ruleId → status → 条数）。 */
+  /** 可订阅的事件目录（来源 → 类型 → 参数）。 */
+  catalogs(): unknown[]
+  /** 当前订阅清单（= 事件类自动化任务）；收件箱据此按任务聚合。 */
+  subscriptions(): unknown[]
+  /** 按订阅（= 任务）统计事件命中分布（subscriptionId → status → 条数）。 */
   ruleStats(): Record<string, Record<string, number>>
-  /** 自然语言提炼规则草稿；不可用时返回模板。 */
-  compileRule(input: { id: string; eventType: string; intent: string; workflowPrompt?: string }): Promise<EventRule>
   /** 按状态统计事件条数（面板统计卡用；不受列表 limit 影响）。 */
   counts(): Record<string, number>
 }
@@ -117,10 +116,6 @@ export interface AutomationApiPort {
   listRuns(automationId?: string): unknown[]
   /** 单条执行记录；面板轮询用来看执行进度。 */
   getRun(id: string): unknown | null
-  /** 待确认的对话式草稿。 */
-  listDrafts(): unknown[]
-  /** 忽略一条待确认草稿。 */
-  dismissDraft(id: string): boolean
   /** 手动触发一次；返回执行记录。 */
   trigger(id: string): Promise<unknown | null>
   /** 生成脚本正文；返回脚本文本，生成不了时返回 null。 */
@@ -134,6 +129,8 @@ export interface AutomationApiPort {
   generateScriptWithReason?(id: string): Promise<{ script: string } | { error: string; reason: string }>
   /** 从自然语言生成任务草稿（对话式创建入口用）。 */
   draft(text: string): Promise<unknown | null>
+  /** 自动化会话（自然语言建任务）；缺省时会话相关端点返回 404。 */
+  conversations?: AutomationConversationPort
   /** 调用自动化内置工具；范围与限流在服务层强制。 */
   invokeTool(automationId: string, name: string, args: Record<string, unknown>): Promise<{
     ok: boolean
@@ -201,6 +198,30 @@ export interface ApiServerOptions {
     channels?: Array<{ id: string; name: string; hint: string; default?: boolean; packageName?: string; loadedIds?: string[] }>
     failures?: Array<{ kind: 'runtime' | 'channel' | 'event'; id: string; specifier: string; message: string }>
   }
+}
+
+/**
+ * 自动化会话的端口：面板用 SSE 建任务、恢复会话、确认落库。
+ *
+ * 缺省时会话相关端点返回 404 —— 老服务端不该让面板卡在加载态。
+ */
+export interface AutomationConversationPort {
+  /** 建一条会话。 */
+  create(input: { source: string; requester: string; chatId?: string; threadId?: string }): unknown
+  /** 列出会话。 */
+  list(): unknown[]
+  /** 取一条会话。 */
+  get(id: string): unknown | null
+  /** 取会话消息流；after 之后的不返回（断线重连补齐用）。 */
+  messages(id: string, after?: number): unknown[]
+  /**
+   * 跑一轮：解析用户这句话。
+   *
+   * `onDelta` 给了就边解析边回调助手的话（逐字显示）。
+   */
+  turn(id: string, text: string, onDelta?: (text: string) => void): Promise<unknown>
+  /** 确认落库。 */
+  confirm(id: string): unknown
 }
 
 export interface ApiServer {
@@ -387,7 +408,8 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
         }),
         sources: opts.events.listSources(),
         decision: opts.events.decision(),
-        rules: opts.events.rules(),
+        catalogs: opts.events.catalogs(),
+        subscriptions: opts.events.subscriptions(),
         ruleStats: opts.events.ruleStats(),
         counts: opts.events.counts(),
         // 候选项目：人工批准时用来挑归属项目（事件本身不绑项目）。
@@ -395,9 +417,9 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       })
     }
 
-    if (path === '/api/events/rules' && req.method === 'GET') {
+    if (path === '/api/events/catalogs' && req.method === 'GET') {
       if (!opts.events) return respond(res, 404, { error: 'events-not-supported' })
-      return respond(res, 200, { rules: opts.events.rules(), ruleStats: opts.events.ruleStats() })
+      return respond(res, 200, { catalogs: opts.events.catalogs() })
     }
 
     // 自动化：任务列表、执行记录与手动触发。
@@ -406,7 +428,6 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       return respond(res, 200, {
         tasks: opts.automation.listTasks(),
         runs: opts.automation.listRuns(url.searchParams.get('automationId') ?? undefined),
-        drafts: opts.automation.listDrafts(),
       })
     }
 
@@ -445,6 +466,112 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       return respond(res, 200, { draft })
     }
 
+    // ---------- 自动化会话（自然语言建任务） ----------
+
+    if (path === '/api/automations/conversations' && req.method === 'POST') {
+      const port = opts.automation?.conversations
+      if (!port) return respond(res, 404, { error: 'automation-conversation-not-supported' })
+      const body = await readJson(req)
+      const conversation = port.create({
+        source: typeof body.source === 'string' && body.source.trim() ? body.source.trim() : 'web-panel',
+        requester: typeof body.requester === 'string' ? body.requester.trim() : 'panel',
+        ...(typeof body.chatId === 'string' && body.chatId.trim() ? { chatId: body.chatId.trim() } : {}),
+        ...(typeof body.threadId === 'string' && body.threadId.trim() ? { threadId: body.threadId.trim() } : {}),
+      })
+      onEvent({ event: 'api:automation-conversation-created' })
+      return respond(res, 200, { conversation })
+    }
+
+    if (path === '/api/automations/conversations' && req.method === 'GET') {
+      const port = opts.automation?.conversations
+      if (!port) return respond(res, 404, { error: 'automation-conversation-not-supported' })
+      return respond(res, 200, { conversations: port.list() })
+    }
+
+    const conversationMessages = path.match(/^\/api\/automations\/conversations\/([^/]+)\/messages$/)
+    if (conversationMessages && req.method === 'GET') {
+      const port = opts.automation?.conversations
+      if (!port) return respond(res, 404, { error: 'automation-conversation-not-supported' })
+      const id = decodeURIComponent(conversationMessages[1]!)
+      const after = Number(url.searchParams.get('after'))
+      return respond(res, 200, {
+        messages: port.messages(id, Number.isFinite(after) ? after : 0),
+      })
+    }
+
+    // SSE：一轮对话的流式响应。
+    // 助手逐字吐字、参数一点点补齐，比「等几秒再蹦一整段」好用得多（决策 A10）。
+    const conversationStream = path.match(/^\/api\/automations\/conversations\/([^/]+)\/stream$/)
+    if (conversationStream && req.method === 'POST') {
+      const port = opts.automation?.conversations
+      if (!port) return respond(res, 404, { error: 'automation-conversation-not-supported' })
+      const id = decodeURIComponent(conversationStream[1]!)
+      const body = await readJson(req)
+      const text = typeof body.text === 'string' ? body.text.trim() : ''
+      if (!text) return respond(res, 400, { error: 'text-required', message: '请先说点什么' })
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      })
+      // 心跳：防中间设备把静默的连接掐掉。
+      const heartbeat = setInterval(() => {
+        res.write(': ping\n\n')
+      }, 15_000)
+      heartbeat.unref?.()
+      try {
+        // 逐字增量：助手每吐一段就推一条 message 事件（§12.7 V29）。
+        let spoken = ''
+        const onDelta = (chunk: string): void => {
+          spoken += chunk
+          res.write(`event: message\ndata: ${JSON.stringify({ text: chunk })}\n\n`)
+        }
+        const turn = await port.turn(id, text, onDelta) as {
+          text?: string
+          step?: string
+          missing?: string[]
+          preview?: unknown
+          done?: boolean
+          taskId?: string
+          speech?: string
+        }
+        const payload = {
+          message: turn.text ?? '',
+          step: turn.step ?? 'parse',
+          missing: turn.missing ?? [],
+          ...(turn.preview ? { preview: turn.preview } : {}),
+          ...(turn.speech ? { speech: turn.speech } : {}),
+          done: turn.done !== false,
+          ...(turn.taskId ? { taskId: turn.taskId } : {}),
+        }
+        res.write(`event: turn\ndata: ${JSON.stringify(payload)}\n\n`)
+        res.write(`event: done\ndata: ${JSON.stringify({ ok: true })}\n\n`)
+      } catch (error) {
+        logger.error('api:automation-conversation-failed', { message: errorMessage(error) })
+        res.write(`event: error\ndata: ${JSON.stringify({ message: errorMessage(error) })}\n\n`)
+      } finally {
+        clearInterval(heartbeat)
+        res.end()
+      }
+      return
+    }
+
+    const conversationConfirm = path.match(/^\/api\/automations\/conversations\/([^/]+)\/confirm$/)
+    if (conversationConfirm && req.method === 'POST') {
+      const port = opts.automation?.conversations
+      if (!port) return respond(res, 404, { error: 'automation-conversation-not-supported' })
+      const id = decodeURIComponent(conversationConfirm[1]!)
+      try {
+        const turn = port.confirm(id)
+        onEvent({ event: 'api:automation-task-confirmed' })
+        return respond(res, 200, { turn })
+      } catch (error) {
+        logger.warn('api:automation-conversation-confirm-failed', { message: errorMessage(error) })
+        return respond(res, 400, { error: 'confirm-failed', message: errorMessage(error) })
+      }
+    }
+
     // 生成脚本：显式一步，生成结果要人工在面板确认后才写进任务。
     if (path === '/api/automations/script' && req.method === 'POST') {
       if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
@@ -464,16 +591,6 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       return respond(res, 200, { script })
     }
 
-    if (path === '/api/automations/drafts/dismiss' && req.method === 'POST') {
-      if (!opts.automation) return respond(res, 404, { error: 'automation-not-supported' })
-      const body = await readJson(req)
-      const id = typeof body.id === 'string' ? body.id.trim() : ''
-      if (!id) return respond(res, 400, { error: 'id-required', message: '草稿 id 不能为空' })
-      const changed = opts.automation.dismissDraft(id)
-      if (!changed) return respond(res, 404, { error: 'draft-not-found' })
-      return respond(res, 200, { ok: true })
-    }
-
     // 自动化工具调用：runtime 里的 agent 通过它操作工单与事件。
     // 范围与鉴权在服务层强制（工具只允许操作本任务所属项目的数据）。
     if (path === '/api/automations/tools' && req.method === 'POST') {
@@ -487,71 +604,6 @@ export async function createApiServer(opts: ApiServerOptions): Promise<ApiServer
       const outcome = await opts.automation.invokeTool(id, name, args)
       if (!outcome.ok) return respond(res, outcome.status, { error: outcome.error, ...(outcome.hint ? { hint: outcome.hint } : {}) })
       return respond(res, 200, { result: outcome.result })
-    }
-
-    if (path === '/api/events/rules/compile' && req.method === 'POST') {
-      if (!opts.events) return respond(res, 404, { error: 'events-not-supported' })
-      const body = await readJson(req)
-      const id = typeof body.id === 'string' ? body.id.trim() : ''
-      const eventType = typeof body.eventType === 'string' ? body.eventType.trim() : ''
-      const intent = typeof body.intent === 'string' ? body.intent.trim() : ''
-      if (!id || !eventType || !intent) {
-        return respond(res, 400, { error: 'rule-input-required', message: 'id / eventType / intent 不能为空' })
-      }
-      const rule = await opts.events.compileRule({
-        id,
-        eventType,
-        intent,
-        ...(typeof body.workflowPrompt === 'string' ? { workflowPrompt: body.workflowPrompt } : {}),
-      })
-      onEvent({ event: 'api:event-rule-compiled', ruleId: rule.id, eventType: rule.eventType })
-      return respond(res, 200, { rule })
-    }
-
-    const eventRulePath = path.match(/^\/api\/events\/rules(?:\/([^/]+))?$/)
-    if (eventRulePath && (req.method === 'POST' || req.method === 'PUT' || req.method === 'DELETE')) {
-      if (!opts.events) return respond(res, 404, { error: 'events-not-supported' })
-      const routeId = eventRulePath[1] ? decodeURIComponent(eventRulePath[1]) : ''
-      let next: unknown[]
-      let savedId = routeId
-      if (req.method === 'DELETE') {
-        if (!routeId) return respond(res, 400, { error: 'rule-id-required' })
-        if (!config.events.rules.some(rule => rule.id === routeId)) return respond(res, 404, { error: 'rule-not-found' })
-        next = config.events.rules.filter(rule => rule.id !== routeId)
-      } else {
-        const body = await readJson(req)
-        const incoming = isRecord(body.rule) ? body.rule : body
-        const id = typeof incoming.id === 'string' && incoming.id.trim() ? incoming.id.trim() : routeId
-        if (!id) return respond(res, 400, { error: 'rule-id-required' })
-        savedId = id
-        const existing = config.events.rules.find(rule => rule.id === id)
-        const candidate = {
-          ...incoming,
-          id,
-          version: existing ? existing.version + 1 : Number(incoming.version) > 0 ? Number(incoming.version) : 1,
-        }
-        next = [...config.events.rules.filter(rule => rule.id !== id), candidate]
-      }
-      const preview = structuredClone(config)
-      const result = applyConfigPatch(preview, { 'events.rules': next })
-      if (result.errors.length > 0) {
-        logger.warn('config:event-rule-rejected', { errors: result.errors })
-        return respond(res, 400, { error: 'invalid-config', errors: result.errors })
-      }
-      if (config.home && result.changed.length > 0) {
-        try {
-          writeConfig(config.home, preview)
-        } catch (error) {
-          logger.error('config:event-rule-write-failed', { home: config.home, message: errorMessage(error) })
-          return respond(res, 500, { error: 'config-write-failed', message: errorMessage(error) })
-        }
-      }
-      applyConfigPatch(config, { 'events.rules': next })
-      await opts.onConfigChange?.(config, result.changed)
-      const rules = opts.events.rules()
-      const saved = savedId ? rules.find(rule => rule.id === savedId) : undefined
-      onEvent({ event: 'api:event-rules', changed: result.changed, count: rules.length })
-      return respond(res, 200, { ok: true, ...(saved ? { rule: saved } : {}), rules })
     }
 
     const eventAction = path.match(/^\/api\/events\/([^/]+)\/action$/)

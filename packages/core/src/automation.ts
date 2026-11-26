@@ -8,6 +8,58 @@
 /** 自动化类型：纯 AI（自然语言提示词）与脚本（提示词 + 落盘脚本）。 */
 export type AutomationType = 'ai' | 'script'
 
+/**
+ * 事件处理方式：命中订阅后这条事件怎么处理。
+ *
+ * 三个值对应三条不同的去向：
+ * - auto：直接开单执行；
+ * - review：进事件列表等人批；
+ * - notify：只记录 + 通知，不进执行链路。
+ */
+export type EventHandlingMode = 'auto' | 'review' | 'notify'
+
+/** 事件订阅的确定性过滤条件。 */
+export interface EventFilter {
+  /** 命中任意一个关键词即算命中（大小写不敏感）。 */
+  keywords?: string[]
+  /** 语义过滤条件（自然语言）；模型据此判断事件是否值得处理。 */
+  semantic?: string
+}
+
+/** 事件触发器：订阅什么、命中后怎么办。 */
+export interface EventTrigger {
+  kind: 'event'
+  /** 来源目录 id（github / feishu / 插件 id）。 */
+  source: string
+  /** 订阅的事件类型（带来源前缀）。 */
+  types: string[]
+  /** 每个订阅自己的参数（仓库、群、白板 id …）。 */
+  params?: Record<string, string>
+  /** 命中条件。 */
+  filter?: EventFilter
+  /** 处理方式。 */
+  mode: EventHandlingMode
+}
+
+/** 定时触发器。 */
+export interface ScheduleTrigger {
+  kind: 'schedule'
+  schedule: AutomationSchedule
+}
+
+/** 任务的触发器：事件或定时，二选一。 */
+export type AutomationTrigger = EventTrigger | ScheduleTrigger
+
+/**
+ * 取任务的定时计划。
+ *
+ * 事件触发的任务没有定时计划，返回 undefined。
+ * 调度器据此跳过事件类任务 —— 它们由事件管线触发，不走定时。
+ */
+export function scheduleOf(trigger: AutomationTrigger | undefined): AutomationSchedule | undefined {
+  return trigger?.kind === 'schedule' ? trigger.schedule : undefined
+}
+
 /** 触发计划种类。 */
 export type AutomationScheduleKind = 'hourly' | 'daily' | 'weekly' | 'cron'
 
@@ -34,7 +86,16 @@ export interface Automation {
   prompt: string
   /** 脚本自动化：AI 生成的脚本正文；持久化保存，可在面板查看与人工编辑。 */
   script?: string
-  schedule: AutomationSchedule
+  /**
+   * 触发方式。
+   *
+   * 事件触发与定时触发是同一个任务的两种模式：
+   * - 事件触发：订阅什么 + 命中后怎么办（`EventTrigger`）；
+   * - 定时触发：什么时候跑（`ScheduleTrigger`）。
+   *
+   * 订阅关系**只存在于这里**，事件源插件不再持有「订阅了哪些事件」。
+   */
+  trigger: AutomationTrigger
   /** 执行 runtime；留空表示跟随默认 runtime。 */
   runtimeId: string
   /** 目标项目名（对应 config.projects[].name）。 */
@@ -43,6 +104,25 @@ export interface Automation {
   repo: string
   /** 起始分支；留空表示跟随项目默认分支。 */
   branch: string
+  /**
+   * 处理方式（skill 闭集内的 id）。
+   *
+   * 这是**任务的属性**：原来它由决策规则判定产出，现在由会话解析时确定。
+   */
+  skill?: string
+  /**
+   * 通知人：事件开工时先私聊通知这个人。
+   *
+   * 空表示不发通知（只落库）。
+   */
+  notifyTo?: string
+  /**
+   * 绑定的会话 id。
+   *
+   * 任务与会话一一绑定：面板任务卡的「恢复会话」用它找回原会话，
+   * 继续迭代改这条任务（§2.6.5）。
+   */
+  conversationId?: string
   enabled: boolean
   /** 创建者标识；当前全局共用，保留字段以便将来区分来源。 */
   createdBy: string
@@ -112,23 +192,46 @@ export interface AutomationRun {
 }
 
 /**
- * 对话式创建的待确认草稿。
+ * 会话状态机的一步。
  *
- * 草稿独立于正式任务：飞书里的自然语言先落成草稿，用户在面板里确认
- * （编辑并保存）后才写进 `automation.tasks`，识别不确定时只回问、不落库。
+ * 会话建任务时每推进一步都记一条，面板与日志据此还原「这个任务是怎么来的」。
  */
-export interface AutomationDraft {
+export type AutomationConversationStep = 'parse' | 'clarify' | 'preview' | 'create' | 'update'
+
+/** 会话里缺的东西：问一次只问一项。 */
+export interface AutomationConversationMissing {
+  /** 缺哪一项：source / types / params / project / skill / mode / runtime / name。 */
+  field: string
+  /** 给用户看的问题。 */
+  question: string
+}
+
+/** 一次会话建任务的完整记录。 */
+export interface AutomationConversation {
   id: string
-  /** 来源标识，例如 `feishu:oc_xxx`。 */
+  /** 绑定的自动化任务 id；尚未创建时为空。 */
+  taskId?: string
+  /** 会话来源（feishu:oc_xxx 等）。 */
   source: string
-  /** 发起人标识；当前任务全局共用，这里只留痕。 */
+  /** 发起人标识。 */
   requester: string
+  /** 会话所在群（面板会话用会话 id 兜底）。 */
+  chatId?: string
+  /** 群里的话题 id；恢复会话时复用。 */
+  threadId?: string
+  /** Pi session 键：绑到 conversationId 上，谁点卡片都能恢复到同一条会话。 */
+  sessionKey?: string
   /** 用户原话（已截断）。 */
   text: string
-  /** 整理后的任务草稿。 */
-  draft: Automation
-  status: 'pending' | 'dismissed'
+  /** 会话当前解析出的任务草稿。 */
+  draft?: Automation
+  /** 还缺哪些必填项。 */
+  missing: AutomationConversationMissing[]
+  /** 最近一步。 */
+  step: AutomationConversationStep
+  status: 'active' | 'confirmed' | 'abandoned'
   createdAt: string
+  updatedAt: string
 }
 
 /**

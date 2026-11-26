@@ -1,6 +1,15 @@
 # 自动化：任务、调度与内置工具
 
-自动化是 router-agent 的定时执行能力：任务定义在 `config.yaml`，调度器跑在服务进程内，执行统一走 Worker runtime。它不替换现有事件判定 / 建单 / 通知链路，npm 包扩展的事件来源仍然可用。
+自动化是 router-agent 的「订阅什么 + 触发后做什么」的能力：任务定义在 `config.yaml`，调度器跑在服务进程内，执行统一走 Worker runtime。
+
+一条任务有两种触发方式：
+
+| 触发方式 | `trigger.kind` | 触发时机 |
+|-|-|-|
+| 定时 | `schedule` | 到点跑（`hourly` / `daily` / `weekly` / `cron`） |
+| 事件 | `event` | 订阅的事件命中后跑 |
+
+事件触发任务的订阅关系写在任务里（`trigger.source` / `types` / `params` / `filter` / `mode`），事件源插件只声明**有什么可订阅**。原来的「决策规则」模块已整体删除。
 
 ## 数据模型
 
@@ -17,10 +26,12 @@ automation:
       description: 周一把过期的依赖列出来
       type: ai             # ai | script
       prompt: 检查 package.json 里有没有新版本依赖，有就建一张工单
-      schedule:
-        kind: weekly
-        weekday: 1         # 0=周日 … 6=周六
-        time: 09:00
+      trigger:
+        kind: schedule
+        schedule:
+          kind: weekly
+          weekday: 1         # 0=周日 … 6=周六
+          time: 09:00
       runtimeId: ''        # 留空跟随默认 runtime
       project: demo
       repo: /Users/me/code/demo
@@ -31,6 +42,7 @@ automation:
       updatedAt: 2026-11-18T00:00:00.000Z
 ```
 
+- `trigger.kind: event`：事件触发。`source` 是事件目录 id，`types` 是订阅的事件类型，`params` 是这一条订阅自己的连接参数（如仓库），`filter` 是过滤条件（`keywords` 确定性过滤 + `semantic` 语义条件），`mode` 是命中后的处理方式（`auto` 直接开单 / `review` 进收件箱等人批 / `notify` 只记录并提醒）。`skill` 是处理方式（`EVENT_SKILLS` 闭集内的 id），`project` 是归属项目。
 - `type: ai`：只需要自然语言提示词。
 - `type: script`：`prompt` 是脚本要达成的目标；`script` 是脚本正文，可在面板查看与人工编辑。脚本由面板的「生成脚本」按钮显式生成（`POST /api/automations/script`），生成后写回任务定义并固定下来；定时执行跑的就是这份脚本，不会每次重新生成。**没有脚本就不会执行**——执行前必须先生成并确认。
 - `runtimeId`、`project`、`schedule.kind` 都是注册 / 配置驱动：runtime 从运行时注册表按 id 取，项目从 `projects`（或按运行时隔离的项目清单）取，计划从计划注册表取。代码里没有针对单一 runtime、项目或渠道的特例分支。
@@ -42,7 +54,7 @@ automation:
 | 任务定义 | `config.yaml` 的 `automation.tasks` | 与 `events` 同级；`LIST_PATHS` / `HOT_CONFIG_PREFIXES` 已登记，Web 保存补丁能正确收集并立即生效 |
 | 调度状态 | `state.db` 的 `automation_states` | 下次触发 / 上次结果由机器写，不污染用户配置文件 |
 | 执行记录 | `state.db` 的 `automation_runs` | 每次执行一条，面板「执行记录」直接读；与现有状态库同实例，不新建数据库 |
-| 待确认草稿 | `state.db` 的 `automation_drafts` | 飞书自然语言整理出的草稿在面板确认前不写正式任务 |
+| 会话 | `state.db` 的 `automation_conversations` | 自然语言建任务的会话；任务与它一一绑定（`conversationId`），点「恢复会话」能找回原会话 |
 | 脚本文件 | `<home>/automations/<任务 id>/automation.sh` | 不写进用户仓库；执行时复制到 runtime 在该项目上创建的 worktree |
 
 ## 调度语义
@@ -155,13 +167,48 @@ ra automation tool --id <任务 id> --name <工具名> --args '<JSON 入参>'
 - 凭据不进入任务定义、契约或脚本正文；需要凭据的动作由 handler 内部复用现有配置。
 - HTTP 入口 `POST /api/automations/tools` 与 CLI 走同一层服务校验，未知任务 / 工具返回 404，工具拒绝返回 400。
 
-## Web 面板与对话式创建
+## 会话建任务（自然语言）
+
+新建自动化**不再有填表弹窗** —— 只有一个入口：用一句话说清要订阅什么、命中后做什么。
+
+会话状态机：
+
+```text
+idle → parsing → clarifying（缺项回问，一次一项） → previewing（出参数预览卡） → confirmed（落库）
+```
+
+- **闭集校验**：来源、事件类型、项目、处理方式都必须落在目录 / 清单里，选不中就回问，绝不编造。目录里没有的事件类型会被**明确拒掉**并列出目录里实际有什么。
+- **一次只问一项**：缺什么问什么，不一口气列一堆必填。
+- **参数齐了才出预览卡**：卡片摊开触发方式、连接参数、过滤条件、处理方式、归属项目、运行时；**没点「确认创建」就不落库**。
+- **参数探活**：格式对但资源不存在（如「订阅不存在的仓库 xxx/yyy」）会被拦下，不建任务。
+- **同会话可迭代**：建完后说「关键词加上退款」「改成只提醒我」，改的是**同一条任务**，不新建。任务卡的「恢复会话」回到原会话，历史完整。
+
+**流式**：助手逐字吐字（SSE），不是等几秒蹦一整段。断线后按 `seq` 补齐遗漏的增量。
+
+会话相关事件：`automation:session-created` / `session-step` / `session-rejected` / `task-created` / `task-updated`。
+
+## 从决策规则迁移
+
+旧的「决策规则」模块已删除，旧配置里的 `events.rules` 会被忽略。迁移用独立命令：
+
+```bash
+ra migrate event-rules --dry-run     # 只读报告：能迁几条、哪些要人工处理
+ra migrate event-rules --apply --yes # 真正写入 automation.tasks
+ra migrate event-rules --verify      # 核对迁移结果
+```
+
+- 默认只读；`--apply` 必须配 `--yes`。
+- 写入前自动备份 `config.yaml.bak.<ts>`；**旧规则段原样保留**，方便回滚。
+- 重复执行幂等：不会重复建任务。
+- 迁不了的（来源前缀不认识、`*` 通配、项目多候选）列进人工清单，不硬迁。
+
+## Web 面板
 
 - 左侧菜单：初始化 → 收件箱 → **自动化** → 工单 → 配置 → 来源 → 日志。自动化紧跟收件箱，因为两者都是「外部输入 → Router 处理」；同时保持在工单上方。
-- 页面两个 Tab：「自动化任务」（新建 / 编辑 / 启停 / 删除 / 生成脚本 / 手动执行一次）与「执行记录」（状态、阶段、耗时、结果、产出、日志入口）。
-- 「新建自动化」弹窗沿用「添加决策规则」的分段与间距，字段顺序：名称 → 类型 → 提示词 / 脚本描述 → runtime → 项目 → 执行时间。
+- 页面两个 Tab：「自动化任务」（会话新建 / 停用 / 删除 / 生成脚本 / 手动执行一次 / 恢复会话）与「执行记录」（状态、阶段、耗时、结果、产出、日志入口）。
+- 任务卡展示处理模式标签、订阅的事件类型、过滤条件，并带「恢复会话」入口。
 - 手动触发是**异步**的：接口立即返回一条 `running` 记录，面板按 3 秒轮询（有任务在跑时）刷新阶段；执行记录每行带「查看日志」深链，跳到日志页并按任务 id 过滤。
-- 飞书里描述「我想监听 / 定期处理 X」时，先用确定性词表预筛，再让模型整理为草稿。草稿落到 `automation_drafts` 并在面板「待确认草稿」显示；用户在面板检查、编辑并保存后才写进 `automation.tasks`。模型识别不确定（例如没说项目、计划不合法）时只回问，不落库。
+- 事件源**目录**在「配置 → 事件总线」里只读展示：列出每个来源可订阅的事件类型与可用性标注，并显示「被 N 个任务订阅」；**没有「勾选事件类型」的多选框**。
 
 ## 排查：脚本生成失败
 

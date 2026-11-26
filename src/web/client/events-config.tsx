@@ -1,18 +1,23 @@
 /**
- * 配置页的「事件来源」编辑区。
+ * 配置页的「事件源目录」编辑区。
  *
- * 来源只做一件事：把事件收进来。这里用卡片列出每个来源，卡上带开关与设置弹窗；
- * 想要新的来源就装一个 npm 包（和「添加运行时」一个路子）。
- * 改完的值写回配置草稿，跟其它配置项一样由底部保存条统一落盘。
+ * 这一页是**只读目录**：回答「有什么事件可订阅」。
+ * 订阅关系一律在自动化任务里 —— 旧的「在这里勾事件类型」的多选框已经删掉，
+ * 那正是「操作成本非常高」的根源（§8.1）。
+ *
+ * 连接参数仍然可配（改完由底部保存条统一落盘）；想要新的来源就装一个 npm 包。
  */
 import { useMemo, useState } from 'react'
 import { getJson, sendJson, type ConfigDoc } from './api.js'
 import { npmPackageOf } from './npm-package.js'
 import { SourceLogo } from './event-source-logos.js'
+import { EventCatalogCard } from './event-catalog-card.js'
+import { subscribersByType, type CatalogView } from './event-catalog-model.js'
 import { githubSourceSummary, sourceFieldDefs, type SourceMeta } from './event-sources.js'
 import { GithubSourceSettings, githubSubscriptionsOf } from './github-subscriptions.js'
 import { getByPath, type FieldDef } from './fields.js'
 import { Icon } from './icons.js'
+import type { AutomationTask } from './automation-model.js'
 
 /** 来源状态 → 卡片上的一句话。 */
 const STATUS_TEXT: Record<string, string> = {
@@ -44,9 +49,13 @@ interface PluginInstallJobView {
   finishedAt?: string
 }
 
-/** 事件来源编辑区。 */
-export function EventSourcesConfig({ sources, draft, defaults, setField, errors, onNotice }: {
+/** 事件源目录编辑区。 */
+export function EventSourcesConfig({ sources, catalogs, tasks, draft, defaults, setField, errors, onNotice }: {
   sources: SourceMeta[]
+  /** 事件目录（来源 → 类型 → 参数）；面板据此展示可订阅的事件。 */
+  catalogs?: CatalogView[]
+  /** 自动化任务：用来算「被 N 个任务订阅」。 */
+  tasks?: AutomationTask[]
   draft: ConfigDoc | null
   defaults: ConfigDoc
   setField: (path: string, value: unknown) => void
@@ -56,6 +65,10 @@ export function EventSourcesConfig({ sources, draft, defaults, setField, errors,
   const [editing, setEditing] = useState<SourceMeta | null>(null)
   const [adding, setAdding] = useState(false)
   const [githubOpen, setGithubOpen] = useState(false)
+  /** 点「查看订阅它的任务」时展示的任务名。 */
+  const [subscribersOf, setSubscribersOf] = useState<{ typeId: string; names: string[] } | null>(null)
+
+  const subscribers = useMemo(() => subscribersByType(tasks ?? []), [tasks])
 
   // 每个仓库仍是一条独立来源，配置页把它们聚合为一张 GitHub 卡片。
   const githubSubs = useMemo(() => githubSubscriptionsOf(draft), [draft])
@@ -77,6 +90,25 @@ export function EventSourcesConfig({ sources, draft, defaults, setField, errors,
 
   return (
     <>
+      {catalogs && catalogs.length > 0 && (
+        <div className="source-cards">
+          {catalogs.map(catalog => (
+            <EventCatalogCard
+              key={catalog.id}
+              catalog={catalog}
+              subscribers={subscribers}
+              onShowSubscribers={(typeId, names) => setSubscribersOf({ typeId, names })}
+            />
+          ))}
+        </div>
+      )}
+      {subscribersOf && (
+        <p className="modal-hint">
+          <Icon name="radio" size={12} />
+          {subscribersOf.typeId} 被这些任务订阅：{subscribersOf.names.join('、')}
+          <button className="btn tiny ghost" onClick={() => setSubscribersOf(null)}>知道了</button>
+        </p>
+      )}
       <div className="source-cards-head">
         <p className="editor-hint">开关与参数改完点底部「保存配置」即生效。</p>
         <button className="btn tiny" onClick={() => setAdding(true)}>
