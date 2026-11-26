@@ -1746,6 +1746,7 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 
 - [x] 本方案文档
 - [x] Web 界面草图（§8，含 4 张 mockup）
+- [x] 功能验证清单（§12，31 条核心链路 case）
 - [x] 用户对 §7 的 A1、A3、A6、A8、A10、A11、B1 拍板（2026-11-26，飞书文档评论）
 - [ ] 用户对 §7 剩余的 A2、A4、A5、A7、A9、B2、B3、B4 拍板
 - [ ] 用户确认 §8 的界面方向
@@ -1868,6 +1869,7 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 - `docs/MONOREPO.md` 补事件来源插件新协议。
 - `packages/event` 发布 `0.4.0`。
 - README / README.en 同步入口链接。
+- **按 §12 的验证清单逐条跑通**：31 条 case 全部通过才算收尾（清单里的「可观测点」即验收依据）。
 
 ---
 
@@ -1963,7 +1965,7 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 |---|---|
 | `docs/CONFIGURATION.md` | 「事件总线」章重写：删决策规则章，来源 → 目录，订阅 → 任务 |
 | `docs/AUTOMATION.md` | 加 trigger 模型、会话流程、事件触发 |
-| `docs/OPERATIONS.md` | 事件表增删：`event:subscription-*` / `event:filtered-out` / `automation:task-created` / `automation:session-*`；删 `event:rule-*` 与 `event:guardrail-matched` |
+| `docs/OPERATIONS.md` | 事件表增删：`event:subscription-*` / `event:filtered-out` / `automation:task-created` / `automation:session-step` / `automation:session-rejected` / `automation:task-updated`；删 `event:rule-*` 与 `event:guardrail-matched` |
 | `docs/MONOREPO.md` | 事件来源插件协议新形状 + 迁移指引 |
 | `docs/API.md` | 删规则端点；加会话与目录端点 |
 | `docs/ARCHITECTURE.md` | 事件链路图更新 |
@@ -2031,9 +2033,127 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 
 ---
 
-## 12. 附录
+## 12. 功能验证清单（核心链路）
 
-### 12.1 关键代码位置速查
+只覆盖**核心链路的交互功能** —— 从「说一句话」到「Agent 干活」这条主干上的关键行为。**不覆盖**：界面像素、响应式、性能压测、异常重试的边界组合、既有功能（飞书消息链路、工单看板）的回归。
+
+**怎么用**：每个 case 一条可执行的行为断言，配一个可观测点（日志事件名或面板/接口上的可见结果）。**全部 case 都能手工跑通，或写成一条自动化测试**；实现阶段应把它们落进 `tests/automation/` 与 `tests/events/`。
+
+**前置条件**：一条 `mode=auto` 的事件任务、一条 `mode=review`、一条 `mode=notify`；一个可用的 GitHub 仓库（用来造事件）；一个飞书群（用来造消息）。
+
+**清单里用到、但 §6.1 时序里没写的新增日志事件**（实现时一并加进 `docs/OPERATIONS.md` 事件表）：
+
+| 事件 | 关键字段 | 什么时候打 |
+|-|-|-|
+| `automation:session-step` | `conversationId`, `step`（`parse` / `clarify` / `preview`）, `missing[]` | 会话每推进一步 |
+| `automation:session-rejected` | `conversationId`, `reason`（`unknown-type` / `invalid-param`） | 模型给出的类型或参数不在闭集内，被拒 |
+| `automation:task-updated` | `taskId`, `changed[]` | 恢复会话后改动了已有任务 |
+
+> 其余可观测点（`event:ingested` / `event:filtered-out` / `event:dispatched` / `event:deferred` / `event:kickoff` 等）见 §6.1 的时序图，字段不变。
+
+---
+
+### 12.1 会话建任务（自然语言 → 任务）
+
+| # | 操作 | 期望结果 | 可观测点 |
+|-|-|-|-|
+| V1 | 在会话里说「帮我订阅 Github 的 issue，有价值的就立即执行」 | 助手**只追问缺的那一项**（如归属项目），不一口气列一堆必填 | 会话里出现一条追问；`automation:session-step`（缺项计数 = 1） |
+| V2 | 补上缺失项后继续 | 参数齐了才出预览卡片 | 预览卡片出现，且列出触发方式 / 过滤条件 / 处理方式 / 归属项目 / 运行时 |
+| V3 | 预览卡片未点「确认创建」 | **不落库** | `automation.tasks` 里没有新任务；无 `automation:task-created` 日志 |
+| V4 | 点「确认创建」 | 任务落库并启用 | `automation:task-created { taskId, source, types, mode }`；面板任务列表出现该卡片 |
+| V5 | 说一个目录里没有的事件类型（如「订阅 GitHub 的 Star 事件」） | 助手**拒绝并说明目录里实际有什么**，不硬造 | 返回的候选类型都来自 `catalog.types()`；`automation:session-rejected` 或等价告警 |
+| V6 | 说「订阅不存在的仓库 xxx/yyy」 | 参数校验拦下，不建任务 | 无 `automation:task-created`；会话里给出可读的失败原因 |
+| V7 | 建完后说「关键词加上退款」「改成只提醒我」 | 在**同一会话**里改同一份草稿，不新建任务 | 预览卡片内容随之更新；`taskId` 不变 |
+
+### 12.2 会话恢复与迭代
+
+| # | 操作 | 期望结果 | 可观测点 |
+|-|-|-|-|
+| V8 | 在任务卡片点「恢复会话」 | 打开该任务绑定的**原会话**，历史消息完整 | 会话里能看到创建时的原始对话；`conversationId` 与任务一致 |
+| V9 | 恢复后说「以后只在工作日跑」 | 改的是原任务，不产生新任务 | `automation:task-updated { taskId }`；任务列表仍是那一条 |
+| V10 | 恢复会话后改到一半放弃 | 任务保持修改前的状态 | 任务的 `updatedAt` 不变；无 `task-updated` 日志 |
+
+### 12.3 事件从来源到任务
+
+| # | 操作 | 期望结果 | 可观测点 |
+|-|-|-|-|
+| V11 | 任务创建后不做任何操作 | watcher 自动装配并开始拉取 | `event:subscription-registered { taskId, source, types }` |
+| V12 | 在 GitHub 上开一个命中关键词的 Issue | 事件入库并进入判定 | `event:ingested { eventId, subscriptionId, source, types }` |
+| V13 | 同一条 Issue 再触发一次拉取 | **不重复入库** | `events` 表只有一行；无第二条 `event:ingested`（幂等键 `(subscriptionId, externalId)`） |
+| V14 | 开一个**不**命中关键词的 Issue | 被确定性过滤掉，不进判定 | `event:filtered-out { eventId, reason }`；收件箱里不出现 |
+| V15 | 同一个 Issue 被**两个任务**订阅 | 两条任务各自处理，互不干扰 | `events` 表两行，`subscriptionId` 不同；各自有独立的 `event:ingested` |
+| V16 | 拉取来源失败 | 任务链路不中断，其他任务不受影响 | `event:source-poll-failed { source, reason }`；其它任务照常 |
+
+### 12.4 三种处理方式的分流
+
+| # | 操作 | 期望结果 | 可观测点 |
+|-|-|-|-|
+| V17 | `mode=auto` 任务命中 | 直接开单执行 | `event:dispatched { eventId, taskId, ticketId, project, skill }` + `event:kickoff` |
+| V18 | `mode=review` 任务命中 | **不开单**，进收件箱等人批 | 事件 `status='review'`；收件箱待审核数 +1；**无** `event:dispatched` |
+| V19 | `mode=review` 的事件在收件箱点「转自动」 | 批准后正常开单 | `event:dispatched`；事件状态从 `review` 变 `pending`/`done` |
+| V20 | `mode=notify` 任务命中 | 只记录 + 通知，**不进入执行链路** | 事件 `execution='notified'`；收件箱「已通知」+1；**无** `event:dispatched`、无工单 |
+| V21 | 事件命中但闸门不允许（超配额 / 窗口外） | 延后，不开单 | `event:deferred { eventId, reason }`；下一轮窗口内再处理 |
+
+### 12.5 上下文与收件箱展示
+
+| # | 操作 | 期望结果 | 可观测点 |
+|-|-|-|-|
+| V22 | 打开一条已判定的事件 | 能看到「命中哪个关键词 / 语义为什么这么判 / 归属哪个任务与项目」 | 事件详情含 `context.background` / `context.filtered`（§6.5） |
+| V23 | 看收件箱「订阅命中」区 | 按**任务**聚合，标题是任务名不是 `ruleId` | 每行显示任务名 + 命中数（有效 / 人审 / 仅提醒 / 合计） |
+| V24 | 一个任务长期 0 命中 | 提示「事件类型或关键词可能订错了」 | 「订阅命中」区该行显示「尚未命中」+ 提示文案 |
+
+### 12.6 面板交互
+
+| # | 操作 | 期望结果 | 可观测点 |
+|-|-|-|-|
+| V25 | 打开「配置 → 事件源目录」 | 看到的是**目录卡**：事件类型清单 + 连接参数，**没有**「勾选事件类型」的多选框 | 页面上无事件类型多选控件 |
+| V26 | 点目录卡上的「查看订阅它的任务」 | 列出订阅了该来源的任务 | 任务列表正确 |
+| V27 | 任务卡片切「停用」 | 该任务不再拉事件、不再判定 | `events.sources` 不受影响；该订阅不再注册 |
+| V28 | 删掉一个任务 | 订阅随之消失，不再有事件进来 | 面板确认后任务消失；该任务不再出现在「订阅它的任务」里 |
+
+### 12.7 SSE 会话流
+
+| # | 操作 | 期望结果 | 可观测点 |
+|-|-|-|-|
+| V29 | 会话里发一句话 | 助手**逐字**吐出，不是等几秒蹦一整段 | 消息流里收到多个 `message` 增量片段 |
+| V30 | SSE 连接中途断开后重连 | 断线期间的内容**补齐**，不丢消息 | 重连后按 `seq` 拉到遗漏增量，最终文本完整 |
+| V31 | 一轮说完 | 流正常结束，不悬挂 | 收到 `done` 事件后连接关闭 |
+
+---
+
+### 12.8 这些 case 覆盖了什么、没覆盖什么
+
+**覆盖**：主干链路的三件事 —— ①**说一句话能建出正确的任务**；②**任务能稳定收到并判定事件**；③**事件按任务的处理方式正确分流**。加上会话恢复、SSE 流式、面板形态这三块交互。
+
+**刻意不覆盖**：
+
+| 不覆盖 | 为什么 |
+|-|-|
+| 界面像素 / 响应式 / 深色模式 | 属于 UI 验收，走 Before/After 截图，不进功能清单 |
+| 性能与并发（多任务同时命中、轮询风暴） | 属于压测，另开 |
+| 异常重试的边界组合（网络抖动 × 游标 × 翻页） | 单点已覆盖（V16），组合爆炸留给测试阶段 |
+| 既有功能回归（飞书消息链路、工单看板、报表） | 本次改动不触碰那些链路，走现有回归 |
+| 迁移脚本的逐条映射（规则 → 任务） | 迁移有独立的 `--dry-run` 报告与人工清单，见 §3.1.2 |
+
+**实现阶段的落点建议**（★ = 新建文件，其余为在现有文件里补 case）：
+
+| case 组 | 测试文件 | 类型 |
+|-|-|-|
+| V1~V7 | ★`tests/automation/parse.test.ts` | 单元（解析与闭集校验） |
+| V1~V2、V8~V10 | ★`tests/automation/session.test.ts` | 单元（会话状态机） |
+| V11~V21 | `tests/events/pipeline.test.ts` | 集成（订阅匹配 → 过滤 → 判定 → 分流） |
+| V12~V16、V22~V24 | ★`tests/events/subscription.test.ts` | 集成（订阅命中与幂等） |
+| V25~V26 | `tests/web/event-sources.test.ts` | 组件（事件源目录卡） |
+| V27~V28 | ★`tests/web/automation-panel.test.ts` | 组件（任务卡：停用 / 删除） |
+| V29~V31 | ★`tests/web/automation-conversation.test.ts` | 组件（假 SSE 流） |
+
+> 本清单是**验收口径**，不是测试代码 —— 实现阶段照着它写测试，或照着它手工跑一遍。
+
+---
+
+## 13. 附录
+
+### 13.1 关键代码位置速查
 
 | 关注点 | 文件:行 |
 |-|-|
@@ -2070,7 +2190,7 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 | 配置解析（events / automation） | `src/config.ts:1050` / `src/config.ts:953` |
 | 配置热更新前缀 | `src/config.ts:1700` |
 
-### 12.2 术语对照
+### 13.2 术语对照
 
 | 术语 | 说明 | 与现状的关系 |
 |-|-|-|
