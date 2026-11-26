@@ -108,6 +108,18 @@
 .catalog-item:last-child { border-bottom: 0; }
 .catalog-item .mono { color: var(--muted); }
 .catalog-item .count { margin-left: auto; color: var(--faint); font-size: 11.5px; }
+.catalog-group {
+  font-size: 11px;
+  color: var(--faint);
+  padding: 9px 0 3px;
+  border-top: 1px solid var(--rule);
+  margin-top: 4px;
+}
+.catalog-group:first-child { border-top: 0; margin-top: 0; padding-top: 0; }
+.catalog-item .tag { margin-left: auto; }
+.catalog-item .tag.warn { background: var(--pill-warning-bg); color: var(--pill-warning-ink); }
+.catalog-item .tag.ok { background: var(--pill-positive-bg); color: var(--pill-positive-ink); }
+.catalog-item .count { margin-left: 14px; }
 
 /* ---- 右侧栏：会话清单 ---- */
 .side-panel {

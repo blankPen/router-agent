@@ -3,6 +3,7 @@
 > 工单 tk-92 ｜ 基线分支 `beta` @ `8a6cef4` ｜ 本轮只出设计，不含实现代码
 > 关联现状文档：[CONFIGURATION.md](../CONFIGURATION.md)（事件总线配置）、[AUTOMATION.md](../AUTOMATION.md)（自动化）、[OPERATIONS.md](../OPERATIONS.md)（日志事件表）
 > 前序设计：[event-decision-rules-design.md](./event-decision-rules-design.md)（决策规则，本方案推翻其「规则是判定依据」这一核心结论）
+> 2026-11-26 增补：**飞书事件源从占位填实**（§4.3）—— 25 个 EventKey 全量入目录，飞书走**长连接实时订阅**而非轮询
 
 ---
 
@@ -39,6 +40,8 @@
 | 「飞书消息」这种来源怎么变成任务？ | 来源插件只声明**可订阅的事件类型目录**（`feishu.message` 等）；用户在 Chat 里说「订阅飞书消息」，会话流程把它解析成一条自动化任务，任务里写明「事件源 = feishu / 事件类型 = feishu.message / 关键词 = Teamwork, 承诺」 |
 | 「Github 的请阅、Feishu 的订阅来源 都只是提供可以订阅的事件源」 | 重构 `packages/event` 的端口：从「EventSource（会 poll 出事件）」拆成「**EventCatalog（声明可订阅什么）**」+「**EventWatcher（负责按订阅拉取）**」；插件只实现 Catalog |
 | 「每个自动化任务点击卡片时都会恢复之前的会话内容」 | 任务与**会话**一一绑定，任务里存 `conversationId`；点卡片 → 恢复该会话的 Pi session → 继续改任务 |
+| 「现在事件应该只有 Github 的事件源，飞书的也要实现下」 | 现状核实：**GitHub 已实现（轮询）**，**飞书是纯占位**。阶段 7 把飞书从 0 填实，25 个 EventKey 全量入目录 —— 详见 §4.3 |
+| 「不要单纯使用轮询去实现监听，有能通过注册事件监听的优先要用事件，实时性更高」 | **飞书走长连接**（`lark-cli event consume`，服务端推送）；**GitHub 保留轮询**（API 无推送能力）。watcher 因此分 `poll` / `realtime` 两种形态 —— 详见 §4.3.1 |
 
 ### 0.4 本轮不做什么（授权范围）
 
@@ -109,7 +112,9 @@ EventManager.runTick() → pipeline.tick()           src/events/pipeline.ts:141
 | `looksLikeAutomationIntent()` 已做确定性预筛 | `src/automation/intent.ts:31` | 预筛逻辑可复用 |
 | Pi 会话可落盘、按 `SessionKeyParts` 复用 | `src/router/session-registry.ts:99` | 「点卡片恢复会话」有现成底座 |
 | 卡片按钮回调已有中立协议（`CardAction.value` 是任意 JSON） | `packages/channel/src/port.ts:73` | 卡片里带 `automationId` / `conversationId` 天然可行 |
-| 飞书消息本身走 channel 链路，不走事件链路 | `src/events/sources/feishu.ts:1` | 飞书事件源一期仍是占位，与本方案不冲突 |
+| **飞书事件源是纯占位** —— `poll()` 返回 `[]`，只打 `event:source-placeholder` | `src/events/sources/feishu.ts:1` | 阶段 7 要**从 0 填实**：25 个 EventKey、长连接消费（§4.3） |
+| **飞书有服务端推送**（长连接），GitHub 没有（Webhook 需公网回调） | 实测 `lark-cli event consume` | 两种 watcher 形态：`poll` vs `realtime`（§4.3.1） |
+| 仓库里已有可复用的长连接实现（NDJSON 解析 + 就绪标记 + 退避重连） | `packages/channel-feishu/src/sources/feishu.ts:414` | 逻辑**复制**到 `src/events/`，但**不 import**（保 A8 独立） |
 
 ### 1.3 面板现状（一句话）
 
@@ -258,14 +263,25 @@ export interface EventCatalog {
 
 「怎么把订阅变成事件」这件事，**宿主做，不让插件做**。理由：GitHub 已经是最特殊的实现（要 `gh` CLI、要游标、要翻页），把它做成通用能力会让每个插件都重写一遍轮询、游标、去重、窗口裁剪。
 
-宿主侧新增 `EventWatcher`（放 `src/events/`，不进 `packages/event`）：
+宿主侧新增 `EventWatcher`（放 `src/events/`，不进 `packages/event`）。**注意 watcher 有两种形态** —— `poll`（宿主定时调，GitHub）与 `realtime`（来源自己维持长连接，飞书），详见 §4.3.1：
 
 ```ts
 // src/events/watcher.ts（新）
 export interface EventWatcher {
   readonly catalogId: string
+  /**
+   * 拉取形态。
+   *
+   * - poll：宿主按固定间隔调用 poll()，来源自己管游标（GitHub）。
+   * - realtime：来源自己维持长连接，把事件推给宿主注册的回调（飞书）。
+   */
+  readonly mode: 'poll' | 'realtime'
   /** 拉一批新事件；没有新事件返回空数组。 */
-  poll(subscription: Subscription): Promise<EventEnvelope[]>
+  poll?(subscription: Subscription): Promise<EventEnvelope[]>
+  /** realtime 形态：订阅变化时启停长连接。 */
+  subscribe?(subscription: Subscription, sink: EventSink): Promise<void>
+  /** 停止所有长连接。 */
+  stop?(): void
   /** 结论回写到来源；没有回写能力的事件只落库。 */
   publish?(subscription: Subscription, target: { externalId: string; url?: string }, text: string): Promise<void>
 }
@@ -275,8 +291,8 @@ export interface EventWatcher {
 
 | watcher | 覆盖来源 | 说明 |
 |-|-|-|
-| `github` | `kind: github` | 复用现有 `GithubEventSource` 的全部逻辑（游标 / 翻页 / 3 天窗口 / 基线），只是**订阅从构造参数改为方法参数** |
-| `feishu` | `kind: feishu` | 一期仍占位（飞书群消息走 channel 链路） |
+| `github` | `kind: github` | **poll 形态**。复用现有 `GithubEventSource` 的全部逻辑（游标 / 翻页 / 3 天窗口 / 基线），只是**订阅从构造参数改为方法参数** |
+| `feishu` | `kind: feishu` | **realtime 形态**。飞书长连接（`lark-cli event consume`），25 个 EventKey，详见 §4.3 |
 | `plugin` | 插件自定义 | 插件若需要自己的拉取逻辑，实现 `EventPlugin.fetch?()` 扩展点（可选） |
 
 **插件协议的新形状：**
@@ -975,6 +991,12 @@ events:
     feishu:
       enabled: true
       kind: feishu
+      # 连接参数：事件侧自有 app，与 channel 的 app 分开
+      options:
+        appId: "cli_xxx"
+        appSecret: "***"
+        # 长连接用的 lark-cli 配置目录（与 channel 侧隔离）
+        home: "~/.router-agent-lark-events"
   # ★ events.rules 整段删除
   decision:
     provider: llm
@@ -995,6 +1017,10 @@ automation:
 ```
 
 **「连接参数」放哪的问题**：`events.sources.<id>.options` 现在放插件选项；订阅的参数（repo / chatIds）随任务走。**同一来源不同订阅可以有不同参数**（比如两个 GitHub 仓库）—— 这正是要解开的耦合。
+
+**飞书的 `options` 与 GitHub 不同**：GitHub 的 `repo` 是**订阅参数**（每个任务订不同仓库，所以 `repo` 在 `trigger.params` 里）；飞书的 `appId` / `appSecret` 是**连接参数**（整个来源连一个 app，所有飞书订阅共用），所以留在 `events.sources.feishu.options`。
+
+**判断标准**：**连一次就够的**（凭据、端点）→ 放来源的 `options`；**每个订阅不一样的**（仓库、群、白板 ID）→ 放任务的 `trigger.params`。按这条线切，GitHub 的 `repo` 与飞书的 `whiteboard_id` 都归到 `trigger.params`，`appId` / `appSecret` 归到 `options`。
 
 > ⚠️ **待确认 A4**：`events.sources` 这层留不留？
 > - (a) **保留但瘦身**（推荐）：只留「这个来源装没装、怎么连」，订阅全在任务里。现有 `events.sources.github-1` 这种「一仓库一条」的形态要迁 —— 一仓库多订阅时来源条目会重复。
@@ -1208,34 +1234,382 @@ export const githubCatalog: EventCatalog = {
 
 **结论**：飞书消息订阅是**事件链路自己的事**，由事件侧独立消费飞书消息，**不碰 `packages/channel`、不碰 `packages/channel-feishu`、不加任何 channel 出口**。
 
+#### 4.3.0 先把现状说清楚：现在事件源只有一个半
+
+用户原话：「**现在事件应该只有 Github 的事件源，飞书的也要实现下**」。核对代码后的事实如下：
+
+| 来源 | 现状 | 拉取方式 | 代码位置 |
+|-|-|-|-|
+| **GitHub** | **已实现** | **轮询** —— `gh` CLI 拉 `repos/<repo>/events` 与 `actions/runs`，靠**增量游标**去重 | `src/events/sources/github.ts:45` |
+| **飞书** | **纯占位** —— `poll()` 直接返回 `[]`，只打一条 `event:source-placeholder` 日志 | 无 | `src/events/sources/feishu.ts:1` |
+| 第三方插件 | 旧 `EventSource` 协议 | 各自 `poll()` | `packages/event/src/plugins/loader.ts:60` |
+
+`src/events/sources/feishu.ts` 的文件头注释写得很直白：
+
+> 飞书群消息已经由 channel 链路（路 A）处理，事件链路不重复接管；这里只保留开关与占位实现，**二期再补规则检测**。
+
+所以「飞书事件源」目前是**一个名字，不是一个实现**。阶段 7 要做的是把它从 0 填成真实现 —— 而且不能重蹈 GitHub 的覆辙：**GitHub 用轮询是因为 GitHub 的公开 API 本身没有推送**（GitHub Webhook 需要公网回调地址，本地跑不了），**飞书反过来，飞书有官方事件订阅（长连接），用轮询是自找麻烦**。
+
+#### 4.3.1 实时优先原则（本节的第一原则）
+
+用户原话：「**不要单纯使用轮询去实现监听，有能通过注册事件监听的优先要用事件，实时性更高**」。
+
+这条原则在本方案里的具体含义：
+
+| 来源 | 是否有服务端推送 | 采用的拉取方式 | 理由 |
+|-|-|-|-|
+| **飞书** | **有** —— 官方「事件与回调」支持**长连接订阅**（WebSocket），事件到达即推 | **长连接消费**（`lark-cli event consume`） | 实时性最好；飞书侧不会因为轮询间隔丢事件 |
+| **GitHub** | 有 Webhook，但**需要公网回调地址**，本地部署拿不到 | **轮询 + 增量游标**（现状） | 保留现状，不在本次范围内改造成本 |
+
+**所以飞书事件源的实现与 GitHub 完全不同构** —— 这直接推翻了 §2.3.3 里「宿主做通用 watcher，插件只提供目录」这条设计里的一个隐含假设：**watcher 不止一种形态**。
+
+§2.3.3 的 `EventWatcher` 端口需要相应调整为两种实现形态：
+
+```ts
+// src/events/watcher.ts（修订）
+export interface EventWatcher {
+  readonly catalogId: string
+  /**
+   * 拉取形态。
+   *
+   * - poll：宿主按固定间隔调用 poll()，来源自己管游标（GitHub）。
+   * - realtime：来源自己维持长连接，把事件推给宿主注册的回调（飞书）。
+   */
+  readonly mode: 'poll' | 'realtime'
+  /** poll 形态：拉一批新事件；没有新事件返回空数组。 */
+  poll?(subscription: Subscription): Promise<EventEnvelope[]>
+  /** realtime 形态：订阅变化时启停长连接。 */
+  subscribe?(subscription: Subscription, sink: EventSink): Promise<void>
+  /** 停止所有长连接。 */
+  stop?(): void
+}
+```
+
+这个改动的**代价是要把「什么时候拉」这件事从宿主统一调度改成两种模式并存**。收益是飞书事件从「最多延迟一个轮询周期」变成「到达即处理」，而且飞书侧不会因为轮询频率过快被限流。
+
+**长连接怎么来**：飞书官方的事件订阅有三种投递方式 —— Webhook、**长连接**、SDK 订阅。本机已装 `lark-cli`，它把长连接封装成了 `lark-cli event consume <EventKey>`：
+
+```bash
+# 阻塞消费，stdout 逐行 NDJSON，stderr 打就绪标记
+lark-cli event consume im.message.receive_v1 --as bot
+# stderr: [event] listening for events (key=im.message.receive_v1)
+```
+
+**实测确认（本机 `lark-cli 1.0.95`，bot 身份，2026-11-26）**：
+
+- `lark-cli event list --json` → **25 个可订阅 EventKey**（`application` / `approval` / `board` / `card` / `im` / `minutes` / `task` / `vc` 八个域）；
+- `lark-cli event consume` 是**服务端推送**：stderr 打 `listening for events` 后进程阻塞，事件到达即输出一行 NDJSON；
+- **一个 EventKey 一个进程**：命令只接受一个位置参数，`k1,k2` 与通配符都不支持；
+- **多 EventKey 可以并存**：实测同时跑 `im.message.reaction.created_v1` 与 `im.message.message_read_v1`，`lark-cli event status --json` 里能看到两个 consumer 同时挂着，共享同一个 bus daemon（UDS 本地 IPC），额外开销很小；
+- **必须优雅退出**：`kill -9` 会跳过服务端退订，泄漏订阅（重启时报 "subscription already exists"、事件重复投递）。**用 SIGTERM 或直接关 stdin**。
+
+**仓库里已有一份可复用的长连接实现**：`packages/channel-feishu/src/sources/feishu.ts:414` 的 `FeishuConsumer` 已经解决了这件事的绝大部分细节 —— NDJSON 逐行解析、stderr 就绪标记识别（`larkStderrLevel()` 区分 `ready` / `error` / `ignore`）、指数退避重连（5s → 60s）、stdin 必须保持打开、优雅停止。
+
+> **A8 的边界在哪**：决策 A8 说「事件链路与 Channel 完全独立」。这里的「独立」指的是**不依赖 `packages/channel` 的抽象层、不共用 channel 的凭据与出口**，而不是「不许抄代码」。`FeishuConsumer` 的连接逻辑可以**复制一份**到 `src/events/` 下（宿主侧），但**不能 import `packages/channel-feishu`** —— 否则事件链路就被绑到了 channel 的依赖链上，与 A8 冲突。
+
+#### 4.3.2 事件类型清单：把 25 个 EventKey 分档
+
+飞书侧要「常用事件都加进去」。下表是 `lark-cli event list --json` 的**全量 25 个 EventKey**，以及本方案给它们的**事件类型 id**（带 `feishu.` 前缀，与 GitHub 的 `github.` 前缀对齐）和**可用性状态**。
+
+> **可用性状态是实测的**（`lark-cli event consume <key> --dry-run`，2026-11-26，bot 身份，用户自己的 app）：
+
+| 状态 | 含义 |
+|-|-|
+| 🟢 **ready** | dry-run 三项前置条件（`credentials_available` / `console_event_published` / `scopes_granted`）全过，**开箱可用** |
+| 🔵 **需后台订阅** | dry-run 返回 `console_event_published: blocked` —— 必须在[飞书开放平台开发者后台](https://open.feishu.cn/app)的「事件与回调」里订阅该事件类型。**这不是代码问题**，订阅完即可用 |
+| 🟡 **需额外参数** | 该 EventKey 必填 `--param`（如白板的 `whiteboard_id`），要用户先提供 |
+| 🟣 **需 user 身份** | 该 EventKey 只支持 `--as user`（`approval` / `minutes` / `vc` 三个域），bot 身份订阅不了 |
+
+**档一 · 消息与互动（最常用，首批必做）**
+
+| 事件类型 id | EventKey | 状态 | 说明 |
+|-|-|-|-|
+| `feishu.message` | `im.message.receive_v1` | 🟢 ready | **群聊 / 私聊消息**。用户最想要的那个（「有人答应了立即去做」） |
+| `feishu.message.reaction.created` | `im.message.reaction.created_v1` | 🟢 ready | 表情回应 —— 「有人点了 👍」比「有人发消息」更轻量、更适合做触发 |
+| `feishu.message.reaction.deleted` | `im.message.reaction.deleted_v1` | 🟢 ready | 取消表情 |
+| `feishu.message.read` | `im.message.message_read_v1` | 🟢 ready | 已读回执 |
+
+**档二 · 群与成员**
+
+| 事件类型 id | EventKey | 状态 | 说明 |
+|-|-|-|-|
+| `feishu.chat.member.bot.added` | `im.chat.member.bot.added_v1` | 🟢 ready | 机器人被拉进群 |
+| `feishu.chat.member.bot.deleted` | `im.chat.member.bot.deleted_v1` | 🟢 ready | 机器人被移出群 |
+| `feishu.chat.member.user.added` | `im.chat.member.user.added_v1` | 🔵 需后台订阅 | 有人进群 |
+| `feishu.chat.member.user.deleted` | `im.chat.member.user.deleted_v1` | 🔵 需后台订阅 | 有人退群 |
+| `feishu.chat.member.user.withdrawn` | `im.chat.member.user.withdrawn_v1` | 🔵 需后台订阅 | 邀请被撤回 |
+| `feishu.chat.updated` | `im.chat.updated_v1` | 🔵 需后台订阅 | 群信息变更（改名、改描述） |
+| `feishu.chat.disbanded` | `im.chat.disbanded_v1` | 🔵 需后台订阅 | 群解散 |
+
+**档三 · 审批**
+
+| 事件类型 id | EventKey | 状态 | 说明 |
+|-|-|-|-|
+| `feishu.approval.instance.status_changed` | `approval.instance.status_changed_v4` | 🔵 需后台订阅 + 🟣 需 user 身份 | 审批实例状态变化（通过 / 拒绝 / 撤销） |
+| `feishu.approval.task.status_changed` | `approval.task.status_changed_v4` | 🔵 需后台订阅 + 🟣 需 user 身份 | 审批任务（审批人待办）状态变化 |
+
+**档四 · 任务与卡片**
+
+| 事件类型 id | EventKey | 状态 | 说明 |
+|-|-|-|-|
+| `feishu.task.updated` | `task.task.update_user_access_v2` | 🔵 需后台订阅 | 飞书任务变更 |
+| `feishu.card.action` | `card.action.trigger` | 🟢 ready | 卡片按钮点击回调 |
+
+**档五 · 文档与会议**
+
+| 事件类型 id | EventKey | 状态 | 说明 |
+|-|-|-|-|
+| `feishu.minute.generated` | `minutes.minute.generated_v1` | 🔵 需后台订阅 + 🟣 需 user 身份 | 妙记生成 |
+| `feishu.vc.meeting.started` | `vc.meeting.participant_meeting_started_v1` | 🔵 需后台订阅 + 🟣 需 user 身份 | 会议开始 |
+| `feishu.vc.meeting.joined` | `vc.meeting.participant_meeting_joined_v1` | 🔵 需后台订阅 + 🟣 需 user 身份 | 有人入会 |
+| `feishu.vc.meeting.ended` | `vc.meeting.participant_meeting_ended_v1` | 🔵 需后台订阅 + 🟣 需 user 身份 | 会议结束 |
+| `feishu.vc.note.generated` | `vc.note.generated_v1` | 🔵 需后台订阅 + 🟣 需 user 身份 | 会议笔记生成 |
+| `feishu.vc.recording.started` | `vc.recording.recording_started_v1` | 🔵 + 🟣 + 额外 scope `vc:recording:read` | 录制开始 |
+| `feishu.vc.recording.transcript_generated` | `vc.recording.recording_transcript_generated_v1` | 🔵 + 🟣 + 额外 scope | 录制转写生成 |
+| `feishu.vc.recording.ended` | `vc.recording.recording_ended_v1` | 🔵 + 🟣 + 额外 scope | 录制结束 |
+
+**档六 · 应用**
+
+| 事件类型 id | EventKey | 状态 | 说明 |
+|-|-|-|-|
+| `feishu.bot.menu` | `application.bot.menu_v6` | 🔵 需后台订阅 | 机器人自定义菜单点击 |
+
+**档七 · 白板**
+
+| 事件类型 id | EventKey | 状态 | 说明 |
+|-|-|-|-|
+| `feishu.whiteboard.updated` | `board.whiteboard.updated_v1` | 🔵 + 🟡 必填 `whiteboard_id` | 白板更新 |
+
+**汇总**：25 个 EventKey 全部纳入了目录，但**可用性差异极大** —— 7 个开箱可用（全是消息类与卡片类），18 个需要先在开发者后台订阅事件类型，其中 9 个还需要 user 身份（`approval` / `minutes` / `vc` 三个域）。
+
+> ⚠️ **关于「user 身份」的连带影响**：`approval` / `minutes` / `vc` 这三域的事件**只能用 user 身份订阅**（`--as bot` 直接被拒：`--as bot is not supported, this command only supports: user`）。本机的 user 身份认证**当前不可用**（`lark-cli` 只有 bot 身份的凭据），这意味着这三域在本轮**无法端到端验证**。
+>
+> 这引出一个新的取舍（见 §7 的 **A12**）：事件侧到底用哪个身份 —— 事件侧自有 app 的 bot 身份，还是复用用户身份。
+
+#### 4.3.3 EventKey → 事件类型 id 的映射规则
+
+映射**不是机械的字符串替换**，而是分档定义的。规则：
+
+| EventKey 形态 | 映射规则 | 例子 |
+|-|-|-|
+| `im.message.receive_v1` | 去掉 `_v1` 版本后缀，**再归并到功能名** | `im.message.receive_v1` → `feishu.message` |
+| `im.message.reaction.created_v1` | 去版本后缀 → `im.message.reaction.created` → 去冗余 `im.message` 段 → `feishu.message.reaction.created` | 同左 |
+| `im.chat.member.user.added_v1` | 去版本后缀 → `im.chat.member.user.added` → 保留全部段（chat / member / user 三级都有意义） | `feishu.chat.member.user.added` |
+| `vc.meeting.participant_meeting_started_v1` | 去版本后缀 → `vc.meeting.participant_meeting_started` → 去掉冗余的 `participant_meeting` → `feishu.vc.meeting.started` | 同左 |
+| `approval.instance.status_changed_v4` | 去版本后缀 → `feishu.approval.instance.status_changed` | 同左 |
+| `card.action.trigger` | 无版本后缀，原样加前缀 | `feishu.card.action` |
+
+**为什么要归并**：飞书的 EventKey 命名是**飞书 API 的历史包袱**（`participant_meeting_started` 里的 `participant` 是冗余的），而事件类型 id 会直接出现在**自然语言会话的提示词**与**用户看到的目录里**。id 越短，模型越不容易选错，用户也越看得懂。
+
+**版本后缀一律去掉**：`_v1` / `_v4` 是飞书的协议版本，不是业务语义。事件类型 id 里带版本号会带来两个麻烦 —— 用户说「订阅飞书消息 v1」时模型要去匹配、飞书升级到 `_v5` 时旧订阅静默失配。
+
+#### 4.3.4 归一化：每个 EventKey 一套 jq 投影 + 一个 normalizer
+
+飞书事件的**原始形状每个 EventKey 都不一样**，而且有个坑：**`jq_root_path` 不统一**。
+
+实测（`lark-cli event schema <key> --json` 的 `jq_root_path` 字段）：
+
+| 形态 | `jq_root_path` | 例子 |
+|-|-|-|
+| **扁平形状** | `.` | `im.message.receive_v1`、`card.action.trigger`、`approval.*`、`minutes.*`、`vc.*`、`application.bot.menu_v6` |
+| **V2 信封形状** | `.event` | `im.message.reaction.*`、`im.message.message_read_v1`、`im.chat.*`、`im.chat.member.*`、`task.task.update_user_access_v2`、`board.whiteboard.updated_v1` |
+
+也就是说：**写 jq 时必须按 EventKey 分别处理，不能一套模板打天下**。`--jq` 是 `lark-cli event consume` 的原生参数，可以直接做投影 —— 宿主侧只要给每个 EventKey 配一条 jq 表达式，就能在**进宿主之前**把不同形状压平成统一形状。
+
+**统一投影目标**（`EventEnvelope` 的字段）：
+
+```ts
+// packages/event/src/port.ts
+export interface EventEnvelope {
+  /** 来源内的唯一 id，用于幂等。 */
+  externalId: string
+  /** 事件类型 id，如 `feishu.message`。 */
+  eventType: string
+  /** 一行标题，面板与判定都看它。 */
+  title: string
+  /** 正文 / 描述。 */
+  body: string
+  /** 事件发生时间（ISO）。 */
+  occurredAt?: string
+  /** 相关链接（飞书网页跳转）。 */
+  url?: string
+  /** 原始事件，保留给判定与排查。 */
+  raw?: Record<string, unknown>
+  /** 事件上下文（群 id、发送人、审批单号……）。 */
+  context?: Record<string, unknown>
+}
+```
+
+**两个典型投影**：
+
+```bash
+# im.message.receive_v1（jq_root_path = "."）
+lark-cli event consume im.message.receive_v1 --as bot --jq '
+  {
+    externalId: .message_id,
+    eventType: "feishu.message",
+    chatId: .chat_id,
+    chatType: .chat_type,
+    senderId: .sender_id,
+    senderType: .sender_type,
+    messageType: .message_type,
+    content: .content,
+    messageId: .message_id,
+    createTime: .create_time,
+    mentions: .mentions
+  }
+'
+
+# im.message.reaction.created_v1（jq_root_path = ".event"）
+lark-cli event consume im.message.reaction.created_v1 --as bot --jq '
+  {
+    externalId: (.event.message_id + ":" + .event.reaction_type + ":" + (.event.action_time|tostring)),
+    eventType: "feishu.message.reaction.created",
+    messageId: .event.message_id,
+    reactionType: .event.reaction_type,
+    userId: .event.user_id,
+    operatorType: .event.operator_type,
+    actionTime: .event.action_time
+  }
+'
+```
+
+> ⚠️ **jq 写错会静默丢事件**：`--jq` 表达式运行时出错时，`lark-cli` 会**跳过这条事件并在 stderr 打一行 WARN**，循环不中止 —— 消费者看起来活着，却一条事件都不吐。这是「jq 写错 = 订阅静默失效」的高危点，实现时必须：
+> 1. 宿主侧对每条 jq 投影写**单元测试**（用 `lark-cli event schema` 输出的 `resolved_output_schema` 造样本）；
+> 2. 宿主侧**自己解析 NDJSON 并记日志**，不依赖 `--jq` 的静默失败 —— stderr 的 WARN 行要被采集并落 `event:feishu-consume-warn`。
+
+#### 4.3.5 去重键：每个 EventKey 各有各的
+
+飞书事件的去重键**不能用统一的 `event_id`**。`lark-cli event schema` 的字段描述里写得很明确：
+
+> `event_id` — **Event delivery ID. Do not use as the message deduplication key; use message_id instead.**（事件投递 ID，不可作为消息去重键，要用 `message_id`）
+
+实测各 EventKey 的可用去重字段：
+
+| 事件类型 id | 去重键 | 说明 |
+|-|-|-|
+| `feishu.message` | `message_id` | 消息 id，唯一 |
+| `feishu.message.reaction.created` | `message_id` + `reaction_type` + `action_time` | 同一消息可被多个表情、多次触发；反应**删除又加回**是不同事件 |
+| `feishu.message.reaction.deleted` | `message_id` + `reaction_type` + `action_time` | 同上 |
+| `feishu.message.read` | `message_id` + `user_id` + `read_time` | 多人已读，每人是一条 |
+| `feishu.chat.member.user.added` | `chat_id` + `user_id` + `operate_time` | 同一人可反复进退群 |
+| `feishu.chat.member.bot.added` | `chat_id` + `operator_id` + `operate_time` | |
+| `feishu.chat.updated` | `chat_id` + `update_time` | 群信息可多次变更 |
+| `feishu.chat.disbanded` | `chat_id` | 一次 |
+| `feishu.approval.instance.status_changed` | `instance_code` + `status` + `operate_time` | 同一实例多次状态变化 |
+| `feishu.approval.task.status_changed` | `task_id` + `status` + `operate_time` | |
+| `feishu.task.updated` | `task_guid` + `event_types` + `operate_time` | |
+| `feishu.card.action` | `event_id` | 卡片回调没有更细的字段，用 `event_id` 即可 |
+| `feishu.minute.generated` | `minute_token` | |
+| `feishu.vc.meeting.started` / `joined` / `ended` | `meeting_id` + `participant_id` + `timestamp` | |
+| `feishu.vc.note.generated` | `note_id` | |
+| `feishu.vc.recording.*` | `unique_key` + `event_time` | |
+| `feishu.bot.menu` | `event_id` | |
+| `feishu.whiteboard.updated` | `whiteboard_id` + `update_time` | |
+
+**这直接推翻了「统一用 `externalId` 一个字段」的简单做法** —— 或者说，`externalId` 仍然存在，但它承载的是**拼接后的复合键**，而不是某一个字段。实现上：`externalId` 由每个 EventKey 的 normalizer 负责生成，宿主只管拿它做幂等。
+
+**幂等键的组合**：`(subscriptionId, externalId)` —— 与 §6.2 的方案一致。飞书事件的 `externalId` 已经把业务维度的唯一性编进去了，不需要再加来源前缀。
+
+#### 4.3.6 多进程模型：一个 EventKey 一个长连接
+
+飞书的长连接模型决定了实现形态：**N 个被订阅的 EventKey = N 个 `lark-cli event consume` 子进程**。
+
+```text
+router-agent 进程
+  └─ FeishuEventWatcher（宿主侧，一个实例管所有订阅）
+       ├─ lark-cli event consume im.message.receive_v1         → NDJSON → normalizer → EventSink
+       ├─ lark-cli event consume im.message.reaction.created_v1 → NDJSON → normalizer → EventSink
+       └─ lark-cli event consume im.chat.member.user.added_v1   → NDJSON → normalizer → EventSink
+                                                                 ↑
+                                        全部共享同一个 lark-cli bus daemon（UDS 本地 IPC）
+```
+
+**关键设计点**：
+
+| 点 | 做法 | 为什么 |
+|-|-|-|
+| **进程按需启停** | 只为「**有启用的订阅用到**」的 EventKey 起进程；最后一个用它的订阅停掉时，进程也停 | 25 个 EventKey 全起是浪费；绝大多数用户只订消息类 |
+| **同一 EventKey 多订阅共享一个进程** | 3 个任务都订 `feishu.message` → **1 个进程**，事件扇出给 3 个订阅 | 进程数按 **EventKey 数**算，不按订阅数算 —— 这与 GitHub 的游标问题（§4.2.1 的 A7）是两个不同的维度，别混 |
+| **stdout 解析** | 逐行 JSON.parse；解析失败记 `event:feishu-parse-failed` 并跳过该行 | 一行坏 JSON 不该拖垮整个连接 |
+| **stderr 分类** | 复用 `larkStderrLevel()` 的三分法：就绪 / 错误 / 忽略 | 就绪要能记 `event:feishu-ready`；错误要能触发重连 |
+| **优雅退出** | 停止时发 SIGTERM 或关 stdin，**禁止 `kill -9`** | `kill -9` 跳过服务端退订，泄漏订阅 → 重启报 "subscription already exists" + 重复投递 |
+| **重连退避** | 指数退避 5s → 60s（与 `FeishuConsumer` 一致） | 网络抖动不打爆日志 |
+| **stdin 必须保持打开** | spawn 后立刻写一行或用 `tail -f /dev/null` 顶着 | `lark-cli` 把 stdin EOF 当退出信号 |
+
+**与决策 A7（游标）的关系**：飞书**没有游标问题** —— 服务端推送 + `externalId` 幂等键就够了。A7 的取舍只影响 GitHub。
+
+**凭据隔离**：事件侧用**自己的 app 凭据**（`trigger.params` 里的 `appId` / `appSecret`），与 channel 的 app 完全分开。实现上，两侧用**不同的 `HOME` 目录**隔离 `lark-cli` 的配置与认证状态（现有 channel 侧就是这么做的 —— `FeishuConsumerOptions.env` 支持注入 `HOME`）。**两个 app 各自订阅各自的事件类型，不会抢同一条流。**
+
+#### 4.3.7 降级策略：blocked 的类型要「看得见」
+
+18 个 EventKey 需要先在开发者后台订阅事件类型。**如果不管，用户会遇到「订阅了但永远不来事件」的死局，而且日志里什么都看不出来** —— 这是最坏的一种失败。
+
+本方案的处置：
+
+| 场景 | 表现 |
+|-|-|
+| 事件类型在目录里，但当前 app **未在开发者后台订阅** | 目录里该类型**标注为「需在后台订阅」**（不是隐藏 —— 用户要知道它存在）；建任务时给出明确提示：「该事件类型需先在飞书开放平台订阅 `im.chat.member.user.added_v1` 才能生效」 |
+| 订阅的 EventKey **启动时 dry-run 就是 blocked** | watcher **不启动对应进程**，记 `event:feishu-subscribe-blocked { eventKey, reason }`（`warn` 级），并在面板任务卡上显示「⚠️ 该来源尚未开通，事件不会到达」 |
+| 事件类型需要 **user 身份**但当前只有 bot | 目录标注「需用户身份」；建任务时提示「该事件类型暂不支持当前凭据」 |
+| 事件类型需要**必填参数**（白板 `whiteboard_id`） | 目录的 `params()` 里声明 `whiteboard_id` 必填；建任务时会话必须问到它，问不到就不建任务 |
+
+**给用户的接入指引**要在面板上给出来。dry-run 的 hint 里带的就是官方扫码订阅链接（`https://open.feishu.cn/page/launcher?clientID=...&addons=...`），可以直接渲染成按钮。
+
+#### 4.3.8 权限与配额
+
+| 维度 | 说明 |
+|-|-|
+| **开发者后台订阅** | 每个 EventKey 要单独勾选「事件与回调 → 订阅事件类型」。这是**人工前置操作**，无法代码自动化 |
+| **权限 scope** | 每个 EventKey 有 `required_scopes`（见 §4.3.2 各档）。实测 `vc.recording.*` 三项的 `scopes_granted` 也是 blocked（缺 `vc:recording:read`） |
+| **身份限制** | `approval` / `minutes` / `vc` 三域只能 `--as user`；其余可 `--as bot` |
+| **长连接数量** | 一个进程一个 EventKey。25 个全开 = 25 个进程（共享 1 个 bus daemon）。**按需启停**是必须的 |
+| **事件配额** | 飞书对事件推送有 QPS 限制；本地长连接不受轮询频率影响，但**任务处理侧仍受 §11 的 `dailyEventLimit` 闸门保护** |
+#### 4.3.9 与 Channel 链路的边界（A8 的具体落法）
+
 **两条链路各管各的**：
 
 | | Channel 链路（消息） | 事件链路（订阅） |
 |-|-|-|
 | 消费的东西 | 群里 @机器人、私聊 —— **有人在跟机器人说话** | 群里/私聊的**全部消息内容** —— 有人在跟别人说话 |
 | 目的是 | 触发一次对话与派工 | 作为**被订阅的事件源**，供自动化任务消费 |
-| 落地代码 | `packages/channel-feishu` | `src/events/sources/feishu.ts` + 事件侧独立 watcher |
+| 落地代码 | `packages/channel-feishu` | `src/events/feishu-watcher.ts` + `src/events/sources/feishu.ts` |
 | 谁的凭据 | channel 的 app 凭据 | 事件源自己的连接参数（`trigger.params`） |
 
 **关键：订阅的语义本就和 channel 不同**。用户想让「有人答应了立即去做」被捕捉到 —— 这条消息是**说给同事听的**，根本不会 @机器人，channel 链路根本看不到它。所以事件侧需要自己接飞书消息流，这是需求本身的要求，不是架构上的重复。
 
 **实现要点**：
 
-1. **事件侧独立消费**：在 `src/events/sources/feishu.ts` 里实现一个独立的飞书 watcher，用 `lark-cli event consume`（或飞书长连接）拉取消息；凭据来自 `trigger.params`（`appId` / `appSecret`），与 channel 的凭据分开配置。
-2. **不与 channel 抢事件流**：两者用**不同的订阅类型**消费 —— channel 消费的是「@机器人 / 私聊给机器人」的消息类型，事件源消费的是「群聊里所有消息」。飞书侧按 `event_type` 区分后各自订阅即可。
+1. **事件侧独立消费**：`src/events/feishu-watcher.ts` 起 `lark-cli event consume` 长连接；凭据来自 `trigger.params`（`appId` / `appSecret`），与 channel 的凭据分开配置（独立 `HOME` 隔离 `lark-cli` 认证态）。
+2. **不与 channel 抢事件流**：两侧用**不同的 app** 订阅不同的事件类型 —— channel 的 app 收「@机器人 / 私聊给机器人」，事件侧的 app 收「群内全部消息」。不同 app 之间不存在抢流。
 3. **不需要去重**：同一句话在两条链路里各出现一次是正常的 —— channel 把它当「对话」，事件链路把它当「一条待判断的事件」，语义不同，不冲突。
 4. **回写独立**：事件链路有自己的回写出口（发卡片 / 发消息到群），不复用 channel 的 `ReplyAction`。
+5. **不 import `packages/channel-feishu`**：`FeishuConsumer` 的长连接逻辑**复制**一份到 `src/events/`，而不是依赖它 —— 否则事件链路就被绑到 channel 的依赖链上。
 
 **对现有代码的影响**：
 
 | 位置 | 处理 |
 |-|-|
-| `src/events/sources/feishu.ts`（现为占位） | **填实**：实现独立的飞书 watcher + `feishu.message` 目录类型 |
+| `src/events/sources/feishu.ts`（现为占位） | **填实**：改为 realtime 形态的 watcher（长连接），不再是 `poll()` 形态 |
 | `packages/channel` / `packages/channel-feishu` | **不动**（决策 A8 明确不耦合） |
-| `src/events/catalogs/feishu.ts` | 新增：`feishu.message` 事件类型 + `appId`/`appSecret` 连接参数声明 |
+| `src/events/catalogs/feishu.ts` | 新增：**25 个事件类型** + `appId`/`appSecret` 连接参数声明 + 每类型的可用性标注 |
+| `src/events/feishu-watcher.ts` | **新增**：长连接 watcher（进程管理 + 重连 + NDJSON 解析 + 归一化分发） |
+| `src/events/feishu-projections.ts` | **新增**：每个 EventKey 的 jq 投影 + normalizer（含去重键生成） |
 | `packages/event` | 不依赖 channel；飞书 watcher 属于宿主侧实现，不进 SDK |
 
-**代价与应对**：多一套飞书连接（多一个长连接、凭据要单独配），以及飞书侧的配额消耗翻倍。应对办法是事件侧 watcher 独立配置轮询/长连接参数，且**只订阅有任务的来源**（没有 `feishu.message` 订阅时根本不启动）。
+**代价与应对**：多一套飞书连接（多几个长连接进程、凭据要单独配），以及飞书侧的配额消耗。应对办法是事件侧 watcher 独立配置长连接参数，且**只启动有启用订阅用到的 EventKey**（没有任何飞书订阅时一个进程都不起）。
+
+**与 GitHub watcher 的对照**：
+
+| | GitHub watcher | 飞书 watcher |
+|-|-|-|
+| 形态 | `poll`（宿主定时调） | `realtime`（自带长连接） |
+| 触发 | 宿主统一调度 tick | 事件到达即处理 |
+| 增量 | 增量游标（按订阅独立，A7 待定） | 无游标，靠 `externalId` 幂等 |
+| 去重 | GitHub 事件 id 单调递增 | 复合键（见 §4.3.5） |
+| 子进程 | 无（进程内调 `gh` CLI） | N 个 `lark-cli event consume` |
+| 凭据 | `gh` CLI 的登录态 | 事件侧自有 app（独立 `HOME`） |
+| 可订阅类型 | `GITHUB_EVENT_TYPES`（现有） | 25 个 EventKey（本节新增） |
 
 ### 4.4 插件 SDK 的版本策略
 
@@ -1315,9 +1689,27 @@ export default {
 2. `params` 的 key 必须是该 source 声明的参数。
 3. `project` 必须是候选项目之一；`skill` 必须是候选处理方式之一。
 4. 拿不准就回问，不要编造。
+5. **只选当前目录里标了「开箱可用」的类型**；标了「需后台订阅」「需用户身份」「需额外参数」的类型，
+   要在预览卡片里明确告诉用户这个前置条件，不要假装它建完就能用。
 
 ## 缺失必填项时
 一次只问一个问题，问清后再继续。
+```
+
+**关于第 5 条**：目录注入 user prompt 时，**可用性标注也要一起注入**。否则模型会给用户建一个「订阅了飞书进群事件」的任务，
+而那个事件类型其实还没在开发者后台开通 —— 用户等一天都不会看到事件，还以为系统坏了（这正是 §11 的 R12）。
+
+**注入目录的形态**（宿主侧拼装，随会话变化）：
+
+```text
+[来源] feishu（飞书）· 实时长连接
+  - feishu.message · 群聊 / 私聊消息 · 开箱可用
+  - feishu.message.reaction.created · 表情回应 · 开箱可用
+  - feishu.chat.member.user.added · 有人进群 · 需后台订阅（open.feishu.cn 勾选 im.chat.member.user.added_v1）
+  - feishu.whiteboard.updated · 白板更新 · 需后台订阅 + 必填参数 whiteboard_id
+[来源] github（GitHub）· 轮询
+  - github.issues.opened · 新建 Issue · 开箱可用
+  ...
 ```
 
 **这是「skill 流程」在现有架构里的落点** —— 注意：现有的「skill」有两套含义：
@@ -1514,6 +1906,23 @@ DROP TABLE events; ALTER TABLE events_new RENAME TO events;
 > ✅ **决策 A11（用户 2026-11-26）**：「直接清空所有历史事件」。
 > 历史行**不回填、不保留** —— `events` 表重建后是空的，详见 §3.1.3。
 
+**飞书侧的 `externalId` 是复合键**：飞书事件没有像 GitHub 事件 id 那样单调递增的单一字段可用 —— `event_id` 是**投递 ID**（官方明示不可作消息去重键），所以每个 EventKey 的去重键都不一样（完整清单见 §4.3.5）。
+
+实现上，`externalId` 由**该 EventKey 的 normalizer** 生成（把业务维度唯一性拼进一个字符串），宿主只管拿 `(subscriptionId, externalId)` 做幂等：
+
+```ts
+// feishu.message 的 normalizer
+externalId: raw.message_id
+
+// feishu.message.reaction.created 的 normalizer
+externalId: [raw.message_id, raw.reaction_type, raw.action_time].join(':')
+
+// feishu.chat.member.user.added 的 normalizer
+externalId: [raw.chat_id, raw.user_id, raw.operate_time].join(':')
+```
+
+**这样做的代价是 `externalId` 长度会涨**（复合键拼接）。事件表里 `external_id` 是普通 TEXT 列，不建索引以外的结构，长度到几十字符没问题。
+
 ### 6.3 事件列表（收件箱）的展示变化
 
 ```text
@@ -1597,6 +2006,10 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 | B2 | 自动化卡片回调走哪条路？ | (a) 扩展 `questions` 表 (b) 新增 `automation_cards` 表 (c) 不用回调 | 默认 (b) | `handleCardAction`、飞书适配器 |
 | B3 | 事件类任务与定时任务是否共用一套 `automation.tasks`？ | (a) 共用 (b) 分表 | 默认 (a) | 整个任务模型 |
 | B4 | 自动化任务的通知人怎么定？ | (a) 沿用来源的 `owner` (b) 任务级通知人 (c) 两者都要 | 默认 (b) | `EventKickoff`、`AutomationTaskConfig` |
+| ❓ A12 | **飞书事件侧用哪个身份**订阅？（`approval` / `minutes` / `vc` 三域只支持 `--as user`，其余支持 `--as bot`） | (a) 只用 bot，user-only 的 9 个类型不开放 (b) 只用 user (c) 两种都支持，目录按凭据动态标注可用性 | **待决策**。建议 (c) —— 目录按当前凭据动态标注可用性，bot 也能用消息类，user 能额外用审批/会议类 | `src/events/catalogs/feishu.ts`、凭据配置 |
+| ❓ A13 | **飞书事件类型铺多开？**（实测 25 个 EventKey 里只有 7 个开箱可用） | (a) 全量 25 个都进目录，不可用标注 (b) 只进 7 个 ready 的 (c) 分批上线（先消息类，再按需加） | **待决策**。建议 (a) —— 目录全量列出并标注前置条件，用户能看见「有这个能力，去后台开通即可」，比藏起来更有用 | `src/events/catalogs/feishu.ts`、面板目录卡 |
+| ❓ A14 | **事件侧飞书 app 与 channel 侧 app 的关系？** | (a) 完全两个 app，凭据各配各的 (b) 同一个 app 两个订阅身份 | **待决策**。建议 (a) —— 彻底隔离（A8 的延伸），但代价是用户要配两套凭据 | `trigger.params`、凭据配置、面板 |
+| ❓ A15 | **GitHub 要不要也改成实时？**（GitHub 有 Webhook，但需公网回调地址） | (a) 保持轮询 (b) 加 Webhook 支持（需内网穿透/公网地址） | **待决策**。建议 (a) —— 本地部署拿不到公网地址，Webhook 改造成本远大于收益 | GitHub watcher、§4.2 |
 
 **已决策项带来的连带改动**（下文各章已同步）：
 
@@ -1606,6 +2019,7 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 | A3 | §3.2 删掉顶层 `schedule` 字段与兼容镜像逻辑；所有读 `task.schedule` 的地方改读 `trigger.schedule` |
 | A6 | §2.2 映射表里风险标签改为「**丢弃**」；§3.5 改写为「护栏取消」并给补偿手段；§6.1 判定链去掉护栏环节；§8.4 收件箱描述同步；§11.1 风险 R1 去掉「风险标签闸门」 |
 | A8 | §4.3 飞书改为「独立 watcher」；§8.3 不再与 channel 有任何耦合；`packages/channel` 回到「不动」 |
+| A12~A15（待决策） | §4.3 的飞书实现按「建议项」写，标注为待拍板；A12 落到目录的可用性标注，A13 落到全量 25 个类型，A14 落到凭据隔离，A15 落到 GitHub 保持轮询 |
 | A10 | §5.4 会话端点改 SSE；§8.3 技术落点改为 SSE |
 | A11 | §3.1.3 事件表不再做历史回填，改为清空历史事件；§6.2 幂等键方案随之简化 |
 | B1 | §2.3.4 兼容策略从「适配层」改为「直接废弃」；`adaptLegacySource` 不再需要 |
@@ -1640,6 +2054,25 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 - 卡片脚：只留「连接参数」与「查看订阅它的任务」两个动作 —— **没有「选择事件类型」的多选框**（那正是要删掉的旧弹窗）。
 
 **为什么这样改**：旧的「设置」弹窗让用户在这里勾事件类型，等于把「订阅」这个动作拆成两处（这里勾 + 规则里再写一遍 `eventType`），正是用户说「操作成本非常高」的根源。新形态里这一页变成**只读的目录**，订阅关系一律在任务里。
+
+#### 8.1.1 飞书事件源目录（展开后的形态）
+
+![飞书事件源：25 种事件类型，按分组列出，标注可用性](@./docs/design/figures/fig-v2-ui-feishu-catalog.png)
+
+飞书的类型多（25 种），不能像 GitHub 那样全平铺在一张卡里 —— 平铺的话一屏 25 行，谁都扫不下去。形态改成**按域分组 + 每条标注可用性**：
+
+| 元素 | 含义 |
+|-|-|
+| **分组标题** | 消息与互动 / 群与成员 / 审批·任务·卡片 / 文档与会议 / 应用与白板 —— 与 §4.3.2 的七档一一对应 |
+| **🟢 开箱可用** | 当前 app 已订阅该事件类型且权限齐全，**建了任务就有事件** |
+| **🟠 需后台订阅** | 要先在飞书开放平台勾选对应事件类型；标注里额外写明「+ 用户身份」「+ 权限」「+ 必填白板 ID」等附加条件 |
+| **右侧订阅计数** | 「被 N 个任务订阅」/「尚未订阅」—— 与 GitHub 卡一致 |
+| **顶部徽标** | 「长连接已建立 N」（当前实际连接数）/「7 个类型开箱可用」/「18 个需后台订阅」 |
+| **「去后台开通事件类型」按钮** | 直达 dry-run hint 里的官方扫码链接 |
+
+**为什么要把「需后台订阅」显式画出来**：这 18 个类型**不是代码没实现**，而是需要人工去开放平台勾一下。如果目录里只写「暂无事件类型」，用户会以为这个能力不存在；写「需后台订阅」，用户知道「这个能做，我得去开一下」。这是 §4.3.7 降级策略在界面上的落点。
+
+**顶部「长连接已建立 N」这个徽标**是 §11 风险 R14（进程数膨胀）的日常观测口 —— 用户能一眼看出自己开了几个订阅进程。
 
 ### 8.2 自动化 · 任务列表（订阅与执行一体）
 
@@ -1721,6 +2154,7 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 | 自动化 · 任务列表 | `src/web/client/automation-panel.tsx:54` | 改：卡片加模式标签、订阅信息、「恢复会话」按钮；删「新建自动化」弹窗 |
 | 自动化 · 会话面板 | 新增 `src/web/client/automation-conversation.tsx` | **新增**：对话流 + 预览卡片 + 会话清单 |
 | 收件箱 | `src/web/client/events-panel.tsx:73` | 改：「判定」列→「归属」列；「规则命中」→「订阅命中」；新增「已通知 / 已过滤」 |
+| 飞书事件源目录 | 新增 / 扩 `src/web/client/events-config.tsx` | **新增**：25 种类型按域分组 + 可用性标注 + 长连接数徽标（§8.1.1） |
 | 预览卡片 | 新增 `src/web/client/automation-preview-card.tsx` | **新增**：会话里确认前的参数预览 |
 | 任务卡「恢复会话」 | `src/service.ts:2211` 卡片回调链路 | 改：卡片动作带 `conversationId`（§2.6.5） |
 
@@ -1731,6 +2165,8 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 .preview-card / .preview-row / .preview-foot       参数预览卡
 .tag.mode-auto / .tag.mode-review / .tag.mode-notify 三种处理模式标签
 .catalog-item                                      事件目录条目
+.catalog-group                                     事件目录分组标题
+.tag.ok / .tag.warn                               事件类型可用性标签
 .side-panel / .side-row                            会话清单侧栏
 ```
 
@@ -1745,10 +2181,11 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 ### 阶段 0 · 文档与决策（当前工单）
 
 - [x] 本方案文档
-- [x] Web 界面草图（§8，含 4 张 mockup）
-- [x] 功能验证清单（§12，31 条核心链路 case）
+- [x] Web 界面草图（§8，含 5 张 mockup —— 新增飞书事件源目录）
+- [x] 功能验证清单（§12，41 条核心链路 case，含飞书实时链路 10 条）
 - [x] 用户对 §7 的 A1、A3、A6、A8、A10、A11、B1 拍板（2026-11-26，飞书文档评论）
-- [ ] 用户对 §7 剩余的 A2、A4、A5、A7、A9、B2、B3、B4 拍板
+- [x] 飞书事件源从占位填实的方案（§4.3，25 个 EventKey + 长连接实时订阅）
+- [ ] 用户对 §7 剩余的 A2、A4、A5、A7、A9、A12、A13、A14、A15、B2、B3、B4 拍板
 - [ ] 用户确认 §8 的界面方向
 
 **产出**：拍板后的方案定稿。
@@ -1759,7 +2196,7 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 
 1. `packages/event`：新增 `EventCatalog` / `EventTypeDescriptor` / `EventParamDescriptor`；`EventPlugin` 加 `catalog?` / `fetch?`；**旧 `EventSource` 插件不再加载**（决策 B1）。
 2. `packages/event`：`EventSource` 标记 `@deprecated`，保留导出。
-3. 宿主：`src/events/catalogs/github.ts`、`src/events/catalogs/feishu.ts` 两个内置目录。
+3. 宿主：`src/events/catalogs/github.ts`、`src/events/catalogs/feishu.ts` 两个内置目录。**飞书目录含 25 个事件类型 + 每类型的可用性标注**（§4.3.2）。
 4. 宿主：`src/events/catalog.ts` 汇总所有目录（内置 + 插件），供 API 与会话流程使用。
 5. API：`GET /api/events/catalogs` 返回目录树（来源 → 类型 → 参数）。
 6. 面板：配置页「事件来源」区新增「可订阅事件」只读视图（**不删现有来源卡**）。
@@ -1855,13 +2292,32 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 
 **回滚**：换回 `config.yaml.bak`；事件表反向 rename。
 
-### 阶段 7 · 飞书消息订阅（A8 已定：完全独立）
+### 阶段 7 · 飞书事件源（从占位填实，A8 已定：完全独立）
 
-- `src/events/sources/feishu.ts` 填实：事件侧**独立**的飞书 watcher，用自己的凭据（`trigger.params`）。
-- `src/events/catalogs/feishu.ts` 新增：`feishu.message` 类型 + `appId`/`appSecret` 参数声明。
+**这一阶段比其它阶段大，建议内部再切三小步**，每步可单独验证：
+
+**7a · 目录与归一化（不连网，先把契约定死）**
+
+- `src/events/catalogs/feishu.ts` 新增：**25 个事件类型**（§4.3.2 的七档）+ `appId`/`appSecret` 参数声明 + 每类型的**可用性标注**（ready / 需后台订阅 / 需 user 身份 / 需额外参数）。
+- `src/events/feishu-projections.ts` 新增：每个 EventKey 的 **jq 投影** + **normalizer**（含 `externalId` 去重键生成）。
+- **不连任何真实订阅**：用 `lark-cli event schema <key> --json` 的 `resolved_output_schema` 造样本，把 25 条投影各写一条单元测试。
 - `packages/channel` / `packages/channel-feishu` **完全不动**（决策 A8：与 Channel 不耦合）。
 
-**风险**：中（多一套飞书连接与凭据；配额翻倍）。**没有双消费风险** —— 两条链路消费的是不同类型的消息事件，各自独立订阅。
+**7b · 长连接 watcher（realtime 形态）**
+
+- `src/events/feishu-watcher.ts` 新增：进程管理 + 就绪标记识别 + 指数退避重连（5s→60s）+ **优雅退出**（SIGTERM / 关 stdin，禁 `kill -9`）+ NDJSON 逐行解析。
+- `src/events/sources/feishu.ts` 填实：从 `poll()` 占位改为 realtime watcher，**订阅变化时按需启停进程**（只为有启用订阅的 EventKey 起进程；同一 EventKey 多订阅共享 1 个进程）。
+- 凭据走 `trigger.params`（`appId` / `appSecret`），与 channel 的 app 完全分开（独立 `HOME` 隔离 `lark-cli` 认证态）。
+- 启动时对每个 EventKey 做 **dry-run 预检**：`blocked` 就不起进程，记 `event:feishu-subscribe-blocked`（`warn`），面板上显示「⚠️ 该来源尚未开通」。
+
+**7c · 面板与联调**
+
+- 目录卡展示飞书的 25 个类型 + 可用性标注 + 「去后台订阅」链接（dry-run 的 hint 里带官方扫码链接）。
+- 用真实的飞书群做端到端验证（§12.9 的 V32~V38）。
+
+**风险**：中偏高（多一套飞书连接与凭据；长连接进程泄漏风险；jq 写错会静默丢事件）。**没有双消费风险** —— 两条链路用**不同的 app** 订阅不同的事件类型。
+
+> ⚠️ **7a 与 7b 的顺序不能反**：先把 25 条 jq 投影测绿，再去连真实订阅。反过来的话，jq 写错 → 事件被静默跳过 → 看起来「订阅了没反应」，很难排查。
 
 ### 阶段 8 · 收尾
 
@@ -1900,9 +2356,11 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 | `src/events/wiring.ts` | 装配改造 | 4 |
 | `src/events/skills.ts` | 保留，语义从「规则候选」变「任务属性」 | 4 |
 | `src/events/sources/github.ts` | 改为 watcher 形态；游标键按订阅 | 4 |
-| `src/events/sources/feishu.ts` | 占位保持（等阶段 7） | 7 |
+| `src/events/sources/feishu.ts` | **填实**：占位 → realtime watcher（长连接） | 7b |
+| `src/events/feishu-watcher.ts` | **新增**：长连接 watcher（进程管理 / 重连 / NDJSON 解析 / 分发） | 7b |
+| `src/events/feishu-projections.ts` | **新增**：25 个 EventKey 的 jq 投影 + normalizer | 7a |
 | `src/events/catalogs/*.ts` | **新增**：内置目录 | 1 |
-| `src/events/watcher.ts` | **新增**：通用 watcher | 4 |
+| `src/events/watcher.ts` | **新增**：通用 watcher（**两种形态**：`poll` / `realtime`，见 §4.3.1） | 4 / 7b |
 | `src/events/subscriptions.ts` | **新增**：订阅推导 | 4 |
 | `src/events/kickoff.ts` | 通知人来源改任务级（B4 结论） | 4 / 7 |
 | `src/automation/service.ts` | 删 `captureDraft` / `parseDraft` 旧路径；接会话流程 | 3 |
@@ -1958,6 +2416,9 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 | **新增** `tests/automation/session.test.ts` | 会话状态机 |
 | **新增** `tests/automation/migrate.test.ts` | 迁移映射 |
 | **新增** `tests/web/automation-conversation.test.ts` | 面板会话 |
+| **新增** `tests/events/feishu-projections.test.ts` | 25 个 EventKey 的 jq 投影 + normalizer（去重键） |
+| **新增** `tests/events/feishu-watcher.test.ts` | 长连接进程管理 / 就绪 / 重连 / 优雅退出 / dry-run 预检 |
+| **新增** `tests/web/feishu-catalog.test.ts` | 飞书目录卡的分组与可用性标注 |
 
 ### 10.4 文档影响面
 
@@ -1965,7 +2426,8 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 |---|---|
 | `docs/CONFIGURATION.md` | 「事件总线」章重写：删决策规则章，来源 → 目录，订阅 → 任务 |
 | `docs/AUTOMATION.md` | 加 trigger 模型、会话流程、事件触发 |
-| `docs/OPERATIONS.md` | 事件表增删：`event:subscription-*` / `event:filtered-out` / `automation:task-created` / `automation:session-step` / `automation:session-rejected` / `automation:task-updated`；删 `event:rule-*` 与 `event:guardrail-matched` |
+| `docs/OPERATIONS.md` | 事件表增删：`event:subscription-*` / `event:filtered-out` / `automation:task-created` / `automation:session-step` / `automation:session-rejected` / `automation:task-updated` / `event:feishu-ready` / `event:feishu-reconnect` / `event:feishu-subscribe-blocked` / `event:feishu-parse-failed` / `event:feishu-consume-warn` / `event:feishu-stopped`；删 `event:rule-*` 与 `event:guardrail-matched` |
+| `docs/CONFIGURATION.md` | 补飞书事件源的连接参数（`appId` / `appSecret` / 独立 `home`）与「需后台订阅」的前置说明 |
 | `docs/MONOREPO.md` | 事件来源插件协议新形状 + 迁移指引 |
 | `docs/API.md` | 删规则端点；加会话与目录端点 |
 | `docs/ARCHITECTURE.md` | 事件链路图更新 |
@@ -2000,6 +2462,12 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 | R8 | **卡片回调落不了地**：B2 选错，卡片点了没反应 | 中 | 中 | B2 选 (b) 不动现有 `questions` 表；卡片按钮之外同时提供「回复指令」降级路径 | 去掉卡片按钮，只保留会话面板 |
 | R9 | **旧插件全部失效**：决策 B1 直接废弃，装了旧插件的用户启动即失效 | 中 | 中 | 启动时打印明确弃用告警（含插件名与升级指引）；README 与迁移指引写清新接口怎么写 | 装回旧版 `@router-agent/event`（插件本身不删） |
 | R10 | **删规则模块时漏删引用点** | 中 | 中 | 阶段 5 一次性删完并跑 `pnpm check`；`tsc` 会抓出所有编译期引用；`grep -rn "events.rules\|EventRule"` 兜底 | git revert |
+| R11 | **飞书 jq 投影写错 → 事件静默丢失**：`--jq` 运行时出错时 `lark-cli` 跳过该事件只打一行 WARN，消费者「看起来活着却一条都不吐」 | 中 | 高 | 7a 阶段先用 `event schema` 的 `resolved_output_schema` 造样本把 25 条投影各测一遍；宿主自己解析 NDJSON 并把 stderr 的 WARN 行落 `event:feishu-consume-warn`；面板显示「最近收到事件时间」，长时间为 0 即告警 | 关掉该 EventKey 的订阅，退回用 `feishu.message` |
+| R12 | **开发者后台未订阅 → 订阅了永远不来事件**：18 个 EventKey 需要人工在开放平台勾选 | **高**（必然发生） | 中 | 启动时 dry-run 预检，`blocked` 就不起进程 + 面板显示「⚠️ 尚未开通」+ 给出官方扫码链接；目录里标注前置条件 | 用户去后台订阅，或改用 7 个 ready 类型 |
+| R13 | **长连接进程泄漏**：`kill -9` 跳过服务端退订，重启报 "subscription already exists" 且事件重复投递 | 中 | 中 | 停止时一律 SIGTERM / 关 stdin；**禁止 `kill -9`**；进程退出后用 `lark-cli event status` 核对 consumer 数 | `lark-cli event stop --all` 清干净后重启 |
+| R14 | **长连接进程数膨胀**：25 个 EventKey 全开 = 25 个子进程 | 中 | 低 | 只为有启用订阅的 EventKey 起进程；同一 EventKey 多订阅共享 1 个进程；面板显示当前连接数 | 停用不用的订阅，进程自动回收 |
+| R15 | **需要 user 身份的 9 个类型无法用 bot 订阅**（`approval` / `minutes` / `vc`） | 高 | 低 | 目录按当前凭据动态标注可用性；建任务时明确提示「该类型需用户身份，当前凭据不支持」 | 换 user 身份认证，或先用消息类类型 |
+| R16 | **用户事件侧 app 没配 / 没在后台订阅事件类型**，任务建成了但事件不来 | 高 | 中 | 面板任务卡显示订阅健康状态；`event:subscription-registered` 与 `event:feishu-ready` 都要能看到；健康状态异常的卡片高亮 | 在面板补配凭据 |
 
 ### 11.2 回滚策略
 
@@ -2019,7 +2487,7 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 | 4（订阅链路） | `subscriptionMode: legacy` | 事件不按新模型处理 |
 | 5（删规则） | git revert | 需要重新构建 |
 | 6（数据迁移） | 换回 `config.yaml.bak`；`state.db` 从备份恢复 | 迁移后新增的自动化任务会丢（可从 `.bak` 里捞） |
-| 7（飞书） | 独立发布，单独回滚 | 飞书消息订阅不可用 |
+| 7（飞书） | 独立发布，单独回滚；关掉 `events.feishu.enabled` 即停全部长连接 | 飞书事件订阅不可用（GitHub 不受影响） |
 
 **观测指标（回滚判断依据）：**
 
@@ -2030,6 +2498,10 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 | 自动化任务创建失败率 | < 10% | > 30% → R5 |
 | 事件平均处理延迟 | < 5 分钟 | > 30 分钟 → R7（洪水） |
 | `event:decision-failed` 占比 | < 5% | > 20% → 判定链路有问题 |
+| 飞书事件端到端延迟（消息发出 → 事件入库） | < 5 秒 | > 30 秒 → 长连接没真正实时，退化成轮询了 |
+| `event:feishu-consume-warn` 占比 | 0 | 出现即说明 jq 投影有问题（R11） |
+| `event:feishu-subscribe-blocked` 数量 | 0（开通后） | 持续出现 → 用户没去后台订阅（R12） |
+| 长连接进程数 | ≤ 启用订阅用到的 EventKey 数 | > 该数 → 进程没被回收（R13） |
 
 ---
 
@@ -2048,6 +2520,12 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 | `automation:session-step` | `conversationId`, `step`（`parse` / `clarify` / `preview`）, `missing[]` | 会话每推进一步 |
 | `automation:session-rejected` | `conversationId`, `reason`（`unknown-type` / `invalid-param`） | 模型给出的类型或参数不在闭集内，被拒 |
 | `automation:task-updated` | `taskId`, `changed[]` | 恢复会话后改动了已有任务 |
+| `event:feishu-ready` | `eventKey`, `pid` | 飞书长连接建立就绪（stderr 打出 listening 标记） |
+| `event:feishu-reconnect` | `eventKey`, `attempt`, `delayMs` | 长连接断开后安排重连 |
+| `event:feishu-subscribe-blocked` | `eventKey`, `reason` | dry-run 预检发现该事件类型未在开发者后台订阅 / 缺权限 |
+| `event:feishu-parse-failed` | `eventKey`, `sample` | NDJSON 单行解析失败（跳过该行，不中断连接） |
+| `event:feishu-consume-warn` | `eventKey`, `detail` | `lark-cli` stderr 的 WARN 行（如 jq 投影运行时错误 → 事件被跳过） |
+| `event:feishu-stopped` | `eventKey` | 长连接优雅退出（订阅停用或进程关闭） |
 
 > 其余可观测点（`event:ingested` / `event:filtered-out` / `event:dispatched` / `event:deferred` / `event:kickoff` 等）见 §6.1 的时序图，字段不变。
 
@@ -2121,9 +2599,26 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 
 ---
 
-### 12.8 这些 case 覆盖了什么、没覆盖什么
+### 12.8 飞书事件源（实时链路）
 
-**覆盖**：主干链路的三件事 —— ①**说一句话能建出正确的任务**；②**任务能稳定收到并判定事件**；③**事件按任务的处理方式正确分流**。加上会话恢复、SSE 流式、面板形态这三块交互。
+**前置条件**：事件侧已配好飞书 app 凭据（独立于 channel）；一个可发消息的飞书群；开发者后台已按用例订阅对应事件类型。
+
+| # | 操作 | 期望结果 | 可观测点 |
+|-|-|-|-|
+| V32 | 在飞书群里发一条消息（**不 @机器人**） | 事件被长连接收到并入库，**不走轮询** | `event:feishu-ready` 后有 `event:ingested { eventType: 'feishu.message' }`；端到端延迟 < 5 秒 |
+| V33 | 对同一条消息**连发两次同样的内容** | **只入库一条** | `events` 表只有一行；幂等键 `(subscriptionId, externalId=message_id)` 生效 |
+| V34 | 订阅 `feishu.message.reaction.created`，有人给消息点 👍 | 表情事件入库，`externalId` 是「message_id + reaction_type + action_time」复合键 | `event:ingested { eventType: 'feishu.message.reaction.created' }` |
+| V35 | 同一个表情**先加后删再** | 三条独立事件（加 / 删 / 再加） | `events` 表三行，`externalId` 三者不同 |
+| V36 | 订阅一个**未在开发者后台订阅**的 EventKey（如 `feishu.chat.member.user.added`） | watcher **不起进程**，任务卡显示「⚠️ 尚未开通」，**不静默失败** | `event:feishu-subscribe-blocked { eventKey }`（warn）；面板有提示 |
+| V37 | 三个任务都订阅 `feishu.message` | **只起 1 个长连接进程**，事件扇出给三个任务 | `lark-cli event status --json` 里该 EventKey 只有 1 个 consumer；`events` 表三行，`subscriptionId` 各不相同 |
+| V38 | 停用最后一个用到某 EventKey 的任务 | 对应长连接进程**退出**，不残留 | `lark-cli event status --json` 里该 consumer 消失；无孤儿进程 |
+| V39 | 正常重启 router-agent | 不报 "subscription already exists"，事件不重复投递 | 无 `event:feishu-subscribe-blocked`（该类报错）；事件不重复入库 |
+| V40 | 故意写错一条 jq 投影后订阅它 | 事件被跳过，**且日志里看得见** | stderr WARN 被采集，落 `event:feishu-consume-warn`；面板「最近收到事件时间」不更新 |
+| V41 | 群里有人退群（订阅 `feishu.chat.member.user.deleted`） | 成员事件入库，`externalId` 含 `chat_id + user_id + operate_time` | `event:ingested { eventType: 'feishu.chat.member.user.deleted' }` |
+
+### 12.9 这些 case 覆盖了什么、没覆盖什么
+
+**覆盖**：主干链路的三件事 —— ①**说一句话能建出正确的任务**；②**任务能稳定收到并判定事件**；③**事件按任务的处理方式正确分流**。加上会话恢复、SSE 流式、面板形态、**飞书实时链路**这四块交互。
 
 **刻意不覆盖**：
 
@@ -2132,6 +2627,8 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 | 界面像素 / 响应式 / 深色模式 | 属于 UI 验收，走 Before/After 截图，不进功能清单 |
 | 性能与并发（多任务同时命中、轮询风暴） | 属于压测，另开 |
 | 异常重试的边界组合（网络抖动 × 游标 × 翻页） | 单点已覆盖（V16），组合爆炸留给测试阶段 |
+| 飞书 `approval` / `minutes` / `vc` 三域的端到端 | 本机 user 身份认证不可用，只能用 bot 验；这三域要等 A12 定了身份方案后再补 |
+| 飞书开发者后台的实际订阅操作 | 人工前置操作，无法自动化；用 dry-run 预检覆盖「未订阅」这一分支（V36） |
 | 既有功能回归（飞书消息链路、工单看板、报表） | 本次改动不触碰那些链路，走现有回归 |
 | 迁移脚本的逐条映射（规则 → 任务） | 迁移有独立的 `--dry-run` 报告与人工清单，见 §3.1.2 |
 
@@ -2146,6 +2643,8 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 | V25~V26 | `tests/web/event-sources.test.ts` | 组件（事件源目录卡） |
 | V27~V28 | ★`tests/web/automation-panel.test.ts` | 组件（任务卡：停用 / 删除） |
 | V29~V31 | ★`tests/web/automation-conversation.test.ts` | 组件（假 SSE 流） |
+| V33~V35、V41 | ★`tests/events/feishu-projections.test.ts` | 单元（jq 投影 + 去重键，用 `event schema` 的 schema 造样本） |
+| V32、V36~V40 | ★`tests/events/feishu-watcher.test.ts` | 集成（长连接进程管理 / 就绪 / 重连 / 优雅退出 / 预检） |
 
 > 本清单是**验收口径**，不是测试代码 —— 实现阶段照着它写测试，或照着它手工跑一遍。
 
@@ -2170,6 +2669,10 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 | 来源装配 | `src/events/manager.ts:121` |
 | 来源轮询 | `src/events/manager.ts:273` |
 | GitHub 来源（游标 / 翻页 / 窗口） | `src/events/sources/github.ts:45` |
+| 飞书事件源（**现为占位**，阶段 7 填实） | `src/events/sources/feishu.ts:1` |
+| 飞书长连接消费实现（**可参考，但不可 import**，保 A8 独立） | `packages/channel-feishu/src/sources/feishu.ts:414` |
+| 飞书 stderr 分级（就绪 / 错误 / 忽略） | `packages/channel-feishu/src/sources/feishu.ts:434` |
+| 飞书事件前置条件预检 | `packages/channel-feishu/src/sources/lark.ts:107` |
 | 事件源端口（要拆的那个） | `packages/event/src/port.ts:48` |
 | 事件插件协议 | `packages/event/src/plugins/types.ts:37` |
 | 事件表 schema | `src/store/db.ts:459` |
@@ -2201,4 +2704,7 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 | 决策规则（EventRule） | 手工配置的判定脚本 | **删除** |
 | 事件判定（EventDecision） | 事件要不要处理、多急、归哪个项目 | **保留**，依据从规则换成订阅 |
 | 护栏（Guardrail） | 风险标签强制人审 | **取消**（决策 A6），机制整体删除 |
+| 事件目录 / 事件类型（EventType） | 「可订阅的事件类型」，如 `feishu.message`、`github.issues.opened` | **新增**；插件只声明这个，不含订阅语义 |
+| EventKey | 飞书官方的事件订阅键，如 `im.message.receive_v1` | **新增**；飞书侧 25 个，映射到 `feishu.*` 事件类型 id（§4.3.3） |
+| watcher 形态（poll / realtime） | 来源怎么把事件交给宿主：定时拉 vs 长连接推送 | **新增**；GitHub = poll，飞书 = realtime（§4.3.1） |
 | 处理方式（EventSkill） | 任务按什么套路执行 | **保留**，从判定产物变成任务属性 |

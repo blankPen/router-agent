@@ -50,7 +50,7 @@
         <h2>事件源目录</h2>
         <p>插件只声明可订阅的事件类型与连接参数；不持有订阅关系，也不做判定。</p>
       </div>
-      <div class="settings-badges"><span class="badge hot">3 个来源</span><span class="badge">11 种事件类型</span></div>
+      <div class="settings-badges"><span class="badge hot">3 个来源</span><span class="badge">29 种事件类型</span></div>
     </div>
 
     <div style="padding: 0 var(--card-pad-x) 20px;">
@@ -79,13 +79,19 @@
         <div class="source-card-top">
           <span class="source-logo"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 9h8M8 13h5"/></svg></span>
           <div class="source-card-title">
-            <strong>飞书消息</strong>
-            <span>1 种事件类型 · 需要 app 凭据</span>
+            <strong>飞书</strong>
+            <span>25 种事件类型 · 需要 app 凭据 · 长连接实时订阅</span>
           </div>
-          <span class="toggle"><span class="toggle-track"><span class="toggle-knob"></span></span></span>
+          <span class="toggle on"><span class="toggle-track"><span class="toggle-knob"></span></span></span>
         </div>
         <div class="catalog-list">
+          <div class="catalog-group">消息与互动</div>
           <div class="catalog-item"><span class="mono">feishu.message</span><span>群聊 / 私聊消息</span><span class="count">被 1 个任务订阅</span></div>
+          <div class="catalog-item"><span class="mono">feishu.message.reaction.created</span><span>表情回应</span><span class="count">尚未订阅</span></div>
+          <div class="catalog-group">群与成员</div>
+          <div class="catalog-item"><span class="mono">feishu.chat.member.user.added</span><span>有人进群</span><span class="tag warn">需后台订阅</span></div>
+          <div class="catalog-group">更多类型</div>
+          <div class="catalog-item"><span class="mono">审批 / 任务 / 会议 / 文档 / 白板 …</span><span>共 20 种</span><span class="count">查看全部</span></div>
         </div>
         <div class="source-card-actions" style="margin-top:12px;">
           <button class="btn tiny">连接参数</button>
