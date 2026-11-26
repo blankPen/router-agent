@@ -46,7 +46,10 @@
 - 不删除或迁移现有 `events.rules` 数据 —— **只出迁移方案，不执行**；
 - 不改数据库 schema —— 只出 schema 方案；
 - 不改运行时配置与发布流程；
-- 文档里**未确认的取舍列备选方案，不替用户拍板**（集中在 §7「待确认取舍清单」）。
+- 文档里**未确认的取舍列备选方案，不替用户拍板**（集中在 §7）。
+
+> **决策状态（2026-11-26）**：用户已在飞书文档评论中对 **A1、A3、A6、A8、A10、A11、B1** 七项拍板，本文档已按决策改写对应章节（决策汇总见 §7）。
+> **A7（游标）**已按用户要求补充 §4.2.1 的完整解释，**仍待拍板**；其余 A2、A4、A5、A9、B2、B3、B4 保留备选。
 
 ---
 
@@ -89,7 +92,7 @@ EventManager.runTick() → pipeline.tick()           src/events/pipeline.ts:141
 |-|-|-|
 | 规则存在与否**决定事件是否被判定**（`undecided` vs `pending`） | `src/events/pipeline.ts:106` | 删规则 = 事件永远不判定。要换成「订阅 = 判定依据」 |
 | `eventType` 精确匹配，一个类型只能一条规则 | `src/events/rules.ts:206` `src/web/client/event-rules-model.ts:48` | 规则不能删干净，得换成「订阅任务 → 事件」的匹配 |
-| 事件**不绑定项目**，项目由判定模型产出 | `packages/core/src/event.ts:67` | 新模型里「归属项目」要么在任务里写死，要么继续靠判定 |
+| 事件**不绑定项目**，项目由判定模型产出 | `packages/core/src/event.ts:67` | 新模型里「归属项目」是**任务属性**，由会话解析时从对话内容分析得出（决策 A1） |
 | 判定失败可重试，连续 5 次转人工 | `src/events/pipeline.ts:25` | 重试语义可复用 |
 | `rule_id` / `rule_version` 落库在 `events` 表 | `src/store/db.ts:459` | 删规则后这两列要么废弃、要么改指订阅任务 id |
 | 规则变更会重新激活 `undecided` 事件 | `src/store/db.ts:1013` `src/cli/index.ts:2030` | 订阅任务变更时的激活逻辑要重写 |
@@ -177,10 +180,10 @@ EventManager.runTick() → pipeline.tick()           src/events/pipeline.ts:141
 | `questions.is_valid.instructions` | → 订阅的 `filter.semantic`（自然语言过滤条件） |
 | `questions.autorun.criteria`（auto / review） | → 订阅的 `mode`：`auto`（直接执行）/ `review`（进事件列表等人批）/ `notify`（只记录+通知） |
 | `questions.priority.criteria` | → 任务的 `priority`（P0~P4，判定时由模型给或写死） |
-| `questions.project.criteria` | → 任务的 `project`（**从判定产物改为任务属性**，见 §7 待确认 A1） |
+| `questions.project.criteria` | → 任务的 `project`（**从判定产物改为任务属性**：由**会话解析时从对话内容分析得出**，见 §7 决策 A1） |
 | `questions.skill.criteria` | → 任务的 `skill`（沿用 `EVENT_SKILLS` 闭集） |
 | `workflowPrompt`（给 Worker 的执行流程） | → 任务的 `prompt`（本来就是自动化任务的字段） |
-| `guardrails.riskLabels` | → 提升为**宿主级全局护栏**（不再每条规则配一遍），见 §3.5 |
+| `guardrails.riskLabels` | → **丢弃**（用户 2026-11-26 决策 A6：风险标签无用，全局护栏整体取消） |
 | `thresholds.isValid` / `projectPick` | → 订阅的 `filter.threshold`（可省略，省略即由模型自评） |
 | `version` | → 任务版本（沿用 `automation.tasks` 的 `updatedAt`，不另起版本号） |
 
@@ -296,27 +299,46 @@ export interface EventPlugin {
 }
 ```
 
-#### 2.3.4 兼容策略
+#### 2.3.4 旧插件直接废弃（不做适配层）
 
-现存的第三方事件来源插件（npm 上的 `@router-agent/event-*`）实现的是旧 `EventSource`。**不破坏它们**：
+> ✅ **决策 B1（用户 2026-11-26）**：「直接废弃」。
+
+现存的第三方事件来源插件（npm 上的 `@router-agent/event-*`）实现的是旧 `EventSource` 接口。**不写适配层，直接废弃**：
 
 ```ts
-// 适配层：packages/event/src/legacy.ts（新）
-/**
- * 旧插件适配：把 EventSource 包成「目录 + fetcher」。
- *
- * 旧插件的 eventType 目录从它 poll 出来的第一条事件的类型推断 ——
- * 不准，但至少能跑；真正准的目录要靠插件升级到 catalog()。
- */
-export function adaptLegacySource(source: EventSource): { catalog: EventCatalog; fetcher: EventFetcher }
+// packages/event/src/port.ts
+/** @deprecated 旧接口已废弃，宿主不再加载实现此接口的插件。 */
+export interface EventSource { /* ... */ }
 ```
 
-> ⚠️ **待确认 B1**：旧插件的「可订阅事件目录」目前无从得知（`EventSource` 接口里没有这个信息）。适配层只能：
-> - (a) 从 `poll()` 首条事件的 `eventType` 推断 —— 不准，且要求先跑一次；
-> - (b) 要求插件升级到 `catalog()`，否则不加载 —— 破坏性但干净；
-> - (c) 允许插件在 `options` 里手写 `eventTypes` 字段声明 —— 需要改插件作者的心智模型。
->
-> 本方案默认选 (a) + 打印弃用告警，理由是**不破坏现有安装**。备选见 §7。
+**处置方式**：
+
+| 事项 | 处理 |
+|-|-|
+| 旧插件的加载 | **不再加载** —— `loadEventPlugins()` 只接受实现了 `catalog()` 的插件 |
+| 旧 `EventSource` 接口 | 保留 `@deprecated` 标记但**不导出适配器**，`adaptLegacySource` **不实现** |
+| 装到旧插件的用户 | 启动时打印明确的弃用告警：`插件 X 实现的是已废弃的 EventSource 接口，v0.4.0 起不再加载，请升级到提供 catalog() 的版本` |
+| `@router-agent/event` 包版本 | 发 **`0.4.0`（major 语义变更）**，并在 README 顶部写明「旧插件不再受支持」 |
+
+**为什么不写适配层**：旧接口里**没有**「可订阅事件类型目录」这个信息 —— 适配层只能从 `poll()` 出来的第一条事件反推，不准、还要先跑一次才能知道。**一个不准的目录比没有目录更危险**：用户在会话里说「订阅 X」，助手基于猜出来的类型建了任务，运行时才发现订阅不到。与其给一个半残的兼容层，不如明确断掉，让插件作者按新协议重写（`catalog()` + 可选 `fetch()` 的心智负担很小）。
+
+**插件作者的迁移代价**（要写进 `docs/MONOREPO.md` 与包 README）：
+
+```ts
+// 旧
+export const plugin: EventPlugin = {
+  create(ctx) { return new MySource(ctx) },
+}
+
+// 新
+export const plugin: EventPlugin = {
+  catalog(ctx) { return { id: 'my-source', kind: 'custom', name: '我的来源', types: () => [...], params: () => [...] } },
+  // 可选：自己实现拉取；不实现则由宿主按目录里的参数拉
+  fetch(ctx) { return new MyFetcher(ctx) },
+}
+```
+
+大部分插件的改动只是把「有哪些事件类型」从 `poll()` 的分支里**提出来声明** —— 原本就写在 `poll()` 的 switch 里，挪到 `types()` 是机械操作。
 
 ### 2.4 自然语言 → 自动化任务
 
@@ -386,7 +408,9 @@ execution:
    ↓
 ② 抽参数（一次模型调用）
    输入：用户原话 + 可订阅事件目录（所有 catalog 的 types 汇总）
+        + 可用项目列表（当前配置里的 projects，供模型选）
    输出：JSON { source, types[], params, filter{keywords,semantic}, mode, schedule, project, skill, prompt }
+        ↑ project 由模型从对话内容里分析出来（决策 A1），取值必须落在项目闭集内
    ↓
 ③ 补齐缺口（回问）
    缺口判定（缺什么就不建）：
@@ -395,7 +419,8 @@ execution:
    - params 缺必填项      → 问（如「哪个仓库？」）
    - mode 拿不准          → 问「命中后直接做，还是先给你看一眼？」
    - 既没有 schedule 也没有 source → 问「什么时候触发？」
-   - project 拿不准       → 问「在哪个项目里做？」
+   - project 拿不准       → 问「在哪个项目里做？」（决策 A1：project 由会话分析得出；
+                             分析不出来就问，不要留空、更不要交给判定模型事后猜）
    ↓
 ④ 预览确认
    卡片列出：订阅什么 / 怎么过滤 / 触发后做什么 / 在哪跑 / 多久跑
@@ -490,7 +515,8 @@ export async function parseAutomationIntent(
    │    ├─ 无效 / 不相关        → status='invalid'
    │    ├─ mode=review 或 判定「待审核」→ status='review'（进事件列表 + 通知用户）
    │    └─ mode=auto            → status='pending'，直接进 ④
-   └─ 归属项目 / skill：优先取任务属性，缺省由模型给（闭集）
+   └─ 归属项目：**直接取任务属性**（决策 A1 —— 会话解析时已分析出来，这里不再判定）
+      skill：取任务属性，缺省由模型给（闭集）
        ↓
 ④ dispatch()（复用现有逻辑）
    合成 Trigger → engine.decide() → Ticket
@@ -695,7 +721,7 @@ await decisionEngine.assess({
 | `src/events/rule-compile.ts` | **删** | 只服务于「规则草稿编译」，被会话流程的解析器取代 |
 | `src/web/client/event-rules.tsx` | **删** | 规则卡片与编辑弹窗 |
 | `src/web/client/event-rules-model.ts` | **删** | 规则表单纯函数 |
-| `src/events/decision.ts` | **改** | `ruleDecisionPort` → `guardrailDecisionPort`；`EventDecisionInput.rule` → `subscription` |
+| `src/events/decision.ts` | **改** | **删 `ruleDecisionPort` 与风险标签分支**（决策 A6）；`EventDecisionInput.rule` → `subscription` |
 | `src/events/decision-model.ts` | **改** | 判定提示词从「规则的四问」改成「订阅的过滤条件」 |
 | `src/events/pipeline.ts` | **改** | 匹配规则 → 匹配订阅 |
 | `src/events/manager.ts` | **改** | `ruleEventTypes()` → 订阅集合 |
@@ -766,16 +792,16 @@ automation:
 | `questions.autorun.criteria.auto` | `trigger.mode = 'auto'` | criteria 有 `auto` 键 → auto |
 | `questions.autorun.criteria.review` | `trigger.mode = 'review'` | 只有 `review` → review |
 | `questions.priority.criteria` | `execution.priority` | 4 档 → P3→P0 映射；非 4 档取中位 |
-| `questions.project.criteria` | `execution.project` | criteria 里除 `unknown` 外的键名当项目名；多个 → 留空并转人工 |
+| `questions.project.criteria` | 任务的 `project` | criteria 里除 `unknown` 外的键名当项目名；多个 → 进人工清单（决策 A1：项目是任务属性，不能留空） |
 | `questions.skill.criteria` | `execution.skill` | 键名直接用（都在 `EVENT_SKILLS` 里） |
-| `guardrails.riskLabels` | **丢弃**（提到全局，见 §3.5） | 每条规则的标签集合并成全局并集 |
+| `guardrails.riskLabels` | **丢弃** | 全局护栏整体取消（决策 A6），不再需要并集 |
 | `thresholds.isValid` | `trigger.filter.threshold` | 省略即用全局默认 |
 | `version` | 丢弃 | 任务的 `updatedAt` 足够 |
 
 **无法自动迁移的情况（必须人工处理）：**
 
 1. `eventType` 不带来源前缀或前缀未知 → 无法确定 source。→ **进「待人工处理」清单**，不自动建任务；
-2. `questions.project.criteria` 里有多个项目名 → 无法确定归属。→ 建任务但 `execution.project` 留空，事件命中后转人工；
+2. `questions.project.criteria` 里有多个项目名 → 无法确定归属。→ **进「待人工处理」清单**，不自动建任务（决策 A1：项目是任务属性，留空等于建了个无效任务）；
 3. `guardrails.skills` 引用了未知 skill → 丢弃该值，退回全局 `EVENT_SKILLS`；
 4. `eventType` 是 `*`（兜底规则）→ **无法表达**（新模型没有兜底规则概念）。→ 进人工清单。
 
@@ -797,14 +823,29 @@ rule_version INTEGER -- 命中的规则版本
 
 | 列 | 处理 | 说明 |
 |-|-|-|
-| `rule_id` | **改名** → `subscription_id` | 存订阅（= 任务 id），保留列名做一次性 rename，SQLite 用 `ALTER TABLE ... RENAME COLUMN` |
-| `rule_version` | **保留但不再写** | 历史事件已有值，保留供审计；新事件留空 |
+| `rule_id` | **改名** → `subscription_id` | 存订阅（= 任务 id），SQLite 用 `ALTER TABLE events RENAME COLUMN rule_id TO subscription_id` |
+| `rule_version` | **删除** | 历史事件已清空（决策 A11），没有需要保留的旧值 |
 | 新增 `subscription_id` | 见上 | |
 | 新增 `trigger_kind` | 可选 | `event` / `notify`，用于区分「只通知」的任务 |
 
-**为什么改名而不只是复用**：不改名的话，日志里 `ruleId` 与「订阅」概念对不上，排查时永远要翻译一次。改名是 `ALTER TABLE events RENAME COLUMN rule_id TO subscription_id`，配合 `migrate()` 里已有的补列逻辑（`src/store/db.ts:563`）做一次性迁移。
+**为什么改名而不只是复用**：不改名的话，日志里 `ruleId` 与「订阅」概念对不上，排查时永远要翻译一次。改名配合 `migrate()` 里已有的补列逻辑（`src/store/db.ts:563`）做一次性迁移。
 
-**历史事件的处理**：已判定的事件**不回溯重判**（沿用现状「判定只跑一次」原则）。`subscription_id` 为空的历史事件在面板上显示为「历史事件（无订阅）」，仍可查看与关闭，但不再参与新的订阅命中统计。
+**历史事件：直接清空**（决策 A11，用户 2026-11-26）。
+
+> ✅ **决策 A11**：「直接清空所有历史事件」。
+
+| 事项 | 处理 |
+|-|-|
+| `events` 表里的历史行 | **全部删除** —— 不做 `subscription_id` 回填、不保留「历史事件（无订阅）」这一档 |
+| `rule_version` 列 | **一并删掉**（没有历史值需要保留） |
+| 清空时机 | **迁移脚本里一次性清**，在表结构改完之后执行；清空前先备份 `state.db`（`VACUUM INTO`） |
+| 为什么可以清 | 历史事件的 `rule_id` 指向的是**即将被删除的决策规则**；新模型里它们既不参与订阅命中统计，也没法回链到任何任务。留着只是让收件箱混着一批永远不会再动的僵尸记录 |
+| 清空的副作用 | 收件箱里的历史统计归零；「订阅命中」聚合从迁移后重新计数（这本来就是新模型的语义） |
+| 可回滚性 | 清空前备份 `state.db`，需要时整库恢复 |
+
+**面板上的表现**：迁移执行完，收件箱是空的（只有迁移后新产生的事件）。**不做「历史事件」标签、不做归档区** —— 保持「当前模型下发生的事」这一条干净的语义。
+
+**幂等键随之简化**：既然历史事件全清，`events` 表重建时不需要「历史行怎么填 `subscription_id`」的分支 —— 唯一索引直接建成 `UNIQUE (subscription_id, external_id)`，拷贝步骤变成 `INSERT INTO events_new SELECT ... WHERE 0`（不拷任何行）。
 
 #### 3.1.4 迁移的执行方式
 
@@ -885,7 +926,6 @@ export interface Automation {
   skill?: string
   /** 事件类任务的优先级；定时任务可留空。新增。 */
   priority?: EventPriority
-  schedule: AutomationSchedule   // 保留字段：schedule 触发时是它；event 触发时留空
   runtimeId: string
   project: string
   repo: string
@@ -897,19 +937,26 @@ export interface Automation {
 }
 ```
 
-**兼容性**：`schedule` 字段保留在原位（不删），避免破坏现有 `automation.tasks` 配置与 `nextRunAt` 逻辑。判定规则：
+**顶层 `schedule` 字段彻底删除**（用户 2026-11-26 决策 A3）。**只有 `trigger` 一个真相**：定时看 `trigger.schedule`，事件看 `trigger.subscription`。
 
 ```ts
 function triggerOf(task: Automation): AutomationTrigger {
-  // 旧任务没有 trigger 字段 → 按 schedule 推导（向后兼容）
-  return task.trigger ?? { kind: 'schedule', schedule: task.schedule }
+  // 旧任务没有 trigger 字段 → 从顶层 schedule 推导一次并回写（迁移期兼容，之后不再有顶层字段）
+  return task.trigger ?? { kind: 'schedule', schedule: (task as LegacyAutomation).schedule }
 }
 ```
 
-**`schedule` 与 `trigger.schedule` 的重复**：新任务两处都写（`trigger.schedule` 是权威，`schedule` 是兼容镜像）。写入时统一由 `triggerOf` / `toLegacyShape` 双向同步，避免两份数据打架。
+**改动点**（读顶层 `task.schedule` 的地方全部改读 `trigger.schedule`）：
 
-> ⚠️ **待确认 A3**：要不要干脆删掉顶层 `schedule`，全部走 `trigger.schedule`？代价是所有读 `task.schedule` 的地方（`src/automation/scheduler.ts:96`、`src/web/client/automation-model.ts:130`、`packages/core/src/automation-schedule.ts`）都要改；好处是没有两份真相。
-> 本方案默认**保留顶层 `schedule` 作为兼容镜像**（改动小、可回滚）。
+| 位置 | 现状 | 改后 |
+|-|-|-|
+| `src/automation/scheduler.ts:96` | `task.schedule` | `triggerOf(task).schedule`（并只处理 `kind === 'schedule'` 的任务） |
+| `src/web/client/automation-model.ts:130` | 面板表单读写 `schedule` | 表单改读写 `trigger.schedule`，事件类任务该字段不可编辑 |
+| `packages/core/src/automation-schedule.ts` | 定时计算入口 | 入口签名从 `Automation` 改成 `AutomationSchedule`，由调用方从 trigger 取 |
+| `src/config.ts` 校验 | 校验 `task.schedule` | 校验 `task.trigger`（按 `kind` 分支校验 `schedule` 或 `subscription`） |
+| 配置迁移 | 旧 `schedule` 字段 | 迁移脚本把顶层 `schedule` 抬进 `trigger.schedule`，然后删掉顶层字段 |
+
+**为什么彻底删而不是留兼容镜像**：两份真相必然打架 —— 用户改面板的定时时间只改了镜像、`trigger` 里的旧值还在，或反过来。定时任务本来就有 `schedule` 这一个语义，多一层镜像没有收益。迁移是一次性的（有 `ra migrate` 命令兜底），不保留反而更干净。
 
 ### 3.3 订阅在配置里的落点
 
@@ -993,23 +1040,41 @@ export type EventExecution = 'none' | 'deferred' | 'retry' | 'failed' | 'notifie
 > - (a) **不保留**（推荐）：省存储、省判定成本，语义最干净 —— 「没订阅 = 没这回事」；
 > - (b) 保留一个「只记录不判定」模式（`mode: 'record'`）：事件入库但永不判定，用于「我想知道发生过什么但不要处理」。代价是多一个 mode 与状态语义。
 
-### 3.5 护栏的提升
+### 3.5 护栏取消（不再有全局护栏）
 
-规则的 `guardrails.riskLabels`（`security` / `prod` / `production` / `incident` / `payment` / `release`）现在是**每条规则各配一遍**。删规则后，提升为**宿主级全局护栏**：
+> ✅ **决策 A6（用户 2026-11-26）**：「不需要全局护栏，这风险标签没啥用」。**风险标签机制整体取消** —— 既不提升为全局，也不按任务覆盖。
 
-```yaml
-events:
-  policy:
-    riskLabels: [security, prod, production, incident, payment, release]
+**要删掉的东西**：
+
+| 位置 | 处理 |
+|-|-|
+| `events.policy.riskLabels`（`src/config.ts`） | **删字段**，配置里不再有这一项 |
+| `ruleDecisionPort`（`src/events/decision.ts:253`） | **整个端口删掉**（含 `labelsOf(event)` 读 GitHub labels 的逻辑） |
+| `mergeOutput` 里的「强制 P0 + 强制人审」分支 | **删掉** —— 模型给什么优先级就是什么 |
+| 规则迁移时的 `guardrails.riskLabels` | **丢弃**（§3.1.2） |
+
+**保留的东西**：事件的风险信息仍会出现在**上下文背景**里（§6.5），只是不再作为「强制拦截」的依据 —— 用户想看得到，但它不替用户做决定。
+
+**对判定链的影响**：§6.1 的判定链从
+
+```text
+关键词过滤 → 语义判定 → 护栏检查 → 分流
 ```
 
-护栏语义不变（`src/events/decision.ts:253` 的 `ruleDecisionPort`）：命中风险标签 → 强制 P0 + 强制人审，模型不能覆盖（`mergeOutput` 里 `needsReview` 与 `P0` 都不被模型降级）。
+变成
 
-**护栏判定从「规则层」移到「订阅判定层」**：现在 `labelsOf(event)` 读事件的 GitHub labels，判定在 `ruleDecisionPort` 里。新模型里这段逻辑搬进 `guardrailDecisionPort`，输入不变。
+```text
+关键词过滤 → 语义判定 → 分流
+```
 
-> ⚠️ **待确认 A6**：全局护栏是否要能按任务覆盖（某条任务想自动处理 `payment` 类事件）？
-> - (a) **不能覆盖**（推荐）：护栏是安全底线，与需求「立即去做」的诉求冲突时，人先看一眼；
-> - (b) 可覆盖，但覆盖需要显式声明 + 记录审计日志。
+少一个环节，也少一个「为什么这条卡住了」的排查点。
+
+**留下的空缺与补法**：护栏取消后，`mode: auto`（自动执行）的任务在遇到「看起来该谨慎」的事件时就没有自动刹车了。补法有两条，都不引入新机制：
+
+1. **靠 `mode` 表达谨慎** —— 需要人看一眼的任务建成 `mode: review`，会话里说「先给我看看」就解析成 review，不靠标签；
+2. **靠会话时多问一句** —— 解析阶段若识别到高风险语义（如「删除」「退款」「上线」），在预览卡片里提示一句「这条涉及 XX，建议先设成待人审」，**给建议不给拦截**。
+
+> 这两条是护栏取消后的补偿手段，**不是新机制**：`mode` 本来就有，提示也只是会话里的一句话。
 
 ---
 
@@ -1040,12 +1105,81 @@ const watcher = githubWatcher({ runner, logger, clock, cursor })
 await watcher.poll({ source: 'github', types: [...], params: { repo } })
 ```
 
-**游标键的变化**：现在按 `repo` 建键（`cursorKey(repo)`），重构后要按 **`(subscriptionId, repo)`** 建键 —— 同一个仓库被两条任务订阅时，两条订阅各自有独立水位。
+#### 4.2.1 什么是「游标」，为什么要按订阅建
 
-> ⚠️ **待确认 A7**：同一仓库被多任务订阅时，游标怎么建？
-> - (a) **按订阅独立游标**（推荐）：语义最干净，但同一个仓库会被拉多次（GitHub API 调用翻倍）；
-> - (b) **按 (source, params) 共享游标 + 扇出**：省 API 调用，但「一条事件被两条订阅命中」需要额外去重逻辑（同一 `externalId` 在不同 subscription 下是两条事件，还是一条事件两个 subscription？）。
-> - 影响面：游标键变了会影响 `event:github-baseline` / `event:github-window-skipped` 日志的 `cursorKey` 字段与告警排查习惯。
+> ❓ **A7 待决策**（用户 2026-11-26：「没看懂什么意思，什么是游标，为什么要建立游标，有什么影响，讲清楚一点」）。本节把这件事从头讲清楚，讲完再选。
+
+**游标（cursor）是什么**
+
+GitHub 没有「把某个仓库的事件流从头给我」的接口 —— 只能**一页页往前翻**。每次轮询都会把仓库的最近 N 条 Issue / PR 拉回来，但这些数据里绝大部分是**上次已经看过的**。
+
+游标就是一个**记住「上次看到哪儿了」的记号**：
+
+```text
+没有游标：每 5 分钟拉 100 条 → 100 条全是旧的 → 每次都当新事件处理
+有游标：  记住「上次处理到 id=12345」→ 下次只处理 id > 12345 的 → 每次只有真正新增的
+```
+
+代码里的实现（`src/events/sources/github.ts:238`）：游标值就是**已处理过的最大事件 id**（GitHub 的事件 id 单调递增，所以「比上次大」=「新的」）。
+
+**现状的游标键是什么**
+
+```ts
+// src/events/sources/github.ts:208
+private cursorKey(repo: string): string {
+  return `github:${this.id}:${repo}:${CURSOR_VERSION}`
+}
+```
+
+键里有 `this.id`（来源实例 id）和 `repo`。**现在一个仓库 = 一个来源实例 = 一个游标**，因为现状是「在来源里勾选要订阅哪些事件」—— 勾选这个动作发生在来源实例上。
+
+**重构后为什么会变**
+
+新模型里「订阅」不再是来源的属性，而是**任务的属性**。同一个仓库完全可能被两个任务订阅：
+
+```yaml
+# 任务 A
+trigger: { kind: event, source: github, types: [github.issues.opened], params: { repo: blankPen/router-agent } }
+# 任务 B
+trigger: { kind: event, source: github, types: [github.pull_request.merged], params: { repo: blankPen/router-agent } }
+```
+
+两个任务订阅了**同一个仓库**，只是关心的事件类型不同。这时游标键有两个选择：
+
+| | (a) 按订阅独立游标 | (b) 按 (source, params) 共享游标 + 扇出 |
+|-|-|-|
+| 键长什么样 | `github:sub_taskA:blankPen/router-agent:v2` | `github:blankPen/router-agent:v2` |
+| 拉几次 GitHub | **2 次**（每个订阅一次） | **1 次** |
+| 一条 issue 被 A、B 都匹配 | 各查各的游标 → 两边都能看到 | 只拉一次 → 得把结果**扇出**给两个订阅 |
+| 实现复杂度 | 低 —— 每个订阅独立走一遍现有逻辑 | 高 —— 要在「拉到的原始事件」与「各订阅的过滤条件」之间加一层分发 |
+| 漏事件的坑 | 无 | **有**：A 把游标推到了 200，B 只关心 id<100 的事件时会被跳过 |
+
+**关键：为什么不能简单共用游标**
+
+源码里已经写了这个坑（`src/events/sources/github.ts:199`）：
+
+> 两个订阅同一个仓库时不能共用游标 —— 否则一个订阅拉到的位置会把另一个订阅的新事件挡掉。
+
+举个会出事的例子：任务 A 订阅「所有 Issue」，任务 B 订阅「标题带 refund 的 Issue」。共用游标时，A 每次轮询都会把游标推到最新；B 的轮询如果晚一步，看到的「新增」区间就被 A 吃掉了 —— **B 会静默漏掉 refund 相关的 Issue**。这不是概率问题，是必然。
+
+**代价对比**
+
+| 维度 | (a) 独立游标 | (b) 共享+扇出 |
+|-|-|-|
+| GitHub API 调用 | N 个任务订阅同一个仓库 → N 倍 | 1 倍 |
+| 代码复杂度 | 低（复用现有 watcher 逻辑，每个订阅一次 poll） | 高（多一层分发 + 去重 + 「一条事件两个订阅」的语义要定） |
+| 漏事件风险 | 无 | 有（必须处理扇出时的水位边界） |
+| 适用场景 | 订阅数少（正常情况 1~3 个） | 同一仓库被大量任务订阅 |
+
+**本方案的建议仍是 (a)**，理由：绝大多数仓库只被 1 个任务订阅，API 调用翻倍只在「刻意让多个任务看同一个仓库」时才发生；而 (b) 的扇出逻辑是**新增的复杂度和新增的漏事件风险**，收益只在小众场景。
+
+**如果选 (a)，要接受的两个后果**：
+
+1. **GitHub API 调用变多** —— 同一仓库被 N 个任务订阅就拉 N 次。缓解：watcher 可以**一轮里拉一次、然后按订阅分别过滤**（拉取共享，过滤独立）—— 这是 (b) 的一个轻量变体，能省掉 API 调用但保留「各订阅独立游标」的语义。
+2. **日志的 `cursorKey` 字段变了** —— `event:github-baseline` / `event:github-window-skipped` 里的 `cursorKey` 会从 `github:<sourceId>:<repo>:v2` 变成带订阅 id 的形式。排查习惯要跟着调整（键里多一段，能看出是哪个订阅的）。
+
+> **需要你拍板**：选 (a) 独立游标（简单、不会漏，代价是重复拉取），还是 (b) 共享游标 + 扇出（省 API，代价是复杂度与漏事件风险）？或者要不要 (c)「拉取共享 + 过滤独立」的折中（API 只拉一次，但每个订阅维护自己的水位）？
+
 
 **GitHub 目录的声明：**
 
@@ -1068,30 +1202,47 @@ export const githubCatalog: EventCatalog = {
 
 **注意**：现在面板上的事件类型 id **不带前缀**（`issues.opened`），事件入库时**带前缀**（`github.issues.opened`）。重构后目录里统一用**带前缀的完整 id**（因为一个面板可能同时有 GitHub 与自建来源，同名类型要能区分）。迁移时配置里的旧 id 要加前缀。
 
-### 4.3 飞书的现状与未来
+### 4.3 飞书：事件链路自己接（与 Channel 完全独立）
 
-飞书消息**已经由 channel 链路处理**（`packages/channel-feishu` 的长连接消费），事件链路不重复接管（`src/events/sources/feishu.ts:1` 的注释明说了）。
+> ✅ **决策 A8（用户 2026-11-26）**：「飞书消息订阅 和 Channel 完全不相关。不要耦合完全独立」。
 
-用户的需求里「订阅飞书消息」是个**重要信号**：他期望飞书消息能进自动化任务体系。两条路：
+**结论**：飞书消息订阅是**事件链路自己的事**，由事件侧独立消费飞书消息，**不碰 `packages/channel`、不碰 `packages/channel-feishu`、不加任何 channel 出口**。
 
-| | (a) 事件链路实现飞书来源 | (b) channel 链路加「入事件队列」出口 |
+**两条链路各管各的**：
+
+| | Channel 链路（消息） | 事件链路（订阅） |
 |-|-|-|
-| 改动范围 | 新写飞书事件 watcher（要处理长连接、去重、回写） | 在 channel ingress 后加一个分流口 |
-| 与现有消息链路的关系 | 两套飞书消费（`lark-cli event consume` 会冲突！） | 一套 |
-| 语义 | 消息 = 事件 | 消息 = 消息，但可被订阅 |
-| 风险 | 高：现有 `FeishuConsumer` 与新 watcher 会抢同一个事件流 | 中：要在 ingress 层判断「这条消息是否被订阅」 |
+| 消费的东西 | 群里 @机器人、私聊 —— **有人在跟机器人说话** | 群里/私聊的**全部消息内容** —— 有人在跟别人说话 |
+| 目的是 | 触发一次对话与派工 | 作为**被订阅的事件源**，供自动化任务消费 |
+| 落地代码 | `packages/channel-feishu` | `src/events/sources/feishu.ts` + 事件侧独立 watcher |
+| 谁的凭据 | channel 的 app 凭据 | 事件源自己的连接参数（`trigger.params`） |
 
-> ⚠️ **待确认 A8（重要）**：飞书消息订阅走 (a) 还是 (b)？
-> - 本方案**建议 (b)**：飞书消息已经在 channel 链路里进来了，事件链路再消费一次会双开长连接。做法是给 channel ingress 加一个「事件订阅出口」—— 当消息命中某条 `mode=event` 的自动化订阅时，除正常消息处理外，再往事件队列写一条事件。
-> - (b) 的代价：channel 侧要能读「订阅清单」，即 `packages/channel` 要能拿到订阅信息 → 违反「runtime 与 channel 互不依赖」？不违反 —— 订阅信息由**宿主注入**（`ChannelIngress` 的 opts 传入），channel 包本身不依赖 event 包。
-> - (a) 的代价更大但语义更纯。若用户坚持「飞书消息是一种事件源」，需要先把现有 `FeishuConsumer` 改造成「同时喂给消息链路与事件链路」的单消费者。
+**关键：订阅的语义本就和 channel 不同**。用户想让「有人答应了立即去做」被捕捉到 —— 这条消息是**说给同事听的**，根本不会 @机器人，channel 链路根本看不到它。所以事件侧需要自己接飞书消息流，这是需求本身的要求，不是架构上的重复。
+
+**实现要点**：
+
+1. **事件侧独立消费**：在 `src/events/sources/feishu.ts` 里实现一个独立的飞书 watcher，用 `lark-cli event consume`（或飞书长连接）拉取消息；凭据来自 `trigger.params`（`appId` / `appSecret`），与 channel 的凭据分开配置。
+2. **不与 channel 抢事件流**：两者用**不同的订阅类型**消费 —— channel 消费的是「@机器人 / 私聊给机器人」的消息类型，事件源消费的是「群聊里所有消息」。飞书侧按 `event_type` 区分后各自订阅即可。
+3. **不需要去重**：同一句话在两条链路里各出现一次是正常的 —— channel 把它当「对话」，事件链路把它当「一条待判断的事件」，语义不同，不冲突。
+4. **回写独立**：事件链路有自己的回写出口（发卡片 / 发消息到群），不复用 channel 的 `ReplyAction`。
+
+**对现有代码的影响**：
+
+| 位置 | 处理 |
+|-|-|
+| `src/events/sources/feishu.ts`（现为占位） | **填实**：实现独立的飞书 watcher + `feishu.message` 目录类型 |
+| `packages/channel` / `packages/channel-feishu` | **不动**（决策 A8 明确不耦合） |
+| `src/events/catalogs/feishu.ts` | 新增：`feishu.message` 事件类型 + `appId`/`appSecret` 连接参数声明 |
+| `packages/event` | 不依赖 channel；飞书 watcher 属于宿主侧实现，不进 SDK |
+
+**代价与应对**：多一套飞书连接（多一个长连接、凭据要单独配），以及飞书侧的配额消耗翻倍。应对办法是事件侧 watcher 独立配置轮询/长连接参数，且**只订阅有任务的来源**（没有 `feishu.message` 订阅时根本不启动）。
 
 ### 4.4 插件 SDK 的版本策略
 
 `packages/event` 是独立发布的 npm 包（当前 `0.3.40`）。端口不兼容变更需要：
 
 1. **发布 `@router-agent/event@0.4.0`**（minor，语义变更）；
-2. 旧的 `EventSource` 接口保留为 deprecated，一并导出 `adaptLegacySource` 适配器；
+2. 旧的 `EventSource` 接口保留为 deprecated 但**不再导出适配器**（决策 B1：旧插件直接废弃）；
 3. 宿主同时支持新旧两种插件（`catalog()` 优先，缺失则走适配器）。
 
 ### 4.5 插件作者的迁移指引（要写进 `docs/MONOREPO.md` 与 README）
@@ -1262,20 +1413,33 @@ export default {
 
 **任务卡片加「修改」按钮** → 打开同一个会话面板，带上 `conversationId`。
 
-**技术实现**：Web 面板是 React SPA（`src/web/client/app.tsx`）。会话面板需要一个**流式**的对话 UI —— 现有面板的 API 都是同步请求。需要新增：
+**技术实现**：Web 面板是 React SPA（`src/web/client/app.tsx`）。会话面板需要**流式**的对话 UI —— 现有面板的 API 都是同步请求。
+
+> ✅ **决策 A10（用户 2026-11-26）**：**用 SSE**。会话助手逐字吐字、参数一点点补齐，体验上比「等几秒再蹦出一整段」好得多 —— 尤其这个流程的核心是「一问一答」，用户要看到助手的思考过程才知道它在问什么。
+
+需要新增的端点：
 
 ```text
 POST /api/automations/conversations              → 建会话，返回 conversationId
-POST /api/automations/conversations/:id/messages → 发消息（同步返回本轮结果）
-GET  /api/automations/conversations/:id           → 拉会话历史（轮询）
+POST /api/automations/conversations/:id/messages → 发消息（响应为 SSE 流）
+GET  /api/automations/conversations/:id/events   → SSE：订阅本会话的消息流（EventSource）
 POST /api/automations/conversations/:id/confirm   → 确认创建
 ```
 
-同步返回 + 轮询历史是最小改动方案（现有面板其它地方也是轮询）。流式（SSE）体验更好但改动大。
+**SSE 的落地要点**：
 
-> ⚠️ **待确认 A10**：面板会话 UI 要不要做流式（SSE）？
-> - (a) **同步返回 + 轮询历史**（推荐）：与现有面板技术栈一致，改动小；
-> - (b) SSE 流式：体验好，但要改 Web 客户端的请求层（`src/web/client/api.ts` 目前只有 `getJson` / `sendJson` / `saveConfigPatch`）。
+| 事项 | 做法 |
+|-|-|
+| 客户端请求层 | `src/web/client/api.ts` 目前只有 `getJson` / `sendJson` / `saveConfigPatch`；**新增 `openEventStream()`**（基于 `fetch` + `ReadableStream`，不用 `EventSource` —— `EventSource` 只支持 GET 且不能带 header） |
+| 服务端 | `src/router/api.ts` 加一个 SSE 路由；响应头 `Content-Type: text/event-stream`、`Cache-Control: no-cache`、`Connection: keep-alive`；**心跳**每 15s 发一条 `: ping` 注释，防中间设备断连 |
+| 事件类型 | `message`（增量文本）、`step`（助手在做什么：抽参数 / 缺项 / 出预览卡）、`preview`（预览卡数据）、`done`（本轮结束）、`error` |
+| 断线重连 | 客户端 `EventSource` 语义要自己补：重连后用 `GET .../messages?after=<lastSeq>` 补齐漏掉的增量（每条消息带单调递增的 `seq`） |
+| 结束条件 | 助手本轮说完发 `done`；客户端关闭流。会话本身长期存在（可恢复），但**单轮流是短的** |
+| 鉴权 | 复用现有面板的 access token 机制；SSE 连接建立时校验一次即可 |
+
+**影响面**：`src/web/client/api.ts` 加一个方法、`src/web/client/automation-conversation.tsx` 用 `EventSource` 风格的订阅、`src/router/api.ts` 加一路由。**不改**其它面板的请求层 —— SSE 只在这个新会话面板里用。
+
+**测试**：`tests/web/automation-conversation.test.ts` 用假的服务端 SSE 流（`ReadableStream` 喂片段）测增量拼接、断开重连补齐、`done` 后收流。
 
 ---
 
@@ -1299,8 +1463,7 @@ t6  pipeline.ingest(subscriptionId, subscription, envelope)
 t7  pipeline.process(event)
      关键词过滤（确定性）→ 不命中 → event:filtered-out { eventId, reason }
      语义判定（模型）→ event:filter-evaluated { eventId, matched, confidence }
-     护栏检查 → 命中风险标签 → 强制 P0 + 强制人审
-     日志：event:guardrail-matched { eventId, label }
+     （护栏环节已取消 —— 决策 A6）
 t8  分流
      ├─ mode=notify  → execution='notified'，通知用户，结束
      ├─ 判定需人审   → status='review'，通知用户，等批准
@@ -1339,20 +1502,17 @@ t12 Worker 执行 → 上报 → 结论回写（按 subscription 决定是否评
 **迁移**：`UNIQUE (source_id, external_id)` → `UNIQUE (subscription_id, external_id)`。SQLite 改唯一索引要重建表：
 
 ```sql
--- 迁移脚本要点
--- 1. 建新表
+-- 迁移脚本要点（决策 A11：历史事件直接清空，不回填）
+-- 0. 先备份：VACUUM INTO 'state.db.bak.<ts>'
+-- 1. 建新表（无 rule_version 列）
 CREATE TABLE events_new ( ... subscription_id TEXT NOT NULL DEFAULT '', UNIQUE (subscription_id, external_id) ... );
--- 2. 拷贝：历史事件 subscription_id 填迁移后的任务 id（或空串）
-INSERT INTO events_new SELECT ..., '', ... FROM events;
+-- 2. 不拷贝任何历史行（决策 A11：历史事件清空）
 -- 3. 换表
 DROP TABLE events; ALTER TABLE events_new RENAME TO events;
 ```
 
-> ⚠️ **待确认 A11**：历史事件的 `subscription_id` 填什么？
-> - (a) `''`（空串）+ 一个特殊常量表示「历史事件，无订阅」；
-> - (b) 从 `rule_id` 反查迁移后的任务 id —— 能回链，但需要迁移顺序严格（先迁任务再迁事件）；
-> - (c) 按 `rule_id` 的规则 id 拼出任务 id（`auto_<ruleId>`），即使任务已被人工改过也能对上大部分。
-> 本方案默认 (c)：规则 id 与迁移后的任务 id 有确定的映射关系，能回链最好。
+> ✅ **决策 A11（用户 2026-11-26）**：「直接清空所有历史事件」。
+> 历史行**不回填、不保留** —— `events` 表重建后是空的，详见 §3.1.3。
 
 ### 6.3 事件列表（收件箱）的展示变化
 
@@ -1416,27 +1576,39 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 
 ---
 
-## 7. 待确认取舍清单
+## 7. 取舍清单与决策结论
 
-以下每一项都影响实现，**都需要用户拍板**。本方案给了默认值，但默认值不代替决策。
+用户已于 2026-11-26 在飞书文档评论中对其中 8 项拍板（表内标 ✅）。**已决策项按决策执行，不再在本方案里留备选**；未决策项保留备选，等后续拍板。
 
-| # | 议题 | 选项 | 本方案默认 | 影响面 |
+| # | 议题 | 选项 | 结论 | 影响面 |
 |-|-|-|-|-|
-| A1 | 事件类任务的「归属项目」从判定产物改成任务属性？ | (a) 任务属性（写死）(b) 继续判定 (c) 任务给了就用、没给就判定 | (a) | `EventDecisionService`、闭集校验、`EventVerdict` |
-| A2 | `eventType: '*'` 的兜底规则怎么迁？ | (a) 丢弃 (b) 展开 (c) 通配订阅 | (a) | 迁移脚本 |
-| A3 | 删不删顶层 `schedule` 字段？ | (a) 保留兼容镜像 (b) 彻底删 | (a) | `automation-schedule.ts`、scheduler、面板 |
-| A4 | `events.sources` 这层留不留？ | (a) 瘦身保留 (b) 彻底删 (c) 原样保留 | (a) | `config.ts`、面板来源卡、迁移 |
-| A5 | 要不要保留「全部事件入库」的观测能力？ | (a) 不保留 (b) 加 `mode: record` | (a) | `EventStatus`、watcher |
-| A6 | 全局护栏（风险标签）能不能按任务覆盖？ | (a) 不能 (b) 可覆盖但记审计 | (a) | `guardrailDecisionPort` |
-| A7 | 同一仓库被多任务订阅时游标怎么建？ | (a) 按订阅独立 (b) 按 (source,params) 共享+扇出 | (a) | GitHub watcher、日志字段 |
-| A8 | 飞书消息订阅走事件链路还是 channel 出口？ | (a) 新写飞书 watcher (b) channel 加事件出口 | (b) | `packages/channel`、channel-feishu、双消费冲突 |
-| A9 | 会话内确认后直接落库，还是仍要面板二次确认？ | (a) 直接落库 (b) 落草稿待确认 | (a) | `automation_drafts` 表 |
-| A10 | 面板会话 UI 要不要流式（SSE）？ | (a) 同步+轮询 (b) SSE | (a) | `src/web/client/api.ts` |
-| A11 | 历史事件的 `subscription_id` 填什么？ | (a) 空串 (b) 反查任务 (c) 按 ruleId 推导 | (c) | 迁移脚本、事件表重建 |
-| B1 | 旧事件插件（只有 `EventSource`）怎么适配？ | (a) 推断目录+弃用告警 (b) 强制升级 (c) 手写 types 字段 | (a) | `packages/event`、插件兼容 |
-| B2 | 自动化卡片回调走哪条路？ | (a) 扩展 `questions` 表 (b) 新增 `automation_cards` 表 (c) 不用回调 | (b) | `handleCardAction`、飞书适配器 |
-| B3 | 事件类任务与定时任务是否共用一套 `automation.tasks`？ | (a) 共用 (b) 分表 | (a) | 整个任务模型 |
-| B4 | 自动化任务的通知人怎么定？ | (a) 沿用来源的 `owner` (b) 任务级通知人 (c) 两者都要 | (b) | `EventKickoff`、`AutomationTaskConfig` |
+| ✅ A1 | 事件类任务的「归属项目」从判定产物改成任务属性？ | (a) 任务属性（写死）(b) 继续判定 (c) 任务给了就用、没给就判定 | **(a) 由会话解析时从对话内容分析得出**（用户 2026-11-26） | `EventDecisionService`、闭集校验、`EventVerdict` |
+| A2 | `eventType: '*'` 的兜底规则怎么迁？ | (a) 丢弃 (b) 展开 (c) 通配订阅 | 默认 (a) | 迁移脚本 |
+| ✅ A3 | 删不删顶层 `schedule` 字段？ | (a) 保留兼容镜像 (b) 彻底删 | **(b) 彻底删除**（用户 2026-11-26） | `automation-schedule.ts`、scheduler、面板 |
+| A4 | `events.sources` 这层留不留？ | (a) 瘦身保留 (b) 彻底删 (c) 原样保留 | 默认 (a) | `config.ts`、面板来源卡、迁移 |
+| A5 | 要不要保留「全部事件入库」的观测能力？ | (a) 不保留 (b) 加 `mode: record` | 默认 (a) | `EventStatus`、watcher |
+| ✅ A6 | 全局护栏（风险标签）能不能按任务覆盖？ | (a) 不能 (b) 可覆盖但记审计 | **整个全局护栏取消**（用户 2026-11-26：「不需要全局护栏，这风险标签没啥用」） | `guardrailDecisionPort`、`events.policy.riskLabels`、事件表列 |
+| ❓ A7 | 同一仓库被多任务订阅时游标怎么建？ | (a) 按订阅独立 (b) 按 (source,params) 共享+扇出 (c) 拉取共享+过滤独立 | **待决策**（已按用户要求在 §4.2.1 讲清「什么是游标 / 为什么按订阅建 / 漏事件的坑 / 三个选项的代价」，建议 (a) 或 (c)） | GitHub watcher、日志字段 |
+| ✅ A8 | 飞书消息订阅走事件链路还是 channel 出口？ | (a) 新写飞书 watcher (b) channel 加事件出口 | **(a) 完全独立，不与 Channel 耦合**（用户 2026-11-26） | `packages/event`、`src/events/sources/feishu.ts`、不碰 channel |
+| A9 | 会话内确认后直接落库，还是仍要面板二次确认？ | (a) 直接落库 (b) 落草稿待确认 | 默认 (a) | `automation_drafts` 表 |
+| ✅ A10 | 面板会话 UI 要不要流式（SSE）？ | (a) 同步+轮询 (b) SSE | **(b) SSE**（用户 2026-11-26） | `src/web/client/api.ts` |
+| ✅ A11 | 历史事件的 `subscription_id` 填什么？ | (a) 空串 (b) 反查任务 (c) 按 ruleId 推导 | **直接清空所有历史事件**（用户 2026-11-26） | 迁移脚本、事件表重建 |
+| ✅ B1 | 旧事件插件（只有 `EventSource`）怎么适配？ | (a) 推断目录+弃用告警 (b) 强制升级 (c) 手写 types 字段 | **直接废弃**（用户 2026-11-26） | `packages/event`、插件兼容 |
+| B2 | 自动化卡片回调走哪条路？ | (a) 扩展 `questions` 表 (b) 新增 `automation_cards` 表 (c) 不用回调 | 默认 (b) | `handleCardAction`、飞书适配器 |
+| B3 | 事件类任务与定时任务是否共用一套 `automation.tasks`？ | (a) 共用 (b) 分表 | 默认 (a) | 整个任务模型 |
+| B4 | 自动化任务的通知人怎么定？ | (a) 沿用来源的 `owner` (b) 任务级通知人 (c) 两者都要 | 默认 (b) | `EventKickoff`、`AutomationTaskConfig` |
+
+**已决策项带来的连带改动**（下文各章已同步）：
+
+| 决策 | 连带改动 |
+|-|-|
+| A1 | §2.2 字段映射改为「会话解析得出」；§2.4 会话流程要抽出 project；§2.5 判定不再负责选项目 |
+| A3 | §3.2 删掉顶层 `schedule` 字段与兼容镜像逻辑；所有读 `task.schedule` 的地方改读 `trigger.schedule` |
+| A6 | §2.2 映射表里风险标签改为「**丢弃**」；§3.5 改写为「护栏取消」并给补偿手段；§6.1 判定链去掉护栏环节；§8.4 收件箱描述同步；§11.1 风险 R1 去掉「风险标签闸门」 |
+| A8 | §4.3 飞书改为「独立 watcher」；§8.3 不再与 channel 有任何耦合；`packages/channel` 回到「不动」 |
+| A10 | §5.4 会话端点改 SSE；§8.3 技术落点改为 SSE |
+| A11 | §3.1.3 事件表不再做历史回填，改为清空历史事件；§6.2 幂等键方案随之简化 |
+| B1 | §2.3.4 兼容策略从「适配层」改为「直接废弃」；`adaptLegacySource` 不再需要 |
 
 ---
 
@@ -1518,7 +1690,7 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 
 **右侧「会话清单」**：列出与本次会话相关的任务，点击可切换。任务与会话一一绑定（`conversationId`），所以从任何入口进来都能找回这条会话。
 
-**技术落点**（与 §5.4 一致）：同步返回 + 轮询历史，不改 Web 客户端请求层；流式方案见 §7 待确认 A10。
+**技术落点**（与 §5.4 一致）：**SSE 流式**（决策 A10）—— 助手逐字吐字，客户端用 `fetch` + `ReadableStream` 订阅，`src/web/client/api.ts` 新增 `openEventStream()`。
 
 ### 8.4 收件箱 · 订阅命中与三种去向
 
@@ -1535,7 +1707,7 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 - 「状态」列新增 **已通知**（`s-done` 之外单独一态），对应仅提醒模式；
 - 「待审核」的行左边仍有一道警示色条（面板既有做法），配「转自动 / 忽略」两个动作。
 
-**上下文背景**：事件摘要行下面那段灰字就是「描述清楚上下文背景」的落点 —— 命中了哪个关键词、语义判定为什么这么判、护栏为什么把人拦下来。完整字段见 §6.5。
+**上下文背景**：事件摘要行下面那段灰字就是「描述清楚上下文背景」的落点 —— 命中了哪个关键词、语义判定为什么这么判。完整字段见 §6.5。
 
 ---
 
@@ -1574,7 +1746,8 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 
 - [x] 本方案文档
 - [x] Web 界面草图（§8，含 4 张 mockup）
-- [ ] 用户对 §7 的 A1~A11、B1~B4 拍板
+- [x] 用户对 §7 的 A1、A3、A6、A8、A10、A11、B1 拍板（2026-11-26，飞书文档评论）
+- [ ] 用户对 §7 剩余的 A2、A4、A5、A7、A9、B2、B3、B4 拍板
 - [ ] 用户确认 §8 的界面方向
 
 **产出**：拍板后的方案定稿。
@@ -1583,7 +1756,7 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 
 **目标**：插件侧的新接口就位，但宿主仍按老路跑。
 
-1. `packages/event`：新增 `EventCatalog` / `EventTypeDescriptor` / `EventParamDescriptor`；`EventPlugin` 加 `catalog?` / `fetch?`；导出 `adaptLegacySource`。
+1. `packages/event`：新增 `EventCatalog` / `EventTypeDescriptor` / `EventParamDescriptor`；`EventPlugin` 加 `catalog?` / `fetch?`；**旧 `EventSource` 插件不再加载**（决策 B1）。
 2. `packages/event`：`EventSource` 标记 `@deprecated`，保留导出。
 3. 宿主：`src/events/catalogs/github.ts`、`src/events/catalogs/feishu.ts` 两个内置目录。
 4. 宿主：`src/events/catalog.ts` 汇总所有目录（内置 + 插件），供 API 与会话流程使用。
@@ -1635,13 +1808,13 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 2. `src/events/subscriptions.ts`：从 `automation.tasks` 推导订阅集合。
 3. `src/events/manager.ts`：`reloadSources` → `reloadSubscriptions`；按订阅装配 watcher。
 4. `src/events/pipeline.ts`：匹配规则 → 匹配订阅；`ingest` 带 `subscriptionId`；`dispatch` 用任务的 `prompt` 与 `skill`。
-5. `src/events/decision.ts`：`ruleDecisionPort` → `guardrailDecisionPort`；判定输入换订阅。
+5. `src/events/decision.ts`：**删掉 `ruleDecisionPort` 与风险标签强制分支**（决策 A6）；判定输入换订阅。
 6. `src/events/decision-model.ts`：判定提示词按订阅的 `filter` 组织。
 7. `src/store/db.ts`：`events` 表改 `subscription_id` + 重建唯一索引；`EventRecord` 加 `subscriptionId`。
 8. `src/events/skills.ts`：`EVENT_SKILLS` 保留，成为任务属性。
-9. 护栏全局化：`events.policy.riskLabels`。
+9. 护栏取消：删 `events.policy.riskLabels` 配置项与风险标签强制分支。
 10. `mode=notify` 的执行路径（`execution: 'notified'`）。
-11. 测试：迁移 `tests/events/*` 现有用例（规则 → 订阅）；新增订阅命中、过滤、护栏、notify 用例。
+11. 测试：迁移 `tests/events/*` 现有用例（规则 → 订阅）；新增订阅命中、过滤、notify 用例；**删除护栏相关用例**。
 
 **风险**：高。这是核心链路替换。
 
@@ -1671,8 +1844,8 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 
 1. `ra migrate event-rules --dry-run / --apply / --verify`。
 2. 迁移规则 → 任务（§3.1.2 的映射表）。
-3. `events` 表重建（`subscription_id` + 唯一索引）。
-4. 历史事件回填 `subscription_id`。
+3. `events` 表重建（`subscription_id` + 唯一索引，**清空历史行** —— 决策 A11）。
+4. `state.db` 备份（`VACUUM INTO`）在第 3 步之前完成，作为回滚依据。
 5. 人工清单：`ra migrate event-rules` 输出待人工处理的规则。
 6. `config.yaml.bak.<ts>` 自动备份。
 7. 观察期：迁移后**保留** `events.rules`（不删），确认无异常后再手工清理。
@@ -1681,12 +1854,13 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 
 **回滚**：换回 `config.yaml.bak`；事件表反向 rename。
 
-### 阶段 7 · 飞书消息订阅（依赖 A8 结论）
+### 阶段 7 · 飞书消息订阅（A8 已定：完全独立）
 
-- (b) 方案：`packages/channel` 的 ingress 加事件出口；`packages/channel-feishu` 不动双消费。
-- (a) 方案：`FeishuConsumer` 改造成单消费者双出口；`src/events/sources/feishu.ts` 填实。
+- `src/events/sources/feishu.ts` 填实：事件侧**独立**的飞书 watcher，用自己的凭据（`trigger.params`）。
+- `src/events/catalogs/feishu.ts` 新增：`feishu.message` 类型 + `appId`/`appSecret` 参数声明。
+- `packages/channel` / `packages/channel-feishu` **完全不动**（决策 A8：与 Channel 不耦合）。
 
-**风险**：高（A 方案）。B 方案中等。
+**风险**：中（多一套飞书连接与凭据；配额翻倍）。**没有双消费风险** —— 两条链路消费的是不同类型的消息事件，各自独立订阅。
 
 ### 阶段 8 · 收尾
 
@@ -1704,9 +1878,9 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 | 包 | 改动 | 阶段 |
 |-|-|-|
 | `packages/core` | `automation.ts` 加 trigger / conversation 类型；`event.ts` 加 `notified`；`github-events.ts` 目录 id 统一带前缀 | 2 / 4 |
-| `packages/event` | 端口拆 Catalog / Fetcher；插件协议加 `catalog?` / `fetch?`；`adaptLegacySource`；发 `0.4.0` | 1 / 4 / 8 |
-| `packages/channel` | （B2/A8-b）ingress 加事件出口；不动 channel 协议 | 7 |
-| `packages/channel-feishu` | 卡片按钮载荷支持自动化卡片（`value` 已是任意 JSON，可能零改动） | 3 / 7 |
+| `packages/event` | 端口拆 Catalog / Fetcher；插件协议加 `catalog?` / `fetch?`；旧插件直接废弃（B1）；发 `0.4.0` | 1 / 4 / 8 |
+| `packages/channel` | **不动**（决策 A8：事件订阅与 Channel 完全独立） | — |
+| `packages/channel-feishu` | 卡片按钮载荷支持自动化卡片（`value` 已是任意 JSON，可能零改动）；**不因飞书订阅而改动消费链路** | 3 |
 | `packages/runtime` | 不动 | — |
 
 ### 10.2 按宿主模块
@@ -1717,10 +1891,10 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 | `src/store/db.ts` | 新表 `automation_conversations`；`events` 表改列与唯一索引；CRUD | 2 / 4 / 6 |
 | `src/events/rules.ts` | 删 | 5 |
 | `src/events/rule-compile.ts` | 删 | 5 |
-| `src/events/decision.ts` | `ruleDecisionPort` → `guardrailDecisionPort`；输入换订阅；全局风险标签 | 4 |
+| `src/events/decision.ts` | `ruleDecisionPort` **整个删除**（决策 A6）；输入换订阅 | 4 |
 | `src/events/decision-model.ts` | 判定提示词按订阅 filter 组织 | 4 |
 | `src/events/pipeline.ts` | 匹配订阅；`ingest` 带 subscriptionId；`dispatch` 用任务 prompt/skill；`scopeOf` 改写 | 4 |
-| `src/events/manager.ts` | `reloadSubscriptions`；按订阅装配 watcher；护栏检查 | 4 |
+| `src/events/manager.ts` | `reloadSubscriptions`；按订阅装配 watcher | 4 |
 | `src/events/wiring.ts` | 装配改造 | 4 |
 | `src/events/skills.ts` | 保留，语义从「规则候选」变「任务属性」 | 4 |
 | `src/events/sources/github.ts` | 改为 watcher 形态；游标键按订阅 | 4 |
@@ -1760,8 +1934,8 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 | `tests/events/rule-compile.test.ts` | **删**（阶段 5） |
 | `tests/web/event-rules.test.ts` | **删**（阶段 5） |
 | `tests/web/rule-modal.test.ts` | **删**（阶段 5） |
-| `tests/events/pipeline.test.ts` | 改：规则 → 订阅；新增过滤 / 护栏 / notify 用例 |
-| `tests/events/decision.test.ts` | 改：`ruleDecisionPort` → `guardrailDecisionPort`；判定输入换订阅 |
+| `tests/events/pipeline.test.ts` | 改：规则 → 订阅；新增过滤 / notify 用例；删护栏用例 |
+| `tests/events/decision.test.ts` | 改：判定输入换订阅；**删护栏用例** |
 | `tests/events/manager.test.ts` | 改：来源装配 → 订阅装配 |
 | `tests/events/api.test.ts` | 改：删规则端点断言 |
 | `tests/events/config.test.ts` | 改：删 rules 解析用例 |
@@ -1789,7 +1963,7 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 |---|---|
 | `docs/CONFIGURATION.md` | 「事件总线」章重写：删决策规则章，来源 → 目录，订阅 → 任务 |
 | `docs/AUTOMATION.md` | 加 trigger 模型、会话流程、事件触发 |
-| `docs/OPERATIONS.md` | 事件表增删：`event:subscription-*` / `event:filtered-out` / `event:guardrail-matched` / `automation:task-created` / `automation:session-*`；删 `event:rule-*` |
+| `docs/OPERATIONS.md` | 事件表增删：`event:subscription-*` / `event:filtered-out` / `automation:task-created` / `automation:session-*`；删 `event:rule-*` 与 `event:guardrail-matched` |
 | `docs/MONOREPO.md` | 事件来源插件协议新形状 + 迁移指引 |
 | `docs/API.md` | 删规则端点；加会话与目录端点 |
 | `docs/ARCHITECTURE.md` | 事件链路图更新 |
@@ -1814,15 +1988,15 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 
 | # | 风险 | 概率 | 影响 | 缓解 | 回滚 |
 |-|-|-|-|-|-|
-| R1 | **删规则后判定依据变弱**：原来规则里的四问很具体，新模型的 `filter.semantic` 由模型从一句话生成，可能不如人工填的准 | 高 | 高 | 迁移时把 `is_valid.instructions` 原样搬进 `filter.semantic`；保留 `mode` 与风险标签两个确定性闸门；观察期看「转人工率」 | 阶段 4 的 `events.subscriptionMode` 开关切回 legacy |
-| R2 | **同一事件被多任务订阅时重复处理** | 中 | 中 | 面板在任务卡上显示「与其它 N 条任务订阅了同一来源」；`mode=auto` 的任务默认独占（见 A11 备选） | 手工关掉重复任务 |
+| R1 | **删规则后判定依据变弱**：原来规则里的四问很具体，新模型的 `filter.semantic` 由模型从一句话生成，可能不如人工填的准 | 高 | 高 | 迁移时把 `is_valid.instructions` 原样搬进 `filter.semantic`；`mode`（auto/review/notify）作为确定性闸门保留；观察期看「转人工率」 | 阶段 4 的 `events.subscriptionMode` 开关切回 legacy |
+| R2 | **同一事件被多任务订阅时重复处理** | 中 | 中 | 面板在任务卡上显示「与其它 N 条任务订阅了同一来源」；`mode=auto` 的任务默认独占（见 §7 备选 A11 的关联讨论） | 手工关掉重复任务 |
 | R3 | **迁移丢语义**：规则里手写的东西没法一一映射 | 中 | 中 | `--dry-run` 报告每一条的映射结果与差异；不确定的进人工清单，不自动迁 | `config.yaml.bak` 换回 |
 | R4 | **事件表重建丢数据** | 低 | 高 | 重建前 `VACUUM INTO` 备份；迁移脚本事务化；`--verify` 比对条数 | 从备份恢复 `state.db` |
 | R5 | **会话流程解析不准**：模型把一句话理解错，建出错的自动化 | 高 | 中 | 预览卡片必须人工点「确认」；闭集校验（source/types/params/project/skill）挡住越界；关键项缺失就回问 | 关闭会话入口，退回弹窗 |
-| R6 | **飞书双消费**：A8 选 (a) 时两个 `lark-cli event consume` 抢同一个事件流 | 中 | 高 | A8 选 (b) 从根上避免；若选 (a) 必须先改造 `FeishuConsumer` 为单消费者 | 阶段 7 独立发布，可单独回滚 |
+| R6 | **飞书双消费**：事件侧独立 watcher 与 channel 侧都消费飞书消息 | 低 | 中 | 决策 A8 已定「完全独立」：两侧消费**不同类型**的消息事件（channel 只收 @机器人/私聊，事件侧收群内全部消息），不抢同一条流；实测确认后再合 | 阶段 7 独立发布，可单独回滚 |
 | R7 | **自然语言创建的自动化误触发**：订阅条件太宽，事件洪水 | 中 | 高 | 迁移期默认 `mode=review`；配额闸门（`dailyEventLimit` / `perSourceDailyLimit`）继续生效；面板上订阅有独立的配额建议 | 把任务改成 `mode=review` 或暂停 |
 | R8 | **卡片回调落不了地**：B2 选错，卡片点了没反应 | 中 | 中 | B2 选 (b) 不动现有 `questions` 表；卡片按钮之外同时提供「回复指令」降级路径 | 去掉卡片按钮，只保留会话面板 |
-| R9 | **旧插件全部失效**：B1 选 (b) 时第三方插件装不上 | 低（若选 b） | 高 | 默认选 (a) 适配层 + 弃用告警 | — |
+| R9 | **旧插件全部失效**：决策 B1 直接废弃，装了旧插件的用户启动即失效 | 中 | 中 | 启动时打印明确弃用告警（含插件名与升级指引）；README 与迁移指引写清新接口怎么写 | 装回旧版 `@router-agent/event`（插件本身不删） |
 | R10 | **删规则模块时漏删引用点** | 中 | 中 | 阶段 5 一次性删完并跑 `pnpm check`；`tsc` 会抓出所有编译期引用；`grep -rn "events.rules\|EventRule"` 兜底 | git revert |
 
 ### 11.2 回滚策略
@@ -1867,7 +2041,7 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 | 规则编译（自然语言 → 规则草稿） | `src/events/rule-compile.ts:25` |
 | 事件入队（规则匹配点） | `src/events/pipeline.ts:86` |
 | 事件判定（规则先判、模型兜底） | `src/events/decision.ts:62` |
-| 规则判定端口（风险标签护栏） | `src/events/decision.ts:253` |
+| 规则判定端口（**已删除**，决策 A6） | `src/events/decision.ts:253` |
 | 判定提示词（依赖规则问题） | `src/events/decision-model.ts:89` |
 | 事件派发（合成 Trigger → 工单） | `src/events/pipeline.ts:344` |
 | 事件闸门（时间窗 / 配额） | `src/events/pipeline.ts:462` |
@@ -1906,5 +2080,5 @@ Worker 拿到的上下文（现状 `pipeline.requestOf()`，`src/events/pipeline
 | 触发器（Trigger） | 任务的触发方式：事件 / 定时 | **新增** |
 | 决策规则（EventRule） | 手工配置的判定脚本 | **删除** |
 | 事件判定（EventDecision） | 事件要不要处理、多急、归哪个项目 | **保留**，依据从规则换成订阅 |
-| 护栏（Guardrail） | 风险标签强制人审 | 提升为全局 |
+| 护栏（Guardrail） | 风险标签强制人审 | **取消**（决策 A6），机制整体删除 |
 | 处理方式（EventSkill） | 任务按什么套路执行 | **保留**，从判定产物变成任务属性 |
