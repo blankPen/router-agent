@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>router-agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="../../../src/web/app.css" />
+<link rel="stylesheet" href="./mock.css" />
+</head>
+<body>
+<div class="shell">
+<aside class="sidebar">
+  <div class="brand">
+    <span class="brand-mark"><svg viewBox="0 0 720 720" width="32" height="32"><rect width="720" height="720" fill="#000"/><g stroke="#fff" stroke-width="16" fill="none"><path d="M360 168V289.5M359 553L360 428.5M154 357.5L290.5 358.4M565 357.5L429.5 358.4M217 494L309 406.7M502 494L409.9 406.9"/></g><g fill="#fff"><circle cx="360" cy="359" r="61.5"/><circle cx="360" cy="168" r="36"/><circle cx="359" cy="553" r="36"/><circle cx="154" cy="357.5" r="36"/><circle cx="565" cy="357.5" r="36"/><circle cx="217" cy="494" r="36"/><circle cx="502" cy="494" r="36"/></g></svg></span>
+    <span class="brand-text"><strong>router-agent</strong><small>control room</small></span>
+  </div>
+  <nav class="side-nav">
+    <button class="nav-tab"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z"/></svg><span>初始化</span></button>
+    <button class="nav-tab active"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg><span>收件箱</span><span class="nav-count">3</span></button>
+    <button class="nav-tab"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>自动化</span></button>
+    <button class="nav-tab"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z"/></svg><span>工单</span><span class="nav-count">2</span></button>
+    <button class="nav-tab"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/><path d="M1 14h6M9 8h6M17 16h6"/></svg><span>配置</span></button>
+    <button class="nav-tab"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg><span>来源</span></button>
+    <button class="nav-tab"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6M9 13h6M9 17h6"/></svg><span>日志</span></button>
+  </nav>
+  <div class="sidebar-bottom">
+    <div class="sidebar-foot">
+      <span class="status-dot live"></span>
+      <span class="sidebar-status"><strong>服务运行中</strong><small>v0.3.40 · 运行时 codex</small></span>
+    </div>
+  </div>
+</aside>
+<div class="workspace tab-events">
+  <div class="page-head">
+    <div>
+      <h1>收件箱</h1>
+      <p>订阅命中的事件先进同一个队列；按任务的处理方式分流：自动执行、等人批、只记录提醒。</p>
+    </div>
+    <div class="page-actions">
+      <button class="btn ghost">来源与任务</button>
+      <button class="btn">刷新</button>
+    </div>
+  </div>
+
+  <section class="event-summary">
+    <div class="event-summary-cell"><span class="event-summary-label">待审核</span><strong class="event-summary-value attention">3</strong></div>
+    <div class="event-summary-cell"><span class="event-summary-label">待处理</span><strong class="event-summary-value">7</strong></div>
+    <div class="event-summary-cell"><span class="event-summary-label">已通知</span><strong class="event-summary-value">18</strong></div>
+    <div class="event-summary-cell"><span class="event-summary-label">已完成</span><strong class="event-summary-value">42</strong></div>
+    <div class="event-summary-cell"><span class="event-summary-label">已过滤</span><strong class="event-summary-value">126</strong></div>
+    <div class="event-summary-cell quiet"><span class="event-summary-label">最近更新</span><strong class="event-summary-time">2 分钟前</strong></div>
+  </section>
+
+  <section class="event-rule-distribution">
+    <div class="event-rule-head">
+      <div>
+        <h2>订阅命中</h2>
+        <p>按订阅它的任务统计；长期 0 命中的订阅，多半是事件类型或关键词订错了。</p>
+      </div>
+    </div>
+    <div class="event-rule-list">
+      <div class="event-rule-row">
+        <div class="event-rule-name"><strong>Teamwork 承诺跟进</strong><span>feishu.message · 事件触发 · 自动执行</span></div>
+        <div class="event-rule-counts"><span>有效 12</span><span>人审 2</span><span>仅提醒 5</span><span class="quiet">合计 19</span></div>
+      </div>
+      <div class="event-rule-row">
+        <div class="event-rule-name"><strong>PR 合并后自检</strong><span>github.pull_request.merged · 待人审</span></div>
+        <div class="event-rule-counts"><span>有效 5</span><span>人审 1</span><span>仅提醒 0</span><span class="quiet">合计 6</span></div>
+      </div>
+      <div class="event-rule-row">
+        <div class="event-rule-name"><strong>每日大盘巡检</strong><span>定时触发 · 仅提醒</span></div>
+        <div class="event-rule-counts"><span>有效 18</span><span>人审 0</span><span>仅提醒 18</span><span class="quiet">合计 18</span></div>
+      </div>
+      <div class="event-rule-row">
+        <div class="event-rule-name"><strong>周报素材收集</strong><span>定时触发 · 仅提醒</span></div>
+        <span class="muted">尚未命中</span>
+      </div>
+    </div>
+  </section>
+
+  <div class="event-filters">
+    <div class="event-filter-group">
+      <span class="event-filter-label">优先级</span>
+      <button class="event-chip active">全部</button>
+      <button class="event-chip">P0</button>
+      <button class="event-chip">P1</button>
+      <button class="event-chip">P2</button>
+    </div>
+    <div class="event-filter-group">
+      <span class="event-filter-label">状态</span>
+      <button class="event-chip active">全部</button>
+      <button class="event-chip">待审核</button>
+      <button class="event-chip">待处理</button>
+      <button class="event-chip">已通知</button>
+    </div>
+  </div>
+
+  <table class="event-table">
+    <thead>
+      <tr>
+        <th class="event-col-priority">优先级</th>
+        <th>事件</th>
+        <th>归属</th>
+        <th>状态</th>
+        <th class="event-col-actions">操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr class="is-review">
+        <td><span class="event-priority p1">P1</span></td>
+        <td>
+          <strong class="event-title">飞书 · 张远：Teamwork 退款流程这版我答应了</strong>
+          <div class="event-meta"><span>feishu</span><span class="dot-sep">·</span><span>feishu.message</span><span class="dot-sep">·</span><span>Teamwork 承诺跟进</span><span class="dot-sep">·</span><span>2 分钟前</span></div>
+          <div class="event-excerpt">「这个退款流程我答应了，今天内改完就行」——命中关键词 Teamwork；语义判定：发送人作出承诺，但涉及退款金额，需人确认。</div>
+        </td>
+        <td>
+          <div class="event-verdict"><span class="event-project">router-agent</span><span class="event-skill">ci-fix</span></div>
+          <div class="event-reason">承诺已确认，但命中「退款」风险标签，护栏强制转人工</div>
+        </td>
+        <td><span class="event-status s-review"><i></i>待审核</span></td>
+        <td class="event-col-actions"><div class="event-actions"><button class="btn tiny">转自动</button><button class="btn tiny ghost">忽略</button></div></td>
+      </tr>
+      <tr>
+        <td><span class="event-priority p2">P2</span></td>
+        <td>
+          <strong class="event-title">GitHub Issue #412 · Teamwork 导出偶发超时</strong>
+          <div class="event-meta"><span>github</span><span class="dot-sep">·</span><span>github.issues.opened</span><span class="dot-sep">·</span><span>Teamwork 承诺跟进</span><span class="dot-sep">·</span><span>38 分钟前</span></div>
+          <div class="event-excerpt">导出接口在超过 5000 行时超时；命中关键词 Teamwork。</div>
+        </td>
+        <td>
+          <div class="event-verdict"><span class="event-project">router-agent</span><span class="event-skill">ci-fix</span></div>
+          <div class="event-reason">语义判定：属于可立即动手的优化事项，已开单执行</div>
+        </td>
+        <td><span class="event-status s-pending"><i></i>待处理</span></td>
+        <td class="event-col-actions"><div class="event-actions"><button class="btn tiny">查看工单</button></div></td>
+      </tr>
+      <tr>
+        <td><span class="event-priority p3">P3</span></td>
+        <td>
+          <strong class="event-title">飞书 · 李冉：Teamwork 周会纪要已上传</strong>
+          <div class="event-meta"><span>feishu</span><span class="dot-sep">·</span><span>feishu.message</span><span class="dot-sep">·</span><span>每日大盘巡检</span><span class="dot-sep">·</span><span>今天 09:30</span></div>
+          <div class="event-excerpt">本周周会纪要已放到共享目录；仅记录并提醒，不改动代码。</div>
+        </td>
+        <td>
+          <div class="event-verdict"><span class="event-project">未判定项目</span><span class="event-skill">notify</span></div>
+          <div class="event-reason">订阅模式为「仅提醒」，不进入执行链路</div>
+        </td>
+        <td><span class="event-status s-done"><i></i>已通知</span></td>
+        <td class="event-col-actions"><div class="event-actions"><button class="btn tiny ghost">查看</button></div></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+</div>
+</body>
+</html>

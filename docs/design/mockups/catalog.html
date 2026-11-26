@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>router-agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="../../../src/web/app.css" />
+<link rel="stylesheet" href="./mock.css" />
+</head>
+<body>
+<div class="shell">
+<aside class="sidebar">
+  <div class="brand">
+    <span class="brand-mark"><svg viewBox="0 0 720 720" width="32" height="32"><rect width="720" height="720" fill="#000"/><g stroke="#fff" stroke-width="16" fill="none"><path d="M360 168V289.5M359 553L360 428.5M154 357.5L290.5 358.4M565 357.5L429.5 358.4M217 494L309 406.7M502 494L409.9 406.9"/></g><g fill="#fff"><circle cx="360" cy="359" r="61.5"/><circle cx="360" cy="168" r="36"/><circle cx="359" cy="553" r="36"/><circle cx="154" cy="357.5" r="36"/><circle cx="565" cy="357.5" r="36"/><circle cx="217" cy="494" r="36"/><circle cx="502" cy="494" r="36"/></g></svg></span>
+    <span class="brand-text"><strong>router-agent</strong><small>control room</small></span>
+  </div>
+  <nav class="side-nav">
+    <button class="nav-tab"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z"/></svg><span>初始化</span></button>
+    <button class="nav-tab"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg><span>收件箱</span><span class="nav-count">3</span></button>
+    <button class="nav-tab"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>自动化</span></button>
+    <button class="nav-tab"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z"/></svg><span>工单</span><span class="nav-count">2</span></button>
+    <button class="nav-tab active"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/><path d="M1 14h6M9 8h6M17 16h6"/></svg><span>配置</span></button>
+    <button class="nav-tab"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg><span>来源</span></button>
+    <button class="nav-tab"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6M9 13h6M9 17h6"/></svg><span>日志</span></button>
+  </nav>
+  <div class="sidebar-bottom">
+    <div class="sidebar-foot">
+      <span class="status-dot live"></span>
+      <span class="sidebar-status"><strong>服务运行中</strong><small>v0.3.40 · 运行时 codex</small></span>
+    </div>
+  </div>
+</aside>
+<div class="workspace tab-config">
+  <div class="page-head">
+    <div>
+      <h1>配置</h1>
+      <p>事件来源只负责「声明有什么事件可订阅」；订阅关系写在自动化任务里，这里不再手工加规则。</p>
+    </div>
+    <div class="page-actions">
+      <button class="btn ghost">重载插件</button>
+      <button class="btn">保存配置</button>
+    </div>
+  </div>
+
+  <section class="settings-card">
+    <div class="settings-head">
+      <div>
+        <h2>事件源目录</h2>
+        <p>插件只声明可订阅的事件类型与连接参数；不持有订阅关系，也不做判定。</p>
+      </div>
+      <div class="settings-badges"><span class="badge hot">3 个来源</span><span class="badge">11 种事件类型</span></div>
+    </div>
+
+    <div style="padding: 0 var(--card-pad-x) 20px;">
+      <article class="source-card on" style="margin-bottom:12px;">
+        <div class="source-card-top">
+          <span class="source-logo"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-4 1.5-4-2-5-2m10 4v-3.5c0-1 .1-1.4-.5-2 2.8-.3 5.5-1.4 5.5-6a4.6 4.6 0 0 0-1.3-3.2 4.2 4.2 0 0 0-.1-3.2s-1.1-.3-3.6 1.3a12.3 12.3 0 0 0-6.4 0C4.8 2.5 3.7 2.8 3.7 2.8A4.2 4.2 0 0 0 3.6 6a4.6 4.6 0 0 0-1.3 3.2c0 4.6 2.7 5.7 5.5 6-.5.5-.6 1-.6 2V21"/></svg></span>
+          <div class="source-card-title">
+            <strong>GitHub</strong>
+            <span>4 种事件类型 · 需要 repo 与 token</span>
+          </div>
+          <span class="toggle on"><span class="toggle-track"><span class="toggle-knob"></span></span></span>
+        </div>
+        <div class="catalog-list">
+          <div class="catalog-item"><span class="mono">github.issues.opened</span><span>新建 Issue</span><span class="count">被 2 个任务订阅</span></div>
+          <div class="catalog-item"><span class="mono">github.pull_request.merged</span><span>PR 合并</span><span class="count">被 1 个任务订阅</span></div>
+          <div class="catalog-item"><span class="mono">github.pull_request.opened</span><span>新建 PR</span><span class="count">尚未订阅</span></div>
+          <div class="catalog-item"><span class="mono">github.check_run.completed</span><span>CI 完成</span><span class="count">尚未订阅</span></div>
+        </div>
+        <div class="source-card-actions" style="margin-top:12px;">
+          <button class="btn tiny">连接参数</button>
+          <button class="btn tiny ghost">查看订阅它的任务</button>
+        </div>
+      </article>
+
+      <article class="source-card" style="margin-bottom:12px;">
+        <div class="source-card-top">
+          <span class="source-logo"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 9h8M8 13h5"/></svg></span>
+          <div class="source-card-title">
+            <strong>飞书消息</strong>
+            <span>1 种事件类型 · 需要 app 凭据</span>
+          </div>
+          <span class="toggle"><span class="toggle-track"><span class="toggle-knob"></span></span></span>
+        </div>
+        <div class="catalog-list">
+          <div class="catalog-item"><span class="mono">feishu.message</span><span>群聊 / 私聊消息</span><span class="count">被 1 个任务订阅</span></div>
+        </div>
+        <div class="source-card-actions" style="margin-top:12px;">
+          <button class="btn tiny">连接参数</button>
+          <button class="btn tiny ghost">查看订阅它的任务</button>
+        </div>
+      </article>
+
+      <article class="source-card">
+        <div class="source-card-top">
+          <span class="source-logo"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.7l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m3.3 7 8.7 5 8.7-5M12 22V12"/></svg></span>
+          <div class="source-card-title">
+            <strong>自定义来源</strong>
+            <span>npm 插件 · 声明自己的事件类型</span>
+          </div>
+        </div>
+        <div class="source-card-actions" style="margin-top:12px;">
+          <button class="btn tiny">添加自定义来源</button>
+        </div>
+      </article>
+    </div>
+  </section>
+</div>
+
+</div>
+</body>
+</html>

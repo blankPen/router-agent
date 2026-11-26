@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>router-agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="../../../src/web/app.css" />
+<link rel="stylesheet" href="./mock.css" />
+</head>
+<body>
+<div class="shell">
+<aside class="sidebar">
+  <div class="brand">
+    <span class="brand-mark"><svg viewBox="0 0 720 720" width="32" height="32"><rect width="720" height="720" fill="#000"/><g stroke="#fff" stroke-width="16" fill="none"><path d="M360 168V289.5M359 553L360 428.5M154 357.5L290.5 358.4M565 357.5L429.5 358.4M217 494L309 406.7M502 494L409.9 406.9"/></g><g fill="#fff"><circle cx="360" cy="359" r="61.5"/><circle cx="360" cy="168" r="36"/><circle cx="359" cy="553" r="36"/><circle cx="154" cy="357.5" r="36"/><circle cx="565" cy="357.5" r="36"/><circle cx="217" cy="494" r="36"/><circle cx="502" cy="494" r="36"/></g></svg></span>
+    <span class="brand-text"><strong>router-agent</strong><small>control room</small></span>
+  </div>
+  <nav class="side-nav">
+    <button class="nav-tab"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z"/></svg><span>初始化</span></button>
+    <button class="nav-tab"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg><span>收件箱</span><span class="nav-count">3</span></button>
+    <button class="nav-tab active"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>自动化</span></button>
+    <button class="nav-tab"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z"/></svg><span>工单</span><span class="nav-count">2</span></button>
+    <button class="nav-tab"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/><path d="M1 14h6M9 8h6M17 16h6"/></svg><span>配置</span></button>
+    <button class="nav-tab"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg><span>来源</span></button>
+    <button class="nav-tab"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6M9 13h6M9 17h6"/></svg><span>日志</span></button>
+  </nav>
+  <div class="sidebar-bottom">
+    <div class="sidebar-foot">
+      <span class="status-dot live"></span>
+      <span class="sidebar-status"><strong>服务运行中</strong><small>v0.3.40 · 运行时 codex</small></span>
+    </div>
+  </div>
+</aside>
+<div class="workspace tab-automation">
+  <div class="page-head">
+    <div>
+      <h1>新建自动化 · 会话</h1>
+      <p>用一句话描述要做什么，助手会补齐事件源、过滤条件与执行方式；确认后才落库。</p>
+    </div>
+    <div class="page-actions">
+      <button class="btn ghost">放弃</button>
+      <button class="btn primary">保存为任务</button>
+    </div>
+  </div>
+
+  <div class="conv">
+    <div class="conv-stream">
+      <div class="conv-msg">
+        <span class="conv-avatar">RA</span>
+        <div class="conv-bubble">
+          <div class="conv-step">会话助手 · 已加载可用事件源目录</div>
+          要建个什么样的自动化？比如「订阅飞书消息里跟 Teamwork 相关的优化事项，有人答应了就立刻去做」。
+        </div>
+      </div>
+
+      <div class="conv-msg user">
+        <span class="conv-avatar">Pz</span>
+        <div class="conv-bubble">帮我订阅飞书消息，跟 Teamwork 相关的优化事项，如果我答应了立即去做</div>
+      </div>
+
+      <div class="conv-msg">
+        <span class="conv-avatar">RA</span>
+        <div class="conv-bubble">
+          <div class="conv-step">会话助手 · 已抽取参数，缺 1 项</div>
+          事件源我按「飞书消息」选了 <span class="mono">feishu.message</span>。<br/>
+          还要一个<b>归属项目</b>：这条自动化改哪个仓库？
+        </div>
+      </div>
+
+      <div class="conv-msg user">
+        <span class="conv-avatar">Pz</span>
+        <div class="conv-bubble">router-agent</div>
+      </div>
+
+      <div class="conv-msg">
+        <span class="conv-avatar">RA</span>
+        <div class="conv-bubble conv-bubble-plain">
+          <div class="preview-card">
+            <div class="preview-head">
+              <span class="source-logo"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z"/></svg></span>
+              <div class="source-card-title">
+                <strong>Teamwork 承诺跟进</strong>
+                <span>确认后落库为 automation.tasks 的一条</span>
+              </div>
+              <span class="tag mode-auto"><i></i>自动执行</span>
+            </div>
+            <div class="preview-body">
+              <dl class="preview-row"><dt>触发方式</dt><dd>事件触发 · <span class="mono">feishu.message</span></dd></dl>
+              <dl class="preview-row"><dt>过滤条件</dt><dd>关键词 <span class="mono">Teamwork</span>、<span class="mono">优化</span>；语义「与 Teamwork 相关的优化事项，且发送人作出承诺」</dd></dl>
+              <dl class="preview-row"><dt>处理方式</dt><dd>命中后直接开单执行，不必再等确认</dd></dl>
+              <dl class="preview-row"><dt>归属项目</dt><dd>router-agent · 分支 <span class="mono">main</span></dd></dl>
+              <dl class="preview-row"><dt>运行时</dt><dd>claude-code</dd></dl>
+            </div>
+            <div class="preview-foot">
+              <span class="muted">参数齐了。改哪一项就直接说，例如「关键词加上退款」。</span>
+              <button class="btn tiny">再改改</button>
+              <button class="btn tiny primary">确认创建</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <aside class="side-panel">
+      <div class="side-panel-head">
+        <h3>会话清单</h3>
+        <p>每个任务绑定一次会话；点任务卡片的「恢复会话」可以回到这里继续改。</p>
+      </div>
+      <div class="side-panel-body">
+        <div class="side-row active"><strong>Teamwork 承诺跟进</strong><span>事件触发 · feishu.message</span></div>
+        <div class="side-row"><strong>每日大盘巡检</strong><span>定时触发 · 每天 09:30</span></div>
+        <div class="side-row"><strong>PR 合并后自检</strong><span>事件触发 · github.pull_request.merged</span></div>
+      </div>
+    </aside>
+  </div>
+
+  <div class="conv-compose">
+    <input placeholder="继续说，比如「关键词加上退款」「改成只提醒我」" />
+    <button class="btn tiny primary">发送</button>
+  </div>
+</div>
+
+</div>
+</body>
+</html>
