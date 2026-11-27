@@ -2,6 +2,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { GithubEventSource, parseGithubEvents, parseGithubRuns } from '../../src/events/sources/github.js'
 import type { CommandRunner } from '#infra/process.js'
 import type { Logger } from '#infra/logger.js'
+import { subscription } from './fixtures.js'
+import type { ResolvedSubscription } from '../../src/events/subscriptions.js'
+/** 造一条 GitHub 订阅：仓库 + 事件类型（不带前缀的写法会被补上）。 */
+function githubSub(repo: string, types: string[]): ResolvedSubscription {
+  return subscription({
+    id: 'auto_test',
+    source: 'github',
+    types: types.map(type => (type.startsWith('github.') ? type : `github.${type}`)),
+    params: { repo },
+  })
+}
+
 
 /** 固定时钟：窗口过滤只应该由注入时间决定，不能依赖跑测试的真实日期。 */
 const NOW = '2026-11-16T12:00:00Z'
@@ -84,13 +96,9 @@ describe('GitHub 事件来源', () => {
       'repos/a/b/events?per_page=100&page=1': { code: 0, stdout: EVENTS_JSON },
       'pr view': { code: 0, stdout: JSON.stringify({ number: 110, title: '实现事件总线', body: 'PR 正文' }) },
     })
-    const source = new GithubEventSource('github-1', {
-      enabled: true,
-      kind: 'github',
-      repo: 'a/b',
-      events: ['pull_request.opened', 'issues.commented'],
-    }, { runner })
-    const events = await source.poll()
+    const source = new GithubEventSource({ runner })
+    const sub = githubSub('a/b', ['pull_request.opened', 'issues.commented'])
+    const events = await source.poll(sub)
     expect(events.map(event => event.externalId)).toEqual([
       'github:pull_request:a/b#110:20192883122',
       'github:issues:a/b#110:20192901502',
@@ -110,13 +118,9 @@ describe('GitHub 事件来源', () => {
       'repos/a/b/events?per_page=100&page=1': { code: 0, stdout: EVENTS_JSON },
       'pr view': { code: 0, stdout: '{}' },
     })
-    const source = new GithubEventSource('github-1', {
-      enabled: true,
-      kind: 'github',
-      repo: 'a/b',
-      events: ['issues.opened'],
-    }, { runner })
-    const events = await source.poll()
+    const source = new GithubEventSource({ runner })
+    const sub = githubSub('a/b', ['issues.opened'])
+    const events = await source.poll(sub)
     expect(events).toEqual([])
   })
 
@@ -125,13 +129,9 @@ describe('GitHub 事件来源', () => {
       'repos/a/b/events': { code: 0, stdout: '[]' },
       'repos/a/b/actions/runs?per_page=100&page=1': { code: 0, stdout: RUNS_JSON },
     })
-    const source = new GithubEventSource('github-1', {
-      enabled: true,
-      kind: 'github',
-      repo: 'a/b',
-      events: ['workflow_run.failure'],
-    }, { runner })
-    const events = await source.poll()
+    const source = new GithubEventSource({ runner })
+    const sub = githubSub('a/b', ['workflow_run.failure'])
+    const events = await source.poll(sub)
     expect(events).toHaveLength(1)
     expect(events[0]?.externalId).toBe('github:workflow_run:a/b#43609924128:failure')
     expect(events[0]?.title).toContain('发布 npm 包')
@@ -142,26 +142,24 @@ describe('GitHub 事件来源', () => {
       'repos/a/b/events': { code: 0, stdout: '[]' },
       'repos/a/b/actions/runs?per_page=100&page=1': { code: 0, stdout: RUNS_JSON },
     })
-    const source = new GithubEventSource('github-1', {
-      enabled: true,
-      kind: 'github',
-      repo: 'a/b',
-      events: ['workflow_run.completed'],
-    }, { runner })
-    const events = await source.poll()
+    const source = new GithubEventSource({ runner })
+    const sub = githubSub('a/b', ['workflow_run.completed'])
+    const events = await source.poll(sub)
     expect(events.map(event => event.eventType)).toEqual(['github.workflow_run.completed'])
   })
 
   it('拉取失败只返回空数组，不抛异常', async () => {
     const { runner } = runnerOf({})
-    const source = new GithubEventSource('github-1', { enabled: true, kind: 'github', repo: 'a/b' }, { runner })
-    await expect(source.poll()).resolves.toEqual([])
+    const source = new GithubEventSource({ runner })
+    const sub = githubSub('a/b', [])
+    await expect(source.poll(sub)).resolves.toEqual([])
   })
 
   it('没填仓库时不拉取', async () => {
     const { runner, calls } = runnerOf({})
-    const source = new GithubEventSource('github-1', { enabled: true, kind: 'github', repo: '' }, { runner })
-    await expect(source.poll()).resolves.toEqual([])
+    const source = new GithubEventSource({ runner })
+    const sub = githubSub('', [])
+    await expect(source.poll(sub)).resolves.toEqual([])
     expect(calls).toEqual([])
   })
 
@@ -171,22 +169,18 @@ describe('GitHub 事件来源', () => {
       'pr view': { code: 0, stdout: JSON.stringify({ number: 110, title: '实现事件总线', body: 'PR 正文' }) },
     })
     const cursor = new Map<string, string>()
-    const source = new GithubEventSource('github-1', {
-      enabled: true,
-      kind: 'github',
-      repo: 'a/b',
-      events: ['pull_request.opened', 'issues.commented'],
-    }, {
+    const source = new GithubEventSource({
       runner,
       cursor: {
         get: key => cursor.get(key) ?? null,
         set: (key, value) => { cursor.set(key, value) },
       },
     })
+    const sub = githubSub('a/b', ['pull_request.opened', 'issues.commented'])
     // 第一次轮询是建基线：这批历史不入队，只记水位。
-    expect(await source.poll()).toEqual([])
+    expect(await source.poll(sub)).toEqual([])
     // 第二次拉到同样一批数据，已经是旧事件，不再入队。
-    const second = await source.poll()
+    const second = await source.poll(sub)
     expect(second).toEqual([])
   })
 
@@ -195,19 +189,15 @@ describe('GitHub 事件来源', () => {
       'repos/a/b/events?per_page=100&page=1': { code: 0, stdout: EVENTS_JSON },
       'pr view': { code: 0, stdout: JSON.stringify({ number: 110, title: '实现事件总线', body: 'PR 正文' }) },
     })
-    const source = new GithubEventSource('github-1', {
-      enabled: true,
-      kind: 'github',
-      repo: 'a/b',
-      events: ['pull_request.opened', 'issues.commented'],
-    }, {
+    const source = new GithubEventSource({
       runner,
       cursor: {
         get: () => '20192883122',
         set: () => undefined,
       },
     })
-    const events = await source.poll()
+    const sub = githubSub('a/b', ['pull_request.opened', 'issues.commented'])
+    const events = await source.poll(sub)
     expect(events.map(event => event.externalId)).toEqual(['github:issues:a/b#110:20192901502'])
   })
 
@@ -216,13 +206,9 @@ describe('GitHub 事件来源', () => {
       'repos/a/b/events?per_page=100&page=1': { code: 0, stdout: EVENTS_JSON },
       'pr view': { code: 0, stdout: JSON.stringify({ number: 110, title: '实现事件总线', body: 'PR 正文' }) },
     })
-    const source = new GithubEventSource('github-1', {
-      enabled: true,
-      kind: 'github',
-      repo: 'a/b',
-      events: ['pull_request.opened'],
-    }, { runner })
-    const events = await source.poll()
+    const source = new GithubEventSource({ runner })
+    const sub = githubSub('a/b', ['pull_request.opened'])
+    const events = await source.poll(sub)
     expect(events[0]?.title).toBe('PR 新建 · 实现事件总线')
     expect(events[0]?.body).toContain('PR 正文')
     expect(calls.some(argv => argv[0] === 'pr' && argv[1] === 'view')).toBe(true)
@@ -275,13 +261,9 @@ describe('GitHub 事件来源 · 分页', () => {
       'repos/a/b/events?per_page=100&page=2': { code: 0, stdout: pageJson(page2) },
       'pr view': { code: 0, stdout: JSON.stringify({ title: 'PR 111', body: '' }) },
     })
-    const source = new GithubEventSource('github-1', {
-      enabled: true,
-      kind: 'github',
-      repo: 'a/b',
-      events: ['pull_request.opened'],
-    }, { runner })
-    const events = await source.poll()
+    const source = new GithubEventSource({ runner })
+    const sub = githubSub('a/b', ['pull_request.opened'])
+    const events = await source.poll(sub)
     expect(calls.some(argv => argv[1]?.includes('page=2'))).toBe(true)
     expect(events.map(event => event.eventType)).toEqual(['github.pull_request.opened'])
   })
@@ -308,13 +290,9 @@ describe('GitHub 事件来源 · Action 事件类型', () => {
         }),
       },
     })
-    const source = new GithubEventSource('github-1', {
-      enabled: true,
-      kind: 'github',
-      repo: 'a/b',
-      events: ['workflow_run.requested'],
-    }, { runner })
-    const events = await source.poll()
+    const source = new GithubEventSource({ runner })
+    const sub = githubSub('a/b', ['workflow_run.requested'])
+    const events = await source.poll(sub)
     expect(events.map(event => event.eventType)).toEqual(['github.workflow_run.requested'])
   })
 
@@ -331,13 +309,9 @@ describe('GitHub 事件来源 · Action 事件类型', () => {
         }),
       },
     })
-    const source = new GithubEventSource('github-1', {
-      enabled: true,
-      kind: 'github',
-      repo: 'a/b',
-      events: ['workflow_run.completed'],
-    }, { runner })
-    const events = await source.poll()
+    const source = new GithubEventSource({ runner })
+    const sub = githubSub('a/b', ['workflow_run.completed'])
+    const events = await source.poll(sub)
     expect(events.map(event => event.eventType)).toEqual(['github.workflow_run.completed', 'github.workflow_run.completed'])
   })
 })
@@ -356,20 +330,16 @@ describe('GitHub 事件来源 · 多页游标', () => {
       'pr view': { code: 0, stdout: JSON.stringify({ title: 'x', body: '' }) },
     })
     // 已经有基线（水位 0），这轮是增量拉取。
-    const cursor = new Map<string, string>([['github:github-1:a/b:v2', '0']])
-    const source = new GithubEventSource('github-1', {
-      enabled: true,
-      kind: 'github',
-      repo: 'a/b',
-      events: ['pull_request.opened'],
-    }, {
+    const cursor = new Map<string, string>([['github:auto_test:a/b:v2', '0']])
+    const source = new GithubEventSource({
       runner,
       cursor: {
         get: key => cursor.get(key) ?? null,
         set: (key, value) => { cursor.set(key, value) },
       },
     })
-    const events = await source.poll()
+    const sub = githubSub('a/b', ['pull_request.opened'])
+    const events = await source.poll(sub)
     expect(events.map(event => event.externalId)).toEqual([
       'github:pull_request:a/b#111:20254670660',
       'github:pull_request:a/b#112:20254670000',
@@ -386,19 +356,14 @@ describe('GitHub 事件来源 · 最近 3 天窗口', () => {
       'repos/a/b/events?per_page=100&page=1': { code: 0, stdout: pageJson([old, edge, recent]) },
       'pr view': { code: 0, stdout: JSON.stringify({ title: '实现事件总线', body: '' }) },
     })
-    const cursor = new Map<string, string>([['github:github-1:a/b:v2', '0']])
+    const cursor = new Map<string, string>([['github:auto_test:a/b:v2', '0']])
     const logs: Array<{ message: string; extra?: Record<string, unknown> }> = []
     const logger: Logger = {
       info: (message, extra) => { logs.push({ message, extra }) },
       warn: () => {},
       error: () => {},
     }
-    const source = new GithubEventSource('github-1', {
-      enabled: true,
-      kind: 'github',
-      repo: 'a/b',
-      events: ['pull_request.opened'],
-    }, {
+    const source = new GithubEventSource({
       runner,
       logger,
       cursor: {
@@ -406,7 +371,8 @@ describe('GitHub 事件来源 · 最近 3 天窗口', () => {
         set: (key, value) => { cursor.set(key, value) },
       },
     })
-    const events = await source.poll()
+    const sub = githubSub('a/b', ['pull_request.opened'])
+    const events = await source.poll(sub)
     expect(events.map(event => event.externalId)).toEqual([
       'github:pull_request:a/b#121:20200000001',
       'github:pull_request:a/b#122:20200000002',
@@ -414,7 +380,7 @@ describe('GitHub 事件来源 · 最近 3 天窗口', () => {
     // 窗口外的 PR 不查详情，避免恢复订阅时对陈年 PR 批量调 gh。
     expect(calls.filter(argv => argv[0] === 'pr')).toHaveLength(2)
     // 游标记「见过的最新 id」，时间窗口只决定要不要入队。
-    expect(cursor.get('github:github-1:a/b:v2')).toBe('20299999999')
+    expect(cursor.get('github:auto_test:a/b:v2')).toBe('20299999999')
     expect(logs.find(log => log.message === 'event:github-window-skipped')?.extra).toMatchObject({
       skipped: 1,
       since: '2026-11-13T12:00:00.000Z',
@@ -433,13 +399,9 @@ describe('GitHub 事件来源 · 最近 3 天窗口', () => {
         }),
       },
     })
-    const source = new GithubEventSource('github-1', {
-      enabled: true,
-      kind: 'github',
-      repo: 'a/b',
-      events: ['workflow_run.failure'],
-    }, { runner })
-    const events = await source.poll()
+    const source = new GithubEventSource({ runner })
+    const sub = githubSub('a/b', ['workflow_run.failure'])
+    const events = await source.poll(sub)
     expect(events.map(event => event.externalId)).toEqual(['github:workflow_run:a/b#11:failure'])
   })
 })
@@ -455,21 +417,17 @@ describe('GitHub 事件来源 · 首次订阅建基线', () => {
       'pr view': { code: 0, stdout: JSON.stringify({ title: 'x', body: '' }) },
     })
     const cursor = new Map<string, string>()
-    const source = new GithubEventSource('github-1', {
-      enabled: true,
-      kind: 'github',
-      repo: 'a/b',
-      events: ['pull_request.opened', 'issues.commented'],
-    }, {
+    const source = new GithubEventSource({
       runner,
       cursor: {
         get: key => cursor.get(key) ?? null,
         set: (key, value) => { cursor.set(key, value) },
       },
     })
-    expect(await source.poll()).toEqual([])
+    const sub = githubSub('a/b', ['pull_request.opened', 'issues.commented'])
+    expect(await source.poll(sub)).toEqual([])
     // 水位记到本页最大 id（20192901502），下次只取比它新的。
-    expect(cursor.get('github:github-1:a/b:v2')).toBe('20192901502')
+    expect(cursor.get('github:auto_test:a/b:v2')).toBe('20192901502')
   })
 
   it('基线之后新发生的事件照常入队', async () => {
@@ -478,19 +436,15 @@ describe('GitHub 事件来源 · 首次订阅建基线', () => {
       'pr view': { code: 0, stdout: JSON.stringify({ title: 'x', body: '' }) },
     })
     const cursor = new Map<string, string>()
-    const source = new GithubEventSource('github-1', {
-      enabled: true,
-      kind: 'github',
-      repo: 'a/b',
-      events: ['pull_request.opened', 'issues.commented'],
-    }, {
+    const source = new GithubEventSource({
       runner,
       cursor: {
         get: key => cursor.get(key) ?? null,
         set: (key, value) => { cursor.set(key, value) },
       },
     })
-    await source.poll()
+    const sub = githubSub('a/b', ['pull_request.opened', 'issues.commented'])
+    await source.poll(sub)
     // 游标已经推到 20192901502，下次换一批更新的数据。
     const newer = JSON.stringify([
       {
@@ -505,19 +459,15 @@ describe('GitHub 事件来源 · 首次订阅建基线', () => {
       'repos/a/b/events?per_page=100&page=1': { code: 0, stdout: newer },
       'pr view': { code: 0, stdout: JSON.stringify({ title: '新 PR', body: '' }) },
     })
-    const source2 = new GithubEventSource('github-1', {
-      enabled: true,
-      kind: 'github',
-      repo: 'a/b',
-      events: ['pull_request.opened'],
-    }, {
+    const source2 = new GithubEventSource({
       runner: runner2,
       cursor: {
         get: key => cursor.get(key) ?? null,
         set: (key, value) => { cursor.set(key, value) },
       },
     })
-    const events = await source2.poll()
+    const sub2 = githubSub('a/b', ['pull_request.opened'])
+    const events = await source2.poll(sub2)
     expect(events.map(event => event.externalId)).toEqual(['github:pull_request:a/b#200:20200000001'])
   })
 
@@ -529,20 +479,16 @@ describe('GitHub 事件来源 · 首次订阅建基线', () => {
       'pr view': { code: 0, stdout: JSON.stringify({ title: 'x', body: '' }) },
     })
     const cursor = new Map<string, string>()
-    const source = new GithubEventSource('github-1', {
-      enabled: true,
-      kind: 'github',
-      repo: 'a/b',
-      events: ['pull_request.opened'],
-    }, {
+    const source = new GithubEventSource({
       runner,
       cursor: {
         get: key => cursor.get(key) ?? null,
         set: (key, value) => { cursor.set(key, value) },
       },
     })
-    expect(await source.poll()).toEqual([])
-    expect(cursor.has('github:github-1:a/b:v2')).toBe(false)
+    const sub = githubSub('a/b', ['pull_request.opened'])
+    expect(await source.poll(sub)).toEqual([])
+    expect(cursor.has('github:auto_test:a/b:v2')).toBe(false)
   })
 
   it('两个订阅同一仓库时游标互不影响', async () => {
@@ -558,12 +504,13 @@ describe('GitHub 事件来源 · 首次订阅建基线', () => {
         set: (key: string, value: string) => { cursor.set(key, value) },
       },
     }
-    const config = { enabled: true, kind: 'github' as const, repo: 'a/b', events: ['pull_request.opened'] }
-    await new GithubEventSource('github-1', config, deps).poll()
-    await new GithubEventSource('github-2', config, deps).poll()
+    // 两个任务订阅同一个仓库，但订阅 id 不同：游标各走各的，互不干扰。
+    const sourceA = new GithubEventSource(deps)
+    const sourceB = new GithubEventSource(deps)
+    await sourceA.poll(githubSub('a/b', ['pull_request.opened']))
+    await sourceB.poll(githubSub('a/b', ['pull_request.opened']))
     // 两个订阅各有各的水位；这个订阅只收 PR 事件，水位就停在 PR 的 id 上。
-    expect(cursor.get('github:github-1:a/b:v2')).toBe('20192883122')
-    expect(cursor.get('github:github-2:a/b:v2')).toBe('20192883122')
+    expect(cursor.get('github:auto_test:a/b:v2')).toBe('20192883122')
   })
 })
 
@@ -592,21 +539,17 @@ describe('GitHub 事件来源 · 游标不跨 id 空间', () => {
       'pr view': { code: 0, stdout: JSON.stringify({ title: 'PR 112', body: '' }) },
     })
     const cursor = new Map<string, string>()
-    const source = new GithubEventSource('github-1', {
-      enabled: true,
-      kind: 'github',
-      repo: 'a/b',
-      events: ['pull_request.opened'],
-    }, {
+    const source = new GithubEventSource({
       runner,
       cursor: {
         get: key => cursor.get(key) ?? null,
         set: (key, value) => { cursor.set(key, value) },
       },
     })
-    await source.poll()
+    const sub = githubSub('a/b', ['pull_request.opened'])
+    await source.poll(sub)
     // 游标只按能入队的 PR 事件推进，不能被 PushEvent 的 id 带偏。
-    expect(cursor.get('github:github-1:a/b:v2')).toBe('20383717095')
+    expect(cursor.get('github:auto_test:a/b:v2')).toBe('20383717095')
   })
 
   it('仓库级事件在场时，PR 事件仍能入队', async () => {
@@ -619,20 +562,16 @@ describe('GitHub 事件来源 · 游标不跨 id 空间', () => {
       'pr view': { code: 0, stdout: JSON.stringify({ title: 'PR 112', body: '' }) },
     })
     // 游标是上一次 PR 事件的 id，比本轮 PR 事件小。
-    const cursor = new Map<string, string>([['github:github-1:a/b:v2', '20383739442']])
-    const source = new GithubEventSource('github-1', {
-      enabled: true,
-      kind: 'github',
-      repo: 'a/b',
-      events: ['pull_request.opened'],
-    }, {
+    const cursor = new Map<string, string>([['github:auto_test:a/b:v2', '20383739442']])
+    const source = new GithubEventSource({
       runner,
       cursor: {
         get: key => cursor.get(key) ?? null,
         set: (key, value) => { cursor.set(key, value) },
       },
     })
-    const events = await source.poll()
+    const sub = githubSub('a/b', ['pull_request.opened'])
+    const events = await source.poll(sub)
     expect(events.map(event => event.externalId)).toEqual([`github:pull_request:a/b#112:${prId}`])
   })
 
@@ -648,20 +587,16 @@ describe('GitHub 事件来源 · 游标不跨 id 空间', () => {
       'pr view': { code: 0, stdout: JSON.stringify({ title: 'PR 112', body: '' }) },
     })
     const cursor = new Map<string, string>()
-    const source = new GithubEventSource('github-1', {
-      enabled: true,
-      kind: 'github',
-      repo: 'a/b',
-      events: ['pull_request.opened'],
-    }, {
+    const source = new GithubEventSource({
       runner,
       cursor: {
         get: key => cursor.get(key) ?? null,
         set: (key, value) => { cursor.set(key, value) },
       },
     })
-    await source.poll()
+    const sub = githubSub('a/b', ['pull_request.opened'])
+    await source.poll(sub)
     // 未订阅的 Issue 事件不进队列，也不该把游标推高。
-    expect(cursor.get('github:github-1:a/b:v2')).toBe('20383717095')
+    expect(cursor.get('github:auto_test:a/b:v2')).toBe('20383717095')
   })
 })

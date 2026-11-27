@@ -2987,6 +2987,15 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
   gap: 12px;
   padding: 0 var(--card-pad-x);
 }
+/* 目录卡要列事件类型清单，比普通来源卡宽：占两列。 */
+.source-cards .catalog-card {
+  grid-column: span 2;
+}
+@media (max-width: 900px) {
+  .source-cards .catalog-card {
+    grid-column: span 1;
+  }
+}
 .source-cards-empty {
   display: flex;
   align-items: center;
@@ -3239,38 +3248,451 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
   justify-content: flex-start;
 }
 
-/* 脚本自动化的脚本状态：一眼看出「能不能执行」。 */
-.automation-script-state {
-  margin: 0;
-  padding: 6px 8px;
-  border-radius: 6px;
-  background: var(--raised);
-  font-size: 11.5px;
-  line-height: 1.5;
-  color: var(--muted);
-}
-
-/* 对话式草稿：与正式任务分开，强调「确认后才落库」。 */
-.automation-drafts {
+/* ---------------------------------------------------------------------------   事件源目录卡：只读展示可订阅的事件类型
+   --------------------------------------------------------------------------- */
+.catalog-card .catalog-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  margin-bottom: 22px;
+  margin-top: 10px;
 }
-.automation-drafts > header {
-  padding: 0 var(--card-pad-x);
+.catalog-group {
+  font-size: 11px;
+  color: var(--faint);
+  padding: 10px 0 2px;
+  border-top: 1px solid var(--rule);
+  margin-top: 4px;
 }
-.automation-drafts > header h2 {
+.catalog-group:first-child {
+  border-top: 0;
+  margin-top: 0;
+  padding-top: 0;
+}
+.catalog-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--rule);
+  font-size: 12.5px;
+}
+.catalog-item:last-child {
+  border-bottom: 0;
+}
+.catalog-item .mono {
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.catalog-item .catalog-label {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+}
+.catalog-item .count {
+  margin-left: auto;
+  color: var(--faint);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+/* 目录卡并排两张时列很窄：类型 id 与标签各占一行，不挤成一团。 */
+.catalog-card .catalog-item {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+.catalog-card .catalog-item .mono {
+  flex: 0 0 auto;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.catalog-card .catalog-item .tag {
+  flex: 0 0 auto;
+}
+.catalog-card .catalog-item .count {
+  flex: 0 0 auto;
+  margin-left: 0;
+}
+.catalog-card .catalog-item .count.link {
+  margin-left: auto;
+}
+.count.link {
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  color: var(--accent);
+  font: inherit;
+}
+.count.link:hover {
+  text-decoration: underline;
+}
+
+/* 事件类型可用性标签 */
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  line-height: 1.6;
+  padding: 1px 7px;
+  border-radius: var(--radius-chip);
+  background: var(--raised);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.tag.ok { background: var(--pill-positive-bg); color: var(--pill-positive-ink); }
+.tag.warn { background: var(--pill-warning-bg); color: var(--pill-warning-ink); }
+.tag.mode-auto { background: var(--pill-positive-bg); color: var(--pill-positive-ink); }
+.tag.mode-review { background: var(--pill-warning-bg); color: var(--pill-warning-ink); }
+.tag.mode-notify { background: var(--info-soft); color: var(--info); }
+.tag.source { background: var(--raised); color: var(--text); }
+.tag i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* ---------------------------------------------------------------------------
+   自动化页：左边任务栏 + 右边大 Chat 会话。
+   主区就是会话窗口，输入框浮在内容之上（像 ChatGPT Codex 那样）。
+   --------------------------------------------------------------------------- */
+.automation-workspace {
+  display: grid;
+  grid-template-columns: 288px minmax(0, 1fr);
+  gap: 16px;
+  align-items: stretch;
+  /* 会话窗口自己占满可视高度：输入框永远贴在底部。 */
+  height: calc(100vh - 240px);
+  min-height: 460px;
+}
+
+/* 左边：所有自动化任务的精简卡片，竖着排。 */
+.automation-rail {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  overflow: hidden;
+}
+.automation-rail-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--rule);
+}
+.automation-rail-head h3 {
+  margin: 0;
   font-size: 13px;
+  font-weight: 600;
+}
+.automation-rail-head span {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.automation-rail-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px;
+}
+.automation-rail-empty {
+  padding: 14px;
+}
+.automation-rail-empty p {
+  margin: 0 0 4px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text);
+}
+.automation-rail-empty .muted { color: var(--muted); font-size: 12px; }
+
+/* 一条任务：一行标题 + 一行摘要；操作按钮 hover 才显形。 */
+.rail-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: var(--radius-control);
+}
+.rail-item:hover { background: var(--raised); }
+.rail-item.active { background: var(--active); }
+.rail-item.off .rail-item-main { opacity: 0.62; }
+.rail-item-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 9px 10px;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.rail-item-main:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.rail-item-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  /* 给浮在右端的操作按钮留出位置：标题先省略，不要被按钮压住。 */
+  padding-right: 0;
+  transition: padding-right 0.12s ease;
+}
+.rail-item:hover .rail-item-head,
+.rail-item:focus-within .rail-item-head { padding-right: 100px; }
+.rail-item-head strong {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rail-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--control);
+}
+.rail-dot.on { background: var(--positive); }
+.rail-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.rail-item-trigger {
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rail-item-actions {
+  position: absolute;
+  right: 6px;
+  top: 7px;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  /* 操作按钮浮在标题上：平时不占位，hover 时盖住标题右端。 */
+  padding-left: 8px;
+  border-radius: var(--radius-control);
+  background: linear-gradient(to right, transparent, var(--raised) 8px);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.rail-item:hover .rail-item-actions,
+.rail-item:focus-within .rail-item-actions { opacity: 1; }
+.rail-item.active:hover .rail-item-actions,
+.rail-item.active:focus-within .rail-item-actions {
+  background: linear-gradient(to right, transparent, var(--active) 8px);
+}
+.rail-item-actions .icon-btn {
+  width: 22px;
+  height: 22px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+.rail-item-actions .icon-btn:hover { background: var(--surface); color: var(--text); }
+.rail-item-actions .icon-btn.danger:hover { background: var(--pill-negative-bg); color: var(--negative); }
+.rail-item-actions .icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* 右边：会话窗口 */
+.automation-chat {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  overflow: hidden;
+}
+.automation-chat-head {
+  padding: 14px 20px 12px;
+  border-bottom: 1px solid var(--rule);
+}
+.automation-chat-head h2 {
+  margin: 0;
+  font-size: 14px;
   font-weight: 600;
   letter-spacing: -0.01em;
 }
-.automation-drafts > header p {
-  margin-top: 3px;
+.automation-chat-head p {
+  margin: 3px 0 0;
   font-size: 12px;
   color: var(--muted);
 }
-.automation-draft-card {
-  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
-  background: color-mix(in srgb, var(--warn-soft) 32%, var(--surface));
+.conv {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.conv-stream {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  /* 底部给浮层输入框让位：最后一条消息不被压住。 */
+  padding: 20px 20px 96px;
+  overflow-y: auto;
+}
+.conv-msg {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+}
+.conv-msg.user { flex-direction: row-reverse; }
+.conv-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--raised);
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+.conv-msg.user .conv-avatar {
+  background: var(--accent-soft);
+  color: var(--accent-deep);
+  border-color: transparent;
+}
+.conv-bubble {
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 12px;
+  font-size: 13px;
+  line-height: 1.6;
+  max-width: 62ch;
+}
+.conv-msg.user .conv-bubble {
+  background: var(--accent-soft);
+  border-color: transparent;
+}
+.conv-step {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--faint);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+/* 输入框：浮在会话内容之上，贴着窗口底部（浮层才给阴影）。 */
+.conv-compose {
+  position: absolute;
+  left: 20px;
+  right: 20px;
+  bottom: 16px;
+  z-index: 2;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+  padding: 8px 9px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.conv-compose input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: none;
+  outline: none;
+  font-size: 13px;
+  color: var(--text);
+}
+.conv-compose input::placeholder { color: var(--faint); }
+.conv-loading { margin: 0; }
+
+/* 会话里的预览卡片：卡片自己带边框，外层气泡不再重复画框 */
+.conv-bubble-plain {
+  background: none;
+  border: 0;
+  padding: 0;
+  max-width: 100%;
+}
+.preview-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  overflow: hidden;
+  width: 100%;
+}
+.preview-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--raised);
+}
+.preview-head strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+.preview-head span {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.preview-body { padding: 2px 14px 8px; }
+.preview-row {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--rule);
+  font-size: 12.5px;
+}
+.preview-row:last-child { border-bottom: 0; }
+.preview-row > dt { color: var(--muted); }
+.preview-row > dd { margin: 0; min-width: 0; }
+.preview-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--rule);
+  background: var(--raised);
+}
+.preview-foot .muted { margin-right: auto; font-size: 11.5px; }
+
+/* 自动化页：窄屏时任务栏收到会话上方，横向排成一条。 */
+@media (max-width: 940px) {
+  .automation-workspace {
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+    min-height: 0;
+  }
+  .automation-rail-body {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 8px;
+  }
+  .automation-rail-item { flex: 0 0 232px; }
+  .automation-chat { height: calc(100vh - 320px); min-height: 420px; }
 }

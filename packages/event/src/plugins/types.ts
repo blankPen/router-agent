@@ -1,7 +1,7 @@
 import type { CommandRunner } from '@router-agent/infra/process.js'
 import type { Logger } from '@router-agent/infra/logger.js'
 import type { PluginEntry, PluginModuleLoader } from '@router-agent/infra/plugin-loader.js'
-import type { EventSource } from '../port.js'
+import type { EventCatalog, EventFetcher } from '../port.js'
 
 export type EventPluginEntry = PluginEntry
 export type EventPluginModuleLoader = PluginModuleLoader
@@ -38,7 +38,17 @@ export interface EventPlugin {
   kind: 'event'
   meta?: EventPluginMeta
   options?: { fields: EventOptionField[] }
-  create(ctx: EventPluginContext): EventSource | null | Promise<EventSource | null>
-  /** 一个包可以注册多个实例；不实现时等价于 create()。 */
-  createAll?(ctx: EventPluginContext): Array<EventSource | null> | Promise<Array<EventSource | null>>
+  /**
+   * 插件提供的可订阅事件目录。
+   *
+   * 这是插件**唯一必须实现**的方法：它只声明「有什么事件可订阅」，
+   * 不拉取、不判定、不派工。
+   */
+  catalog?(ctx: EventPluginContext): EventCatalog | null | Promise<EventCatalog | null>
+  /**
+   * 插件自带的拉取实现（可选）。
+   *
+   * 不实现就用宿主的通用 watcher（轮询 + 去重 + 窗口裁剪）。
+   */
+  fetch?(ctx: EventPluginContext): EventFetcher | null | Promise<EventFetcher | null>
 }

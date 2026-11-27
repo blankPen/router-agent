@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -83,7 +83,60 @@ describe('ra migrate sessions', () => {
     const dir = home()
     const output = io(dir)
     expect(await runCli(['migrate', 'unknown', '--home', dir], output)).toBe(2)
-    expect(output.err.join('\n')).toContain('ra migrate <sessions|threads>')
+    expect(output.err.join('\n')).toContain('ra migrate <sessions|threads|event-rules>')
+  })
+})
+
+describe('ra migrate event-rules', () => {
+  function seedRules(dir: string): void {
+    writeFileSync(join(dir, 'config.yaml'), [
+      'projects:',
+      '  - name: router-agent',
+      '    repo: /Users/me/router-agent',
+      'events:',
+      '  rules:',
+      '    - id: rule-ci',
+      '      eventType: github.workflow_run.failure',
+      '      intent: CI 失败就修',
+      '      workflowPrompt: 分析失败步骤并修复。',
+      '      questions:',
+      '        autorun:',
+      '          criteria:',
+      '            auto: 可以自动执行。',
+      '        project:',
+      '          criteria:',
+      '            router-agent: 本项目',
+      '',
+    ].join('\n'), 'utf8')
+  }
+
+  it('dry-run 只报告，不写盘', async () => {
+    const dir = home()
+    seedRules(dir)
+    const output = io(dir)
+    expect(await runCli(['migrate', 'event-rules', '--home', dir], output)).toBe(0)
+    expect(output.out.join('\n')).toContain('auto_ci')
+    expect(readFileSync(join(dir, 'config.yaml'), 'utf8')).not.toContain('auto_ci')
+  })
+
+  it('apply 把规则迁成任务，并留下 events.rules 以便回滚', async () => {
+    const dir = home()
+    seedRules(dir)
+    const output = io(dir)
+    expect(await runCli(['migrate', 'event-rules', '--apply', '--yes', '--home', dir], output)).toBe(0)
+    const written = readFileSync(join(dir, 'config.yaml'), 'utf8')
+    expect(written).toContain('auto_ci')
+    expect(written).toContain('rules:')
+  })
+
+  it('重复 apply 不会重复建任务', async () => {
+    const dir = home()
+    seedRules(dir)
+    const output = io(dir)
+    await runCli(['migrate', 'event-rules', '--apply', '--yes', '--home', dir], output)
+    await runCli(['migrate', 'event-rules', '--apply', '--yes', '--home', dir], output)
+    const written = readFileSync(join(dir, 'config.yaml'), 'utf8')
+    expect(written.match(/id: auto_ci/g)).toHaveLength(1)
   })
 })
 

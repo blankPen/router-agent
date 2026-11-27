@@ -148,3 +148,87 @@ export async function importLocalProvider(id: string): Promise<LocalProviderImpo
 export async function saveConfigPatch(patch: Record<string, unknown>): Promise<ConfigSaveResult> {
   return sendJson<ConfigSaveResult>('/api/config', 'PUT', { patch })
 }
+
+/**
+ * 订阅一条 SSE 流。
+ *
+ * 用 `fetch` + `ReadableStream` 而不是 `EventSource`：EventSource 只能 GET，
+ * 而会话这一轮要带用户的原话（POST）。
+ */
+export interface EventStreamHandlers {
+  /** 收到一个事件。`event` 是事件名（turn / done / error）。 */
+  onEvent: (event: string, data: unknown) => void
+  /** 流结束（正常或异常都会调）。 */
+  onClose?: () => void
+  /** 读流出错。 */
+  onError?: (error: unknown) => void
+}
+
+export async function openEventStream(
+  path: string,
+  body: unknown,
+  handlers: EventStreamHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  try {
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...tokenHeaders() },
+      body: JSON.stringify(body),
+      ...(signal ? { signal } : {}),
+    })
+    if (!res.ok || !res.body) {
+      const data = await res.json().catch(() => null)
+      throw apiError(res.status, data)
+    }
+    await readEventStream(res.body, handlers)
+  } catch (error) {
+    // 主动中断不算失败：面板关闭会话面板时会 abort。
+    if (signal?.aborted) {
+      handlers.onClose?.()
+      return
+    }
+    handlers.onError?.(error)
+    handlers.onClose?.()
+    return
+  }
+  handlers.onClose?.()
+}
+
+/** 逐段解析 SSE：`event:` / `data:` 两行一组，空行分隔。 */
+export async function readEventStream(body: ReadableStream<Uint8Array>, handlers: EventStreamHandlers): Promise<void> {
+  const reader = body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let index = buffer.indexOf('\n\n')
+    while (index >= 0) {
+      const chunk = buffer.slice(0, index)
+      buffer = buffer.slice(index + 2)
+      const parsed = parseSseChunk(chunk)
+      if (parsed) handlers.onEvent(parsed.event, parsed.data)
+      index = buffer.indexOf('\n\n')
+    }
+  }
+}
+
+/** 解析一段 SSE；心跳（`: ping`）与注释行返回 null。 */
+export function parseSseChunk(chunk: string): { event: string; data: unknown } | null {
+  let event = 'message'
+  const dataLines: string[] = []
+  for (const line of chunk.split('\n')) {
+    if (!line || line.startsWith(':')) continue
+    if (line.startsWith('event:')) event = line.slice(6).trim()
+    else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
+  }
+  if (dataLines.length === 0) return null
+  const raw = dataLines.join('\n')
+  try {
+    return { event, data: JSON.parse(raw) }
+  } catch {
+    return { event, data: raw }
+  }
+}

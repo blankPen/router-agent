@@ -17,12 +17,17 @@ Router 在 `server.port`（默认 3083）上提供本地 HTTP API，供 Web 面�
 | POST | `/api/reports` | Worker 上报状态与回复（`ra report` 的入口） |
 | GET / PUT | `/api/policy` | 读写策略（保存后落盘） |
 | GET / PUT | `/api/config` | 配置面板：读安全快照 / 按点路径提交补丁（白名单校验 + 落盘）；快照里的 `hotPaths` 说明哪些路径保存后立即生效 |
-| GET | `/api/automations` | 自动化页：任务（含调度状态）、执行记录与待确认草稿 |
+| GET | `/api/automations` | 自动化页：任务（含调度状态）与执行记录 |
 | GET | `/api/automations/runs?automationId=` | 只读执行记录，可按任务过滤 |
 | GET | `/api/automations/runs/:id` | 单条执行记录；面板轮询它看执行进度与阶段 |
 | POST | `/api/automations/trigger` | 手动触发一次（`{ id }`）；**立即返回** `running` 记录，执行在后台继续 |
-| POST | `/api/automations/draft` | 从自然语言生成草稿预览（`{ text }`）；不落库 |
-| POST | `/api/automations/drafts/dismiss` | 忽略一条待确认草稿（`{ id }`） |
+| POST | `/api/automations/conversations` | 建一条会话（`{ source, requester, chatId?, threadId? }`），返回 `conversation` |
+| GET | `/api/automations/conversations` | 列出全部会话 |
+| GET | `/api/automations/conversations/:id/messages?after=` | 取会话消息流；`after` 之后的不返回（断线重连补齐用），每条带单调 `seq` |
+| POST | `/api/automations/conversations/:id/stream` | 发一句话（`{ text }`），**响应为 SSE 流**：`message` 增量 → `turn` 结论 → `done`；出错为 `error` |
+| POST | `/api/automations/conversations/:id/confirm` | 确认落库：把预览卡变成正式任务（已有任务则更新它） |
+| GET | `/api/events` | 收件箱：事件列表、事件源、**事件目录**、订阅清单、命中统计与状态计数 |
+| GET | `/api/events/catalogs` | 只读事件目录：每个来源可订阅的事件类型、可用性标注与连接参数 |
 | POST | `/api/automations/script` | 为脚本自动化生成脚本正文（`{ id }`）；生成失败返回 502，`message` 里带真实失败原因（如 `chat:empty-response:max_tokens`） |
 | POST | `/api/automations/tools` | 自动化内置工具调用（`{ automationId, name, args }`）；项目范围与限流在服务层强制 |
 | GET | `/api/channels` | 已注册的消息通道（`id` / `kind` / `capabilities`），供配置页的「渠道配置」列出渠道实例 |

@@ -221,8 +221,11 @@ export function validateSchedule(schedule: AutomationSchedule): string | null {
 
 /**
  * 下一次触发时间；计划非法时返回 null。
+ *
+ * 计划为空（事件触发的任务）时返回 null —— 它不按时间触发。
  */
-export function nextRunAt(schedule: AutomationSchedule, from: Date): string | null {
+export function nextRunAt(schedule: AutomationSchedule | undefined, from: Date): string | null {
+  if (!schedule) return null
   const spec = scheduleSpec(schedule.kind)
   if (!spec || validateSchedule(schedule)) return null
   const next = spec.next(schedule, from)

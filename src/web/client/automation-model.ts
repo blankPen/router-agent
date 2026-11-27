@@ -16,6 +16,27 @@ export interface AutomationSchedule {
   cron?: string
 }
 
+/** 事件处理方式。 */
+export type EventHandlingMode = 'auto' | 'review' | 'notify'
+
+/** 事件订阅的过滤条件。 */
+export interface EventFilter {
+  keywords?: string[]
+  semantic?: string
+}
+
+/** 任务触发器：事件订阅或定时计划。 */
+export type AutomationTrigger =
+  | {
+    kind: 'event'
+    source: string
+    types: string[]
+    params?: Record<string, string>
+    filter?: EventFilter
+    mode: EventHandlingMode
+  }
+  | { kind: 'schedule'; schedule: AutomationSchedule }
+
 /** 面板上的自动化任务。 */
 export interface AutomationTask {
   id: string
@@ -24,7 +45,14 @@ export interface AutomationTask {
   type: AutomationType
   prompt: string
   script?: string
-  schedule: AutomationSchedule
+  /** 触发方式：事件订阅或定时计划。 */
+  trigger: AutomationTrigger
+  /** 处理方式（skill 闭集内的 id）。 */
+  skill?: string
+  /** 通知人；事件开工时先私聊通知这个人。 */
+  notifyTo?: string
+  /** 绑定的会话 id；「恢复会话」用它找回原会话。 */
+  conversationId?: string
   runtimeId: string
   project: string
   repo: string
@@ -75,7 +103,8 @@ export interface AutomationDraft {
   type: AutomationType
   prompt: string
   script: string
-  schedule: AutomationSchedule
+  /** 触发方式：事件订阅或定时计划。 */
+  trigger: AutomationTrigger
   runtimeId: string
   project: string
   repo: string
@@ -92,7 +121,7 @@ export function blankDraft(): AutomationDraft {
     type: 'ai',
     prompt: '',
     script: '',
-    schedule: { kind: 'daily', at: '09:00' },
+    trigger: { kind: 'schedule', schedule: { kind: 'daily', at: '09:00' } },
     runtimeId: '',
     project: '',
     repo: '',
@@ -110,7 +139,7 @@ export function draftOf(task: AutomationTask): AutomationDraft {
     type: task.type,
     prompt: task.prompt,
     script: task.script ?? '',
-    schedule: { ...task.schedule },
+    trigger: task.trigger,
     runtimeId: task.runtimeId,
     project: task.project,
     repo: task.repo,
@@ -141,19 +170,55 @@ export function scheduleText(schedule: AutomationSchedule): string {
   }
 }
 
+/** 定时计划；事件触发的任务没有。 */
+export function scheduleOf(trigger: AutomationTrigger | undefined): AutomationSchedule | undefined {
+  return trigger?.kind === 'schedule' ? trigger.schedule : undefined
+}
+
+/**
+ * 触发方式的短摘要；任务栏那种一行宽的地方用这句。
+ *
+ * 只留「来源 · 事件类型」或「定时 · 每天 09:00」——
+ * 完整说明在任务栏一行里放不下。
+ */
+export function triggerSummary(trigger: AutomationTrigger | undefined): string {
+  if (!trigger) return '未知触发方式'
+  if (trigger.kind === 'schedule') return `定时 · ${scheduleText(trigger.schedule)}`
+  if (trigger.types.length === 0) return trigger.source
+  if (trigger.types.length > 1) return `${trigger.source} · ${trigger.types.length} 类事件`
+  // 类型 id 自带来源前缀（github.issues.opened），摘要里省掉重复的那一段。
+  const type = trigger.types[0] ?? ''
+  const short = type.startsWith(`${trigger.source}.`) ? type.slice(trigger.source.length + 1) : type
+  return `${trigger.source} · ${short}`
+}
+
+/** 处理模式的中文名。 */
+export const MODE_LABEL: Record<EventHandlingMode, string> = {
+  auto: '自动执行',
+  review: '待人审',
+  notify: '仅提醒',
+}
+
+/** 处理模式的语义 class；面板用既有语义色，不新增色板。 */
+export function modeClass(mode: EventHandlingMode): string {
+  return `tag mode-${mode}`
+}
+
 /** 计划参数的校验；返回错误信息表示不合法。 */
 export function validateDraft(draft: AutomationDraft): string | null {
   if (!draft.name.trim()) return '名称不能为空'
   if (!draft.prompt.trim()) return draft.type === 'script' ? '脚本描述不能为空' : '提示词不能为空'
   if (!draft.project.trim()) return '请选择目标项目'
   if (!draft.repo.trim()) return '目标项目缺少仓库路径'
-  if (draft.schedule.kind === 'daily' && !isClockTime(draft.schedule.at ?? '')) return '每天的执行时刻应为 HH:mm'
-  if (draft.schedule.kind === 'weekly') {
+  const schedule = scheduleOf(draft.trigger)
+  if (!schedule) return '触发方式不合法'
+  if (schedule.kind === 'daily' && !isClockTime(schedule.at ?? '')) return '每天的执行时刻应为 HH:mm'
+  if (schedule.kind === 'weekly') {
     // 面板展示的是默认值（周一 09:00），校验也必须按同一套默认值，避免「看着合法却报错」。
-    if (!isClockTime(draft.schedule.time ?? '09:00')) return '每周的执行时刻应为 HH:mm'
-    if (draft.schedule.weekday !== undefined && (draft.schedule.weekday < 0 || draft.schedule.weekday > 6)) return '请选择星期几'
+    if (!isClockTime(schedule.time ?? '09:00')) return '每周的执行时刻应为 HH:mm'
+    if (schedule.weekday !== undefined && (schedule.weekday < 0 || schedule.weekday > 6)) return '请选择星期几'
   }
-  if (draft.schedule.kind === 'cron' && !draft.schedule.cron?.trim()) return 'Cron 表达式不能为空'
+  if (schedule.kind === 'cron' && !schedule.cron?.trim()) return 'Cron 表达式不能为空'
   return null
 }
 
@@ -232,4 +297,124 @@ export const SCHEDULE_KIND_LABEL: Record<AutomationSchedule['kind'], string> = {
 /** 星期下拉框的选项。 */
 export function weekdayOptions(): Array<{ value: number; label: string }> {
   return WEEKDAYS.map((label, value) => ({ value, label }))
+}
+
+/**
+ * 停用 / 启用一条任务后的任务列表。
+ *
+ * 面板的「停用」按钮走这里：停用后任务还在列表里（用户还能再启用），
+ * 但事件订阅随之消失 —— 订阅由任务推导，任务停了就没有订阅（§12.6 V27）。
+ */
+export function toggledTasks(tasks: AutomationTask[], taskId: string): AutomationTask[] {
+  return tasks.map(task => (task.id === taskId ? { ...task, enabled: !task.enabled } : task))
+}
+
+/**
+ * 删除一条任务后的任务列表。
+ *
+ * 任务删了，订阅随之消失，不再有事件进来（§12.6 V28）。
+ */
+export function removedTasks(tasks: AutomationTask[], taskId: string): AutomationTask[] {
+  return tasks.filter(task => task.id !== taskId)
+}
+
+/** 任务卡上「恢复会话」按钮的目标会话 id；没有绑定会话就返回空串。 */
+export function resumeTargetOf(task: AutomationTask): string {
+  return task.conversationId ?? ''
+}
+
+/** 会话记录（与服务端 `AutomationConversation` 同形的子集）。 */
+export interface ConversationRecord {
+  id: string
+  taskId?: string
+  source: string
+  requester: string
+  text: string
+  step: string
+  status: 'active' | 'confirmed' | 'abandoned'
+  createdAt: string
+  updatedAt: string
+}
+
+/**
+ * 任务该恢复到哪条会话。
+ *
+ * 任务自己存着 `conversationId` 就用它；没有的话（早于会话化的任务）
+ * 反查会话列表里 `taskId` 指向它的那条 —— 一个任务只对应一条会话。
+ */
+export function conversationIdOf(
+  task: AutomationTask,
+  conversations: ConversationRecord[],
+): string | undefined {
+  if (task.conversationId) return task.conversationId
+  return conversations.find(item => item.taskId === task.id)?.id
+}
+
+/** 会话消息（与服务端同形的子集）。 */
+export interface ConversationMessage {
+  seq: number
+  role: 'user' | 'assistant'
+  text: string
+  step?: string
+  /** 预览卡数据；与服务端的 `AutomationPreview` 同形。 */
+  preview?: AutomationPreviewData
+  done?: boolean
+}
+
+/** 预览卡数据（与服务端 `AutomationPreview` 同形）。 */
+export interface AutomationPreviewData {
+  name: string
+  source: string
+  types: string[]
+  params: Record<string, string>
+  keywords: string[]
+  semantic: string
+  mode: string
+  project: string
+  skill: string
+  runtimeId: string
+  prompt: string
+  trigger: string
+}
+
+/**
+ * 合并断线期间补齐的消息。
+ *
+ * 按 seq 去重：已经显示过的消息不重复追加，
+ * 遗漏的按 seq 顺序接在后面 —— 最终文本完整（§12.7 V30）。
+ */
+export function mergeMissedMessages(
+  current: ConversationMessage[],
+  missed: ConversationMessage[],
+): ConversationMessage[] {
+  if (missed.length === 0) return current
+  const known = new Set(current.map(item => item.seq))
+  const fresh = missed
+    .filter(item => !known.has(item.seq))
+    .sort((left, right) => left.seq - right.seq)
+  return fresh.length === 0 ? current : [...current, ...fresh]
+}
+
+/**
+ * 合并助手逐字吐出的片段。
+ *
+ * 增量片段先进消息流，`turn` 事件到了再补上结论与预览卡；
+ * 已经逐字说过的话不再整段重复（§12.7 V29）。
+ */
+export function mergeTurnMessage(
+  current: ConversationMessage[],
+  turn: { message?: string; step?: string; preview?: AutomationPreviewData; done?: boolean },
+  spoken: string,
+): ConversationMessage[] {
+  return [
+    ...current,
+    {
+      seq: current.length + 1,
+      role: 'assistant',
+      text: spoken ? '' : (turn.message ?? ''),
+      ...(turn.step ? { step: turn.step } : {}),
+      ...(turn.preview ? { preview: turn.preview } : {}),
+      ...(turn.done ? { done: true } : {}),
+    },
+  ]
 }

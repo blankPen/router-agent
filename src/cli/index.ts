@@ -1,4 +1,4 @@
-import { appendFileSync, closeSync, mkdirSync, existsSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync, unlinkSync } from 'node:fs'
+import { appendFileSync, closeSync, copyFileSync, mkdirSync, existsSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync, unlinkSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { spawn, spawnSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
@@ -10,13 +10,17 @@ import { Store, type SessionMigrationState } from '../store/db.js'
 import { Engine } from '../core/engine.js'
 import { admitsByScope, effectiveAdmins, scopeOf, shouldAcknowledge } from '#core/policy.js'
 import { logDimensions } from '#core/events.js'
+import type { Automation } from '#core/automation.js'
 import { loadRuntimePlugins, type LoadedRuntimePlugins } from '#runtime/plugins/loader.js'
 import { loadChannelPlugins, type LoadedChannelPlugins } from '#channel/plugins/loader.js'
 import { createEventWiring } from '../events/wiring.js'
+import { subscriptionsOf, type ResolvedSubscription } from '../events/subscriptions.js'
+import { CatalogService } from '../events/catalog.js'
+import { migrateRules, MIGRATION_CREATED_BY, type LegacyEventRule } from '../events/migrate-rules.js'
+import { AutomationSessionService } from '../automation/session.js'
 import { AutomationService, type AutomationServiceDeps } from '../automation/service.js'
 import { EventKickoff } from '../events/kickoff.js'
-import { ruleEventTypes } from '../events/rules.js'
-import { compileEventRule } from '../events/rule-compile.js'
+import { probeSubscriptionParams } from '../events/param-probe.js'
 import { createChatClient } from '#infra/chat.js'
 import { AcpRuntimeAdmin } from '@router-agent/runtime-acp'
 import { readDetectionSnapshot } from '@router-agent/runtime-acp'
@@ -43,6 +47,7 @@ import { runReply, readContentArg, type ReplyOptions } from './reply.js'
 import type { Prompter } from './prompts.js'
 import { realRunner, type CommandRunner } from '#infra/process.js'
 import { errorMessage, withFieldContext } from '#infra/logger.js'
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { resolveImageModelConfig, resolvePiModelConfig, type PiModelConfig } from '../router/model-config.js'
 import { createDecisionAgent, createDecisionEngine, createIntakeEngine } from '../router/engine-factory.js'
 import type { DecisionAudit } from '../router/decision-engine.js'
@@ -302,7 +307,7 @@ function buildProgram(output: CliIo, setCode: (code: number) => void): Command {
     }))
 
   withHome(program.command('migrate [action]')
-    .description('数据迁移：migrate sessions | threads --dry-run | --apply | --verify（人工手动执行）')
+    .description('数据迁移：migrate sessions | threads | event-rules --dry-run | --apply | --verify（人工手动执行）')
     .option('--dry-run', '只读检查，不写库（默认行为）')
     .option('--apply', '执行迁移；默认要求交互确认，非交互环境需 --yes')
     .option('--verify', '迁移后校验')
@@ -512,9 +517,10 @@ async function cmdAutomation(
           output.stdout('暂无自动化任务')
           return 0
         }
-        output.stdout('ID\t类型\t启用\t计划\t项目\t名称')
+        output.stdout('ID\t类型\t启用\t触发\t项目\t名称')
         for (const task of tasks) {
-          output.stdout(`${task.id}\t${task.type}\t${task.enabled ? '是' : '否'}\t${task.schedule.kind}\t${task.project}\t${task.name}`)
+          const trigger = task.trigger.kind === 'schedule' ? `定时:${task.trigger.schedule.kind}` : `事件:${task.trigger.source}`
+          output.stdout(`${task.id}\t${task.type}\t${task.enabled ? '是' : '否'}\t${trigger}\t${task.project}\t${task.name}`)
         }
         return 0
       }
@@ -749,8 +755,9 @@ async function cmdMigrate(
   output: CliIo,
 ): Promise<number> {
   if (action === 'threads') return cmdMigrateThreads(home, opts, output)
+  if (action === 'event-rules') return cmdMigrateEventRules(home, opts, output)
   if (action !== 'sessions') {
-    output.stderr('用法：ra migrate <sessions|threads> [--dry-run | --apply | --verify]')
+    output.stderr('用法：ra migrate <sessions|threads|event-rules> [--dry-run | --apply | --verify]')
     return 2
   }
   const store = openStore(home)
@@ -936,6 +943,143 @@ function printSessionMigrationState(state: SessionMigrationState, output: CliIo)
     }
     if (state.anomalies.length > 3) output.stdout('  ...')
   }
+}
+
+/**
+ * 决策规则 → 自动化任务的迁移。
+ *
+ * 规则留在 `events.rules` 里不动（用户确认新任务跑通后再手工清理），
+ * 迁移只往 `automation.tasks` 里追加任务 —— 回滚就是把新增任务删掉。
+ *
+ * 默认只读；`--apply` 才写盘，写前自动备份 `config.yaml`。
+ */
+async function cmdMigrateEventRules(
+  home: string,
+  opts: { dryRun?: boolean; apply?: boolean; verify?: boolean; yes?: boolean },
+  output: CliIo,
+): Promise<number> {
+  ensureHome(home)
+  const configPath = join(home, 'config.yaml')
+  const logger = createLogger(home, output)
+  const config = loadConfig(home, output.env as NodeJS.ProcessEnv)
+  const rules = readLegacyRules(configPath)
+
+  if (rules.length === 0) {
+    output.stdout('配置里没有 events.rules，无需迁移。')
+    return 0
+  }
+
+  const result = migrateRules({
+    rules,
+    projects: config.projects,
+    sources: config.events.sources,
+    existingTasks: config.automation.tasks,
+    now: new Date().toISOString(),
+  })
+
+  const migrated = config.automation.tasks.filter(task => task.createdBy === MIGRATION_CREATED_BY)
+
+  if (opts.verify) {
+    output.stdout(`规则总数：${rules.length}`)
+    output.stdout(`已迁任务：${migrated.length}`)
+    output.stdout(`待人工处理：${result.manual.length}`)
+    const pending = result.tasks.length
+    if (pending === 0) {
+      output.stdout(result.manual.length === 0
+        ? '校验通过：所有规则都已迁移。'
+        : `校验通过：所有可迁移的规则都已迁移；${result.manual.length} 条需人工处理。`)
+      return 0
+    }
+    logger.warn('migration:event-rules-incomplete', { pending, manual: result.manual.length })
+    output.stderr(`仍有 ${pending} 条规则待迁移、${result.manual.length} 条需人工处理。`)
+    return 1
+  }
+
+  output.stdout(`规则总数：${rules.length}`)
+  output.stdout(`可迁移：${result.tasks.length}`)
+  output.stdout(`已迁移（跳过）：${result.skipped.length}`)
+  output.stdout(`待人工处理：${result.manual.length}`)
+  for (const task of result.tasks.slice(0, 10)) {
+    output.stdout(`  + ${task.id} · ${task.name} · ${task.trigger.kind === 'event' ? task.trigger.types.join(',') : ''}`)
+  }
+  if (result.tasks.length > 10) output.stdout(`  ... 另有 ${result.tasks.length - 10} 条`)
+  for (const item of result.manual) {
+    output.stdout(`  ! ${item.id}（${item.eventType}）：${item.reason}`)
+  }
+
+  if (!opts.apply) {
+    output.stdout('未写入任何数据。确认后执行：ra migrate event-rules --apply')
+    return 0
+  }
+  if (!opts.yes) {
+    const confirmed = output.prompts
+      ? await output.prompts.confirm({
+        message: `确认把 ${result.tasks.length} 条决策规则迁成自动化任务？`,
+        default: false,
+      })
+      : false
+    if (!confirmed) {
+      output.stderr('已取消，未写入任何数据。非交互环境请显式传 --yes。')
+      return 1
+    }
+  }
+
+  if (result.tasks.length === 0) {
+    output.stdout('没有需要写入的任务，未改动配置。')
+    return 0
+  }
+
+  // 写前备份：回滚只需换回这份文件。
+  const stamp = new Date().toISOString().replace(/[-:.]/g, '')
+  const backupPath = `${configPath}.bak.${stamp}`
+  copyFileSync(configPath, backupPath)
+
+  appendTasksToYaml(configPath, result.tasks)
+  logger.info('migration:event-rules-migrated', {
+    tasks: result.tasks.length,
+    manual: result.manual.length,
+    backup: backupPath,
+  })
+  output.stdout(`迁移完成：新增 ${result.tasks.length} 条任务。`)
+  output.stdout(`配置备份：${backupPath}`)
+  if (result.manual.length > 0) {
+    output.stdout(`待人工处理 ${result.manual.length} 条（见上方 ! 列表）。`)
+  }
+  output.stdout('规则本身仍留在 events.rules 里；确认新任务跑通后再手工清理。')
+  return 0
+}
+
+/**
+ * 把迁移出的任务追加到 config.yaml 的 `automation.tasks`。
+ *
+ * 直接改 YAML 而不是走 `writeConfig`：后者按新模型重建整份文件，
+ * 会把 `events.rules` 一并抹掉 —— 而规则必须留着（确认新任务跑通后由人手工清理），
+ * 否则回滚就没有退路。
+ */
+function appendTasksToYaml(configPath: string, tasks: Automation[]): void {
+  const doc = (parseYaml(readFileSync(configPath, 'utf8')) as Record<string, any>) ?? {}
+  const automation = (doc.automation ?? {}) as Record<string, any>
+  const existing = Array.isArray(automation.tasks) ? automation.tasks : []
+  automation.tasks = [...existing, ...tasks]
+  doc.automation = automation
+  writeFileSync(configPath, stringifyYaml(doc, { lineWidth: 0 }), 'utf8')
+}
+
+/** 从 config.yaml 里读原始 `events.rules`（新版本已不解析这段，这里直接读原文）。 */
+function readLegacyRules(configPath: string): LegacyEventRule[] {
+  if (!existsSync(configPath)) return []
+  let doc: Record<string, unknown>
+  try {
+    doc = (parseYaml(readFileSync(configPath, 'utf8')) as Record<string, unknown>) ?? {}
+  } catch (error) {
+    throw new Error(`配置解析失败：${errorMessage(error)}`)
+  }
+  const events = doc.events
+  if (!events || typeof events !== 'object' || Array.isArray(events)) return []
+  const rules = (events as Record<string, unknown>).rules
+  if (!Array.isArray(rules)) return []
+  return rules.filter((rule): rule is LegacyEventRule =>
+    Boolean(rule) && typeof rule === 'object' && typeof (rule as LegacyEventRule).id === 'string')
 }
 
 function cmdTickets(home: string, opts: { stage?: string; limit?: string }, output: CliIo): number {
@@ -1807,6 +1951,25 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     },
   })
 
+  // 自动化会话：自然语言建任务，卡片点「恢复会话」据此找回同一条会话。
+  const automationSessions = new AutomationSessionService({
+    store,
+    config: () => config,
+    client: () => (model ? createChatClient(model) : null),
+    catalogs: () => eventCatalogs.list(),
+    // 参数探活：订阅不存在的仓库要在建任务时就拦下来，别让用户等一天没事件（V6）。
+    probeParams: (source, params) => probeSubscriptionParams(source, params, { runner: ghRunner, logger }),
+    clock: () => new Date().toISOString(),
+    logger,
+    // 落库任务：写进配置文件，任务列表随即多一条。
+    saveTask: task => {
+      const tasks = config.automation.tasks.filter(item => item.id !== task.id)
+      tasks.push(task as typeof config.automation.tasks[number])
+      config.automation.tasks = tasks
+      writeConfig(config.home, config)
+    },
+  })
+
   const service = decisionEngine
     ? new RouterService({
       config,
@@ -1830,15 +1993,26 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       onDecisionAudit,
       // 飞书里的自然语言 → 待确认草稿；确认后才写 automation.tasks。
       automationDraft: async trigger => {
-        const result = await automationService.captureDraft(
-          trigger.text,
-          `feishu:${trigger.chatId}`,
-          trigger.actorId,
-        )
-        return result?.reply ?? null
+        // 飞书与面板走同一条会话流程：解析 → 追问 → 预览 → 确认。
+        // 会话落库（automation_conversations），点卡片能找回同一条。
+        const conversation = automationSessions.create({
+          source: `feishu:${trigger.chatId}`,
+          requester: trigger.actorId,
+          chatId: trigger.chatId,
+          ...(trigger.threadId ? { threadId: trigger.threadId } : {}),
+        })
+        const turn = await automationSessions.turn(conversation.id, trigger.text)
+        return [
+          turn.text,
+          `会话 ${conversation.id}：在面板「自动化」里可以继续改这条任务。`,
+        ].join('\n')
       },
     })
     : null
+
+  // 事件目录：内置目录常驻，插件目录随配置刷新。
+  const eventCatalogs = new CatalogService(logger)
+  await eventCatalogs.reload(config)
 
   // 事件总线：多来源事件 → 队列 → 决策 → 分级派发。
   // 事件链路与飞书消息链路只在「派工 → Worker」处汇合：事件判定后合成工单，
@@ -1889,7 +2063,23 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
       // 事件判定前就带上项目范围，自动化的工具查询据此过滤，不会看到无关项目的事件。
       context: { repo: input.repo, project: input.project },
     }
-    return eventWiring.pipeline.ingest(sourceId, { enabled: true, kind: 'feishu' }, envelope).id
+    // 自动化任务自己产出的事件：以该任务为订阅归属。
+    const task = automationService.find(input.automationId)
+    const subscription: ResolvedSubscription = {
+      id: input.automationId,
+      taskName: task?.name ?? input.automationId,
+      source: 'automation',
+      types: [envelope.eventType],
+      params: {},
+      filter: { keywords: [], semantic: '' },
+      mode: 'auto',
+      project: input.project,
+      skill: task?.skill ?? '',
+      prompt: task?.prompt ?? '',
+      notifyTo: task?.notifyTo ?? '',
+      enabled: true,
+    }
+    return eventWiring.pipeline.ingest(sourceId, 'automation', subscription, envelope).id
   }
   automationService.initStates()
   automationService.closeStaleRuns()
@@ -1973,20 +2163,30 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
           fallback: decision.fallback,
         }
       },
-      rules: () => config.events.rules,
       ruleStats: () => eventWiring.manager.countEventRules(),
-      compileRule: input => compileEventRule(input, {
-        client: model ? createChatClient(model) : null,
-        logger,
-      }),
+      catalogs: () => eventCatalogs.views(),
+      subscriptions: () => subscriptionsOf(config).map(subscription => ({
+        id: subscription.id,
+        taskName: subscription.taskName,
+        source: subscription.source,
+        types: subscription.types,
+        mode: subscription.mode,
+        project: subscription.project,
+      })),
       counts: () => eventWiring.manager.countEvents(),
     },
     automation: {
+      conversations: {
+        create: (input: { source: string; requester: string; chatId?: string; threadId?: string }) => automationSessions.create(input),
+        list: () => automationSessions.list(),
+        get: (id: string) => automationSessions.get(id) ?? null,
+        messages: (id: string, after?: number) => automationSessions.messages(id, after),
+        turn: (id: string, text: string, onDelta?: (text: string) => void) => automationSessions.turn(id, text, onDelta),
+        confirm: (id: string) => automationSessions.confirm(id),
+      },
       listTasks: () => automationService.list(),
       listRuns: automationId => automationService.runs(automationId ? { automationId } : {}),
       getRun: id => automationService.run(id),
-      listDrafts: () => automationService.listDrafts(),
-      dismissDraft: id => automationService.dismissDraft(id),
       trigger: id => automationService.trigger(id),
       generateScript: id => automationService.generateScriptFor(id),
       generateScriptWithReason: id => automationService.generateScriptWithReason(id),
@@ -2027,14 +2227,13 @@ async function cmdServe(home: string, output: CliIo): Promise<number> {
     },
     onConfigChange: (updated, changed) => {
       logger.info('config:updated', { changed })
-      const rulesChanged = changed.includes('events.rules')
-      // 规则变化后，把之前只收集不判定的事件重新激活。
-      if (rulesChanged) {
-        const activated = store.activateUndecidedEvents(ruleEventTypes(updated.events.rules), new Date().toISOString())
-        logger.info('event:rule-activated', { ruleId: 'config', activated })
-      }
       if (changed.some(path => path.startsWith('events.'))) {
-        void eventWiring.manager.reloadSources()
+        void eventCatalogs.reload(updated)
+        void eventWiring.manager.reloadSubscriptions()
+      }
+      // 订阅关系在自动化任务里：任务改了要重新装配 watcher。
+      if (changed.some(path => path.startsWith('automation.tasks'))) {
+        void eventWiring.manager.reloadSubscriptions()
       }
     },
   })

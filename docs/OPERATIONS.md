@@ -253,17 +253,13 @@ Router 不做对话，只在必要时说话：
 | `session:transcript-failed` / `session:reset-failed` | Agent Loop | `key` `detail` | 会话转录 / `/new` 重置失败，不影响当轮回复 |
 | `config:created` | Config | `path` | 首次启动写入了默认 `config.yaml` |
 | `config:parse-failed` | Config | `path` `detail` | YAML 解析失败，已降级为默认配置启动 |
-| `config:event-rules-invalid` | Config | `detail` | `events.rules` 校验失败，已忽略该段规则并保留空规则集 |
 | `config:legacy-backend` | Config | `path` | 旧版 `backend` 段已兼容映射到 `runtime` |
 | `config:intake-migrated` | Config | `chats` `enabled` `maxQuestions` | 旧版全局 `intake:` 段已迁移到群级配置（`chats` 是被迁移的群） |
 | `config:invalid-security-override` | Config | `runtime` `keys` | `runtime.options` 试图覆盖安全参数，启动被拒绝 |
 | `config:updated` | CLI | `changed` | 面板保存配置落盘成功并生效 |
 | `policy:updated` | CLI | `version` `acceptMode` | 面板保存后策略版本变化 |
 | `config:patch-rejected` / `config:write-failed` | HTTP API | `errors` / `detail` | 面板保存的配置校验失败或落盘失败 |
-| `config:event-rule-rejected` / `config:event-rule-write-failed` | HTTP API | `errors` / `home` `detail` | 单条规则保存校验失败 / 落盘失败 |
 | `api:config` | HTTP API | `changed` `policyChanged` `restartRequired` `identityEffective` | 配置保存成功、是否需要重启、允许名单是否已即时生效 |
-| `api:event-rule-compiled` | HTTP API | `ruleId` `eventType` | 面板请求规则提炼完成 |
-| `api:event-rules` | HTTP API | `changed` `count` | 规则单条保存 / 删除成功 |
 | `api:listening` | CLI | `port` `host` | HTTP API 已监听 |
 | `api:access-denied` | HTTP API | `method` `path` `remote` `host` | 开放监听后请求没带访问令牌，被 401 拒绝；同一「方法 + 路径 + 来源」只记一次，避免轮询刷屏 |
 | `api:access-token-missing` | HTTP API | `host` | 对外监听却没有访问令牌，服务拒绝启动 |
@@ -289,7 +285,12 @@ Router 不做对话，只在必要时说话：
 | `automation:script-updated-by-agent` / `automation:script-readback-failed` | Automation | `automationId` `runId` `chars` / `workdir` `detail` | agent 执行期间改过脚本（改后正文写回任务定义）/ 读回脚本失败 |
 | `automation:executor-missing` / `automation:schedule-invalid` / `automation:execute-failed` | Automation | `automationId` `runId` `type` / `detail` | 执行器缺失、计划非法或执行抛错 |
 | `automation:tool-invoked` / `automation:tool-rejected` / `automation:tool-failed` | Automation | `automationId` `tool` `error` `detail` | 内置工具调用成功 / 被范围或限流拒绝 / handler 抛错 |
-| `automation:draft-created` / `automation:draft-uncertain` / `automation:draft-unavailable` / `automation:draft-failed` / `automation:draft-dismissed` | Automation | `draftId` `automationId` `source` `detail` | 对话式草稿的创建、回问、降级与忽略 |
+| `automation:session-created` | Automation | `conversationId` `source` | 一条会话建立（面板按钮或飞书消息） |
+| `automation:session-step` | Automation | `conversationId` `step` `missing` | 会话每推进一步；`step` 为 `parse` / `clarify` / `preview`，`missing` 是这一轮缺的项 |
+| `automation:session-rejected` | Automation | `conversationId` `reason` `source` `types` `params` | 模型给出的类型或参数不在闭集内，被拒；`reason` 为 `unknown-type` / `invalid-param` |
+| `automation:parse-failed` | Automation | `detail` | 模型输出不是 JSON 或调用失败，本轮降级 |
+| `automation:task-created` | Automation | `conversationId` `taskId` `source` `types` `mode` | 会话确认后新建了自动化任务 |
+| `automation:task-updated` | Automation | `conversationId` `taskId` `changed` | 恢复会话后改的是原任务；`changed` 是这次变动的字段名 |
 | `config:automation-invalid` | Config | `detail` | `automation.tasks` 中某条任务校验失败，已忽略该条 |
 | `api:workspace-cleanup` | HTTP API | `requested` `runtimeId` `removed` `skipped` | 面板批量清理工作区成功 |
 | `event:manager-started` / `event:manager-stopped` | Event | `sources` | 事件总线启停；`sources` 是已装配的来源数 |
@@ -304,14 +305,15 @@ Router 不做对话，只在必要时说话：
 | `event:source-placeholder` | Event | `sourceId` `kind` | 占位来源（飞书消息订阅本期只留开关） |
 | `event:source-duplicate` | Event | `sourceId` | 同名来源重复注册，先注册的继续跑（插件重载不覆盖正在跑的来源） |
 | `event:source-stop-failed` | Event | `sourceId` `detail` | 停来源抛错；不影响其它来源 |
-| `event:ingested` | Event | `eventId` `sourceId` `sourceKind` `externalId` `title` `status` `ruleId` | 事件进入队列；`status` 为 `pending`（命中规则）或 `undecided`（只收集） |
-| `event:duplicate` | Event | `eventId` `sourceId` `externalId` | 同一来源的同一事件重复到达，按 `(来源, externalId)` 幂等忽略；已处理的状态与工单不会被覆盖 |
-| `event:rule-matched` | Event | `eventId` `ruleId` `eventType` `ruleVersion` | 事件命中规则，开始判定 |
-| `event:rule-unmatched` | Event | `eventId` `eventType` | 没有匹配规则；事件保持未判定，不调模型 |
-| `event:rule-activated` | Event | `ruleId` `activated` | 规则变更 / 启动后重新激活的未判定事件数；`ruleId` 为 `config` / `startup` 时表示批量激活 |
-| `event:rule-compiled` | API / RuleCompiler | `ruleId` `eventType` | 自然语言提炼规则草稿成功 |
-| `event:rule-compile-failed` | RuleCompiler | `ruleId` `detail` | 提炼失败，返回内置模板并保留用户原文 |
-| `event:jev-failed` | Decision | `eventId` `ruleId` `detail` | Jev 请求或答案解析失败；上层按判定未完成处理 |
+| `event:ingested` | Event | `eventId` `sourceId` `sourceKind` `externalId` `title` `status` `subscriptionId` | 事件进入队列；`subscriptionId` 是命中的订阅（等于自动化任务 id） |
+| `event:duplicate` | Event | `eventId` `sourceId` `externalId` | 同一订阅的同一事件重复到达，按 `(订阅, externalId)` 幂等忽略；已处理的状态与工单不会被覆盖 |
+| `event:subscription-registered` | Event | `taskId` `source` `types` | 一条订阅已装配，watcher 开始拉事件 |
+| `event:subscription-register-failed` | Event | `taskId` `source` `detail` | 订阅装配失败，本次不拉取；不影响其它订阅 |
+| `event:subscription-matched` | Event | `eventId` `subscriptionId` `eventType` `mode` | 事件命中订阅，进入判定 |
+| `event:subscription-unmatched` | Event | `eventId` `eventType` `sourceId` | 事件对应的订阅已不存在，转人工等人处理，不静默消失 |
+| `event:filtered-out` | Event | `eventId` `subscriptionId` `reason` | 确定性关键词没命中，不进判定 |
+| `event:notified` | Event | `eventId` `subscriptionId` `taskId` | `mode=notify` 的任务只记录并通知，不进执行链路 |
+| `event:jev-failed` | Decision | `eventId` `subscriptionId` `detail` | Jev 请求或答案解析失败；上层按判定未完成处理 |
 | `event:invalid` | Event | `eventId` `sourceId` `reason` | 事件被判为无效（P4），只留记录不再处理 |
 | `event:review-queued` | Event | `eventId` `sourceId` `priority` `reason` | 事件需要人审，已进待审核队列 |
 | `event:review-notified` | Event | `eventId` `chatId` | 待审核事件已推送给管理员 |
@@ -332,12 +334,30 @@ Router 不做对话，只在必要时说话：
 | `event:decision-failed` | Event | `eventId` `provider` `permanent` `detail` | 判定模型调用失败；`permanent=true`（401 / 403 / 451）直接转人工，否则留在队列等下一轮重判 |
 | `event:decision-no-output` | Event | `eventId` `provider` | 模型没给出可用结论，按兜底处理 |
 | `event:decision-unparsable` | Event | `eventId` | 模型返回的内容解析不出 JSON 结论，按兜底处理 |
-| `event:decision-incomplete` | Event | `eventId` `sourceId` `ruleId` `reason` | 判定没完成（模型失败等）；事件留在队列等下一轮，不派工也不丢 |
+| `event:decision-incomplete` | Event | `eventId` `sourceId` `subscriptionId` `reason` | 判定没完成（模型失败等）；事件留在队列等下一轮，不派工也不丢 |
 | `event:attempts-exceeded` | Event | `eventId` `sourceId` `attempts` `detail` | 判定连续失败超过上限，已转人工处理，不再重试 |
-| `event:decision-provider-unavailable` | Event | `provider` | 判定用的模型没配好，本轮退回规则判定 |
+| `event:decision-provider-unavailable` | Event | `provider` | 判定用的模型没配好，本轮退回订阅自带结论 |
 | `event:priority-changed` / `event:ignored` / `event:retry` | Event | `eventId` `priority` / `action` | 面板上手工改优先级 / 忽略 / 重试 |
 | `event:tick-failed` | Event | `detail` | 事件管线一轮处理抛错，不影响下一轮 |
 | `event:plugin-failed` | Event | `sourceId` `detail` | 自定义事件来源插件加载或创建失败，不影响其它来源 |
+| `event:catalog-load-failed` | Event | `detail` | 事件目录加载失败；内置目录不受影响，少一个来源不该让面板瘫掉 |
+| `event:param-probe-failed` | Event | `sourceId` `repo` `code` `message` | 订阅参数探活失败（没装 gh / 没登录 / 限流）；放行建任务，问题留给事件拉取时报错 |
+| `event:param-probe-skipped` | Event | `sourceId` | 该来源暂不支持参数探活，只做闭集与格式校验 |
+| `event:feishu-starting` | FeishuWatcher | `eventKey` `pid` | 飞书长连接进程已拉起，等就绪标记 |
+| `event:feishu-ready` | FeishuWatcher | `eventKey` `pid` | 飞书长连接建立就绪（stderr 打出 listening 标记） |
+| `event:feishu-reconnect` | FeishuWatcher | `eventKey` `attempt` `delayMs` | 长连接断开后按指数退避安排重连 |
+| `event:feishu-received` | FeishuWatcher | `eventKey` `eventType` `externalId` | 收到一条飞书事件，已扇出给订阅它的任务 |
+| `event:feishu-subscribe-blocked` | FeishuWatcher | `eventKey` `reason` | 预检发现该事件类型未在开发者后台订阅 / 缺权限；不起进程，任务卡显示「⚠️ 尚未开通」 |
+| `event:feishu-precheck-failed` | FeishuWatcher | `eventKey` `message` | 预检本身失败（命令报错 / 输出不可解析）；按「不通」处理，不放行 |
+| `event:feishu-parse-failed` | FeishuWatcher | `eventKey` `sample` `message` | NDJSON 单行解析失败；跳过该行，不中断连接 |
+| `event:feishu-consume-warn` | FeishuWatcher | `eventKey` `detail` | `lark-cli` stderr 的 WARN 行（如 jq 投影运行时错误 → 事件被跳过） |
+| `event:feishu-unknown-type` | FeishuWatcher | `eventKey` | 收到目录里没有的事件类型；跳过并留日志，不静默吞掉 |
+| `event:feishu-exit` | FeishuWatcher | `eventKey` `code` | 长连接进程退出（正常或异常） |
+| `event:feishu-spawn-failed` | FeishuWatcher | `eventKey` `message` | 拉起长连接进程失败；下次重连再试 |
+| `event:feishu-stopped` | FeishuWatcher | `eventKey` | 长连接优雅退出（订阅停用或进程关闭） |
+| `event:feishu-stop-failed` | FeishuWatcher | `eventKey` `message` | 停长连接失败；不影响其它 EventKey |
+| `migration:event-rules-migrated` | CLI | `tasks` `manual` `backup` | 旧决策规则已迁移成自动化任务；`tasks` 是新增任务数，`backup` 是配置备份路径 |
+| `migration:event-rules-incomplete` | CLI | `pending` `manual` | 有规则没法自动迁移，需人工处理 |
 | `api:workspace-cleanup-failed` | HTTP API | `requested` `runtimeId` `detail` | 面板批量清理工作区失败 |
 | `api:channels` | HTTP API | `count` | 面板读取已注册的消息通道（渠道配置的渠道列表来源） |
 | `api:request-failed` | HTTP API | `method` `path` `detail` | 请求级未预期异常（客户端会收到 500） |

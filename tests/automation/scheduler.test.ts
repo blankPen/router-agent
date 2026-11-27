@@ -27,7 +27,7 @@ function task(over: Partial<Automation> = {}): Automation {
     description: '',
     type: 'ai',
     prompt: '检查依赖更新',
-    schedule: { kind: 'daily', at: '09:00' },
+    trigger: { kind: 'schedule', schedule: { kind: 'daily', at: '09:00' } },
     runtimeId: '',
     project: 'demo',
     repo: '/tmp/demo',

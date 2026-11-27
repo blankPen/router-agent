@@ -36,7 +36,6 @@ describe('自动化 HTTP API', () => {
   let engine: Engine
   let config: AppConfig
   let server: ApiServer
-  const dismissals: string[] = []
   const toolCalls: Array<{ id: string; name: string; args: Record<string, unknown> }> = []
   const runs: Array<{ id: string; status: string }> = []
 
@@ -44,11 +43,6 @@ describe('自动化 HTTP API', () => {
     listTasks: () => [{ id: 'auto_1', name: '巡检' }],
     listRuns: () => [{ id: 'run_1', automationId: 'auto_1', status: 'success' }],
     getRun: id => runs.find(run => run.id === id) ?? null,
-    listDrafts: () => [{ id: 'ad_1', draft: { name: '草稿' } }],
-    dismissDraft: id => {
-      dismissals.push(id)
-      return id === 'ad_1'
-    },
     trigger: async id => (id === 'auto_1' ? { id: 'run_2', status: 'success' } : null),
     generateScript: async id => (id === 'auto_1' ? '#!/bin/sh\necho hi' : null),
     draft: async text => (text === '每天检查依赖' ? { name: '依赖巡检' } : null),
@@ -73,12 +67,11 @@ describe('自动化 HTTP API', () => {
     store.close()
   })
 
-  it('GET /api/automations 同时返回任务、执行记录与待确认草稿', async () => {
+  it('GET /api/automations 同时返回任务与执行记录', async () => {
     const res = await call(server, 'GET', '/api/automations')
     expect(res.status).toBe(200)
     expect(res.json.tasks[0].id).toBe('auto_1')
     expect(res.json.runs[0].id).toBe('run_1')
-    expect(res.json.drafts[0].id).toBe('ad_1')
   })
 
   it('POST /api/automations/trigger 手动触发并返回执行记录', async () => {
@@ -122,12 +115,6 @@ describe('自动化 HTTP API', () => {
   it('POST /api/automations/tools 缺少参数返回 400', async () => {
     const res = await call(server, 'POST', '/api/automations/tools', { automationId: 'auto_1' })
     expect(res.status).toBe(400)
-  })
-
-  it('POST /api/automations/drafts/dismiss 标记草稿已处理', async () => {
-    const res = await call(server, 'POST', '/api/automations/drafts/dismiss', { id: 'ad_1' })
-    expect(res.status).toBe(200)
-    expect(dismissals).toEqual(['ad_1'])
   })
 
   it('POST /api/automations/script 生成脚本正文', async () => {

@@ -12,10 +12,11 @@ import { createChatClient } from '#infra/chat.js'
 import { JevClient } from '#infra/decision/jev-client.js'
 import { noopLogger, type Logger } from '#infra/logger.js'
 import type { CommandRunner } from '#infra/process.js'
-import { EventDecisionService, ruleDecisionPort, type EventDecisionPort } from './decision.js'
+import { EventDecisionService, type EventDecisionPort } from './decision.js'
 import { createJevDecisionPort, createLlmDecisionPort } from './decision-model.js'
 import { EventManager } from './manager.js'
 import { EventPipeline } from './pipeline.js'
+import { subscriptionsOf, type ResolvedSubscription } from './subscriptions.js'
 
 export interface EventWiringDeps {
   config: () => AppConfig
@@ -29,6 +30,8 @@ export interface EventWiringDeps {
   /** 事件判定后的回调（通知 admin、刷新派工）。 */
   onReview?: (event: { id: string; title: string; priority: string; reason?: string }) => void | Promise<void>
   onDispatched?: () => void | Promise<void>
+  /** 订阅清单；宿主注入（默认从配置里的自动化任务推导）。 */
+  subscriptions?: () => ResolvedSubscription[]
 }
 
 /** 装配好的事件总线。 */
@@ -87,7 +90,6 @@ export function createEventWiring(deps: EventWiringDeps): EventWiring {
   const logger = deps.logger ?? noopLogger
   const decision = new EventDecisionService({
     decision: () => deps.config().events.decision,
-    rule: ruleDecisionPort,
     model: createConfigurableDecisionPort({
       config: deps.config,
       model: deps.model,
@@ -102,6 +104,7 @@ export function createEventWiring(deps: EventWiringDeps): EventWiring {
     clock: () => new Date().toISOString(),
     ids: prefix => `${prefix}_${crypto.randomUUID()}`,
     decision,
+    subscriptions: deps.subscriptions ?? (() => subscriptionsOf(deps.config())),
     logger,
     ...(deps.onReview ? { onReview: deps.onReview } : {}),
     ...(deps.onDispatched ? { onDispatched: deps.onDispatched } : {}),
@@ -113,6 +116,7 @@ export function createEventWiring(deps: EventWiringDeps): EventWiring {
     clock: () => new Date().toISOString(),
     runner: deps.runner,
     logger,
+    ...(deps.subscriptions ? { subscriptions: deps.subscriptions } : {}),
   })
   return { manager, pipeline, decision }
 }

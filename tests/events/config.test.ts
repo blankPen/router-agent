@@ -10,8 +10,8 @@ describe('事件配置', () => {
     expect(config.events.enabled).toBe(false)
     // GitHub 仓库由面板「添加仓库」创建，默认配置里不留空壳来源。
     expect(config.events.sources.github).toBeUndefined()
-    expect(config.events.decision.provider).toBe('rule')
-    expect(config.events.rules).toEqual([])
+    expect(config.events.decision.provider).toBe('llm')
+    expect('rules' in config.events).toBe(false)
   })
 
   it('从 YAML 读取事件配置', () => {
@@ -219,7 +219,7 @@ describe('事件配置', () => {
     expect(result.errors).toEqual([])
   })
 
-  it('从 YAML 读取按 eventType 的规则集', () => {
+  it('旧配置里的决策规则整段被忽略，迁移交给 ra migrate', () => {
     const home = mkdtempSync(join(tmpdir(), 'ra-events-'))
     writeFileSync(join(home, 'config.yaml'), [
       'events:',
@@ -234,14 +234,7 @@ describe('事件配置', () => {
       '',
     ].join('\n'), 'utf8')
     const config = loadConfig(home, {})
-    expect(config.events.rules).toHaveLength(1)
-    expect(config.events.rules[0]).toMatchObject({
-      id: 'rule-ci',
-      eventType: 'github.workflow_run.failure',
-      workflowPrompt: '分析失败并提交 PR',
-      thresholds: { isValid: 0.4, projectPick: 0.3 },
-    })
-    expect(config.events.rules[0]?.questions.is_valid.type).toBe('noul')
+    expect('rules' in config.events).toBe(false)
   })
 
   it('旧配置里的全局 prompt 被忽略，不再影响判定', () => {
@@ -256,7 +249,7 @@ describe('事件配置', () => {
     ].join('\n'), 'utf8')
     const config = loadConfig(home, {})
     expect(config.events.decision.provider).toBe('llm')
-    expect(config.events.rules).toEqual([])
+    expect('rules' in config.events).toBe(false)
   })
 
   it('写回配置时旧版全局 prompt 与兜底开关被丢掉', () => {
@@ -277,9 +270,9 @@ describe('事件配置', () => {
     expect(written).toContain('provider: llm')
   })
 
-  it('规则整段写入做 eventType 前缀与重复校验', () => {
+  it('决策规则整段不再可编辑', () => {
     const config = defaultConfig()
-    const good = applyConfigPatch(config, {
+    const result = applyConfigPatch(config, {
       'events.rules': [{
         id: 'rule-ci',
         eventType: 'github.workflow_run.failure',
@@ -287,21 +280,7 @@ describe('事件配置', () => {
         workflowPrompt: '分析并修复',
       }],
     })
-    expect(good.errors).toEqual([])
-    expect(config.events.rules[0]?.id).toBe('rule-ci')
-
-    const badPrefix = applyConfigPatch(config, {
-      'events.rules': [{ id: 'bad', eventType: 'workflow_run.failure', intent: 'x' }],
-    })
-    expect(badPrefix.errors[0]?.message).toContain('来源前缀')
-
-    const duplicate = applyConfigPatch(config, {
-      'events.rules': [
-        { id: 'a', eventType: 'github.issues.opened', intent: 'a' },
-        { id: 'b', eventType: 'github.issues.opened', intent: 'b' },
-      ],
-    })
-    expect(duplicate.errors[0]?.message).toContain('事件类型重复')
+    expect(result.errors[0]?.message).toContain('不是可编辑的配置项')
   })
 })
 

@@ -31,7 +31,10 @@ import type { ReplyBlock } from '#core/reply.js'
 import { normalizeStage, stageAliases } from '#core/stage.js'
 import type {
   Automation,
-  AutomationDraft,
+  AutomationConversation,
+  AutomationConversationMessage,
+  AutomationConversationPreview,
+  AutomationConversationMissing,
   AutomationRun,
   AutomationRunOutputs,
   AutomationRunPhase,
@@ -479,14 +482,14 @@ CREATE TABLE IF NOT EXISTS events (
   reason TEXT,
   confidence REAL,
   basis TEXT,
-  rule_id TEXT,
+  subscription_id TEXT,
   ticket_id TEXT,
   trigger_id TEXT,
   decided_at TEXT,
   updated_at TEXT NOT NULL,
   attempts INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,
-  UNIQUE (source_id, external_id)
+  UNIQUE (subscription_id, external_id)
 );
 CREATE INDEX IF NOT EXISTS idx_events_status ON events (status, received_at);
 CREATE INDEX IF NOT EXISTS idx_events_priority ON events (priority, received_at);
@@ -516,17 +519,42 @@ CREATE TABLE IF NOT EXISTS automation_states (
   last_status  TEXT
 );
 
--- 对话式创建的待确认草稿：面板确认前不写进正式任务配置。
-CREATE TABLE IF NOT EXISTS automation_drafts (
-  id          TEXT PRIMARY KEY,
-  source      TEXT NOT NULL DEFAULT '',
-  requester   TEXT NOT NULL DEFAULT '',
-  text        TEXT NOT NULL,
-  draft       TEXT NOT NULL,
-  status      TEXT NOT NULL DEFAULT 'pending',
-  created_at  TEXT NOT NULL
+-- 自动化会话：一条会话建一条任务；任务与会话一一绑定，卡片点「恢复会话」据此找回。
+CREATE TABLE IF NOT EXISTS automation_conversations (
+  id            TEXT PRIMARY KEY,
+  task_id       TEXT NOT NULL DEFAULT '',
+  source        TEXT NOT NULL DEFAULT '',
+  requester     TEXT NOT NULL DEFAULT '',
+  chat_id       TEXT NOT NULL DEFAULT '',
+  thread_id     TEXT NOT NULL DEFAULT '',
+  session_key   TEXT NOT NULL DEFAULT '',
+  text          TEXT NOT NULL DEFAULT '',
+  draft         TEXT NOT NULL DEFAULT '',
+  missing       TEXT NOT NULL DEFAULT '[]',
+  step          TEXT NOT NULL DEFAULT 'parse',
+  status        TEXT NOT NULL DEFAULT 'active',
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_automation_drafts_status ON automation_drafts (status, created_at);
+CREATE INDEX IF NOT EXISTS idx_automation_conversations_task ON automation_conversations (task_id);
+CREATE INDEX IF NOT EXISTS idx_automation_conversations_status ON automation_conversations (status, updated_at);
+
+-- 会话消息：落库而不是只留内存。
+-- 面板点任务卡「恢复会话」时，服务重启过也要能把上次聊的内容取回来。
+CREATE TABLE IF NOT EXISTS automation_conversation_messages (
+  conversation_id TEXT NOT NULL,
+  seq            INTEGER NOT NULL,
+  role           TEXT NOT NULL,
+  text           TEXT NOT NULL DEFAULT '',
+  speech         TEXT NOT NULL DEFAULT '',
+  step           TEXT NOT NULL DEFAULT '',
+  preview        TEXT NOT NULL DEFAULT '',
+  done           INTEGER NOT NULL DEFAULT 0,
+  created_at     TEXT NOT NULL,
+  PRIMARY KEY (conversation_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_automation_conversation_messages_seq
+  ON automation_conversation_messages (conversation_id, seq);
 
 -- 身份别名缓存：邮箱 / open_id 解析成 open_id 的结果。
 -- 键里必须带 app_id：open_id 是「应用 × 用户」维度的，换个应用同一个人的 open_id 就变了，
@@ -600,14 +628,14 @@ export class Store {
     if (!eventColumns.some(column => column.name === 'context')) {
       this.db.exec('ALTER TABLE events ADD COLUMN context TEXT')
     }
-    if (!eventColumns.some(column => column.name === 'rule_id')) {
-      this.db.exec('ALTER TABLE events ADD COLUMN rule_id TEXT')
-    }
-    if (!eventColumns.some(column => column.name === 'rule_version')) {
-      this.db.exec('ALTER TABLE events ADD COLUMN rule_version INTEGER')
-    }
-    // 旧版全局 prompt 已删除，prompt_version 不再有人写：把这一列从旧库里去掉。
-    if (eventColumns.some(column => column.name === 'prompt_version')) {
+    // 决策规则已删除：rule_id / rule_version 换成 subscription_id，
+    // 唯一索引从 (source_id, external_id) 改成 (subscription_id, external_id)
+    // —— 事件按订阅归属，两个任务订阅同一件事各拿各的。
+    // 决策 A11：历史事件直接清空，不回填（旧行没有 subscription_id，语义也变了）。
+    if (eventColumns.some(column => column.name === 'rule_id')
+      || eventColumns.some(column => column.name === 'rule_version')
+      || eventColumns.some(column => column.name === 'prompt_version')
+      || !eventColumns.some(column => column.name === 'subscription_id')) {
       this.db.exec(`
         ALTER TABLE events RENAME TO events_legacy;
         CREATE TABLE events (
@@ -633,23 +661,16 @@ export class Store {
           reason TEXT,
           confidence REAL,
           basis TEXT,
-          rule_id TEXT,
-          rule_version INTEGER,
+          subscription_id TEXT,
           ticket_id TEXT,
           trigger_id TEXT,
           decided_at TEXT,
           updated_at TEXT NOT NULL,
           attempts INTEGER NOT NULL DEFAULT 0,
           last_error TEXT,
-          UNIQUE (source_id, external_id)
+          UNIQUE (subscription_id, external_id)
         );
-        INSERT INTO events
-          (id, source_id, source_kind, external_id, title, body, url, raw, context, received_at, status, execution, priority,
-           event_type, project, repo, branch, skill, needs_review, reason, confidence, basis, rule_id, rule_version, ticket_id,
-           trigger_id, decided_at, updated_at, attempts, last_error)
-          SELECT id, source_id, source_kind, external_id, title, body, url, raw, context, received_at, status, execution, priority,
-           event_type, project, repo, branch, skill, needs_review, reason, confidence, basis, rule_id, rule_version, ticket_id,
-           trigger_id, decided_at, updated_at, attempts, last_error FROM events_legacy;
+        -- 决策 A11：历史事件直接清空，不回填。旧行没有 subscription_id，语义已经变了。
         DROP TABLE events_legacy;
         CREATE INDEX IF NOT EXISTS idx_events_status ON events (status, received_at);
         CREATE INDEX IF NOT EXISTS idx_events_priority ON events (priority, received_at);
@@ -833,9 +854,9 @@ export class Store {
   insertEvent(event: EventRecord): boolean {
     const result = this.db.prepare(`INSERT OR IGNORE INTO events
       (id, source_id, source_kind, external_id, title, body, url, raw, context, received_at, status, execution, priority, event_type,
-       project, repo, branch, skill, needs_review, reason, confidence, basis, rule_id, rule_version, ticket_id, trigger_id,
+       project, repo, branch, skill, needs_review, reason, confidence, basis, subscription_id, ticket_id, trigger_id,
        decided_at, updated_at, attempts, last_error)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(
         event.id,
         event.sourceId,
@@ -859,8 +880,7 @@ export class Store {
         event.reason ?? null,
         event.confidence ?? null,
         event.basis ?? null,
-        event.ruleId ?? null,
-        event.ruleVersion ?? null,
+        event.subscriptionId ?? null,
         event.ticketId ?? null,
         event.triggerId ?? null,
         event.decidedAt ?? null,
@@ -882,9 +902,17 @@ export class Store {
    * 去重的唯一依据是 `(source_id, external_id)`：来源保证同一事件的 externalId 稳定不变，
    * 宿主据此判定「这条已经入过队」，不靠全表扫描猜。
    */
-  getEventByExternalId(sourceId: string, externalId: string): EventRecord | null {
-    const row = this.db.prepare('SELECT * FROM events WHERE source_id = ? AND external_id = ?').get(sourceId, externalId) as Row | undefined
+  getEventByExternalId(subscriptionId: string, externalId: string): EventRecord | null {
+    const row = this.db.prepare('SELECT * FROM events WHERE subscription_id = ? AND external_id = ?').get(subscriptionId, externalId) as Row | undefined
     return row ? eventFromRow(row) : null
+  }
+
+  /** 按订阅列出事件；收件箱按任务聚合时用。 */
+  listEventsBySubscription(subscriptionId: string, limit = 200): EventRecord[] {
+    const rows = (this.db.prepare(
+      'SELECT * FROM events WHERE subscription_id = ? ORDER BY received_at DESC LIMIT ?',
+    ).all(subscriptionId, limit) as Row[])
+    return rows.map(eventFromRow)
   }
 
   listEvents(filter: { status?: EventStatus; priority?: EventPriority; sourceId?: string; limit?: number } = {}): EventRecord[] {
@@ -917,8 +945,8 @@ export class Store {
 
   updateEvent(event: EventRecord): void {
     this.db.prepare(`UPDATE events SET title = ?, body = ?, url = ?, status = ?, execution = ?, priority = ?, event_type = ?,
-      project = ?, repo = ?, branch = ?, skill = ?, needs_review = ?, reason = ?, confidence = ?, basis = ?, rule_id = ?,
-      rule_version = ?, context = ?, ticket_id = ?, trigger_id = ?, decided_at = ?, updated_at = ?, attempts = ?, last_error = ? WHERE id = ?`)
+      project = ?, repo = ?, branch = ?, skill = ?, needs_review = ?, reason = ?, confidence = ?, basis = ?, subscription_id = ?,
+      context = ?, ticket_id = ?, trigger_id = ?, decided_at = ?, updated_at = ?, attempts = ?, last_error = ? WHERE id = ?`)
       .run(
         event.title,
         event.body,
@@ -935,8 +963,7 @@ export class Store {
         event.reason ?? null,
         event.confidence ?? null,
         event.basis ?? null,
-        event.ruleId ?? null,
-        event.ruleVersion ?? null,
+        event.subscriptionId ?? null,
         event.context === undefined ? null : JSON.stringify(event.context),
         event.ticketId ?? null,
         event.triggerId ?? null,
@@ -985,38 +1012,24 @@ export class Store {
   /** 按业务状态统计事件条数（面板统计卡用；不受列表 limit 影响）。 */
   countEventsByStatus(): Record<string, number> {
     const rows = this.db.prepare('SELECT status, COUNT(*) AS n FROM events GROUP BY status').all() as Row[]
-    const out: Record<string, number> = { undecided: 0, pending: 0, review: 0, done: 0, invalid: 0 }
+    const out: Record<string, number> = { pending: 0, review: 0, done: 0, invalid: 0 }
     for (const row of rows) out[String(row.status)] = Number(row.n ?? 0)
     return out
   }
 
-  /** 按命中的规则与状态聚合事件条数；没有 rule_id 的事件不计入。 */
-  countEventsByRule(): Record<string, Record<string, number>> {
+  /** 按命中的订阅与状态聚合事件条数；没有 subscription_id 的事件不计入。 */
+  countEventsBySubscription(): Record<string, Record<string, number>> {
     const rows = this.db.prepare(
-      "SELECT rule_id, status, COUNT(*) AS n FROM events WHERE rule_id IS NOT NULL AND rule_id != '' GROUP BY rule_id, status",
+      "SELECT subscription_id, status, COUNT(*) AS n FROM events WHERE subscription_id IS NOT NULL AND subscription_id != '' GROUP BY subscription_id, status",
     ).all() as Row[]
     const out: Record<string, Record<string, number>> = {}
     for (const row of rows) {
-      const ruleId = String(row.rule_id)
-      const stats = out[ruleId] ?? { pending: 0, review: 0, done: 0, invalid: 0 }
+      const subscriptionId = String(row.subscription_id)
+      const stats = out[subscriptionId] ?? { pending: 0, review: 0, done: 0, invalid: 0 }
       stats[String(row.status)] = Number(row.n ?? 0)
-      out[ruleId] = stats
+      out[subscriptionId] = stats
     }
     return out
-  }
-
-  /**
-   * 规则变更后重新激活未判定事件。
-   *
-   * eventTypes 为空数组表示没有具体规则可激活。
-   */
-  activateUndecidedEvents(eventTypes: string[], at = new Date().toISOString()): number {
-    if (eventTypes.length === 0) return 0
-    const result = this.db.prepare(
-      `UPDATE events SET status = 'pending', execution = 'none', decided_at = NULL, updated_at = ?
-       WHERE status = 'undecided' AND event_type IN (${eventTypes.map(() => '?').join(', ')})`,
-    ).run(at, ...eventTypes)
-    return Number(result.changes)
   }
 
   /**
@@ -1139,33 +1152,105 @@ export class Store {
     return rows.length
   }
 
-  /** 写入一条待确认草稿。 */
-  insertAutomationDraft(draft: AutomationDraft): void {
-    this.db.prepare(`INSERT INTO automation_drafts (id, source, requester, text, draft, status, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`)
+  // ---------- 自动化会话 ----------
+
+  /** 写入一条会话。 */
+  insertAutomationConversation(conversation: AutomationConversation): void {
+    this.db.prepare(`INSERT INTO automation_conversations
+      (id, task_id, source, requester, chat_id, thread_id, session_key, text, draft, missing, step, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(
-        draft.id,
-        draft.source,
-        draft.requester,
-        draft.text,
-        JSON.stringify(draft.draft),
-        draft.status,
-        draft.createdAt,
+        conversation.id,
+        conversation.taskId ?? '',
+        conversation.source,
+        conversation.requester,
+        conversation.chatId ?? '',
+        conversation.threadId ?? '',
+        conversation.sessionKey ?? '',
+        conversation.text ?? '',
+        conversation.draft ? JSON.stringify(conversation.draft) : '',
+        JSON.stringify(conversation.missing ?? []),
+        conversation.step,
+        conversation.status,
+        conversation.createdAt,
+        conversation.updatedAt,
       )
   }
 
-  /** 列出待确认草稿；默认只给 `pending`。 */
-  listAutomationDrafts(status?: AutomationDraft['status']): AutomationDraft[] {
-    const rows = (status
-      ? this.db.prepare('SELECT * FROM automation_drafts WHERE status = ? ORDER BY created_at DESC').all(status)
-      : this.db.prepare('SELECT * FROM automation_drafts ORDER BY created_at DESC').all()) as Row[]
-    return rows.map(automationDraftFromRow)
+  /** 更新一条会话。 */
+  updateAutomationConversation(conversation: AutomationConversation): void {
+    this.db.prepare(`UPDATE automation_conversations SET
+      task_id = ?, source = ?, requester = ?, chat_id = ?, thread_id = ?, session_key = ?, text = ?,
+      draft = ?, missing = ?, step = ?, status = ?, updated_at = ? WHERE id = ?`)
+      .run(
+        conversation.taskId ?? '',
+        conversation.source,
+        conversation.requester,
+        conversation.chatId ?? '',
+        conversation.threadId ?? '',
+        conversation.sessionKey ?? '',
+        conversation.text ?? '',
+        conversation.draft ? JSON.stringify(conversation.draft) : '',
+        JSON.stringify(conversation.missing ?? []),
+        conversation.step,
+        conversation.status,
+        conversation.updatedAt,
+        conversation.id,
+      )
   }
 
-  /** 标记草稿已忽略 / 已转为正式任务。 */
-  setAutomationDraftStatus(id: string, status: AutomationDraft['status']): boolean {
-    const result = this.db.prepare('UPDATE automation_drafts SET status = ? WHERE id = ?').run(status, id)
-    return result.changes > 0
+  /** 按 id 取会话。 */
+  getAutomationConversation(id: string): AutomationConversation | undefined {
+    const row = this.db.prepare('SELECT * FROM automation_conversations WHERE id = ?').get(id) as Row | undefined
+    return row ? automationConversationFromRow(row) : undefined
+  }
+
+  /** 列出会话；默认只给 `active`。 */
+  listAutomationConversations(status?: AutomationConversation['status']): AutomationConversation[] {
+    const rows = (status
+      ? this.db.prepare('SELECT * FROM automation_conversations WHERE status = ? ORDER BY updated_at DESC').all(status)
+      : this.db.prepare('SELECT * FROM automation_conversations ORDER BY updated_at DESC').all()) as Row[]
+    return rows.map(automationConversationFromRow)
+  }
+
+  /** 按任务 id 取会话（一个任务对应一条会话）。 */
+  getAutomationConversationByTask(taskId: string): AutomationConversation | undefined {
+    const row = this.db.prepare('SELECT * FROM automation_conversations WHERE task_id = ? ORDER BY updated_at DESC LIMIT 1').get(taskId) as Row | undefined
+    return row ? automationConversationFromRow(row) : undefined
+  }
+
+  /** 写入一条会话消息；同一条 (会话, seq) 只留一份。 */
+  insertAutomationConversationMessage(message: AutomationConversationMessage): void {
+    this.db.prepare(`INSERT OR REPLACE INTO automation_conversation_messages
+      (conversation_id, seq, role, text, speech, step, preview, done, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(
+        message.conversationId,
+        message.seq,
+        message.role,
+        message.text,
+        message.speech ?? '',
+        message.step ?? '',
+        message.preview ? JSON.stringify(message.preview) : '',
+        message.done ? 1 : 0,
+        message.createdAt,
+      )
+  }
+
+  /** 取会话消息流；after 之后的不返回（断线重连补齐用）。 */
+  listAutomationConversationMessages(conversationId: string, after = 0): AutomationConversationMessage[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM automation_conversation_messages WHERE conversation_id = ? AND seq > ? ORDER BY seq ASC',
+    ).all(conversationId, after) as Row[]
+    return rows.map(automationConversationMessageFromRow)
+  }
+
+  /** 会话里已经用掉的最后一个序号；新消息接着它往后排。 */
+  lastAutomationConversationSeq(conversationId: string): number {
+    const row = this.db.prepare(
+      'SELECT MAX(seq) AS seq FROM automation_conversation_messages WHERE conversation_id = ?',
+    ).get(conversationId) as Row | undefined
+    return Number(row?.seq ?? 0)
   }
 
   // ---------- Thread alias ----------
@@ -2195,8 +2280,7 @@ function eventFromRow(row: Row): EventRecord {
     ...(row.reason ? { reason: String(row.reason) } : {}),
     ...(row.confidence !== null && row.confidence !== undefined ? { confidence: Number(row.confidence) } : {}),
     ...(row.basis ? { basis: String(row.basis) } : {}),
-    ...(row.rule_id ? { ruleId: String(row.rule_id) } : {}),
-    ...(row.rule_version !== null && row.rule_version !== undefined ? { ruleVersion: Number(row.rule_version) } : {}),
+    ...(row.subscription_id ? { subscriptionId: String(row.subscription_id) } : {}),
     ...(row.ticket_id ? { ticketId: String(row.ticket_id) } : {}),
     ...(row.trigger_id ? { triggerId: String(row.trigger_id) } : {}),
     ...(row.decided_at ? { decidedAt: String(row.decided_at) } : {}),
@@ -2223,15 +2307,49 @@ function automationRunFromRow(row: Row): AutomationRun {
   }
 }
 
-function automationDraftFromRow(row: Row): AutomationDraft {
+function automationConversationFromRow(row: Row): AutomationConversation {
   return {
     id: String(row.id),
+    ...(row.task_id ? { taskId: String(row.task_id) } : {}),
     source: String(row.source ?? ''),
     requester: String(row.requester ?? ''),
+    ...(row.chat_id ? { chatId: String(row.chat_id) } : {}),
+    ...(row.thread_id ? { threadId: String(row.thread_id) } : {}),
+    ...(row.session_key ? { sessionKey: String(row.session_key) } : {}),
     text: String(row.text ?? ''),
-    draft: JSON.parse(String(row.draft)) as Automation,
-    status: String(row.status) as AutomationDraft['status'],
+    ...(row.draft ? { draft: JSON.parse(String(row.draft)) as Automation } : {}),
+    missing: parseMissing(String(row.missing ?? '[]')),
+    step: String(row.step ?? 'parse') as AutomationConversation['step'],
+    status: String(row.status ?? 'active') as AutomationConversation['status'],
     createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  }
+}
+
+/** 会话消息行 → 消息。 */
+function automationConversationMessageFromRow(row: Row): AutomationConversationMessage {
+  const preview = row.preview ? JSON.parse(String(row.preview)) as AutomationConversationPreview : undefined
+  return {
+    conversationId: String(row.conversation_id),
+    seq: Number(row.seq),
+    role: String(row.role) as AutomationConversationMessage['role'],
+    text: String(row.text ?? ''),
+    ...(row.speech ? { speech: String(row.speech) } : {}),
+    ...(row.step ? { step: String(row.step) } : {}),
+    ...(preview ? { preview } : {}),
+    ...(Number(row.done) === 1 ? { done: true } : {}),
+    createdAt: String(row.created_at),
+  }
+}
+
+/** 解析会话的缺项清单；坏数据当空数组，不让面板崩。 */
+function parseMissing(raw: string): AutomationConversationMissing[] {
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter(item => item && typeof item === 'object' && 'field' in item) as AutomationConversationMissing[]
+  } catch {
+    return []
   }
 }
 

@@ -1,48 +1,35 @@
 /**
- * 自动化页：任务列表与执行记录两个 Tab。
+ * 自动化页：左边任务栏 + 右边大 Chat 会话。
  *
- * 视觉沿用收件箱与配置页的既有规范（页头、表格、卡片、弹窗），
- * 弹窗字段顺序与「添加决策规则」保持一致：名称 → 类型 → 提示词 → 运行时 → 项目 → 执行时间。
+ * 布局照 ChatGPT Codex 的样子：整个页面主区就是会话窗口，
+ * 底部浮着一个消息输入框；左边的任务卡点一下就把会话切过去（历史接得上）。
+ *
+ * 新建任务走**会话**（自然语言一句话），不再有填表弹窗。
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { getJson, saveConfigPatch, sendJson } from './api.js'
 import { Icon } from './icons.js'
+import { AutomationConversationView } from './automation-conversation.js'
 import {
+  MODE_LABEL,
   RUN_PHASE_LABEL,
   RUN_STATUS_LABEL,
-  SCHEDULE_KIND_LABEL,
-  blankDraft,
-  draftOf,
-  editorDraftOf,
+  conversationIdOf,
   durationText,
+  modeClass,
   phaseText,
+  removedTasks,
   runStatusClass,
-  scheduleText,
-  validateDraft,
-  weekdayOptions,
-  type AutomationDraftRecord,
-  type AutomationDraft,
+  toggledTasks,
+  triggerSummary,
   type AutomationRun,
   type AutomationTask,
+  type ConversationRecord,
 } from './automation-model.js'
-
-/** 可选的 runtime。 */
-export interface RuntimeOption {
-  id: string
-  name: string
-}
-
-/** 可选的项目。 */
-export interface ProjectOption {
-  name: string
-  repo: string
-  defaultBranch?: string
-}
 
 interface AutomationsPayload {
   tasks: AutomationTask[]
   runs: AutomationRun[]
-  drafts: AutomationDraftRecord[]
 }
 
 interface Notice {
@@ -54,17 +41,14 @@ interface Notice {
 export function AutomationView(): JSX.Element {
   const [tasks, setTasks] = useState<AutomationTask[]>([])
   const [runs, setRuns] = useState<AutomationRun[]>([])
-  const [drafts, setDrafts] = useState<AutomationDraftRecord[]>([])
-  const [runtimes, setRuntimes] = useState<RuntimeOption[]>([])
-  const [projects, setProjects] = useState<ProjectOption[]>([])
-  const [tab, setTab] = useState<'tasks' | 'runs'>('tasks')
+  const [conversations, setConversations] = useState<ConversationRecord[]>([])
+  const [tab, setTab] = useState<'chat' | 'runs'>('chat')
   const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
   const [busy, setBusy] = useState(false)
-  const [editing, setEditing] = useState<AutomationDraft | null>(null)
-  /** 正在编辑的待确认草稿 id；保存成功后把它标记为已处理。 */
-  const [editingDraftId, setEditingDraftId] = useState<string | null>(null)
+  /** 当前打开的会话；空表示还没有会话（页面刚进来）。 */
+  const [conversationId, setConversationId] = useState<string | undefined>(undefined)
   /** 有任务正在执行：轮询加快，阶段才看得出在动。 */
   const running = runs.some(run => run.status === 'running')
 
@@ -73,23 +57,14 @@ export function AutomationView(): JSX.Element {
       const data = await getJson<AutomationsPayload>('/api/automations')
       setTasks(data.tasks ?? [])
       setRuns(data.runs ?? [])
-      setDrafts(data.drafts ?? [])
+      const list = await getJson<{ conversations: ConversationRecord[] }>('/api/automations/conversations')
+      setConversations(list.conversations ?? [])
       setLoaded(true)
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
       setLoaded(true)
     }
-  }, [])
-
-  // 候选 runtime / 项目跟着配置走：面板「配置 → 运行时 / 项目」改完这里立刻能看到。
-  useEffect(() => {
-    void getJson<{ runtimeChoices?: Array<{ id: string; name: string }>; projects?: ProjectOption[] }>('/api/config')
-      .then(data => {
-        setRuntimes(data.runtimeChoices ?? [])
-        setProjects(data.projects ?? [])
-      })
-      .catch(() => undefined)
   }, [])
 
   useEffect(() => {
@@ -107,7 +82,10 @@ export function AutomationView(): JSX.Element {
       type: task.type,
       prompt: task.prompt,
       ...(task.script ? { script: task.script } : {}),
-      schedule: task.schedule,
+      trigger: task.trigger,
+      ...(task.skill ? { skill: task.skill } : {}),
+      ...(task.notifyTo ? { notifyTo: task.notifyTo } : {}),
+      ...(task.conversationId ? { conversationId: task.conversationId } : {}),
       runtimeId: task.runtimeId,
       project: task.project,
       repo: task.repo,
@@ -120,85 +98,32 @@ export function AutomationView(): JSX.Element {
     await saveConfigPatch({ 'automation.tasks': payload })
   }, [])
 
+  /** 新建：开一条空会话，助手在那边等着听用户说话。 */
   const openCreate = () => {
-    setEditingDraftId(null)
-    setEditing(blankDraft())
+    setTab('chat')
+    setConversationId(undefined)
   }
 
-  const openEdit = (task: AutomationTask) => {
-    setEditingDraftId(null)
-    setEditing(draftOf(task))
-  }
-
-  /** 打开飞书草稿：字段与新建弹窗一致，保存后才写正式任务。 */
-  const openDraft = (record: AutomationDraftRecord) => {
-    setEditingDraftId(record.id)
-    setEditing(editorDraftOf(record))
-  }
-
-  const dismissDraft = async (record: AutomationDraftRecord) => {
-    setBusy(true)
-    try {
-      await sendJson<{ ok: boolean }>('/api/automations/drafts/dismiss', 'POST', { id: record.id })
-      setNotice({ kind: 'warn', text: `已忽略草稿「${record.draft.name}」。` })
-      await load()
-    } catch (err) {
-      setNotice({ kind: 'error', text: err instanceof Error ? err.message : String(err) })
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const commit = async (draft: AutomationDraft) => {
-    const message = validateDraft(draft)
-    if (message) {
-      setNotice({ kind: 'error', text: message })
+  /**
+   * 恢复会话：回到这条任务绑定的原会话，历史接得上。
+   *
+   * 任务自己存着 `conversationId` 就用它；没有的话反查会话列表
+   * 里 `taskId` 指向它的那条（会话化之前建的任务也能找回）。
+   */
+  const resumeConversation = (task: AutomationTask) => {
+    const target = conversationIdOf(task, conversations)
+    if (!target) {
+      setNotice({ kind: 'warn', text: `「${task.name}」没有会话记录，这条任务是会话化之前建的。` })
       return
     }
-    setBusy(true)
-    try {
-      const now = new Date().toISOString()
-      const existing = tasks.find(task => task.id === draft.id)
-      const task: AutomationTask = {
-        id: draft.id || `auto_${Date.now().toString(36)}`,
-        name: draft.name.trim(),
-        description: draft.description.trim(),
-        type: draft.type,
-        prompt: draft.prompt.trim(),
-        ...(draft.type === 'script' && draft.script.trim() ? { script: draft.script.trim() } : {}),
-        schedule: draft.schedule,
-        runtimeId: draft.runtimeId,
-        project: draft.project,
-        repo: draft.repo,
-        branch: draft.branch,
-        enabled: draft.enabled,
-        createdAt: existing?.createdAt ?? now,
-        updatedAt: now,
-      }
-      const next = existing
-        ? tasks.map(item => (item.id === task.id ? task : item))
-        : [...tasks, task]
-      await saveTasks(next)
-      // 草稿确认后标记为已处理，避免面板里继续显示同一条待确认项。
-      if (editingDraftId) {
-        await sendJson<{ ok: boolean }>('/api/automations/drafts/dismiss', 'POST', { id: editingDraftId })
-      }
-      setNotice({ kind: 'ok', text: `自动化「${task.name}」已保存。` })
-      setEditingDraftId(null)
-      setEditing(null)
-      await load()
-    } catch (err) {
-      setNotice({ kind: 'error', text: err instanceof Error ? err.message : String(err) })
-    } finally {
-      setBusy(false)
-    }
+    setTab('chat')
+    setConversationId(target)
   }
 
   const toggle = async (task: AutomationTask) => {
     setBusy(true)
     try {
-      const next = tasks.map(item => (item.id === task.id ? { ...item, enabled: !item.enabled } : item))
-      await saveTasks(next)
+      await saveTasks(toggledTasks(tasks, task.id))
       await load()
     } catch (err) {
       setNotice({ kind: 'error', text: err instanceof Error ? err.message : String(err) })
@@ -211,7 +136,7 @@ export function AutomationView(): JSX.Element {
     if (!confirm(`删除自动化「${task.name}」？执行记录会保留。`)) return
     setBusy(true)
     try {
-      await saveTasks(tasks.filter(item => item.id !== task.id))
+      await saveTasks(removedTasks(tasks, task.id))
       setNotice({ kind: 'warn', text: `已删除自动化「${task.name}」。` })
       await load()
     } catch (err) {
@@ -225,8 +150,7 @@ export function AutomationView(): JSX.Element {
     setBusy(true)
     setNotice({ kind: 'ok', text: `已触发「${task.name}」，进度见「执行记录」。` })
     try {
-      const data = await sendJson<{ run: AutomationRun }>('/api/automations/trigger', 'POST', { id: task.id })
-      const run = data.run
+      await sendJson<{ run: AutomationRun }>('/api/automations/trigger', 'POST', { id: task.id })
       // 触发立即返回：执行还在后台跑，这里只报「已触发」，进度靠轮询。
       setNotice({ kind: 'ok', text: `「${task.name}」已触发，正在执行。` })
       await load()
@@ -267,110 +191,76 @@ export function AutomationView(): JSX.Element {
       <div className="page-head">
         <div>
           <h1>自动化</h1>
-          <p>按计划触发的任务：服务在跑就自动执行，执行记录留在这里可查。</p>
+          <p>任务既是定时计划，也是事件订阅：一句话说清订阅什么、命中后做什么。</p>
         </div>
         <div className="page-actions">
-          <button className="btn" onClick={openCreate}>
-            <Icon name="plus" size={13} />新建自动化
+          <button className="btn primary" onClick={openCreate}>
+            <Icon name="plus" size={13} />用一句话新建
           </button>
           <button className="btn ghost" onClick={() => { void load() }} disabled={busy}>刷新</button>
         </div>
       </div>
 
       {error && <div className="banner danger"><Icon name="alert" />{error}</div>}
-      {notice && <div className={`banner ${notice.kind === 'error' ? 'danger' : ''}`} onClick={() => setNotice(null)}>{notice.text}</div>}
+      {notice && <div className={`banner ${notice.kind === 'error' ? 'danger' : notice.kind === 'warn' ? 'warn' : ''}`} onClick={() => setNotice(null)}>{notice.text}</div>}
 
       <div className="segmented automation-tabs" role="tablist">
-        <button className={tab === 'tasks' ? 'active' : ''} onClick={() => setTab('tasks')}>
-          自动化任务{tasks.length ? `（${enabledCount}/${tasks.length} 启用）` : ''}
+        <button className={tab === 'chat' ? 'active' : ''} onClick={() => setTab('chat')}>
+          会话
         </button>
         <button className={tab === 'runs' ? 'active' : ''} onClick={() => setTab('runs')}>
           执行记录{runs.length ? `（${runs.length}）` : ''}
         </button>
       </div>
 
-      {tab === 'tasks' ? (
-        <>
-        {drafts.length > 0 && (
-          <section className="automation-drafts">
-            <header>
-              <h2>待确认草稿</h2>
-              <p>来自飞书的自然语言整理结果；检查后保存才会成为正式任务。</p>
-            </header>
-            <div className="source-cards">
-              {drafts.map(record => (
-                <article key={record.id} className="source-card automation-draft-card">
-                  <div className="source-card-top">
-                    <span className="source-logo"><Icon name="radio" size={16} /></span>
-                    <div className="source-card-title">
-                      <strong>{record.draft.name}</strong>
-                      <span>
-                        {scheduleText(record.draft.schedule)} · {record.draft.project || '未选项目'} · 来自 {record.source || '组织'}
-                      </span>
-                    </div>
-                  </div>
-                  <p className="source-card-status">{record.draft.prompt}</p>
-                  <div className="source-card-actions">
-                    <button className="btn tiny" onClick={() => openDraft(record)} disabled={busy}>编辑并保存</button>
-                    <button className="btn tiny ghost" onClick={() => void dismissDraft(record)} disabled={busy}>忽略</button>
-                  </div>
-                </article>
-              ))}
+      {tab === 'chat' ? (
+        <div className="automation-workspace">
+          {/* 左边：所有自动化任务的精简卡片，竖着排。 */}
+          <aside className="automation-rail">
+            <div className="automation-rail-head">
+              <h3>自动化任务</h3>
+              <span>{tasks.length ? `${enabledCount} 条启用` : '还没有任务'}</span>
             </div>
+            <div className="automation-rail-body">
+              {tasks.length === 0 ? (
+                <div className="automation-rail-empty">
+                  <p>还没有自动化任务。</p>
+                  <p className="muted">用一句话建一个，比如「订阅 GitHub 的 CI 失败，有价值的就立即修复」。</p>
+                </div>
+              ) : (
+                tasks.map(task => (
+                  <TaskRailItem
+                    key={task.id}
+                    task={task}
+                    active={conversationId !== undefined && conversationIdOf(task, conversations) === conversationId}
+                    busy={busy}
+                    onOpen={() => resumeConversation(task)}
+                    onTrigger={() => void trigger(task)}
+                    onToggle={() => void toggle(task)}
+                    onRemove={() => void remove(task)}
+                    onGenerateScript={() => void generateScript(task)}
+                  />
+                ))
+              )}
+            </div>
+          </aside>
+
+          {/* 右边：整个主区就是会话窗口，底部浮着输入框。 */}
+          <section className="automation-chat">
+            <header className="automation-chat-head">
+              <h2>{conversationId ? '任务会话' : '新建自动化 · 会话'}</h2>
+              <p>
+                {conversationId
+                  ? '接着上次的对话继续改这条任务；确认后才写回任务。'
+                  : '说清要订阅什么、命中后做什么；助手会追问缺的那一项，确认后才落库。'}
+              </p>
+            </header>
+            <AutomationConversationView
+              conversationId={conversationId}
+              onTaskCreated={() => { void load() }}
+            />
           </section>
-        )}
-        {tasks.length === 0 ? (
-          <div className="empty-state">
-            <p>还没有自动化任务。</p>
-            <p className="muted">新建一个：说明要做什么、选个项目、定个执行时间。</p>
-          </div>
-        ) : (
-          <div className="source-cards">
-            {tasks.map(task => (
-              <article key={task.id} className={`source-card ${task.enabled ? 'on' : ''}`}>
-                <div className="source-card-top">
-                  <span className="source-logo"><Icon name="zap" size={16} /></span>
-                  <div className="source-card-title">
-                    <strong>{task.name}</strong>
-                    <span>
-                      {task.type === 'script' ? '脚本自动化' : 'AI 自动化'} · {scheduleText(task.schedule)} · {task.project}
-                    </span>
-                  </div>
-                </div>
-                <p className="source-card-status">{task.description || task.prompt}</p>
-                <p className="source-card-package" title={task.prompt}>{task.prompt}</p>
-                {task.type === 'script' && (
-                  <p className="automation-script-state">
-                    {task.script
-                      ? <>脚本已就绪（{task.script.split('\n').length} 行），定时执行跑的就是这份</>
-                      : <>还没有脚本：先生成脚本，确认后才会执行</>}
-                  </p>
-                )}
-                <div className="source-card-fields">
-                  {task.nextRunAt ? `下次触发 ${formatTime(task.nextRunAt)}` : '尚未排期'}
-                  {task.lastStatus ? ` · 上次 ${RUN_STATUS_LABEL[task.lastStatus] ?? task.lastStatus}` : ''}
-                </div>
-                <div className="source-card-actions">
-                  <button className="btn tiny" onClick={() => openEdit(task)}>编辑</button>
-                  {task.type === 'script' && (
-                    <button className="btn tiny ghost" onClick={() => void generateScript(task)} disabled={busy}>
-                      <Icon name="zap" size={11} />{task.script ? '重新生成脚本' : '生成脚本'}
-                    </button>
-                  )}
-                  <button className="btn tiny ghost" onClick={() => void trigger(task)} disabled={busy}>
-                    <Icon name="play" size={11} />执行一次
-                  </button>
-                  <button className="btn tiny ghost" onClick={() => void toggle(task)} disabled={busy}>
-                    {task.enabled ? '停用' : '启用'}
-                  </button>
-                  <button className="btn tiny ghost" onClick={() => void remove(task)} disabled={busy}>删除</button>
-                </div>
-              </article>
-            ))}
-          </div>
-        )
-        }
-        </>
+        </div>
       ) : (
         runs.length === 0 ? (
           <div className="empty-state">
@@ -428,19 +318,53 @@ export function AutomationView(): JSX.Element {
           </table>
         )
       )}
-
-      {editing && (
-        <AutomationEditor
-          draft={editing}
-          runtimes={runtimes}
-          projects={projects}
-          busy={busy}
-          onChange={setEditing}
-          onClose={() => { setEditing(null); setEditingDraftId(null) }}
-          onSave={() => void commit(editing)}
-        />
-      )}
     </>
+  )
+}
+
+/** 任务栏里的一条任务：精简到一行标题 + 一行摘要，操作收在 hover 出来的按钮里。 */
+function TaskRailItem({ task, active, busy, onOpen, onTrigger, onToggle, onRemove, onGenerateScript }: {
+  task: AutomationTask
+  /** 这条任务是不是当前打开的会话。 */
+  active: boolean
+  busy: boolean
+  onOpen: () => void
+  onTrigger: () => void
+  onToggle: () => void
+  onRemove: () => void
+  onGenerateScript: () => void
+}): JSX.Element {
+  return (
+    <article className={`rail-item automation-rail-item ${active ? 'active' : ''} ${task.enabled ? '' : 'off'}`}>
+      <button className="rail-item-main" onClick={onOpen} title={task.description || task.prompt}>
+        <span className="rail-item-head">
+          <span className={`rail-dot ${task.enabled ? 'on' : ''}`} aria-hidden="true" />
+          <strong>{task.name}</strong>
+        </span>
+        <span className="rail-item-meta">
+          {task.trigger.kind === 'event' ? (
+            <span className={modeClass(task.trigger.mode)}><i />{MODE_LABEL[task.trigger.mode]}</span>
+          ) : null}
+          <span className="rail-item-trigger">{triggerSummary(task.trigger)}</span>
+        </span>
+      </button>
+      <div className="rail-item-actions">
+        <button className="icon-btn" title="执行一次" aria-label={`执行一次 ${task.name}`} onClick={onTrigger} disabled={busy}>
+          <Icon name="play" size={13} />
+        </button>
+        {task.type === 'script' && (
+          <button className="icon-btn" title="生成脚本" aria-label={`生成脚本 ${task.name}`} onClick={onGenerateScript} disabled={busy}>
+            <Icon name="zap" size={13} />
+          </button>
+        )}
+        <button className="icon-btn" title={task.enabled ? '停用' : '启用'} aria-label={`${task.enabled ? '停用' : '启用'} ${task.name}`} onClick={onToggle} disabled={busy}>
+          <Icon name={task.enabled ? 'stop' : 'play'} size={13} />
+        </button>
+        <button className="icon-btn danger" title="删除" aria-label={`删除 ${task.name}`} onClick={onRemove} disabled={busy}>
+          <Icon name="trash" size={13} />
+        </button>
+      </div>
+    </article>
   )
 }
 
@@ -451,240 +375,6 @@ function RunOutputs({ outputs }: { outputs: AutomationRun['outputs'] }): JSX.Ele
     <div className="automation-outputs">
       {outputs.ticketIds.map(id => <a key={id} href={`#tickets/${encodeURIComponent(id)}`} className="automation-output-link">工单 {id}</a>)}
       {outputs.eventIds.map(id => <a key={id} href="#events" className="automation-output-link">事件 {id}</a>)}
-    </div>
-  )
-}
-
-/** 新建 / 编辑自动化弹窗。 */
-export function AutomationEditor({ draft, runtimes, projects, busy, onChange, onClose, onSave }: {
-  draft: AutomationDraft
-  runtimes: RuntimeOption[]
-  projects: ProjectOption[]
-  busy: boolean
-  onChange: (draft: AutomationDraft) => void
-  onClose: () => void
-  onSave: () => void
-}): JSX.Element {
-  const message = validateDraft(draft)
-  const pickProject = (name: string) => {
-    const project = projects.find(item => item.name === name)
-    onChange({
-      ...draft,
-      project: name,
-      repo: project?.repo ?? draft.repo,
-      branch: project?.defaultBranch ?? draft.branch,
-    })
-  }
-  const setSchedule = (patch: Partial<AutomationDraft['schedule']>) => {
-    onChange({ ...draft, schedule: { ...draft.schedule, ...patch } })
-  }
-
-  return (
-    <div className="modal-layer">
-      <button className="modal-backdrop" aria-label="关闭" onClick={onClose} />
-      <div className="modal modal-wide rule-modal" role="dialog" aria-modal="true" aria-label="新建自动化">
-        <header className="modal-head rule-modal-head">
-          <div>
-            <h2>{draft.id ? '编辑自动化' : '新建自动化'}</h2>
-            <p className="rule-modal-sub">
-              <span className="mono">{scheduleText(draft.schedule)}</span>
-              <span className="rule-modal-dot">·</span>
-              <span>{draft.project || '未选项目'}</span>
-            </p>
-          </div>
-          <button className="icon-btn" title="关闭" aria-label="关闭" onClick={onClose}>
-            <Icon name="close" size={14} />
-          </button>
-        </header>
-        <div className="modal-body rule-modal-body">
-          <section className="rule-section">
-            <header className="rule-section-head">
-              <h3><span className="rule-step">1</span>基本信息</h3>
-              <p>名称与描述只给人看；执行时以「提示词」为准。</p>
-            </header>
-            <label className="modal-field">
-              <span>名称</span>
-              <input
-                value={draft.name}
-                placeholder="例如：每周检查依赖更新"
-                onChange={event => onChange({ ...draft, name: event.target.value })}
-              />
-            </label>
-            <label className="modal-field">
-              <span>描述<span className="rule-field-key">可选</span></span>
-              <input
-                value={draft.description}
-                placeholder="一句话说明这个自动化做什么"
-                onChange={event => onChange({ ...draft, description: event.target.value })}
-              />
-            </label>
-          </section>
-
-          <section className="rule-section">
-            <header className="rule-section-head">
-              <h3><span className="rule-step">2</span>类型与内容</h3>
-              <p>AI 自动化只给提示词；脚本自动化执行的是固定脚本，脚本生成后可以人工改。</p>
-            </header>
-            <label className="modal-field">
-              <span>类型</span>
-              <span className="select-wrap">
-                <select value={draft.type} onChange={event => onChange({ ...draft, type: event.target.value as AutomationDraft['type'] })}>
-                  <option value="ai">AI 自动化（自然语言提示词）</option>
-                  <option value="script">脚本自动化（AI 生成脚本，可人工编辑）</option>
-                </select>
-                <Icon name="chevron" size={12} className="select-chevron" />
-              </span>
-            </label>
-            <label className="modal-field">
-              <span className="rule-field-label">
-                {draft.type === 'script' ? '脚本要达成的目标' : '提示词'}
-              </span>
-              <textarea
-                className="rule-textarea"
-                rows={4}
-                value={draft.prompt}
-                placeholder="例如：检查 package.json 里的依赖有没有新版本，有就列出清单"
-                onChange={event => onChange({ ...draft, prompt: event.target.value })}
-              />
-            </label>
-            {draft.type === 'script' && (
-              <>
-                <label className="modal-field">
-                  <span className="rule-field-label">脚本正文<span className="rule-field-key">留空则执行前需先生成</span></span>
-                  <textarea
-                    className="rule-textarea"
-                    rows={6}
-                    value={draft.script}
-                    placeholder={'#!/bin/sh\n# 任务执行时在所选项目的工作目录里跑这段脚本'}
-                    onChange={event => onChange({ ...draft, script: event.target.value })}
-                  />
-                </label>
-                <p className="modal-hint">
-                  <Icon name="alert" size={12} />
-                  {draft.script.trim()
-                    ? '定时执行跑的就是这份脚本，可以在上面直接改。'
-                    : '还没有脚本：保存后到任务卡片点「生成脚本」，确认脚本内容后再执行。'}
-                </p>
-              </>
-            )}
-          </section>
-
-          <section className="rule-section">
-            <header className="rule-section-head">
-              <h3><span className="rule-step">3</span>执行环境</h3>
-              <p>任务在所选项目里跑，超出项目范围的资源不会被访问。</p>
-            </header>
-            <label className="modal-field">
-              <span>运行时</span>
-              <span className="select-wrap">
-                <select value={draft.runtimeId} onChange={event => onChange({ ...draft, runtimeId: event.target.value })}>
-                  <option value="">跟随默认运行时</option>
-                  {runtimes.map(runtime => (
-                    <option key={runtime.id} value={runtime.id}>{runtime.name}</option>
-                  ))}
-                </select>
-                <Icon name="chevron" size={12} className="select-chevron" />
-              </span>
-            </label>
-            <label className="modal-field">
-              <span>目标项目</span>
-              <span className="select-wrap">
-                <select value={draft.project} onChange={event => pickProject(event.target.value)}>
-                  <option value="">请选择项目</option>
-                  {projects.map(project => (
-                    <option key={project.name} value={project.name}>{project.name}</option>
-                  ))}
-                </select>
-                <Icon name="chevron" size={12} className="select-chevron" />
-              </span>
-            </label>
-            {draft.repo && (
-              <p className="modal-hint">
-                <Icon name="folder" size={12} />{draft.repo}
-                {draft.branch ? ` @ ${draft.branch}` : ''}
-              </p>
-            )}
-          </section>
-
-          <section className="rule-section">
-            <header className="rule-section-head">
-              <h3><span className="rule-step">4</span>执行时间</h3>
-              <p>服务没在跑时错过的触发不会补跑，会记成「已错过」。</p>
-            </header>
-            <label className="modal-field">
-              <span>频率</span>
-              <span className="select-wrap">
-                <select
-                  value={draft.schedule.kind}
-                  onChange={event => setSchedule({ kind: event.target.value as AutomationDraft['schedule']['kind'] })}
-                >
-                  {Object.entries(SCHEDULE_KIND_LABEL).map(([value, label]) => (
-                    <option key={value} value={value}>{label}</option>
-                  ))}
-                </select>
-                <Icon name="chevron" size={12} className="select-chevron" />
-              </span>
-            </label>
-            {draft.schedule.kind === 'daily' && (
-              <label className="modal-field">
-                <span>执行时刻</span>
-                <input
-                  type="time"
-                  value={draft.schedule.at ?? '09:00'}
-                  onChange={event => setSchedule({ at: event.target.value })}
-                />
-              </label>
-            )}
-            {draft.schedule.kind === 'weekly' && (
-              <div className="modal-grid">
-                <label className="modal-field">
-                  <span>星期</span>
-                  <span className="select-wrap">
-                    <select
-                      value={draft.schedule.weekday ?? 1}
-                      onChange={event => setSchedule({ weekday: Number(event.target.value) })}
-                    >
-                      {weekdayOptions().map(option => (
-                        <option key={option.value} value={option.value}>{option.label}</option>
-                      ))}
-                    </select>
-                    <Icon name="chevron" size={12} className="select-chevron" />
-                  </span>
-                </label>
-                <label className="modal-field">
-                  <span>执行时刻</span>
-                  <input
-                    type="time"
-                    value={draft.schedule.time ?? '09:00'}
-                    onChange={event => setSchedule({ time: event.target.value })}
-                  />
-                </label>
-              </div>
-            )}
-            {draft.schedule.kind === 'cron' && (
-              <label className="modal-field">
-                <span className="rule-field-label">Cron 表达式<span className="rule-field-key">分 时 日 月 周</span></span>
-                <input
-                  value={draft.schedule.cron ?? ''}
-                  placeholder="0 9 * * 1"
-                  onChange={event => setSchedule({ cron: event.target.value })}
-                />
-                <p className="modal-hint">五段式；例如 0 9 * * 1 表示每周一 09:00。</p>
-              </label>
-            )}
-          </section>
-        </div>
-        <footer className="modal-foot rule-modal-foot">
-          {message && (
-            <p className="rule-modal-error" role="alert">
-              <Icon name="alert" size={13} />
-              <span>{message}</span>
-            </p>
-          )}
-          <button className="btn ghost" onClick={onClose}>取消</button>
-          <button className="btn primary" onClick={onSave} disabled={busy}>保存</button>
-        </footer>
-      </div>
     </div>
   )
 }

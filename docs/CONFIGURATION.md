@@ -327,9 +327,13 @@ ra logs --follow | grep '"message":"decision:'
 
 ## 事件总线（多来源事件）
 
-事件总线把「飞书消息之外」的事也接进来：GitHub 仓库的 Issue / PR / Action，以及自定义来源插件。事件先进队列，按 **eventType 精确匹配一条决策规则**，由规则里的问题判定「是否有效 / 能否自动执行 / 优先级 / 归属项目 / 执行方式」，再分级派发：**能直接做的开单，需要人看的推管理员审核**。
+事件总线把「飞书消息之外」的事也接进来：GitHub 仓库的 Issue / PR / Action、飞书群的实时事件，以及自定义来源插件。
 
-事件本身**不绑定项目** —— 归属项目由规则判定。**默认关闭**；没有匹配规则的事件只收集、不判定、不调用模型。
+事件订阅与自动化任务现在**合为一体**：一条任务既是「订阅什么」，也是「命中后做什么」。事件源插件只声明**有什么可订阅**（事件目录），订阅关系写在 `automation.tasks[].trigger` 里。**决策规则模块已整体删除** —— 不用再手工维护规则列表。
+
+事件的处理链路：事件先进队列 → 命中的订阅做**确定性关键词过滤**（不命中就不调模型）→ 语义判定（模型补齐优先级、归属项目、处理方式）→ 按订阅的 `mode` 分流：**`auto` 直接开单、`review` 进收件箱等人批、`notify` 只记录并提醒**。
+
+`events.enabled` **默认关闭**；关着时事件来源不装配。
 
 在 Web 面板「配置 → 事件总线」里配（也可以写 `config.yaml`）：
 
@@ -351,38 +355,9 @@ events:
     feishu:
       enabled: false                 # 飞书群消息由消息链路处理，这里只留开关
       kind: feishu
-  rules:
-    - id: rule-github-action-error
-      eventType: github.workflow_run.failure
-      intent: |-
-        所有 GitHub Action 失败都处理并自动执行。
-        执行流程：分析报错原因，修复并提交 PR。
-      questions:
-        is_valid:
-          type: noul
-          instructions: 该事件是否属于需要处理的 GitHub Action 失败事件？
-        autorun:
-          type: choice
-          criteria:
-            auto: 可以自动执行，不需要人工确认。
-            review: 涉及发布、生产或信息不足时转人工。
-        priority:
-          type: score
-          instructions: 评估处理优先级。
-          criteria: [低, 中, 高, 紧急]
-        project:
-          type: choice
-          instructions: 根据事件内容判断归属项目。
-      workflowPrompt: 分析失败步骤，修复并提交 PR。
-      guardrails:
-        riskLabels: [security, prod, production, incident, payment, release]
-      thresholds:
-        isValid: 0.5
-        projectPick: 0.4
-      version: 1
   decision:
-    provider: llm                    # jev | llm | rule
-    confidenceThreshold: 0.6         # 规则没写阈值时的兜底置信度阈值
+    provider: llm                    # jev | llm
+    confidenceThreshold: 0.6         # 模型没给出置信度时的兜底阈值
     fallback: review                 # review 转人工 | pending 留队重试（见下方说明）
   policy:
     peak: { start: "09:00", end: "20:00", priorities: [P0, P1] }
@@ -394,26 +369,46 @@ events:
     reviewChatId: ""                 # 审核通知发到哪个会话；留空只落面板
 ```
 
-### 决策规则
+### 事件订阅与自动化任务
 
-规则按 `eventType` 精确匹配，`eventType` 必须带来源前缀（例如 `github.workflow_run.failure`、`feishu.message.received`）。同一个类型只允许一条规则；没有匹配规则的事件状态是 **`undecided`（未判定）**，留在队列里，不调用模型，也不计配额。
+订阅关系写在 `automation.tasks[].trigger` 里（见 [AUTOMATION.md](AUTOMATION.md)）。事件源插件**不再持有订阅**：
 
-固定四问骨架：
-
-| 问题 | 类型 | 落点 |
+| 角色 | 放在哪 | 说明 |
 |-|-|-|
-| `is_valid` | `noul` | 低于阈值 → `invalid`，只留记录 |
-| `autorun` | `choice` | `auto` 自动执行；`review` 进待审核 |
-| `priority` | `score` | 决定时间窗与配额排序 |
-| `project` | `choice` | 决定派工仓库；`unknown` 一律转人工 |
+| 可订阅的事件类型 | 事件目录（`EventCatalog`） | 插件声明「我有什么事件」，只读 |
+| 订阅哪些类型、怎么过滤、命中后怎么办 | `automation.tasks[].trigger` | 任务的属性；订阅由任务推导 |
 
-`workflowPrompt` 会作为「执行流程」拼进 Worker 的授权范围；宿主的安全护栏（只改本仓库、不碰生产环境与发布）始终追加，规则和模型都不能覆盖。`guardrails.riskLabels` 命中时强制人审并提 P0。
+`trigger` 有两种形态：
 
-规则变更（新增 / 修改 / 整段保存）后，宿主会把这些类型下状态为 `undecided` 的事件重新激活成 `pending`；已经判定或已顺延的事件不会被重判。删除规则不会影响已开出的工单。
+```yaml
+automation:
+  tasks:
+    - id: auto_ci_fix
+      name: CI 修复
+      type: ai
+      prompt: 分析失败步骤，修复并提交 PR。
+      trigger:
+        kind: event
+        source: github
+        types: [github.workflow_run.failure]
+        params:
+          repo: blankPen/router-agent
+        filter:
+          keywords: [失败, error]          # 确定性过滤：命中任一即通过
+          semantic: 影响主流程的失败       # 语义条件：交给判定模型
+        mode: auto                        # auto | review | notify
+      skill: ci-fix
+      project: router-agent
+      enabled: true
+```
 
-收件箱（事件队列页，页签标识仍是 `events`）的「规则命中」区按 `ruleId + status` 聚合展示每条规则命中了多少条事件（有效 / 人审 / 无效 / 合计）。长期 0 命中的规则通常说明 `eventType` 配错了。
+`mode` 决定分流：`auto` 命中就开单，`review` 进收件箱等人批，`notify` 只记录并提醒、不进执行链路。
 
-判定依据只有规则一处：旧版全局 `events.decision.prompt` 与 `events.decision.fallbackToPrompt` 已删除，旧配置里残留的这两项会被忽略。
+没有配 `filter.keywords` 时一律通过 —— 过滤条件的缺失不该让事件凭空消失。
+
+**旧配置里的 `events.rules` 会被忽略**：规则模块已删除，旧规则不迁移到运行期。用 `ra migrate event-rules --dry-run` 看迁移报告（详见 [AUTOMATION.md](AUTOMATION.md) 的「从决策规则迁移」）。
+
+收件箱（事件队列页，页签标识仍是 `events`）的「订阅命中」区按**任务**聚合展示每条任务命中了多少条事件（有效 / 人审 / 仅提醒 / 合计）。长期 0 命中的任务通常说明事件类型或关键词订错了。
 
 ### GitHub 仓库订阅
 
@@ -480,7 +475,7 @@ events:
 
 内置来源（GitHub 仓库订阅 / 飞书）不够用时，可以装一个事件来源插件 —— 和「添加运行时」是同一套机制：面板「配置 → 事件总线 → 添加自定义事件」填 npm 包名，走 `npm install` 装到 `<RA_HOME>/node_modules`。
 
-插件包默认导出一个对象：
+插件包默认导出一个对象。**插件只声明「有什么可订阅」** —— 不拉取、不判定、不派工：
 
 ```ts
 import type { EventPlugin } from '@router-agent/event'
@@ -494,14 +489,31 @@ const plugin: EventPlugin = {
       { key: 'verbose', label: '输出详情', kind: 'boolean' },
     ],
   },
-  async create(ctx) {
-    const source = new MySource(ctx.config, ctx.logger)
-    return source
+  // 必填：事件目录。面板的目录卡、自然语言会话的提示词都读它。
+  catalog: {
+    id: 'my-source',
+    kind: 'my-source',
+    name: '我的来源',
+    types: () => [
+      { id: 'my-source.alert.fired', label: '告警触发', group: '告警' },
+      { id: 'my-source.alert.cleared', label: '告警解除', group: '告警' },
+    ],
+    params: () => [
+      { key: 'target', label: '巡检目标', kind: 'text', required: true },
+    ],
+  },
+  // 可选：自己拉事件。不实现就由宿主按目录用通用轮询拉。
+  async fetch(ctx) {
+    return new MyFetcher(ctx.config, ctx.logger)
   },
 }
 
 export default plugin
 ```
+
+**`catalog` 是插件唯一必须实现的部分**。`types()` 里的每个类型可以带 `availability`，标出前置条件（需后台订阅 / 需用户身份 / 需额外参数）—— 这些标注会带进会话提示词，避免模型给用户建一个永远等不到事件的任务。
+
+**旧版只实现 `create()` 的插件不再加载**（`EventSource` 已废弃）：插件要么给 `catalog`，要么什么都不做。
 
 装好之后面板按插件声明的 `meta.id` 把它登记成一个来源，来源 id 就是 `meta.id`。落盘形状：
 
@@ -517,9 +529,9 @@ events:
         verbose: false
 ```
 
-`options` 里的键就是插件 `options.fields[].key`，面板设置弹窗直接按它渲染，不用宿主再写一份表单。插件可以声明 `createAll()` 注册多个来源实例，也可以只实现 `create()` 注册一个。
+`options` 里的键就是插件 `options.fields[].key`，面板设置弹窗直接按它渲染，不用宿主再写一份表单。
 
-加载失败只记 `event:plugin-failed` 日志，不影响其它来源。
+加载失败只记 `event:plugin-failed` 日志，不影响其它来源；目录加载失败只记 `event:catalog-load-failed`，内置目录不受影响。
 
 ## 飞书机器人（专属 profile）
 

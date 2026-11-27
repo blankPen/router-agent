@@ -1,7 +1,8 @@
 /**
  * 决策模型的两种接入方式：Jev（结构化问题）与 LLM（JSON 结论式）。
  *
- * questions 由规则自带；state 在判定时把事件现场与规则上下文拼出来。
+ * 判定依据是命中的订阅：订阅里的语义过滤条件是模型要回答的问题，
+ * state 在判定时把事件现场与订阅上下文拼出来。
  * 模型只能从宿主给出的项目 / skill 闭集里选，不能凭空造。
  */
 import type { EventPriority } from '#core/event.js'
@@ -10,8 +11,14 @@ import type { ChatClient } from '#infra/chat.js'
 import { JevClient, type JevQuestion, type JevAnswers } from '#infra/decision/jev-client.js'
 import { extractJsonObject } from '../router/model-config.js'
 import type { EventDecisionInput, EventDecisionOutput, EventDecisionPort } from './decision.js'
-import { priorityLevels, ruleSkills, type EventRuleQuestion } from './rules.js'
-import { skillCatalogText } from './skills.js'
+import { EVENT_SKILLS, skillCatalogText } from './skills.js'
+
+/** Jev / LLM 的问题骨架：类型与规则无关，只看订阅的语义条件。 */
+interface DecisionQuestion {
+  type: 'noul' | 'score' | 'choice'
+  instructions: string
+  criteria?: string[] | Record<string, string>
+}
 
 /** LLM 判定端口：一次调用要一个 JSON 结论。 */
 export function createLlmDecisionPort(client: ChatClient, deps: { logger?: Logger } = {}): EventDecisionPort {
@@ -56,13 +63,11 @@ export function createJevDecisionPort(client: JevClient, deps: { logger?: Logger
       try {
         answers = await client.ask(stateOf(input), jevQuestionsOf(input))
       } catch (error) {
-        logger.warn('event:jev-failed', { eventId: input.event.id, ruleId: input.rule?.id, message: errorMessage(error) })
+        logger.warn('event:jev-failed', { eventId: input.event.id, subscriptionId: input.subscription?.id, message: errorMessage(error) })
         throw error
       }
       const isValid = numberAnswer(answers, 'is_valid')
-      const threshold = input.rule
-        ? input.rule.thresholds.isValid
-        : input.decision.confidenceThreshold
+      const threshold = input.decision.confidenceThreshold
       const valid = isValid >= threshold
       const autorun = stringAnswer(answers, 'autorun')
       const priority = priorityFromScore(numberAnswer(answers, 'priority'), priorityCriteriaOf(input))
@@ -70,7 +75,7 @@ export function createJevDecisionPort(client: JevClient, deps: { logger?: Logger
       const skill = stringAnswer(answers, 'skill')
       const projectName = project && project !== 'unknown' ? project : ''
       const skillId = skill && skill !== 'unknown' ? skill : ''
-      const confidence = valid ? Math.min(isValid, projectName ? 1 : input.rule?.thresholds.projectPick ?? 0.4) : isValid
+      const confidence = valid ? Math.min(isValid, projectName ? 1 : 0.4) : isValid
       return {
         actionable: valid,
         priority,
@@ -78,7 +83,7 @@ export function createJevDecisionPort(client: JevClient, deps: { logger?: Logger
         ...(projectName ? { project: projectName } : {}),
         ...(skillId ? { skill: skillId } : {}),
         needsReview: valid && autorun !== 'auto',
-        reason: 'Jev 规则判定',
+        reason: 'Jev 判定',
         confidence,
       }
     },
@@ -87,19 +92,19 @@ export function createJevDecisionPort(client: JevClient, deps: { logger?: Logger
 
 /** LLM 的系统提示词：规则问题 + 输出格式 + 候选闭集。 */
 export function systemPromptOf(input: EventDecisionInput): string {
-  const rule = input.rule
+  const subscription = input.subscription
   const projects = input.projects.length
     ? input.projects.map(project => `- ${project.name}（仓库 ${project.repo}）`).join('\n')
     : '（没有候选项目；判定不出归属时把 project 设为 unknown，并标 autorun=review）'
-  const skills = ruleSkills(rule)
+  const skills = EVENT_SKILLS
   return [
     '你是事件总线里的决策模型。一次判定要同时回答：事件是否有效、能否自动执行、优先级、归属项目，以及可选的处理方式。',
     '',
-    '# 规则意图（人工可配置）',
-    rule?.intent || '（没有命中规则）',
-    '',
-    '# 判定问题（按顺序回答，语义不可改变）',
-    questionCatalogText(rule),
+    '# 订阅意图（用户用自然语言写的过滤条件）',
+    subscription?.filter.semantic || '（没有语义过滤条件；按事件内容判断是否值得处理）',
+    subscription?.filter.keywords.length
+      ? `\n已命中的关键词：${subscription.filter.keywords.join('、')}`
+      : '',
     '',
     '# 候选项目（只能从中选，或 unknown）',
     projects,
@@ -111,6 +116,7 @@ export function systemPromptOf(input: EventDecisionInput): string {
     '只输出一个 JSON 对象，不要解释：',
     '{"is_valid":true,"autorun":"auto","priority":"P1","project":"项目名","skill":"skill-id","reason":"一句话理由","confidence":0.9}',
     'autorun 只能是 auto / review；拿不准时 project=unknown、autorun=review，并调低 confidence。不要编造闭集以外的项目或 skill。',
+    subscription?.project ? `订阅已经指定归属项目「${subscription.project}」，不要改写它。` : '',
   ].join('\n')
 }
 
@@ -124,11 +130,11 @@ export function userPromptOf(input: EventDecisionInput): string {
   ].join('\n\n')
 }
 
-/** Jev 的 state：背景、事件参数与规则上下文；保存时不生成，判定时拼接。 */
+/** Jev 的 state：背景、事件参数与订阅上下文；保存时不生成，判定时拼接。 */
 export function stateOf(input: EventDecisionInput): {
   background: string
   payload: Record<string, string>
-  rule: { id: string; eventType: string; intent: string; workflowPrompt: string }
+  subscription: { id: string; taskName: string; types: string[]; semantic: string; workflowPrompt: string }
 } {
   const event = input.event
   const context = event.context ?? {}
@@ -142,11 +148,12 @@ export function stateOf(input: EventDecisionInput): {
       branch: context.branch ?? event.branch ?? '',
       url: event.url ?? '',
     },
-    rule: {
-      id: input.rule?.id ?? '',
-      eventType: input.rule?.eventType ?? event.eventType,
-      intent: input.rule?.intent ?? '',
-      workflowPrompt: input.rule?.workflowPrompt ?? '',
+    subscription: {
+      id: input.subscription?.id ?? '',
+      taskName: input.subscription?.taskName ?? '',
+      types: input.subscription?.types ?? [],
+      semantic: input.subscription?.filter.semantic ?? '',
+      workflowPrompt: input.subscription?.prompt ?? '',
     },
   }
 }
@@ -163,67 +170,53 @@ function jevQuestionsOf(input: EventDecisionInput): Record<string, JevQuestion> 
   return questions
 }
 
-function coreQuestionsOf(input: EventDecisionInput): Record<string, EventRuleQuestion> {
-  const base = input.rule?.questions
+function coreQuestionsOf(input: EventDecisionInput): Record<string, DecisionQuestion> {
+  const semantic = input.subscription?.filter.semantic ?? ''
   const projectCriteria = {
-    ...(base?.project.criteria && !Array.isArray(base.project.criteria) ? base.project.criteria : {}),
     ...Object.fromEntries(input.projects.map(project => [project.name, `项目 ${project.name}（仓库 ${project.repo}）`])),
     unknown: '无法根据事件内容可靠识别项目归属。',
   }
   const skillCriteria = {
-    ...(base?.skill?.criteria && !Array.isArray(base.skill.criteria) ? base.skill.criteria : {}),
-    ...Object.fromEntries(ruleSkills(input.rule).map(skill => [skill.id, `${skill.name}：${skill.hint}`])),
+    ...Object.fromEntries(EVENT_SKILLS.map(skill => [skill.id, `${skill.name}：${skill.hint}`])),
     unknown: '无法确定处理方式。',
   }
   return {
-    is_valid: base?.is_valid ?? {
+    is_valid: {
       type: 'noul',
-      instructions: '该事件是否需要处理？与规则无关的噪声回答 0。',
+      instructions: semantic
+        ? `该事件是否符合订阅的过滤条件「${semantic}」？不符合回答 0。`
+        : '该事件是否需要处理？无关的噪声回答 0。',
     },
-    autorun: base?.autorun ?? {
+    autorun: {
       type: 'choice',
       instructions: '该事件是否可以自动执行？',
       criteria: { auto: '可以自动执行。', review: '需要人工 review。' },
     },
-    priority: base?.priority ?? {
+    priority: {
       type: 'score',
       instructions: '该事件有多急？',
       criteria: ['低优先级', '中优先级', '高优先级', '紧急'],
     },
     project: {
       type: 'choice',
-      instructions: base?.project.instructions ?? '该事件归属于哪个项目？',
+      instructions: '该事件归属于哪个项目？',
       criteria: projectCriteria,
     },
     skill: {
       type: 'choice',
-      instructions: base?.skill?.instructions ?? '该事件应该用哪种处理方式？',
+      instructions: '该事件应该用哪种处理方式？',
       criteria: skillCriteria,
     },
   }
 }
 
-function questionCatalogText(rule: EventDecisionInput['rule']): string {
-  if (!rule) return '（没有规则；按事件内容判定是否处理）'
-  return Object.entries(rule.questions)
-    .map(([id, question]) => {
-      const criteria = question.criteria && !Array.isArray(question.criteria)
-        ? Object.entries(question.criteria).map(([key, value]) => `  - ${key}: ${value}`).join('\n')
-        : Array.isArray(question.criteria)
-          ? question.criteria.map((value: unknown, index: number) => `  - ${index}: ${value}`).join('\n')
-          : ''
-      return `- ${id}（${question.type}）：${question.instructions}${criteria ? `\n${criteria}` : ''}`
-    })
-    .join('\n')
-}
-
 function priorityCriteriaOf(input: EventDecisionInput): readonly string[] {
-  const criteria = input.rule?.questions.priority.criteria
-  return Array.isArray(criteria) && criteria.length > 0 ? criteria : ['低', '中', '高', '紧急']
+  return ['低', '中', '高', '紧急']
 }
 
 function priorityFromScore(score: number, criteria: readonly string[]): EventPriority {
-  const levels = priorityLevels(criteria)
+  // 分数从低到高对应 P4 → P1；与全局优先级的语义一致。
+  const levels: EventPriority[] = ['P4', 'P3', 'P2', 'P1']
   const index = Math.round(Math.min(1, Math.max(0, score)) * (criteria.length - 1))
   return levels[index] ?? 'P3'
 }

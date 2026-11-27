@@ -7,8 +7,8 @@ import {
   throwRunner,
   type PluginFailure,
 } from '@router-agent/infra/plugin-loader.js'
-import { EventSourceRegistry } from '../registry.js'
-import type { EventSource } from '../port.js'
+import { EventCatalogRegistry, EventFetcherRegistry } from '../registry.js'
+import type { EventCatalog, EventFetcher } from '../port.js'
 import type {
   EventOptionField,
   EventPlugin,
@@ -41,10 +41,12 @@ export interface EventPluginDeps {
 }
 
 export interface LoadedEventPlugins {
-  registry: EventSourceRegistry
+  /** 插件提供的事件目录（宿主按它渲染目录卡与注入会话提示词）。 */
+  catalogs: EventCatalog[]
+  /** 插件自带的拉取器；没有就是宿主通用 watcher。 */
+  fetchers: EventFetcher[]
   metas: EventPluginMeta[]
-  sources: EventSource[]
-  /** 配置 id → 实际注册的来源实例 id；一个插件包可以注册多个。 */
+  /** 配置 id → 实际注册的目录 id；一个插件包可以注册多个。 */
   loadedIds: Record<string, string[]>
   /** 配置 id → 插件声明的可配置项；面板按它渲染设置表单。 */
   optionsById: Record<string, EventOptionField[]>
@@ -56,6 +58,9 @@ export interface LoadedEventPlugins {
  *
  * 只有配置里声明了插件入口的来源 id 才会尝试加载；内置来源（github / feishu）
  * 由宿主直接装配，不走这里。
+ *
+ * 插件必须提供 `catalog()`：旧插件（只实现 `EventSource`）不再加载，
+ * 启动时打一条明确的弃用告警。
  */
 export async function loadEventPlugins(
   config: EventPluginConfigView,
@@ -64,9 +69,11 @@ export async function loadEventPlugins(
   const logger = deps.logger ?? noopLogger
   const home = deps.home ?? config.home ?? ''
   const ids = Object.keys(config.events?.sources ?? {}).filter(id => eventPluginEntryOf(config, id))
-  const registry = new EventSourceRegistry(logger)
+  const catalogRegistry = new EventCatalogRegistry(logger)
+  const fetcherRegistry = new EventFetcherRegistry(logger)
   const metas: EventPluginMeta[] = []
-  const sources: EventSource[] = []
+  const catalogs: EventCatalog[] = []
+  const fetchers: EventFetcher[] = []
   const loadedIds: Record<string, string[]> = {}
   const optionsById: Record<string, EventOptionField[]> = {}
   const failures: PluginFailure[] = []
@@ -91,14 +98,33 @@ export async function loadEventPlugins(
         runner: deps.runner ?? (bin => throwRunner('event', bin)),
         ...(deps.services ? { services: deps.services } : {}),
       }
-      const created = plugin.createAll ? await plugin.createAll(ctx) : [await plugin.create(ctx)]
+      // 旧插件只实现 EventSource：明确废弃，不做适配层。
+      // 适配层只能从 poll() 的第一条事件反推目录，不准；一个不准的目录比没有目录更危险。
+      if (!plugin.catalog) {
+        logger.warn('event:plugin-deprecated', {
+          id: configId,
+          detail: '插件实现的是已废弃的 EventSource 接口，v0.4.0 起不再加载，请升级到提供 catalog() 的版本',
+        })
+        failures.push({
+          kind: 'event',
+          id: configId,
+          specifier: eventPluginEntryOf(config, configId) ?? configId,
+          message: '插件未提供 catalog()，旧 EventSource 插件已废弃',
+        })
+        continue
+      }
+      const catalog = await plugin.catalog(ctx)
       const instanceIds: string[] = []
-      for (const source of created) {
-        if (!source) continue
-        registry.register(source)
-        sources.push(source)
-        instanceIds.push(source.id)
-        logger.info('plugin:loaded', { kind: 'event', id: source.id })
+      if (catalog) {
+        catalogRegistry.register(catalog)
+        catalogs.push(catalog)
+        instanceIds.push(catalog.id)
+        logger.info('plugin:loaded', { kind: 'event', id: catalog.id })
+      }
+      const fetcher = plugin.fetch ? await plugin.fetch(ctx) : null
+      if (fetcher) {
+        fetcherRegistry.register(fetcher)
+        fetchers.push(fetcher)
       }
       loadedIds[configId] = instanceIds
       optionsById[configId] = plugin.options?.fields ?? []
@@ -124,5 +150,5 @@ export async function loadEventPlugins(
       })
     }
   }
-  return { registry, metas, sources, loadedIds, optionsById, failures }
+  return { catalogs, fetchers, metas, loadedIds, optionsById, failures }
 }

@@ -11,7 +11,7 @@ packages/core              领域内核：Ticket / Mandate / Assignment / Stage 
 packages/infra             基础设施：Logger、CommandRunner、对话模型、图片识别、插件加载器
 packages/runtime           Runtime SDK：WorkerRuntime 端口、RuntimeRegistry、插件协议
 packages/channel           Channel SDK：ChannelAdapter 端口、ChannelRegistry、入站管线、插件协议
-packages/event              事件来源 SDK：EventSource 端口、EventSourceRegistry、插件协议
+packages/event              事件来源 SDK：EventCatalog 端口（事件目录）、EventFetcher（可选拉取）、插件协议
 packages/runtime-orca        内置插件：Orca
 packages/runtime-claude-code 内置插件：Claude Code
 packages/runtime-codex       内置插件：Codex App
@@ -104,7 +104,8 @@ export default plugin
 
 ### 事件来源插件
 
-事件来源与 runtime / channel 同构：插件只负责「把外面发生的事变成事件」，判定与派发由宿主统一做。
+事件来源与 runtime / channel 同构，但**职责更窄**：插件只回答「有什么可订阅」，
+拉取是可选扩展，判定与派发一律由宿主统一做。
 
 ```ts
 import type { EventPlugin } from '@router-agent/event'
@@ -113,14 +114,32 @@ const plugin: EventPlugin = {
   kind: 'event',
   meta: { id: 'my-source', name: 'My Source', hint: '...' },
   options: { fields: [{ key: 'endpoint', label: '接口地址', kind: 'text' }] },
-  create(ctx) { /* 返回 EventSource */ },
+  // 必填：事件目录
+  catalog: {
+    id: 'my-source',
+    kind: 'my-source',
+    name: 'My Source',
+    types: () => [{ id: 'my-source.deploy.failed', label: '部署失败', group: '部署' }],
+    params: () => [{ key: 'endpoint', label: '接口地址', kind: 'text' }],
+  },
+  // 可选：自己拉事件
+  fetch(ctx) { /* 返回 EventFetcher */ },
 }
 
 export default plugin
 ```
 
-`EventSource` 实现 `poll()`（拉取型）、`start(sink)`（订阅型）或 `publish()`（结论回写）中的任意组合；
+两个契约：
+
+| 接口 | 必填 | 职责 |
+|-|-|-|
+| `EventCatalog` | **是** | 声明可订阅的事件类型（`types()`）与连接参数（`params()`）；类型可带 `availability` 标注前置条件 |
+| `EventFetcher` | 否 | `poll()` 拉事件、`publish()` 回写结论；不实现就由宿主按目录用通用轮询拉 |
+
+**订阅不属于插件** —— 订阅是自动化任务的属性（`automation.tasks[].trigger`），由宿主从任务推导。
 插件声明的字段落在 `events.sources.<id>.options.<key>`。
+
+> 旧版只实现 `create()` 的插件（`EventSource`）**不再加载**，接口已标 `@deprecated`。
 
 ### channel 插件
 
@@ -148,13 +167,14 @@ export default plugin
 ## 新增一个事件来源插件
 
 1. 插件包实现 `EventPlugin`（`kind: 'event'`），依赖 `@router-agent/event` / `@router-agent/core` / `@router-agent/infra`；
-2. 面板「配置 → 事件总线 → 添加自定义事件」填 npm 包名即可安装，装完按插件声明的 `meta.id` 登记成来源；也可以手写 `events.sources.<id>.plugin: <包名>`；
-3. 插件用 `options.fields` 声明自己的可配置项，面板设置弹窗按声明自动渲染，值落在 `events.sources.<id>.options.<key>`；
-4. 加载失败只记 `event:plugin-failed`，不影响其它来源。
+2. 插件**必须**实现 `catalog`（事件目录）；`fetch` 可选；
+3. 面板「配置 → 事件总线 → 添加自定义事件」填 npm 包名即可安装，装完按插件声明的 `meta.id` 登记成来源；也可以手写 `events.sources.<id>.plugin: <包名>`；
+4. 插件用 `options.fields` 声明自己的可配置项，面板设置弹窗按声明自动渲染，值落在 `events.sources.<id>.options.<key>`；
+5. 加载失败只记 `event:plugin-failed`，不影响其它来源。
 
 插件产出的事件要遵守两条约定：
 
-- `externalId` **同一事件必须稳定不变** —— 宿主按 `(来源, externalId)` 唯一入库，靠它去重；
+- `externalId` **同一事件必须稳定不变** —— 宿主按 `(订阅, externalId)` 唯一入库，靠它去重；
 - `eventType` **带来源前缀**（插件 id 或来源种类名，如 `myplugin.deploy.failed`）—— 不同来源的同名类型靠前缀区分。
 
 协议与配置形状见 [CONFIGURATION.md](CONFIGURATION.md#自定义事件来源npm-插件)。

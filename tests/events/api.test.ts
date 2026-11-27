@@ -5,7 +5,6 @@ import { Store } from '../../src/store/db.js'
 import { Engine } from '../../src/core/engine.js'
 import { createApiServer, type ApiServer } from '../../src/router/api.js'
 import { defaultConfig, policyOf, type AppConfig } from '../../src/config.js'
-import { compileRuleTemplate } from '../../src/events/rules.js'
 
 function call(server: ApiServer, method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<{ status: number; json: any }> {
   return new Promise((resolve, reject) => {
@@ -40,8 +39,6 @@ describe('事件 API', () => {
     config.events.sources.github = { enabled: true, kind: 'github', repo: 'a/b' }
     const engine = new Engine({ store, policy: policyOf(config), ids: { next: p => `${p}_1` } })
     const applied: Array<{ eventId: string; action: string }> = []
-    const rule = compileRuleTemplate({ id: 'rule-issue', eventType: 'github.issues.opened', intent: '处理 issue' })
-    config.events.rules = [rule]
     const api = await createApiServer({
       engine,
       store,
@@ -54,14 +51,9 @@ describe('事件 API', () => {
           return { id: eventId, status: 'pending' }
         },
         decision: () => ({ provider: 'rule', confidenceThreshold: 0.6, fallback: 'review' }),
-        rules: () => config.events.rules,
-        ruleStats: () => ({ 'rule-issue': { pending: 1, review: 2, done: 3, invalid: 4 } }),
-        compileRule: async input => compileRuleTemplate({
-          id: input.id,
-          eventType: input.eventType,
-          intent: input.intent,
-          workflowPrompt: input.workflowPrompt,
-        }),
+        catalogs: () => [{ id: 'github', label: 'GitHub', types: [{ id: 'github.issues.opened' }] }],
+        subscriptions: () => [{ id: 'auto-issue', taskName: 'Issue 处理', source: 'github', types: ['github.issues.opened'], mode: 'auto' }],
+        ruleStats: () => ({ 'auto-issue': { pending: 1, review: 2, done: 3, invalid: 4 } }),
         counts: () => ({ pending: 0, review: 0, done: 0, invalid: 0 }),
       },
     })
@@ -70,31 +62,13 @@ describe('事件 API', () => {
       expect(list.status).toBe(200)
       expect(list.json.events).toHaveLength(1)
       expect(list.json.decision.provider).toBe('rule')
-      expect(list.json.rules).toHaveLength(1)
-      expect(list.json.ruleStats['rule-issue'].done).toBe(3)
+      expect(list.json.catalogs).toHaveLength(1)
+      expect(list.json.subscriptions[0].taskName).toBe('Issue 处理')
+      expect(list.json.ruleStats['auto-issue'].done).toBe(3)
 
-      const rules = await call(api, 'GET', '/api/events/rules')
-      expect(rules.status).toBe(200)
-      expect(rules.json.ruleStats['rule-issue'].review).toBe(2)
-
-      const created = await call(api, 'POST', '/api/events/rules', {
-        rule: compileRuleTemplate({ id: 'rule-ci', eventType: 'github.workflow_run.failure', intent: '修复 CI' }),
-      })
-      expect(created.status).toBe(200)
-      expect(created.json.rule.id).toBe('rule-ci')
-      expect(config.events.rules.map(item => item.id)).toContain('rule-ci')
-
-      const deleted = await call(api, 'DELETE', '/api/events/rules/rule-ci')
-      expect(deleted.status).toBe(200)
-      expect(config.events.rules.map(item => item.id)).not.toContain('rule-ci')
-
-      const compiled = await call(api, 'POST', '/api/events/rules/compile', {
-        id: 'rule-ci',
-        eventType: 'github.workflow_run.failure',
-        intent: '修复 CI',
-      })
-      expect(compiled.status).toBe(200)
-      expect(compiled.json.rule.eventType).toBe('github.workflow_run.failure')
+      const catalogs = await call(api, 'GET', '/api/events/catalogs')
+      expect(catalogs.status).toBe(200)
+      expect(catalogs.json.catalogs[0].id).toBe('github')
 
       const action = await call(api, 'POST', '/api/events/evt_1/action', { action: 'approve' })
       expect(action.status).toBe(200)

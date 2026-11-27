@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>router-agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="../../../src/web/app.css" />
+<link rel="stylesheet" href="./mock.css" />
+</head>
+<body>
+<aside class="sidebar">
+  <div class="brand">
+    <span class="brand-mark"><svg viewBox="0 0 720 720" width="32" height="32"><rect width="720" height="720" fill="#000"/><g stroke="#fff" stroke-width="16" fill="none"><path d="M360 168V289.5M359 553L360 428.5M154 357.5L290.5 358.4M565 357.5L429.5 358.4M217 494L309 406.7M502 494L409.9 406.9"/></g><g fill="#fff"><circle cx="360" cy="359" r="61.5"/><circle cx="360" cy="168" r="36"/><circle cx="359" cy="553" r="36"/><circle cx="154" cy="357.5" r="36"/><circle cx="565" cy="357.5" r="36"/><circle cx="217" cy="494" r="36"/><circle cx="502" cy="494" r="36"/></g></svg></span>
+    <span class="brand-text"><strong>router-agent</strong><small>control room</small></span>
+  </div>
+  <nav class="side-nav">
+    <button class="nav-tab"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z"/></svg><span>初始化</span></button>
+    <button class="nav-tab"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg><span>收件箱</span><span class="nav-count">3</span></button>
+    <button class="nav-tab active"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>自动化</span></button>
+    <button class="nav-tab"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z"/></svg><span>工单</span><span class="nav-count">2</span></button>
+    <button class="nav-tab"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/><path d="M1 14h6M9 8h6M17 16h6"/></svg><span>配置</span></button>
+    <button class="nav-tab"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg><span>来源</span></button>
+    <button class="nav-tab"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6M9 13h6M9 17h6"/></svg><span>日志</span></button>
+  </nav>
+  <div class="sidebar-bottom">
+    <div class="sidebar-foot">
+      <span class="status-dot live"></span>
+      <span class="sidebar-status"><strong>服务运行中</strong><small>v0.3.40 · 运行时 codex</small></span>
+    </div>
+  </div>
+</aside>
+<div class="workspace tab-automation">
+  <div class="page-head">
+    <div>
+      <h1>自动化</h1>
+      <p>用一句话说清要做什么，剩下交给会话助手；事件订阅与定时触发都在这里。</p>
+    </div>
+    <div class="page-actions">
+      <button class="btn primary"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>新建自动化</button>
+      <button class="btn ghost">刷新</button>
+    </div>
+  </div>
+
+  <div class="segmented automation-tabs" role="tablist">
+    <button class="active">自动化任务（4/4 启用）</button>
+    <button>执行记录（128）</button>
+  </div>
+
+  <div class="source-cards">
+    <article class="source-card on">
+      <div class="source-card-top">
+        <span class="source-logo"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z"/></svg></span>
+        <div class="source-card-title">
+          <strong>Teamwork 承诺跟进</strong>
+          <span>事件触发 · github · router-agent · claude-code</span>
+        </div>
+      </div>
+      <p class="source-card-status">订阅 GitHub Issue 与飞书消息；命中关键词「Teamwork」「承诺」且语义判定为可立即动手时直接开单。</p>
+      <div class="source-card-fields"><span class="tag mode-auto"><i></i>自动执行</span> ｜ 订阅 <span class="mono">github.issues.opened</span> · <span class="mono">feishu.message</span> ｜ 命中 12 次</div>
+      <div class="source-card-actions">
+        <button class="btn tiny">修改</button>
+        <button class="btn tiny ghost">恢复会话</button>
+        <button class="btn tiny ghost">执行一次</button>
+        <button class="btn tiny ghost">停用</button>
+        <button class="btn tiny ghost">删除</button>
+      </div>
+    </article>
+
+    <article class="source-card on">
+      <div class="source-card-top">
+        <span class="source-logo"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z"/></svg></span>
+        <div class="source-card-title">
+          <strong>每日大盘巡检</strong>
+          <span>定时触发 · 每天 09:30 · router-agent</span>
+        </div>
+      </div>
+      <p class="source-card-status">每天 09:30 拉一次大盘数据，只记录并提醒，不自动改动任何代码。</p>
+      <div class="source-card-fields"><span class="tag mode-notify"><i></i>仅提醒</span> ｜ 下次触发 明天 09:30 ｜ 上次 成功 · 耗时 42s</div>
+      <div class="source-card-actions">
+        <button class="btn tiny">修改</button>
+        <button class="btn tiny ghost">恢复会话</button>
+        <button class="btn tiny ghost">执行一次</button>
+        <button class="btn tiny ghost">停用</button>
+        <button class="btn tiny ghost">删除</button>
+      </div>
+    </article>
+
+    <article class="source-card on">
+      <div class="source-card-top">
+        <span class="source-logo"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z"/></svg></span>
+        <div class="source-card-title">
+          <strong>PR 合并后自检</strong>
+          <span>事件触发 · github · router-agent</span>
+        </div>
+      </div>
+      <p class="source-card-status">Pull Request 合并后进入事件列表，等人确认再执行 CI 修复。</p>
+      <div class="source-card-fields"><span class="tag mode-review"><i></i>待人审</span> ｜ 订阅 <span class="mono">github.pull_request.merged</span> ｜ 命中 5 次</div>
+      <div class="source-card-actions">
+        <button class="btn tiny">修改</button>
+        <button class="btn tiny ghost">恢复会话</button>
+        <button class="btn tiny ghost">执行一次</button>
+        <button class="btn tiny ghost">停用</button>
+        <button class="btn tiny ghost">删除</button>
+      </div>
+    </article>
+
+    <article class="source-card on">
+      <div class="source-card-top">
+        <span class="source-logo"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z"/></svg></span>
+        <div class="source-card-title">
+          <strong>周报素材收集</strong>
+          <span>定时触发 · 每周五 18:00 · notes</span>
+        </div>
+      </div>
+      <p class="source-card-status">每周五把本周 Issue 摘要成周报素材，只记录，不动手。</p>
+      <div class="source-card-fields"><span class="tag mode-notify"><i></i>仅提醒</span> ｜ 下次触发 本周五 18:00 ｜ 上次 成功 · 耗时 18s</div>
+      <div class="source-card-actions">
+        <button class="btn tiny">修改</button>
+        <button class="btn tiny ghost">恢复会话</button>
+        <button class="btn tiny ghost">执行一次</button>
+        <button class="btn tiny ghost">停用</button>
+        <button class="btn tiny ghost">删除</button>
+      </div>
+    </article>
+  </div>
+</div>
+</div>
+</body>
+</html>
